@@ -4,7 +4,7 @@ import { zipSync, strToU8 } from 'fflate'
 import {
   normalizeTemplateName, collectTemplateEntries, planTemplateImports, disambiguateName,
   TEMPLATE_MAX_INPUT_BYTES,
-} from './console/template-upload'
+} from '../../plugins/gamer-yaml/ui/src/console/template-upload'
 
 function zipFile(entries) {
   return new Blob([zipSync(entries)])

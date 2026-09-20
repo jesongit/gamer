@@ -18,7 +18,7 @@ version = "1.0.0"
 [targets.android]
 packages = ["com.miHoYo.hkrpg"]
 
-[plugins."gamer.keymap"]
+[plugins."gamer-keymap"]
 required = false
 
 [plugins."vendor.ocr.example"]
@@ -28,7 +28,7 @@ required = false
             .to_vec(),
         ),
         (
-            "plugins/gamer.keymap/mappings/dormant.yaml",
+            "plugins/gamer-keymap/mappings/dormant.yaml",
             DORMANT_KEYMAP_YAML.as_bytes().to_vec(),
         ),
         (
@@ -127,12 +127,12 @@ async fn package_detail_reports_plugin_dependency_states() {
         &t,
         &sid,
         "/api/packages",
-        serde_json::json!({ "id": "user.req", "plugins": { "gamer.yaml": true } }),
+        serde_json::json!({ "id": "user.req", "plugins": { "gamer-yaml": true } }),
     )
     .await;
     assert_eq!(created.status(), StatusCode::CREATED);
 
-    // 导入 dormant 包：gamer.keymap / vendor.ocr.example 均 optional 声明
+    // 导入 dormant 包：gamer-keymap / vendor.ocr.example 均 optional 声明
     let imported = send(
         &t.app,
         req_bytes(
@@ -174,12 +174,12 @@ async fn package_detail_reports_plugin_dependency_states() {
     }
 
     let states = states_of(&t, &sid, "user.req").await;
-    assert_eq!(find(&states, "gamer.yaml")["state"], "missing_required");
-    assert_eq!(find(&states, "gamer.yaml")["required"], true);
+    assert_eq!(find(&states, "gamer-yaml")["state"], "missing_required");
+    assert_eq!(find(&states, "gamer-yaml")["required"], true);
 
     let states = states_of(&t, &sid, "official.hsr.daily").await;
-    assert_eq!(find(&states, "gamer.keymap")["state"], "missing_optional");
-    assert_eq!(find(&states, "gamer.keymap")["required"], false);
+    assert_eq!(find(&states, "gamer-keymap")["state"], "missing_optional");
+    assert_eq!(find(&states, "gamer-keymap")["required"], false);
     assert_eq!(find(&states, "vendor.ocr.example")["state"], "missing_optional");
     assert_eq!(find(&states, "ghost.plugin")["state"], "unknown");
     assert_eq!(find(&states, "ghost.plugin")["required"], serde_json::Value::Null);
@@ -228,18 +228,18 @@ async fn plugin_states_track_installed_extension_lifecycle() {
     let states = json_body(detail).await["plugin_states"].as_array().unwrap().clone();
     let entry = states
         .iter()
-        .find(|s| s["plugin"] == "gamer.keymap")
+        .find(|s| s["plugin"] == "gamer-keymap")
         .unwrap();
     assert_eq!(entry["state"], "available");
 
     // disable（运行中自动 stop → Disabled）→ 插件状态 disabled
-    let disabled = post_json(&t, &sid, "/api/extensions/gamer.keymap/disable", serde_json::json!({})).await;
+    let disabled = post_json(&t, &sid, "/api/extensions/gamer-keymap/disable", serde_json::json!({})).await;
     assert_eq!(disabled.status(), StatusCode::OK);
     let detail = get_json(&t, &sid, "/api/packages/official.hsr.daily").await;
     let states = json_body(detail).await["plugin_states"].as_array().unwrap().clone();
     let entry = states
         .iter()
-        .find(|s| s["plugin"] == "gamer.keymap")
+        .find(|s| s["plugin"] == "gamer-keymap")
         .unwrap();
     assert_eq!(entry["state"], "disabled");
 }

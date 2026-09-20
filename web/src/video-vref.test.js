@@ -8,7 +8,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 
 const fetchStub = vi.fn()
 
-vi.mock('./components/video/videoApi', async (importOriginal) => {
+vi.mock('../../plugins/gamer-video/ui/src/components/video/videoApi', async (importOriginal) => {
   const actual = await importOriginal()
   return {
     ...actual,
@@ -33,7 +33,7 @@ vi.mock('./components/console/useConsoleStage', async (importOriginal) => {
   return { ...actual, requestStageMedia: vi.fn() }
 })
 
-vi.mock('./components/video/yamlCapability', () => ({
+vi.mock('../../plugins/gamer-video/ui/src/components/video/yamlCapability', () => ({
   useYamlCapability: () => ({
     ready: true,
     start: vi.fn(),
@@ -41,8 +41,8 @@ vi.mock('./components/video/yamlCapability', () => ({
   }),
 }))
 
-import VideoWorkbench from './components/video/VideoWorkbench.vue'
-import { videoApi } from './components/video/videoApi'
+import VideoWorkbench from '../../plugins/gamer-video/ui/src/components/video/VideoWorkbench.vue'
+import { videoApi } from '../../plugins/gamer-video/ui/src/components/video/videoApi'
 import { packageStore } from './package-store'
 
 function jsonResponse(status, body) {
@@ -141,7 +141,7 @@ describe('P1-VREF 媒体引用一致性', () => {
     const body = JSON.parse(fetchStub.mock.calls[0][1].body)
     expect(body).toEqual({ refs: [
       { package_id: 'other.pkg', plugin_id: 'other.plugin', kind: 'workspace' },
-      { package_id: 'pkg.scope', plugin_id: 'gamer.video', kind: 'project' },
+      { package_id: 'pkg.scope', plugin_id: 'gamer-video', kind: 'project' },
     ] })
     expect(wrapper.find('[data-testid="project-dirty"]').text()).toContain('已保存')
     expect(wrapper.find('[data-testid="project-save-status"]').text()).toContain('媒体引用已同步')
@@ -190,11 +190,11 @@ describe('P1-VREF 媒体引用一致性', () => {
 
   it('setMediaRefs 接受与 Workbench 一致的 snake_case 引用字段并正确编码 media id', async () => {
     fetchStub.mockResolvedValue(jsonResponse(200, { id: 'm 2', refs: [] }))
-    await videoApi.setMediaRefs('m 2', [{ package_id: 'pkg.scope', plugin_id: 'gamer.video', kind: 'project' }])
+    await videoApi.setMediaRefs('m 2', [{ package_id: 'pkg.scope', plugin_id: 'gamer-video', kind: 'project' }])
 
     expect(fetchStub).toHaveBeenCalledWith('/api/media/m%202/refs', expect.objectContaining({ method: 'POST' }))
     expect(JSON.parse(fetchStub.mock.calls[0][1].body)).toEqual({ refs: [
-      { package_id: 'pkg.scope', plugin_id: 'gamer.video', kind: 'project' },
+      { package_id: 'pkg.scope', plugin_id: 'gamer-video', kind: 'project' },
     ] })
   })
 })

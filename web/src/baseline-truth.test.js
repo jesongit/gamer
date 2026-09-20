@@ -5,8 +5,8 @@ const root = new URL('./', import.meta.url)
 const read = (path) => readFileSync(new URL(path, root), 'utf8')
 
 describe('清洁基线的凭据与版本展示', () => {
-  it('Docker 配置只声明 Argon2id PHC 或开发环境变量入口', () => {
-    const config = read('../../docker-config.toml')
+  it('示例配置只声明 Argon2id PHC 或开发环境变量入口', () => {
+    const config = read('../../server/config.example.toml')
 
     expect(config).toContain('[auth]')
     expect(config).toContain('password_hash = ""')

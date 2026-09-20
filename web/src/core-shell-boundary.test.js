@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
  * Core 壳知识边界（ADR-11 / P11.5 §10.6）——源码级断言，锁死回归：
  *
  * Core 壳（Console 视图 + workspace 注册层 + Core 通用模块）不认识任何具体
- * 扩展（gamer.yaml / gamer.keymap）、不引用业务编辑组件（ScriptPicker /
+ * 扩展（gamer-yaml / gamer-keymap）、不引用业务编辑组件（ScriptPicker /
  * ParamsForm）、不在壳内预取业务资源（listScripts / listTemplates）、不出现
  * script_id 执行句柄字面量。业务面板实现归扩展前端侧
  * （components/console/ 的面板 composable、components/task/ 的任务贡献），
@@ -20,7 +20,7 @@ const root = new URL('./', import.meta.url)
 const read = (path) => readFileSync(new URL(path, root), 'utf8')
 
 // 扩展注册 id：壳与注册层一律不得出现
-const EXTENSION_IDS = ['gamer.yaml', 'gamer.keymap']
+const EXTENSION_IDS = ['gamer-yaml', 'gamer-keymap']
 // 业务编辑组件：只有扩展面板实现/贡献文件可引用
 const BUSINESS_COMPONENTS = ['ScriptPicker', 'ParamsForm']
 // 业务资源预取与执行句柄：壳只认识设备/日志等 Core 资源
@@ -106,8 +106,8 @@ describe('yaml 扩展前端侧契约点（归属正确性）', () => {
   it('runner 注册 id 唯一配置点在 gamer-yaml-runner.js（字面量下沉 gamer-plugin-ids.js）；api.runScript/runFunction 包装已迁出', () => {
     // V3 Package 化后：id 字面量唯一归宿是 gamer-plugin-ids.js（api.js 资源寻址
     // 与扩展契约点共用），gamer-yaml-runner.js 经其导出维持 runner id 配置点角色
-    expect(read('./gamer-plugin-ids.js')).toContain("export const GAMER_YAML_PLUGIN_ID = 'gamer.yaml'")
-    const runner = read('./gamer-yaml-runner.js')
+    expect(read('./gamer-plugin-ids.js')).toContain("export const GAMER_YAML_PLUGIN_ID = 'gamer-yaml'")
+    const runner = read('../../plugins/gamer-yaml/ui/src/gamer-yaml-runner.js')
     expect(runner).toContain('import { GAMER_YAML_PLUGIN_ID }')
     expect(runner).toContain('export const GAMER_YAML_RUNNER_ID = GAMER_YAML_PLUGIN_ID')
     expect(() => read('./workspace/yaml-extension.ts')).toThrow()
@@ -120,8 +120,8 @@ describe('yaml 扩展前端侧契约点（归属正确性）', () => {
 
 describe('keymap 扩展前端侧契约点（P12.10 收口）', () => {
   it('扩展注册 id 唯一配置点在 gamer-keymap-extension.js（字面量下沉 gamer-plugin-ids.js，运行态判定随 id 同点收敛）', () => {
-    expect(read('./gamer-plugin-ids.js')).toContain("export const KEYMAP_PLUGIN_ID = 'gamer.keymap'")
-    const source = read('./gamer-keymap-extension.js')
+    expect(read('./gamer-plugin-ids.js')).toContain("export const KEYMAP_PLUGIN_ID = 'gamer-keymap'")
+    const source = read('../../plugins/gamer-keymap/ui/src/gamer-keymap-extension.js')
     expect(source).toContain('import { KEYMAP_PLUGIN_ID }')
     expect(source).toContain('export const GAMER_KEYMAP_EXTENSION_ID = KEYMAP_PLUGIN_ID')
     expect(source).toContain('export function isRemoteKeymapRunning')
@@ -130,7 +130,7 @@ describe('keymap 扩展前端侧契约点（P12.10 收口）', () => {
   it('keymap 输入路由的运行态消费方不出现扩展 id 字面量', () => {
     // 远端映射运行中 → 输入交 keymap 控制器，否则直通 scrcpy；壳只认布尔态
     for (const file of ['./views/Console.vue', './keymap-control.js', './keyboard-control.js']) {
-      expect(read(file)).not.toContain('gamer.keymap')
+      expect(read(file)).not.toContain('gamer-keymap')
     }
   })
 })

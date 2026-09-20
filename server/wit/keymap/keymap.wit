@@ -76,7 +76,7 @@ interface keymap {
   /// Called once after the component is instantiated. `profile` carries the
   /// raw keymap YAML the host resolved from the package data context (the
   /// same schema as
-  /// `packages/<package-id>/plugins/gamer.keymap/mappings/*.yaml`:
+  /// `packages/<package-id>/plugins/gamer-keymap/mappings/*.yaml`:
   /// version/name/bindings with tap|swipe|raw_key|hold actions). `none` starts
   /// with the guest's built-in default rules; unmapped input falls through to
   /// the native control path.

@@ -20,12 +20,14 @@ vi.mock('./api', async importOriginal => {
         width: 1280,
         height: 720,
       })),
+      mediaFrames: vi.fn(async () => ({ current: { index: 0, pts_us: 0 } })),
+      mediaFrameNeighbors: vi.fn(async () => ({ prev: null, next: null })),
       activeRecording: vi.fn(async () => null),
     },
   }
 })
 
-vi.mock('./components/video/videoApi', () => ({
+vi.mock('../../plugins/gamer-video/ui/src/components/video/videoApi', () => ({
   videoApi: {
     mediaFrames: vi.fn(async () => ({ current: { index: 0, pts_us: 0 } })),
     mediaFrameNeighbors: vi.fn(async () => ({ prev: null, next: null })),
@@ -35,7 +37,7 @@ vi.mock('./components/video/videoApi', () => ({
 import { api } from './api'
 import { useConsoleStage } from './components/console/useConsoleStage'
 import ConsoleVideoStage from './components/console/ConsoleVideoStage.vue'
-import { videoApi } from './components/video/videoApi'
+const videoApi = api
 
 function fakeMediaVideo({ width = 1280, height = 720, duration = 10 } = {}) {
   const listeners = new Map()

@@ -1,5 +1,5 @@
-# Build script for the "vision-probe" example plugin (Windows PowerShell).
-# Produces dist/com.example.visionprobe-<version>.gplugin using the repo's own
+﻿# Build script for the "vision-probe" example plugin (Windows PowerShell).
+# Produces dist/gamer-vision-probe-<version>.gplugin using the repo's own
 # tools/plugin-signer CLI. No signing key is needed (unsigned by design).
 #
 # Usage:

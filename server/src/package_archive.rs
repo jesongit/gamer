@@ -811,7 +811,7 @@ mod tests {
         let package = archive(vec![
             ("package.toml", manifest_bytes("official.demo").as_slice()),
             (
-                "plugins/gamer.yaml/automations/daily.yaml",
+                "plugins/gamer-yaml/automations/daily.yaml",
                 b"version: 3\nsteps: []\n",
             ),
             ("shared/notes.txt", b"shared bytes"),
@@ -821,7 +821,7 @@ mod tests {
         assert_eq!(manifest.id, "official.demo");
         assert!(staging.join("package.toml").is_file());
         assert!(staging
-            .join("plugins/gamer.yaml/automations/daily.yaml")
+            .join("plugins/gamer-yaml/automations/daily.yaml")
             .is_file());
         assert!(staging.join("shared/notes.txt").is_file());
 
@@ -840,7 +840,7 @@ mod tests {
                 store
                     .package_dir("official.demo")
                     .unwrap()
-                    .join("plugins/gamer.yaml/automations/daily.yaml")
+                    .join("plugins/gamer-yaml/automations/daily.yaml")
             )
             .unwrap(),
             b"version: 3\nsteps: []\n"
@@ -861,18 +861,18 @@ mod tests {
         let package = archive(vec![
             ("package.toml", manifest_bytes("official.demo").as_slice()),
             (
-                "plugins/gamer.yaml/templates/登录.png",
+                "plugins/gamer-yaml/templates/登录.png",
                 b"\x89PNG fake bytes",
             ),
             (
-                "plugins/gamer.yaml/automations/日常任务.yaml",
+                "plugins/gamer-yaml/automations/日常任务.yaml",
                 b"version: 3\nsteps: []\n",
             ),
         ]);
         let staging = store.staging_root().join("zh1");
         extract_archive(&package, &staging).unwrap();
         assert!(staging
-            .join("plugins/gamer.yaml/templates/登录.png")
+            .join("plugins/gamer-yaml/templates/登录.png")
             .is_file());
 
         let final_dir = store.package_dir("official.demo").unwrap();
@@ -883,10 +883,10 @@ mod tests {
         let staging2 = store.staging_root().join("zh2");
         extract_archive(&exported.archive, &staging2).unwrap();
         assert!(staging2
-            .join("plugins/gamer.yaml/templates/登录.png")
+            .join("plugins/gamer-yaml/templates/登录.png")
             .is_file());
         assert!(staging2
-            .join("plugins/gamer.yaml/automations/日常任务.yaml")
+            .join("plugins/gamer-yaml/automations/日常任务.yaml")
             .is_file());
     }
 
@@ -950,7 +950,7 @@ mod tests {
     #[test]
     fn gbk_named_archive_is_rejected() {
         // "登录" 的 GBK（CP936）字节：B5 C7 C2 BC
-        let gbk_name = b"plugins/gamer.yaml/templates/\xB5\xC7\xC2\xBC.png".to_vec();
+        let gbk_name = b"plugins/gamer-yaml/templates/\xB5\xC7\xC2\xBC.png".to_vec();
         let bytes = raw_zip(vec![
             (
                 b"package.toml".to_vec(),
@@ -1039,7 +1039,7 @@ mod tests {
       "name": "clip.mp4",
       "sha256": "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44",
       "size": 4,
-      "plugin_id": "gamer.video",
+      "plugin_id": "gamer-video",
       "kind": "project",
       "included": true
     }
@@ -1104,7 +1104,7 @@ mod tests {
             "name": "clip.mp4",
             "sha256": "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44",
             "size": 4,
-            "plugin_id": "gamer.video",
+            "plugin_id": "gamer-video",
             "kind": "project",
             "included": true
         }"#;
@@ -1129,7 +1129,7 @@ mod tests {
             ),
             (
                 "bad plugin",
-                entry_json.replace("gamer.video", "Bad Plugin"),
+                entry_json.replace("gamer-video", "Bad Plugin"),
             ),
             ("bad kind", entry_json.replace("project", "")),
         ] {
@@ -1192,7 +1192,7 @@ mod tests {
             created_at: "2026-09-07T00:00:00.000000Z".into(),
             refs: vec![MediaRef {
                 package_id: "official.media".into(),
-                plugin_id: "gamer.video".into(),
+                plugin_id: "gamer-video".into(),
                 kind: "project".into(),
             }],
         };

@@ -24,10 +24,11 @@ pub(crate) enum HostApiDomain {
     Runtime,
     Log,
     Media,
+    Ui,
 }
 
 impl HostApiDomain {
-    pub(crate) const ALL: [Self; 9] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::Device,
         Self::Vision,
         Self::Input,
@@ -37,6 +38,7 @@ impl HostApiDomain {
         Self::Runtime,
         Self::Log,
         Self::Media,
+        Self::Ui,
     ];
 
     pub(crate) fn as_str(self) -> &'static str {
@@ -50,10 +52,11 @@ impl HostApiDomain {
             Self::Runtime => "runtime",
             Self::Log => "log",
             Self::Media => "media",
+            Self::Ui => "ui",
         }
     }
 
-    pub(crate) fn all() -> &'static [Self; 9] {
+    pub(crate) fn all() -> &'static [Self; 10] {
         &Self::ALL
     }
 }
@@ -163,7 +166,7 @@ impl HostApi {
             HostApiDomain::Log => self.registry.log().is_some(),
             // media 是 Core 进程级机制域（crate::media::service 单例恒可装配），
             // 不经 CapabilityRegistry 注册适配器。
-            HostApiDomain::Media => true,
+            HostApiDomain::Media | HostApiDomain::Ui => true,
         }
     }
 
@@ -307,7 +310,7 @@ mod tests {
     /// available（目录里有权限名 ≠ guest 能消费，但目录缺失 = 校验无从谈起）。
     #[test]
     fn media_domain_is_versioned_and_gated_by_permissions() {
-        assert_eq!(HostApiDomain::ALL.len(), 9);
+        assert_eq!(HostApiDomain::ALL.len(), 10);
         assert!(HostApiDomain::ALL.contains(&HostApiDomain::Media));
         assert_eq!(
             HostApiCatalog::default()

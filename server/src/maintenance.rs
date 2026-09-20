@@ -563,7 +563,7 @@ mod tests {
         let dir = temp_dir("too-new");
         let db_path = crate::store::db_path(&dir);
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute_batch("CREATE TABLE future (x TEXT); PRAGMA user_version = 4;")
+        conn.execute_batch("CREATE TABLE future (x TEXT); PRAGMA user_version = 5;")
             .unwrap();
         drop(conn);
         let report = inspect(&dir);
@@ -572,12 +572,12 @@ mod tests {
         assert_eq!(report["status"], "too_new");
         assert_eq!(report["ok"], false);
         let err = report["error"].as_str().unwrap();
-        assert!(err.contains("supported range [1, 3]"), "{err}");
+        assert!(err.contains("supported range [1, 4]"), "{err}");
         let version: i64 = rusqlite::Connection::open(&db_path)
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 4, "too_new 拒绝后不得改写数据");
+        assert_eq!(version, 5, "too_new 拒绝后不得改写数据");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -609,7 +609,7 @@ mod tests {
         // 合规包目录：package.toml + shared/ + plugins/<plugin>/
         let pkg = dir.join("packages").join("com.example.game");
         std::fs::create_dir_all(pkg.join("shared")).unwrap();
-        std::fs::create_dir_all(pkg.join("plugins").join("gamer.yaml").join("automations"))
+        std::fs::create_dir_all(pkg.join("plugins").join("gamer-yaml").join("automations"))
             .unwrap();
         std::fs::write(
             pkg.join("package.toml"),

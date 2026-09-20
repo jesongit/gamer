@@ -39,7 +39,7 @@ vi.mock('./api', async (importOriginal) => {
 
 import { api } from './api'
 import { useConsoleStage, formatStageClock } from './components/console/useConsoleStage'
-import { useConsoleTemplates } from './components/console/useConsoleTemplates'
+import { useConsoleTemplates } from '../../plugins/gamer-yaml/ui/src/components/console/useConsoleTemplates'
 
 const { api: realApi } = await vi.importActual('./api')
 
@@ -150,7 +150,7 @@ describe('api.js 媒体与录制合同方法', () => {
     fetch.mockResolvedValueOnce(jsonRes(200, { ok: true, data }))
     await expect(realApi.createVideoDraft('r-1', ['e1', 'e2'])).resolves.toBe(data)
     const [url, options] = fetch.mock.calls[0]
-    expect(url).toBe('/api/extensions/gamer.yaml/call')
+    expect(url).toBe('/api/extensions/gamer-yaml/call')
     expect(options.method).toBe('POST')
     expect(JSON.parse(options.body)).toEqual({
       action: 'automation.create_draft',

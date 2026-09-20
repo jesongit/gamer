@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 /**
- * 视频工作台面板（gamer.video core 面板）挂载测试：
+ * 视频工作台面板（gamer-video core 面板）挂载测试：
  * - 宿主 VideoWorkbench 三分区（素材库/项目/草稿子导航，非 Core 永久页签）+
  *   Package 缺失横幅 + 项目列表/详情装配 + 打开项目联动舞台媒体
  *   （requestStageMedia：只动舞台来源，不动设备/包身份）；
@@ -16,7 +16,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 
-vi.mock('./components/video/videoApi', async (importOriginal) => {
+vi.mock('../../plugins/gamer-video/ui/src/components/video/videoApi', async (importOriginal) => {
   const actual = await importOriginal()
   return {
     ...actual,
@@ -59,12 +59,12 @@ vi.mock('vue-router', () => ({
   useRouter: () => ({ push: routerPush, currentRoute: { value: { query: {} } } }),
 }))
 
-import MediaLibrary from './components/video/MediaLibrary.vue'
-import VideoDraft from './components/video/VideoDraft.vue'
-import VideoProjects from './components/video/VideoProjects.vue'
-import VideoTimeline from './components/video/VideoTimeline.vue'
-import VideoWorkbench from './components/video/VideoWorkbench.vue'
-import { videoApi } from './components/video/videoApi'
+import MediaLibrary from '../../plugins/gamer-video/ui/src/components/video/MediaLibrary.vue'
+import VideoDraft from '../../plugins/gamer-video/ui/src/components/video/VideoDraft.vue'
+import VideoProjects from '../../plugins/gamer-video/ui/src/components/video/VideoProjects.vue'
+import VideoTimeline from '../../plugins/gamer-video/ui/src/components/video/VideoTimeline.vue'
+import VideoWorkbench from '../../plugins/gamer-video/ui/src/components/video/VideoWorkbench.vue'
+import { videoApi } from '../../plugins/gamer-video/ui/src/components/video/videoApi'
 import { requestStageMedia } from './components/console/useConsoleStage'
 import { devicesData } from './store'
 import { packageStore } from './package-store'
@@ -798,7 +798,7 @@ describe('VideoDraft 草稿区状态流转（Phase 7 可编辑工作流）', () 
     })
     // automation.open_editor（前端契约）：路由切到自动化面板
     expect(routerPush).toHaveBeenCalledWith(expect.objectContaining({
-      query: expect.objectContaining({ panel: 'gamer.yaml:automation' }),
+      query: expect.objectContaining({ panel: 'gamer-yaml:automation' }),
     }))
     wrapper.unmount()
   })
@@ -872,20 +872,20 @@ describe('项目保存 → 媒体引用同步（遗留 #2）', () => {
     return w
   }
 
-  it('保存时向引用媒体登记 gamer.video/project 引用（全量替换端点）', async () => {
+  it('保存时向引用媒体登记 gamer-video/project 引用（全量替换端点）', async () => {
     videoApi.getMedia.mockResolvedValue({ id: 'm1', refs: [] })
     const w = await mountOpenDirtyProject(projectJson({ markers: [MARKER()] }))
     await w.find('[data-testid="project-save"]').trigger('click')
     await flushPromises()
     expect(videoApi.setMediaRefs).toHaveBeenCalledWith('m1', [
-      { package_id: 'pkg', plugin_id: 'gamer.video', kind: 'project' },
+      { package_id: 'pkg', plugin_id: 'gamer-video', kind: 'project' },
     ])
     w.unmount()
   })
 
   it('重复保存幂等：引用已登记且未变化时不重复写 refs', async () => {
     videoApi.getMedia.mockResolvedValue({ id: 'm1', refs: [
-      { package_id: 'pkg', plugin_id: 'gamer.video', kind: 'project' },
+      { package_id: 'pkg', plugin_id: 'gamer-video', kind: 'project' },
     ] })
     const w = await mountOpenDirtyProject(projectJson({ markers: [MARKER()] }))
     await w.find('[data-testid="project-save"]').trigger('click')

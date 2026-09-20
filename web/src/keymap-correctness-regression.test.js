@@ -2,8 +2,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { ref } from 'vue'
-import KeymapPanel from './components/console/KeymapPanel.vue'
-import { useConsoleKeymap } from './components/console/useConsoleKeymap'
+import KeymapPanel from '../../plugins/gamer-keymap/ui/src/components/console/KeymapPanel.vue'
+import { useConsoleKeymap } from '../../plugins/gamer-keymap/ui/src/components/console/useConsoleKeymap'
 
 function deferred() {
   let resolve

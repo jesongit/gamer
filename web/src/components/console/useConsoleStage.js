@@ -1,6 +1,11 @@
 import { computed, onUnmounted, reactive, ref, shallowRef, watch } from 'vue'
 import { api } from '../../api'
-import { videoApi } from '../video/videoApi'
+const videoApi = {
+  mediaFrames: async (id, { ptsUs } = {}) => {
+    return api.mediaFrames(id, ptsUs)
+  },
+  mediaFrameNeighbors: (id, index) => api.mediaFrameNeighbors(id, index),
+}
 
 /**
  * 舞台媒体切换请求（Phase 6 项目联动，计划 §9.3）：右侧视频工作台面板「打开

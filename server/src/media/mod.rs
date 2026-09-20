@@ -1652,7 +1652,7 @@ mod tests {
             "2026-09-07T01:00:00.000000Z",
             vec![MediaRef {
                 package_id: "com.test.game".into(),
-                plugin_id: "gamer.yaml".into(),
+                plugin_id: "gamer-yaml".into(),
                 kind: "project".into(),
             }],
         );
@@ -1690,7 +1690,7 @@ mod tests {
         for bad in [
             MediaRef {
                 package_id: "Bad Package".into(),
-                plugin_id: "gamer.yaml".into(),
+                plugin_id: "gamer-yaml".into(),
                 kind: "project".into(),
             },
             MediaRef {
@@ -1700,7 +1700,7 @@ mod tests {
             },
             MediaRef {
                 package_id: "pkg".into(),
-                plugin_id: "gamer.yaml".into(),
+                plugin_id: "gamer-yaml".into(),
                 kind: String::new(),
             },
         ] {
@@ -1725,7 +1725,7 @@ mod tests {
     fn project_ref(pkg: &str) -> MediaRef {
         MediaRef {
             package_id: pkg.into(),
-            plugin_id: "gamer.video".into(),
+            plugin_id: "gamer-video".into(),
             kind: "project".into(),
         }
     }

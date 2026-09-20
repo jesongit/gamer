@@ -19,11 +19,11 @@ vi.mock('vue-router', () => ({
   useRouter: () => ({ push: mocks.routerPush, currentRoute: { value: { query: {} } } }),
 }))
 
-vi.mock('./components/console/automationEditorBridge', () => ({
+vi.mock('../../plugins/gamer-yaml/ui/src/components/console/automationEditorBridge', () => ({
   requestAutomationEditor: mocks.requestAutomationEditor,
 }))
 
-vi.mock('./components/video/videoApi', () => ({
+vi.mock('../../plugins/gamer-video/ui/src/components/video/videoApi', () => ({
   videoApi: {
     recordingEvents: mocks.recordingEvents,
     createVideoDraft: mocks.createVideoDraft,
@@ -31,8 +31,8 @@ vi.mock('./components/video/videoApi', () => ({
   },
 }))
 
-import VideoDraft from './components/video/VideoDraft.vue'
-import { videoApi } from './components/video/videoApi'
+import VideoDraft from '../../plugins/gamer-video/ui/src/components/video/VideoDraft.vue'
+import { videoApi } from '../../plugins/gamer-video/ui/src/components/video/videoApi'
 
 const EVENTS = [
   { event_id: 'tap-1', kind: 'tap', source: 'manual', status: 'accepted', timeline_us: 100000, payload: { x: 10, y: 20 } },

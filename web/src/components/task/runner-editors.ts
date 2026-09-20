@@ -4,7 +4,7 @@
  * TaskBoard 是通用任务表单（ADR-12：Task = 任意 ScheduleProvider + 任意 Runner），
  * 只认 runner_id / entrypoint / payload 三个抽象字段；某类执行器「执行目标长什么样、
  * 参数怎么编辑」由按 runner_id 注册的编辑器贡献提供：
- * - gamer.yaml（内置）：执行目标 = 分区脚本（ScriptPicker），参数 = 脚本 params 声明（ParamsForm）；
+ * - gamer-yaml（内置）：执行目标 = 分区脚本（ScriptPicker），参数 = 脚本 params 声明（ParamsForm）；
  * - 未来扩展 runner：安装对应前端贡献后自动获得同等编辑体验。
  *
  * 职责边界：
@@ -54,7 +54,7 @@ export interface RunnerAppPackages {
  * 用通用下拉渲染 `entrypoints(ctx)` 候选（同步数组或 Promise 加载器均可）。
  */
 export interface RunnerEditorContribution {
-  /** 对应后端 runner 注册 id（如 'gamer.yaml'） */
+  /** 对应后端 runner 注册 id（如 'gamer-yaml'） */
   runnerId: string
   /** 下拉显示名（无贡献的 runner 显示 runner_id 原文） */
   title: string

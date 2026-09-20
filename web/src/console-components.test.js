@@ -12,10 +12,10 @@ describe('Console 视觉组件拆分静态回归', () => {
   const consoleModules = [
     './views/Console.vue',
     './components/console/useConsoleDeviceManager.js',
-    './components/console/useConsoleTemplates.js',
+    '../../plugins/gamer-yaml/ui/src/components/console/useConsoleTemplates.js',
     './components/console/useConsoleBridgeOverlays.js',
-    './components/console/useConsoleScriptRunner.js',
-    './components/console/useConsoleKeymap.js',
+    '../../plugins/gamer-yaml/ui/src/components/console/useConsoleScriptRunner.js',
+    '../../plugins/gamer-keymap/ui/src/components/console/useConsoleKeymap.js',
     './components/console/useWebrtcStats.js',
     './components/console/useConsolePanelResize.js',
     './components/console/useConsoleWorkspacePanels.js',
@@ -62,7 +62,7 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(toolbar).toContain('flushAndConnect')
     expect(toolbar).toContain('refreshDevices')
     expect(toolbar).toContain('<UiIcon name="more" />')
-    expect(toolbar).toContain('功能 ▾')
+    expect(toolbar).toContain('aria-label="更多投屏功能"')
     expect(toolbar).toContain("toggleToolbarMenu('device'")
     expect(toolbar).toContain("toggleToolbarMenu('actions'")
     expect((toolbar.match(/class="tb-row/g) || [])).toHaveLength(2)
@@ -78,23 +78,25 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(deviceMenu).toContain('startAdd')
     expect(deviceMenu).toContain('openSettings')
     expect(deviceMenu).toContain('installApk()')
-    expect(deviceMenu).toContain('📦 安装应用')
+    expect(deviceMenu).toContain('安装应用')
     expect(deviceMenu).toContain('removeDevice')
-    expect(deviceMenu).toContain('⚙️ 设备设置')
+    expect(deviceMenu).toContain('设备设置')
     const actionsMenu = teleport.slice(teleport.indexOf(`v-if="toolbarMenuOpen === 'actions'"`))
     expect(actionsMenu).toContain('clipboard()')
     expect(actionsMenu).toContain('shot()')
     expect(actionsMenu).toContain("key('HOME')")
     expect(actionsMenu).toContain("key('BACK')")
-    expect(actionsMenu).toContain('🔄 旋转')
+    expect(actionsMenu).toContain('旋转')
     expect(actionsMenu).toContain("key('APP_SWITCH')")
     expect(actionsMenu).toContain("key('VOL_UP')")
     expect(actionsMenu).toContain("key('VOL_DOWN')")
     expect(actionsMenu).toContain('toggleAudio()')
-    // 两组之间有唯一分割线：设备「更多」之后、应用区（应用下拉）之前
-    const sep = toolbar.indexOf('class="tb-sep"')
-    expect(sep).toBeGreaterThan(toolbar.indexOf('<UiIcon name="more" />'))
-    expect(sep).toBeLessThan(toolbar.indexOf('tb-app-select'))
+    // 对象与动作在同一组：设备/配置包在首行，应用/操控在第二行。
+    const operations = toolbar.indexOf('class="tb-row tb-operation-row"')
+    expect(toolbar.indexOf('tb-device-group')).toBeLessThan(operations)
+    expect(toolbar.indexOf('<PackageContextBar')).toBeLessThan(operations)
+    expect(toolbar.indexOf('tb-app-group')).toBeGreaterThan(operations)
+    expect(toolbar.indexOf('tb-control-group')).toBeGreaterThan(toolbar.indexOf('tb-app-group'))
     expect(toolbar).toContain('tb-operation-row')
   })
 
@@ -109,7 +111,7 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleImpl).toContain('api.installApk(d.id, file)')
     const toolbar = template.slice(template.indexOf('class="toolbar"'), template.indexOf('ConsoleVideoStage'))
     const launchIdx = toolbar.indexOf('>启动</button>')
-    const stopIdx = toolbar.indexOf('⏹ 停止应用')
+    const stopIdx = toolbar.indexOf('>停止应用</button>')
     expect(launchIdx).toBeGreaterThan(-1)
     expect(stopIdx).toBeGreaterThan(launchIdx)
     // 应用下拉 = Android 运行目标唯一配置入口（设备设置弹窗不再编辑 pkg）：
@@ -123,10 +125,11 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(toolbar).toContain('loadApps({ force: true })')
     expect(consoleImpl).toContain('async function loadApps({ silent = false, force = false } = {})')
     expect(consoleSource).toContain('loadApps({ silent: true })')
-    // 「功能」下拉里的停止应用可用（非置灰）且带确认回调
+    // 停止应用与启动同属应用区，保留原控制回调。
     const stopBtnOpen = toolbar.slice(toolbar.lastIndexOf('<button', stopIdx), stopIdx)
     expect(stopBtnOpen).not.toContain('disabled')
     expect(stopBtnOpen).toContain('stopGame()')
+    expect(stopIdx).toBeLessThan(toolbar.indexOf('tb-control-group'))
     // 静音开关必须有定义（曾出现模板引用未定义 toggleAudio 的回归）
     expect(consoleSource).toContain('function toggleAudio()')
   })
@@ -134,9 +137,9 @@ describe('Console 视觉组件拆分静态回归', () => {
   it('子组件保留关键交互入口和挂载回调契约', () => {
     const settings = read('./components/console/DeviceSettingsModal.vue')
     const virtualFields = read('./components/console/DeviceVirtualFields.vue')
-    const capture = read('./components/console/TemplateCapture.vue')
-    const runner = read('./components/console/ScriptRunner.vue')
-    const logs = read('./components/console/RunLogPanel.vue')
+    const capture = read('../../plugins/gamer-yaml/ui/src/components/console/TemplateCapture.vue')
+    const runner = read('../../plugins/gamer-yaml/ui/src/components/console/ScriptRunner.vue')
+    const logs = read('../../plugins/gamer-yaml/ui/src/components/console/RunLogPanel.vue')
 
     expect(settings).toContain('DeviceVirtualFields')
     expect(settings).toContain('ctx.saveSettings')
@@ -152,7 +155,7 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleImpl).toContain("(current?.pkg || '未选择应用')")
     expect(consoleSource).not.toContain("sendControl({ type: 'start_app', app: activePkg")
     // 二次裁切弹窗独立成 TemplateCropModal：挂在面板层级（任何页签下框选可见，不切页签）
-    const cropModal = read('./components/console/TemplateCropModal.vue')
+    const cropModal = read('../../plugins/gamer-yaml/ui/src/components/console/TemplateCropModal.vue')
     expect(cropModal).toContain('props.onCropMounted({ canvas: cropCanvas.value, section: cropSec.value })')
     expect(cropModal).toContain('ctx.cropMouseDown')
     expect(cropModal).toContain('ctx.crop.preserveColor')
@@ -217,12 +220,12 @@ describe('Console 视觉组件拆分静态回归', () => {
 
   it('P11.5：裸 Core 只注册 任务/日志/设置（gamer.core:*），业务面板全部 manifest 驱动', () => {
     const core = read('./workspace/core-contributions.ts')
-    // Core 自有 UI 只有 gamer.core:*（ADR-11）；gamer.yaml/gamer.keymap 硬编码注册已删
+    // Core 自有 UI 只有 gamer.core:*（ADR-11）；gamer-yaml/gamer-keymap 硬编码注册已删
     expect(core).toContain("pluginId: 'gamer.core', panelId: 'tasks'")
     expect(core).toContain("pluginId: 'gamer.core', panelId: 'logs'")
     expect(core).toContain("pluginId: 'gamer.core', panelId: 'settings'")
-    expect(core).not.toContain('gamer.yaml')
-    expect(core).not.toContain('gamer.keymap')
+    expect(core).not.toContain('gamer-yaml')
+    expect(core).not.toContain('gamer-keymap')
     // 本地回退注册模块与 iframe fixture 已删除
     expect(() => read('./workspace/keymap-extension.ts')).toThrow()
     expect(() => read('./workspace/yaml-extension.ts')).toThrow()
@@ -231,8 +234,8 @@ describe('Console 视觉组件拆分静态回归', () => {
     // Console 壳不再出现扩展 id 硬编码；面板经 server-ui adapter（runtime=core）驱动
     expect(consoleSource).toContain('registerCoreContributions(panelRegistry')
     expect(consoleSource).toContain('createServerUiContributionAdapter')
-    expect(consoleSource).not.toContain('gamer.yaml')
-    expect(consoleSource).not.toContain('gamer.keymap')
+    expect(consoleSource).not.toContain('gamer-yaml')
+    expect(consoleSource).not.toContain('gamer-keymap')
     expect(consoleSource).not.toContain('registerKeymapExtension')
     expect(consoleSource).not.toContain('registerYamlExtensionPanels')
     // 默认面板 = 裸 Core 的任务页签；旧六页签 panelTab 兼容字段已删除，
@@ -250,8 +253,8 @@ describe('Console 视觉组件拆分静态回归', () => {
   })
 
   it('按键映射面板仍接入当前应用分区，但顶部不再暴露方案选择器', () => {
-    const keymap = read('./components/console/KeymapPanel.vue')
-    const keymapLogic = read('./components/console/useConsoleKeymap.js')
+    const keymap = read('../../plugins/gamer-keymap/ui/src/components/console/KeymapPanel.vue')
+    const keymapLogic = read('../../plugins/gamer-keymap/ui/src/components/console/useConsoleKeymap.js')
     // 映射面板经 console.keymaps 组件键解析，不再有壳内 keymap 页签模板分支
     expect(read('./workspace/core-component-registry.ts')).toContain('console.keymaps')
     expect(template).not.toContain('v-model="activeKeymapName"')
@@ -316,13 +319,13 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(template).not.toContain('onImportFile')
     expect(consoleImpl).not.toContain('api.exportPartition')
     expect(consoleImpl).not.toContain('runPartitionImport')
-    expect(read('./components/console/TemplateCapture.vue')).not.toContain('pkg-bar')
+    expect(read('../../plugins/gamer-yaml/ui/src/components/console/TemplateCapture.vue')).not.toContain('pkg-bar')
     // 框选生成模板：不切页签 + captureTemplate 以 Promise 回传模板短名（保存/取消 resolve）
     expect(consoleImpl).toContain('cellCaptureResolve')
     const captureFn = consoleImpl.slice(consoleImpl.indexOf('captureTemplate: () => {'))
     expect(captureFn.slice(0, captureFn.indexOf('\n  },'))).not.toContain('panelTab')
     // 函数模式：无总「编辑」按钮，摘要区逐函数「编辑」直达 + 分类徽标 + 签名展示；编辑态画布锁函数切换
-    const runner = read('./components/console/ScriptRunner.vue')
+    const runner = read('../../plugins/gamer-yaml/ui/src/components/console/ScriptRunner.vue')
     expect(runner).toContain(`ctx.runKind === 'script'`)
     expect(runner).toContain('ctx.editFunction(selectedFunction.value)')
     expect(runner).toContain('aria-label="选择函数"')
@@ -334,7 +337,7 @@ describe('Console 视觉组件拆分静态回归', () => {
   })
 
   it('函数面板函数个体化：列表平铺全部函数 + 模糊搜索；新建直进默认 _function.yaml 编辑态', () => {
-    const runner = read('./components/console/ScriptRunner.vue')
+    const runner = read('../../plugins/gamer-yaml/ui/src/components/console/ScriptRunner.vue')
     // 顶部无分类下拉/弹窗：模糊搜索框（名称/来源/拼音首字母）过滤函数列表
     expect(runner).toContain('aria-label="选择函数"')
     expect(runner).not.toContain('选择分类')
@@ -361,7 +364,7 @@ describe('Console 视觉组件拆分静态回归', () => {
   })
 
   it('模板字段的匹配预览复用宿主步骤语义且只走匹配接口', () => {
-    const cell = read('./script-editor/components/CellEditor.vue')
+    const cell = read('../../plugins/gamer-yaml/ui/src/script-editor/components/CellEditor.vue')
     expect(cell).toContain('框选')
     expect(cell).toContain('匹配')
     expect(cell).toContain('tools.matchTemplate(name)')
@@ -372,7 +375,7 @@ describe('Console 视觉组件拆分静态回归', () => {
   it('波次 2-F：运行与模板资源调用点只使用当前契约', () => {
     const layout = read('./layouts/MainLayout.vue')
     const taskBoard = read('./components/TaskBoard.vue')
-    const capture = read('./components/console/TemplateCapture.vue')
+    const capture = read('../../plugins/gamer-yaml/ui/src/components/console/TemplateCapture.vue')
     const sources = [layout, consoleImpl, taskBoard, capture]
 
     for (const source of sources) {

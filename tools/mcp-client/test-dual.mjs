@@ -64,7 +64,7 @@ for (const p of ps) {
 }
 
 // 页 A（第一个 console 页）：确认已连接
-const pageA = ps.find(p => p.url.includes('#/console') && p.title.includes('GameBot'))
+const pageA = ps.find(p => p.url.includes('#/console') && p.title.includes('Gamer'))
 const pageB = ps.find(p => p.url.includes('#/devices'))
 out.pageA = pageA.idx
 out.pageB = pageB.idx

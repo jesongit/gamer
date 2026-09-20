@@ -46,7 +46,7 @@ pub(crate) trait TimerRunnerRegistrar: Send + Sync {
 
     /// 该扩展是否采用「按调用执行、无常驻实例」模型：`start` 只表示「作为
     /// runner 提供方在线」，不启动 extension-host 常驻实例；执行由按调用
-    /// 运行时在每次运行时惰性实例化（gamer.yaml 的 run_yaml_program）。默认
+    /// 运行时在每次运行时惰性实例化（gamer-yaml 的 run_yaml_program）。默认
     /// false = 常驻实例模型（start 启动实例并持有句柄）。执行模型由拥有该
     /// 扩展 runner 构造的边界自行声明，本服务不按扩展 id 特判。
     fn executes_without_instance(&self, _extension_id: &str) -> bool {
@@ -400,7 +400,7 @@ impl ExtensionService {
     /// 是否按调用执行（无常驻实例）。组合根注册的 registrar 是唯一权威——
     /// 它拥有各扩展 runner 的构造方式，因此也拥有该扩展执行模型的声明；
     /// 未挂 registrar 的最小装配一律按常驻实例模型处理。builtin（宿主预置）
-    /// 扩展（`gamer.video`，无 guest/无 Runner）的「按调用执行」由静态注册表
+    /// 扩展（`gamer-video`，无 guest/无 Runner）的「按调用执行」由静态注册表
     /// （`builtin::is_builtin_extension`）声明：start 只表示进入 Running 以
     /// 点亮 UI 贡献与 call 通路。
     fn instance_free(&self, id: &ExtensionId) -> bool {
@@ -880,7 +880,7 @@ impl ExtensionService {
     }
 
     /// 能力发现（简化计划 Phase 4）：目标插件对外公开的动作集合 = declarative
-    /// UI 按钮集合 ∪ 原生公开动作清单（gamer.yaml actions）。调用方（其他
+    /// UI 按钮集合 ∪ 原生公开动作清单（gamer-yaml actions）。调用方（其他
     /// 插件/前端）据此决定功能入口是否可用——动作存在 ≠ 可调用，调用时仍须
     /// 目标 Running + 权限/上下文门禁（`call_extension` 统一执行）。
     pub(crate) fn capability_actions(
@@ -2440,7 +2440,7 @@ mod tests {
         archive
     }
 
-    /// gamer.yaml 安装包：无实例执行模型下 `start` 不读 guest 字节，占位
+    /// gamer-yaml 安装包：无实例执行模型下 `start` 不读 guest 字节，占位
     /// wasm 即可通过安装；真实 v3 运行验收在 gamer_yaml 的端到端测试。
     fn gamer_yaml_archive() -> Vec<u8> {
         zip_archive(&[
@@ -2449,6 +2449,7 @@ mod tests {
                 YAML_EXTENSION_MANIFEST_TOML.as_bytes().to_vec(),
             ),
             ("plugin.wasm", b"\0asm\x01\0\0\0".to_vec()),
+            ("ui/plugin.js", b"export const sdkVersion = 1;".to_vec()),
         ])
     }
 
@@ -2601,6 +2602,7 @@ entry = "plugin.wasm"
             ),
             // 合法 wasm 模块头、非 component：常驻实例模型下 start 必败。
             ("plugin.wasm", b"\0asm\x01\0\0\0".to_vec()),
+            ("ui/plugin.js", b"export const sdkVersion = 1;".to_vec()),
         ]);
         service.install(&archive).await.unwrap();
         let id = ExtensionId::parse("com.example.broken").unwrap();
@@ -2688,7 +2690,7 @@ entry = "plugin.wasm"
         );
         let archive = zip_of(&[(
             "manifest.toml",
-            builtin_manifest_bytes("com.other.alias", "1.0.0", "gamer.video"),
+            builtin_manifest_bytes("com.other.alias", "1.0.0", "gamer-video"),
         )]);
         let error = service.install(&archive).await.unwrap_err();
         assert!(
@@ -2721,7 +2723,7 @@ entry = "plugin.wasm"
 
         let builtin_update = zip_of(&[(
             "manifest.toml",
-            builtin_manifest_bytes("gamer.video", "1.0.0", "gamer.video"),
+            builtin_manifest_bytes("gamer-video", "1.0.0", "gamer-video"),
         )]);
         let inspected = service
             .inspect(&builtin_update)
@@ -2738,7 +2740,7 @@ entry = "plugin.wasm"
         assert_eq!(updated.active_version().as_str(), "1.0.0");
 
         // builtin→wasm 降级：拒绝（builtin 归宿主所有，不得被 wasm 重实现）
-        let downgrade = wasm_archive("gamer.video", "1.1.0");
+        let downgrade = wasm_archive("gamer-video", "1.1.0");
         let error = service.update(&downgrade).await.unwrap_err();
         assert!(
             matches!(error, ExtensionError::InvalidManifest(ref m) if m.contains("内置")),
@@ -2870,7 +2872,7 @@ entry = "plugin.wasm"
             builtin_manifest_bytes(
                 super::super::video::VIDEO_EXTENSION_ID,
                 "1.0.0",
-                "gamer.video",
+                "gamer-video",
             ),
         )])
     }
@@ -2884,13 +2886,13 @@ entry = "plugin.wasm"
         let consumer = ExtensionId::parse("com.example.consumer").unwrap();
         let provider = ExtensionId::parse(super::super::video::VIDEO_EXTENSION_ID).unwrap();
 
-        // 安装消费方（必需依赖 gamer.video 未安装）：enable 落 Enabled，start
+        // 安装消费方（必需依赖 gamer-video 未安装）：enable 落 Enabled，start
         // 被依赖门禁拒绝 → Failed + last_error（保留启用意图，可重试）。
         service
             .install(&wasm_archive_with_deps(
                 "com.example.consumer",
                 "1.0.0",
-                "# 必需依赖\n[[dependencies]]\nid = \"gamer.video\"\nversion = \"^1.0.0\"\n",
+                "# 必需依赖\n[[dependencies]]\nid = \"gamer-video\"\nversion = \"^1.0.0\"\n",
             ))
             .await
             .unwrap();
@@ -2906,13 +2908,13 @@ entry = "plugin.wasm"
             .expect("必须记录依赖缺失原因")
             .to_string();
         assert!(error.contains("必需依赖"), "{error}");
-        assert!(error.contains("gamer.video"), "{error}");
+        assert!(error.contains("gamer-video"), "{error}");
 
         // 依赖状态报告：未安装/未满足/带降级提示。
         let manifest = service.snapshot_for(&consumer).unwrap().manifest().clone();
         let report = service.dependency_report(&manifest);
         assert_eq!(report.len(), 1);
-        assert_eq!(report[0].id, "gamer.video");
+        assert_eq!(report[0].id, "gamer-video");
         assert!(report[0].required, "缺省 required 从紧 = true");
         assert!(!report[0].installed);
         assert!(!report[0].satisfied);
@@ -3427,11 +3429,11 @@ entry = "plugin.wasm"
         assert!(matches!(error, ExtensionError::InvalidTransition { .. }));
         assert!(!temp
             .path()
-            .join("packages/native-call/plugins/gamer.yaml/automations/blocked.yaml")
+            .join("packages/native-call/plugins/gamer-yaml/automations/blocked.yaml")
             .exists());
         assert!(temp
             .path()
-            .join("packages/native-call/plugins/gamer.yaml/automations/running.yaml")
+            .join("packages/native-call/plugins/gamer-yaml/automations/running.yaml")
             .exists());
 
         let blocked_template = serde_json::json!({
@@ -3453,7 +3455,7 @@ entry = "plugin.wasm"
         assert!(matches!(error, ExtensionError::InvalidTransition { .. }));
         assert!(!temp
             .path()
-            .join("packages/native-call/plugins/gamer.yaml/templates/blocked-template#100_200_300_400.png")
+            .join("packages/native-call/plugins/gamer-yaml/templates/blocked-template#100_200_300_400.png")
             .exists());
     }
 
@@ -3501,7 +3503,7 @@ entry = "plugin.wasm"
         );
         assert!(!temp
             .path()
-            .join("packages/stale-call/plugins/gamer.yaml/automations/must-not-write.yaml")
+            .join("packages/stale-call/plugins/gamer-yaml/automations/must-not-write.yaml")
             .exists());
     }
 
@@ -3546,7 +3548,7 @@ entry = "plugin.wasm"
         assert!(matches!(error, ExtensionError::Permission(_)), "{error}");
         assert!(!temp
             .path()
-            .join("packages/permission-call/plugins/gamer.yaml/automations/must-not-write.yaml")
+            .join("packages/permission-call/plugins/gamer-yaml/automations/must-not-write.yaml")
             .exists());
     }
 
@@ -3613,7 +3615,7 @@ entry = "plugin.wasm"
             .unwrap();
         assert!(temp
             .path()
-            .join("packages/plugin-context/plugins/gamer.yaml/automations/from-video.yaml")
+            .join("packages/plugin-context/plugins/gamer-yaml/automations/from-video.yaml")
             .exists());
 
         let spoofed = serde_json::json!({
@@ -3630,7 +3632,7 @@ entry = "plugin.wasm"
         assert!(error.to_string().contains("不匹配动作"), "{error}");
         assert!(!temp
             .path()
-            .join("packages/plugin-context/plugins/gamer.yaml/automations/spoofed.yaml")
+            .join("packages/plugin-context/plugins/gamer-yaml/automations/spoofed.yaml")
             .exists());
 
         let wrong_package = serde_json::json!({
@@ -3645,7 +3647,7 @@ entry = "plugin.wasm"
         assert!(error.to_string().contains("Package Context"), "{error}");
         assert!(!temp
             .path()
-            .join("packages/other-context/plugins/gamer.yaml/automations/wrong-package.yaml")
+            .join("packages/other-context/plugins/gamer-yaml/automations/wrong-package.yaml")
             .exists());
 
         service.disable(&video).await.unwrap();
@@ -3665,7 +3667,7 @@ entry = "plugin.wasm"
         assert!(matches!(stale_error, ExtensionError::RuntimeUnavailable(_)));
         assert!(!temp
             .path()
-            .join("packages/plugin-context/plugins/gamer.yaml/automations/stale-context.yaml")
+            .join("packages/plugin-context/plugins/gamer-yaml/automations/stale-context.yaml")
             .exists());
     }
 
@@ -3739,7 +3741,7 @@ entry = "plugin.wasm"
             .install(&wasm_archive_with_deps(
                 "com.example.optconsumer",
                 "1.0.0",
-                "[[dependencies]]\nid = \"gamer.yaml\"\nversion = \"*\"\nrequired = false\n",
+                "[[dependencies]]\nid = \"gamer-yaml\"\nversion = \"*\"\nrequired = false\n",
             ))
             .await
             .unwrap();
@@ -4026,9 +4028,9 @@ version = "1.0.0"
 name = "D"
 entry = "plugin.wasm"
 [[dependencies]]
-id = "gamer.video"
+id = "gamer-video"
 [[dependencies]]
-id = "gamer.yaml"
+id = "gamer-yaml"
 version = "^3.0"
 required = false
 "#,
@@ -4063,9 +4065,9 @@ version = "1.0.0"
 name = "D"
 entry = "plugin.wasm"
 [[dependencies]]
-id = "gamer.video"
+id = "gamer-video"
 [[dependencies]]
-id = "gamer.video"
+id = "gamer-video"
 required = false
 "#,
         )
@@ -4080,7 +4082,7 @@ version = "1.0.0"
 name = "D"
 entry = "plugin.wasm"
 [[dependencies]]
-id = "gamer.video"
+id = "gamer-video"
 version = "not-a-req"
 "#,
         )

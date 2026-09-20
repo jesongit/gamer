@@ -1,4 +1,4 @@
-/* ============ GameBot 主题 ============ */
+/* ============ Gamer 主题 ============ */
 :root {
   color-scheme: dark;
   --bg-0: #17191a;
@@ -57,6 +57,31 @@ body {
 .btn-sm { padding: 3px 8px; font-size: 13px; }
 .btn-ghost { background: transparent; border-color: transparent; color: var(--text-1); }
 .btn-ghost:hover { background: var(--bg-3); border-color: var(--border); color: var(--text-0); }
+
+/* 操作下拉：菜单内纯文字；外部紧凑入口可用图标。定位由宿主负责。 */
+.action-menu {
+  display: flex; flex-direction: column; gap: 2px; min-width: 140px;
+  padding: 4px; background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow);
+}
+.action-menu-item {
+  display: flex; align-items: center; flex: none; width: 100%; min-height: 28px;
+  padding: 4px 10px; border: 0; border-radius: var(--radius-sm); background: transparent;
+  color: var(--text-0); font: inherit; font-size: 13px; line-height: 20px;
+  text-align: left; white-space: nowrap; cursor: pointer;
+}
+.action-menu-item:hover:not(:disabled) { background: var(--bg-3); }
+.action-menu-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.action-menu-item.danger { color: var(--danger); }
+.action-menu-item.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.action-menu-item:disabled { color: var(--text-2); opacity: .45; cursor: not-allowed; }
+.action-menu-separator { flex: none; height: 1px; margin: 3px 6px; background: var(--border); }
+.menu-summary { list-style: none; }
+.menu-summary::-webkit-details-marker { display: none; }
+.menu-chevron {
+  display: inline-block; flex: none; width: 6px; height: 6px; margin: -3px 2px 0;
+  border-right: 1px solid currentColor; border-bottom: 1px solid currentColor; transform: rotate(45deg);
+}
 
 .input, .select, .textarea {
   width: 100%; min-height: 28px; padding: 3px 8px; border-radius: var(--radius-sm);

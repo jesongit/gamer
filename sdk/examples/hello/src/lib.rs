@@ -26,7 +26,7 @@ use gamer::host::types::{HostError, HostErrorKind};
 use gamer::host::{context, device, log, resources};
 
 /// 本插件在 Package 内的私有数据路径（宿主强制限定在
-/// `packages/<content_package>/plugins/com.example.hello/` 前缀内，
+/// `packages/<content_package>/plugins/gamer-hello/` 前缀内，
 /// plugin 维度由宿主注入调用方身份，guest 无法寻址其他插件目录）。
 const STATE_PATH: &str = "data/state.json";
 
@@ -100,7 +100,7 @@ fn greet(values: &serde_json::Value) -> Result<String, String> {
 /// 边界说明（host API 1.0.0 现状）：WIT `resources` 域只暴露
 /// `resolve`（逻辑名 → 句柄，文件必须存在）与 `open`（字节长度），
 /// 字节内容读取/写入尚未开放给 guest——写侧目前走 Package 资源 REST
-/// （`PUT /api/packages/:pkg/plugins/com.example.hello/resources/...`），
+/// （`PUT /api/packages/:pkg/plugins/gamer-hello/resources/...`），
 /// 读取字节内容同理。本动作验证的是「私有数据定位 + 存在性 + 大小」链路
 /// 与插件数据隔离（宿主把 plugin 维度钉死为调用方 id）。
 fn check_resource() -> Result<String, String> {

@@ -6,7 +6,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 
-vi.mock('./components/video/videoApi', async (importOriginal) => {
+vi.mock('../../plugins/gamer-video/ui/src/components/video/videoApi', async (importOriginal) => {
   const actual = await importOriginal()
   return {
     ...actual,
@@ -18,8 +18,8 @@ vi.mock('./components/video/videoApi', async (importOriginal) => {
   }
 })
 
-import VideoTimeline from './components/video/VideoTimeline.vue'
-import { videoApi } from './components/video/videoApi'
+import VideoTimeline from '../../plugins/gamer-video/ui/src/components/video/VideoTimeline.vue'
+import { videoApi } from '../../plugins/gamer-video/ui/src/components/video/videoApi'
 
 const MEDIA_A = { id: 'media-a', name: 'A.mp4', duration_us: 5_000_000, width: 1920, height: 1080 }
 const MEDIA_B = { id: 'media-b', name: 'B.mp4', duration_us: 7_000_000, width: 1280, height: 720 }

@@ -74,10 +74,10 @@ describe('Package 插件资源 API surface（plan §12-§14）', () => {
       })
   })
 
-  it('脚本创建/更新走 gamer.yaml automations/ PUT（资源 id 首段 = Package id）', async () => {
+  it('脚本创建/更新走 gamer-yaml automations/ PUT（资源 id 首段 = Package id）', async () => {
     fetch.mockResolvedValueOnce(jsonRes(200, { id: 'com.demo/main.yaml', version: 'v1' }))
     await api.createScript({ pkg: 'com.demo', name: 'main.yaml', content: 'steps: []\n', id: 'old-id' })
-    expect(fetch.mock.calls[0][0]).toBe('/api/packages/com.demo/plugins/gamer.yaml/resources/automations%2Fmain.yaml')
+    expect(fetch.mock.calls[0][0]).toBe('/api/packages/com.demo/plugins/gamer-yaml/resources/automations%2Fmain.yaml')
     expect(fetch.mock.calls[0][1].method).toBe('PUT')
     expect(bodyOf()).toEqual({ content: 'steps: []\n' })
 
@@ -85,7 +85,7 @@ describe('Package 插件资源 API surface（plan §12-§14）', () => {
     await api.updateScript('com.demo/main.yaml', {
       content: 'steps: []\n', expected_version: 'v1',
     })
-    expect(fetch.mock.calls[1][0]).toBe('/api/packages/com.demo/plugins/gamer.yaml/resources/automations%2Fmain.yaml')
+    expect(fetch.mock.calls[1][0]).toBe('/api/packages/com.demo/plugins/gamer-yaml/resources/automations%2Fmain.yaml')
     expect(fetch.mock.calls[1][1].method).toBe('PUT')
     expect(bodyOf(1)).toEqual({ content: 'steps: []\n', expected_version: 'v1' })
   })
@@ -93,7 +93,7 @@ describe('Package 插件资源 API surface（plan §12-§14）', () => {
   it('函数库创建与更新共用 PUT（automations/ 前缀识别）；缺版本不发请求，force:true 才跳过版本门禁', async () => {
     fetch.mockResolvedValueOnce(jsonRes(200, { id: 'com.demo/_function.yaml', version: 'v1' }))
     await api.createFunction({ pkg: 'com.demo', name: '_function.yaml', content: 'functions:\n  login:\n    run: []\n' })
-    expect(fetch.mock.calls[0][0]).toBe('/api/packages/com.demo/plugins/gamer.yaml/resources/automations%2F_function.yaml')
+    expect(fetch.mock.calls[0][0]).toBe('/api/packages/com.demo/plugins/gamer-yaml/resources/automations%2F_function.yaml')
     expect(fetch.mock.calls[0][1].method).toBe('PUT')
     expect(bodyOf()).toEqual({ content: 'functions:\n  login:\n    run: []\n' })
 
@@ -103,7 +103,7 @@ describe('Package 插件资源 API surface（plan §12-§14）', () => {
 
     fetch.mockResolvedValueOnce(jsonRes(200, { id: 'com.demo/_function.yaml', version: 'v3' }))
     await api.updateFunction('com.demo/_function.yaml', { content: 'functions:\n  login:\n    run: []\n', force: true })
-    expect(fetch.mock.calls[1][0]).toBe('/api/packages/com.demo/plugins/gamer.yaml/resources/automations%2F_function.yaml')
+    expect(fetch.mock.calls[1][0]).toBe('/api/packages/com.demo/plugins/gamer-yaml/resources/automations%2F_function.yaml')
     expect(fetch.mock.calls[1][1].method).toBe('PUT')
     expect(bodyOf(1)).toEqual({ content: 'functions:\n  login:\n    run: []\n', force: true })
   })
@@ -112,7 +112,7 @@ describe('Package 插件资源 API surface（plan §12-§14）', () => {
     fetch.mockResolvedValueOnce(jsonRes(200, { ok: true, name: 'shot#100_200_800_900.png' }))
     await api.createTemplate('shot.png', 'QUJD', 'com.demo', [0.1, 0.2, 0.8, 0.9])
     expect(fetch.mock.calls[0][0]).toBe(
-      '/api/packages/com.demo/plugins/gamer.yaml/resources/templates%2Fshot%23100_200_800_900.png',
+      '/api/packages/com.demo/plugins/gamer-yaml/resources/templates%2Fshot%23100_200_800_900.png',
     )
     expect(fetch.mock.calls[0][1].method).toBe('PUT')
     expect(fetch.mock.calls[0][1].headers['Content-Type']).toBe('application/octet-stream')
@@ -122,12 +122,12 @@ describe('Package 插件资源 API surface（plan §12-§14）', () => {
     fetch.mockResolvedValueOnce(jsonRes(200, { ok: true, name: 'color#100_200_800_900#1.png' }))
     await api.createTemplate('color.png', 'QUJD', 'com.demo', [0.1, 0.2, 0.8, 0.9], true)
     expect(fetch.mock.calls[1][0]).toBe(
-      '/api/packages/com.demo/plugins/gamer.yaml/resources/templates%2Fcolor%23100_200_800_900%231.png',
+      '/api/packages/com.demo/plugins/gamer-yaml/resources/templates%2Fcolor%23100_200_800_900%231.png',
     )
 
     fetch.mockResolvedValueOnce(jsonRes(200, { ok: true, name: 'shot.png' }))
     await api.replaceTemplateImage('shot#100_200_800_900.png', 'REVG', 'com.demo')
-    expect(fetch.mock.calls[2][0]).toBe('/api/packages/com.demo/plugins/gamer.yaml/resources/templates%2Fshot%23100_200_800_900.png')
+    expect(fetch.mock.calls[2][0]).toBe('/api/packages/com.demo/plugins/gamer-yaml/resources/templates%2Fshot%23100_200_800_900.png')
     expect(fetch.mock.calls[2][1].method).toBe('PUT')
     expect(new TextDecoder().decode(fetch.mock.calls[2][1].body)).toBe('DEF')
   })
@@ -135,33 +135,33 @@ describe('Package 插件资源 API surface（plan §12-§14）', () => {
   it('模板重命名走 rename 端点（服务端同步改写脚本/函数引用）', async () => {
     fetch.mockResolvedValueOnce(jsonRes(200, { ok: true }))
     await api.renameTemplate('old.png', 'new.png', 'com.demo')
-    expect(fetch.mock.calls[0][0]).toBe('/api/packages/com.demo/plugins/gamer.yaml/rename')
+    expect(fetch.mock.calls[0][0]).toBe('/api/packages/com.demo/plugins/gamer-yaml/rename')
     expect(bodyOf()).toEqual({ path: 'templates/old.png', new_path: 'templates/new.png' })
   })
 
-  it('按键映射详情/更新走 gamer.keymap mappings/，并保留版本门禁', async () => {
+  it('按键映射详情/更新走 gamer-keymap mappings/，并保留版本门禁', async () => {
     fetch.mockResolvedValueOnce(jsonRes(200, { content: 'version: 1\n', version: 'abc' }))
     await api.getKeymap('com.demo/combat.yaml', 'com.demo')
-    expect(fetch.mock.calls[0][0]).toBe('/api/packages/com.demo/plugins/gamer.keymap/resources/mappings%2Fcombat.yaml')
+    expect(fetch.mock.calls[0][0]).toBe('/api/packages/com.demo/plugins/gamer-keymap/resources/mappings%2Fcombat.yaml')
 
     fetch.mockResolvedValueOnce(jsonRes(200, { id: 'com.demo/combat.yaml', version: 'v2' }))
     await api.updateKeymap('combat.yaml', 'com.demo', {
       content: 'version: 1\nname: combat\nbindings: []\n',
       expected_version: 'abc123',
     })
-    expect(fetch.mock.calls[1][0]).toBe('/api/packages/com.demo/plugins/gamer.keymap/resources/mappings%2Fcombat.yaml')
+    expect(fetch.mock.calls[1][0]).toBe('/api/packages/com.demo/plugins/gamer-keymap/resources/mappings%2Fcombat.yaml')
     expect(bodyOf(1)).toEqual({
       content: 'version: 1\nname: combat\nbindings: []\n',
       expected_version: 'abc123',
     })
   })
 
-  it('vision 测试显式携带 pkg（Package id）+ plugin（gamer.yaml）三元组', async () => {
+  it('vision 测试显式携带 pkg（Package id）+ plugin（gamer-yaml）三元组', async () => {
     fetch.mockResolvedValueOnce(jsonRes(200, { found: true }))
     await api.testTemplate('shot.png', 'dev-1', 0.9, [0, 0, 1, 1], 'com.demo')
     expect(fetch.mock.calls[0][0]).toBe('/api/capabilities/vision/test')
     expect(bodyOf()).toMatchObject({
-      device_id: 'dev-1', pkg: 'com.demo', plugin: 'gamer.yaml', name: 'shot.png',
+      device_id: 'dev-1', pkg: 'com.demo', plugin: 'gamer-yaml', name: 'shot.png',
     })
   })
 })
@@ -261,7 +261,7 @@ describe('统一任务 API（P11.1 ADR-12）', () => {
     expect(fetch.mock.calls[0][1].method).toBe('GET')
 
     fetch.mockResolvedValueOnce(jsonRes(201, {}))
-    const body = { name: 't', runner: { runner_id: 'gamer.yaml', entrypoint: 'p/a.yaml', payload: {} }, schedule: { provider_id: 'cron', config: { expression: '0 8 * * *' } } }
+    const body = { name: 't', runner: { runner_id: 'gamer-yaml', entrypoint: 'p/a.yaml', payload: {} }, schedule: { provider_id: 'cron', config: { expression: '0 8 * * *' } } }
     await api.saveTask(body)
     expect(fetch.mock.calls[1][0]).toBe('/api/tasks')
     expect(fetch.mock.calls[1][1].method).toBe('POST')
@@ -292,8 +292,8 @@ describe('统一任务 API（P11.1 ADR-12）', () => {
     fetch.mockResolvedValueOnce(jsonRes(202, { ok: true }))
     await expect(api.runTaskNow('t1')).rejects.toMatchObject({ code: 'invalid_response' })
 
-    fetch.mockResolvedValueOnce(jsonRes(200, [{ runner_id: 'gamer.yaml' }]))
-    await expect(api.listRunners()).resolves.toEqual([{ runner_id: 'gamer.yaml' }])
+    fetch.mockResolvedValueOnce(jsonRes(200, [{ runner_id: 'gamer-yaml' }]))
+    await expect(api.listRunners()).resolves.toEqual([{ runner_id: 'gamer-yaml' }])
     expect(fetch.mock.calls[2][0]).toBe('/api/runners')
 
     fetch.mockResolvedValueOnce(jsonRes(200, [{ provider_id: 'cron' }]))

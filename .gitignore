@@ -7,10 +7,9 @@ server/target-b/
 server/target-d/
 # Phase 3 与 WASM guest 的独立 Cargo 输出目录（均为可重建生成物）
 server/target-phase3/
-server/guests/yaml-guest/target/
-server/guests/yaml-interp/target/
-server/guests/keymap-guest/target/
 server/tests/call-guest/target/
+# 插件迁移前遗留的本机构建缓存
+server/guests/*/target/
 # 本机配置（真实路径/密码，不入库）；分发以 server/config.example.toml 为准
 server/config.toml
 # 按天轮转的日志产物（gamer-server.log.YYYY-MM-DD；裸 *.log 规则盖不住带日期后缀的名）
@@ -29,17 +28,26 @@ server/data/packages/
 server/data/_migration_backup/
 # 运行时安装的扩展产物与状态注册表（/api/extensions/install 落盘，本机数据）
 server/data/extensions/
+server/data.before-plugin-ids-*/
+server/data.plugin-convert-*/
 # 本机导入视频、录制及会话历史，不随仓库分发
 server/data/media/
 
-# ===== Docker 并存部署（docker-compose.local.yml，宿主 8444）=====
-# 独立数据目录（volume 挂载，本机运行数据不随仓库分发）：需要种子分区时
-# 从 server/data/<pkg> 自行复制
+# ===== 历史部署数据（保留，不随仓库发布）=====
 docker-data/
 
 # ===== Node (web) =====
 web/node_modules/
 web/dist/
+plugins/*/ui/node_modules/
+plugins/*/dist/
+plugins/*/guest/target/
+plugins/*/interpreter/target/
+web/public/plugin-ui/
+docs/node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+docs/.vitepress/.temp/
 
 # ===== 运行时/调试产物 =====
 mcp-test/
@@ -58,6 +66,7 @@ desktop.ini
 .zcode/
 tools/mcp-client/node_modules/
 tools/mcp-client/out/
+tools/__pycache__/
 server/web-dist/
 
 # ===== 本地任务笔记 =====

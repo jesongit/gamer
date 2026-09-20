@@ -82,7 +82,7 @@ mod sec_tests {
         let device = Device {
             id: id.to_string(),
             name: id.to_string(),
-            kind: "wifi".into(),
+
             addr: "127.0.0.1:5555".into(),
             screen_mode: ScreenMode::Mirror,
             vd_res: None,
@@ -194,7 +194,7 @@ mod sec_tests {
     ) -> TestApp {
         let runs = Arc::new(crate::run_manager::RunManager::new(executor));
         let scheduler = Arc::new(Scheduler::new(db.clone()));
-        // 与生产等价：gamer.yaml 扩展 Running 时注册其 timer runner（POST
+        // 与生产等价：gamer-yaml 扩展 Running 时注册其 timer runner（POST
         // /api/runs 手动分发与任务路径共用同一注册表）。测试装配直接同步注册。
         let yaml_runner = Arc::new(
             crate::extensions::gamer_yaml::timer_yaml::YamlTimerRunner::new(
@@ -204,18 +204,18 @@ mod sec_tests {
             ),
         );
         scheduler
-            .register_runner_for_tests("gamer.yaml", "gamer.yaml", yaml_runner.clone())
+            .register_runner_for_tests("gamer-yaml", "gamer-yaml", yaml_runner.clone())
             .unwrap();
         // P12.3：entrypoint 参数 schema 描述器（与生产 start 生命周期同构）
         scheduler.register_entrypoint_describer(
-            "gamer.yaml",
-            "gamer.yaml",
+            "gamer-yaml",
+            "gamer-yaml",
             yaml_runner.entrypoint_describer(),
         );
         // V1：原生函数目录描述器（与生产 start 生命周期同构）
         scheduler.register_functions_describer(
-            "gamer.yaml",
-            "gamer.yaml",
+            "gamer-yaml",
+            "gamer-yaml",
             crate::extensions::gamer_yaml::timer_yaml::YamlTimerRunner::functions_describer(),
         );
         let auth = Arc::new(auth::AuthState::new(

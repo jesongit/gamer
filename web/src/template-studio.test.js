@@ -11,7 +11,7 @@ import {
   pixelRectToStyle,
   regionFromRect,
   regionToPixelRect,
-} from './components/video/templateStudio'
+} from '../../plugins/gamer-video/ui/src/components/video/templateStudio'
 
 describe('regionFromRect / regionToPixelRect（模板区域 ↔ 帧像素，双向一致）', () => {
   it('像素矩形 → 相对区域，clamp 到画面内；太小选框拒绝', () => {

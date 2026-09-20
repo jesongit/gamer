@@ -9,6 +9,7 @@ const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 
 
 export default defineConfig({
   plugins: [vue()],
+  resolve: { dedupe: ["vue", "vue-router"] },
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version)
   },

@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn core_contributions_pass_component_through_to_json() {
-        let manifest_text = "manifest_version = 2\nid = \"gamer.yaml\"\nversion = \"3.0.0\"\nname = \"Gamer YAML vNext\"\nentry = \"plugin.wasm\"\n\
+        let manifest_text = "manifest_version = 2\nid = \"gamer-yaml\"\nversion = \"3.0.0\"\nname = \"Gamer YAML vNext\"\nentry = \"plugin.wasm\"\n\
               [ui]\n[[ui.contributions]]\npanel_id = \"automation\"\ntitle = \"自动化\"\nruntime = \"core\"\ncomponent = \"console.scripts\"\nrequires_device = true\n";
         let registry = UiContributionRegistry::default();
         let manifest = parse_manifest(manifest_text.as_bytes()).unwrap();

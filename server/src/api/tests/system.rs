@@ -266,7 +266,7 @@ fn log_limit_clamped_to_1_1000() {
 fn route_validation_rejects_ambiguous_device_configuration() {
     let valid = CreateDeviceReq {
         name: "demo".into(),
-        kind: "redroid".into(),
+
         addr: Some("127.0.0.1:5555".into()),
         screen_mode: Some("virtual".into()),
         vd_res: Some("1920x1080".into()),
@@ -297,7 +297,7 @@ fn session_affecting_change_only_detects_casting_fields() {
     let base = Device {
         id: "d1".into(),
         name: "挂机一号".into(),
-        kind: "redroid".into(),
+
         addr: "127.0.0.1:5555".into(),
         screen_mode: ScreenMode::Virtual,
         vd_res: Some("1920x1080".into()),
@@ -379,11 +379,7 @@ fn session_affecting_change_only_detects_casting_fields() {
         &mutate(&|d| d.addr = "192.168.1.9:5555".into()),
         30
     ));
-    assert!(session_affecting_change(
-        &base,
-        &mutate(&|d| d.kind = "emu".into()),
-        30
-    ));
+
 
     // fps None 跟随全局配置：全局值不同则生效值不同 → 重建
     assert!(session_affecting_change(
@@ -422,7 +418,7 @@ fn route_validation_bounds_run_and_task_requests() {
         name: "daily".into(),
         app: crate::core::AppContext::for_test("device-1", "com.example.game").unwrap(),
         runner: RunnerSpecDto {
-            runner_id: "gamer.yaml".into(),
+            runner_id: "gamer-yaml".into(),
             entrypoint: "com.example.game/daily.yaml".into(),
             payload: serde_json::json!({}),
         },

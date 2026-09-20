@@ -7,14 +7,14 @@ import PluginWorkspace from './workspace/PluginWorkspace.vue'
 afterEach(() => localStorage.removeItem('gamer.workbench.tab-order'))
 
 it('工作台页签拖动只改变顺序，重挂载保留，恢复默认不切换当前面板', async () => {
-  let wrapper = await mountWorkspace('gamer.video:video')
+  let wrapper = await mountWorkspace('gamer-video:video')
   let tabs = wrapper.findAll('.workspace-subtab')
   await tabs[2].trigger('dragstart', { dataTransfer: { setData() {} } })
   await tabs[0].trigger('drop', { clientX: -1 })
   expect(wrapper.findAll('.workspace-subtab').map(tab => tab.text())).toEqual(['模板', '视频', '自动化'])
   expect(wrapper.emitted('select')).toBeUndefined()
   wrapper.unmount()
-  wrapper = await mountWorkspace('gamer.video:video')
+  wrapper = await mountWorkspace('gamer-video:video')
   expect(wrapper.findAll('.workspace-subtab').map(tab => tab.text())).toEqual(['模板', '视频', '自动化'])
   await wrapper.get('[aria-label="恢复默认页签顺序"]').trigger('click')
   expect(wrapper.findAll('.workspace-subtab').map(tab => tab.text())).toEqual(['视频', '自动化', '模板'])
@@ -23,7 +23,7 @@ it('工作台页签拖动只改变顺序，重挂载保留，恢复默认不切�
 })
 
 it('键盘排序在隐藏插件重新出现后保留其位置', async () => {
-  const wrapper = await mountWorkspace('gamer.video:video', { pluginTargets: { 'gamer.yaml': ['game.app'] }, androidPackageName: 'game.app' })
+  const wrapper = await mountWorkspace('gamer-video:video', { pluginTargets: { 'gamer-yaml': ['game.app'] }, androidPackageName: 'game.app' })
   await wrapper.findAll('.workspace-subtab')[0].trigger('keydown', { key: 'ArrowRight', altKey: true, shiftKey: true })
   expect(wrapper.findAll('.workspace-subtab').map(tab => tab.text())).toEqual(['自动化', '视频', '模板'])
   await wrapper.setProps({ androidPackageName: 'other.app' })
@@ -57,9 +57,9 @@ function makeRegistry() {
     { key: 'gamer.core:tasks', title: '任务', pluginId: 'gamer.core', runtime: 'core', component: defineComponent({ template: '<div>TASKS_OK</div>' }) },
     { key: 'gamer.core:logs', title: '日志', pluginId: 'gamer.core', runtime: 'core', component: defineComponent({ template: '<div>LOGS_OK</div>' }) },
     { key: 'gamer.core:settings', title: '设置', pluginId: 'gamer.core', runtime: 'core', component: defineComponent({ template: '<div>SETTINGS_OK</div>' }) },
-    { key: 'gamer.video:video', title: '视频', pluginId: 'gamer.video', runtime: 'core', component: VideoPanelStub, panelClass: 'video-tab' },
-    { key: 'gamer.yaml:automation', title: '自动化', pluginId: 'gamer.yaml', runtime: 'core', component: AutomationPanelStub },
-    { key: 'gamer.yaml:templates', title: '模板', pluginId: 'gamer.yaml', runtime: 'core', component: TemplatesPanelStub },
+    { key: 'gamer-video:video', title: '视频', pluginId: 'gamer-video', runtime: 'core', component: VideoPanelStub, panelClass: 'video-tab' },
+    { key: 'gamer-yaml:automation', title: '自动化', pluginId: 'gamer-yaml', runtime: 'core', component: AutomationPanelStub },
+    { key: 'gamer-yaml:templates', title: '模板', pluginId: 'gamer-yaml', runtime: 'core', component: TemplatesPanelStub },
   ]
   return {
     getPanels: () => panels,
@@ -68,7 +68,7 @@ function makeRegistry() {
   }
 }
 
-const PLUGIN_NAMES = { 'gamer.video': '视频工作台', 'gamer.yaml': '自动化' }
+const PLUGIN_NAMES = { 'gamer-video': '视频工作台', 'gamer-yaml': '自动化' }
 
 async function mountWorkspace(activePanel, extraProps = {}) {
   const wrapper = mount(PluginWorkspace, {
@@ -89,7 +89,7 @@ async function mountWorkspace(activePanel, extraProps = {}) {
 
 describe('PluginWorkspace 业务面板激活（入口二级菜单回归）', () => {
   it('业务面板 key 激活：渲染面板组件本体，不显示插件选择器兜底', async () => {
-    const wrapper = await mountWorkspace('gamer.video:video')
+    const wrapper = await mountWorkspace('gamer-video:video')
     expect(wrapper.find('.plugin-picker').exists()).toBe(false)
     expect(wrapper.find('.video-stub').exists()).toBe(true)
     expect(wrapper.text()).toContain('VIDEO_PANEL_OK')
@@ -101,13 +101,13 @@ describe('PluginWorkspace 业务面板激活（入口二级菜单回归）', () 
   })
 
   it('工作台平铺所有可用功能，当前单面板插件也有切换入口', async () => {
-    const wrapper = await mountWorkspace('gamer.video:video')
+    const wrapper = await mountWorkspace('gamer-video:video')
     expect(wrapper.find('.workspace-subtab.active').text()).toBe('视频')
     wrapper.unmount()
   })
 
   it('多面板插件激活：主导航下一行渲染功能子页签条且当前功能高亮', async () => {
-    const wrapper = await mountWorkspace('gamer.yaml:templates')
+    const wrapper = await mountWorkspace('gamer-yaml:templates')
     expect(wrapper.find('.plugin-picker').exists()).toBe(false)
     const subtabs = wrapper.findAll('.workspace-subtab')
     expect(subtabs.length).toBe(3)
@@ -116,7 +116,7 @@ describe('PluginWorkspace 业务面板激活（入口二级菜单回归）', () 
     expect(wrapper.find('.templates-stub').exists()).toBe(true)
     // 子页签可切换功能
     await subtabs[1].trigger('click')
-    expect(wrapper.emitted('select')?.at(-1)).toEqual(['gamer.yaml:automation'])
+    expect(wrapper.emitted('select')?.at(-1)).toEqual(['gamer-yaml:automation'])
     wrapper.unmount()
   })
 
@@ -143,7 +143,7 @@ describe('PluginWorkspace 业务面板激活（入口二级菜单回归）', () 
 
   it('首次进入工作台自动选择可用功能，无插件仍留在工作台', async () => {
     const wrapper = await mountWorkspace('workbench')
-    expect(wrapper.emitted('fallback')?.at(-1)).toEqual(['gamer.video:video'])
+    expect(wrapper.emitted('fallback')?.at(-1)).toEqual(['gamer-video:video'])
     wrapper.unmount()
     const empty = await mountWorkspace('workbench', { registry: { getPanels: () => [], resolve: () => null } })
     expect(empty.find('.workspace-tab.active').text()).toBe('工作台')
@@ -166,12 +166,12 @@ describe('PluginWorkspace 业务面板激活（入口二级菜单回归）', () 
 // 当前设备应用命中时出现在插件入口，不命中（含未选择应用）直接不显示。
 describe('PluginWorkspace 插件入口按当前应用过滤（Android Targets）', () => {
   const TARGETS = {
-    'gamer.video': ['*'],
-    'gamer.yaml': ['com.miHoYo.hkrpg'],
+    'gamer-video': ['*'],
+    'gamer-yaml': ['com.miHoYo.hkrpg'],
   }
 
   it('通用（*）插件恒显示；具体目标插件当前应用命中才显示', async () => {
-    const wrapper = await mountWorkspace('gamer.video:video', {
+    const wrapper = await mountWorkspace('gamer-video:video', {
       pluginTargets: TARGETS,
       androidPackageName: 'com.miHoYo.hkrpg',
     })
@@ -187,7 +187,7 @@ describe('PluginWorkspace 插件入口按当前应用过滤（Android Targets）
   })
 
   it('未选择应用：仅通用（*）插件显示，具体目标插件不出现', async () => {
-    const wrapper = await mountWorkspace('gamer.video:video', {
+    const wrapper = await mountWorkspace('gamer-video:video', {
       pluginTargets: TARGETS,
       androidPackageName: '',
     })
@@ -198,7 +198,7 @@ describe('PluginWorkspace 插件入口按当前应用过滤（Android Targets）
   })
 
   it('targets 数据未到达（未声明）：不误隐藏插件（fail-open）', async () => {
-    const wrapper = await mountWorkspace('gamer.video:video')
+    const wrapper = await mountWorkspace('gamer-video:video')
     const items = wrapper.findAll('.workspace-subtab')
     expect(items.map(node => node.text()))
       .toEqual(['视频', '自动化', '模板'])

@@ -3,7 +3,7 @@
 //! - `POST /api/runs` body `{runner_id, entrypoint, device_id, payload?,
 //!   content_package?}`：Core 只做通用分发——按 `runner_id` 在
 //!   [`crate::timer_core::TimerRunnerRegistry`] 查找已注册 runner 并转发；
-//!   entrypoint/payload 语义属于注册该 runner 的扩展（gamer.yaml 的契约见
+//!   entrypoint/payload 语义属于注册该 runner 的扩展（gamer-yaml 的契约见
 //!   `extensions::gamer_yaml::timer_yaml`）。`task_id` 为空 = 手动 ad-hoc
 //!   运行（任务路径复用同一 runner，`/api/tasks/:id/run`）。
 //! - `GET /api/runs/:run_id` / `POST /api/runs/:run_id/cancel`：
@@ -121,7 +121,7 @@ pub(super) async fn api_dispatch_run(
         Ok(request) => request,
         Err(error) => return ApiError::bad_request(error.to_string()).into_response(),
     };
-    // 手动运行终态摘要行由 gamer.yaml runner 落库（实时日志 realtime 入库）；
+    // 手动运行终态摘要行由 gamer-yaml runner 落库（实时日志 realtime 入库）；
     // 完成回调当前无 TimerCore 记账需求，传 no-op。
     let hook: crate::timer_core::TimerCompletionHook = Arc::new(|_completion: TimerCompletion| {});
     use crate::timer_core::TimerRunner as _;

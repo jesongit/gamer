@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
-import TemplateCropModal from './components/console/TemplateCropModal.vue'
+import TemplateCropModal from '../../plugins/gamer-yaml/ui/src/components/console/TemplateCropModal.vue'
 
 function context(overrides = {}) {
   return {

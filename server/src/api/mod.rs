@@ -233,7 +233,7 @@ pub(crate) fn build_router_with_extensions(
             "/api/packages/:pkg/plugins/:plugin/resources/*path",
             get(packages::api_get_plugin_resource).delete(packages::api_delete_plugin_resource),
         )
-        // 模板/资源重命名：经插件 ResourceHandler::before_rename 钩子（gamer.yaml
+        // 模板/资源重命名：经插件 ResourceHandler::before_rename 钩子（gamer-yaml
         // 的模板引用 v3 AST 同步改写）后原子移动（资源 CRUD 面不承载该组合语义）
         .route(
             "/api/packages/:pkg/plugins/:plugin/rename",

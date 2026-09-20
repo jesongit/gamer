@@ -10,7 +10,7 @@ use super::*;
 
 fn dispatch_body_for(entrypoint: &str, device_id: &str, payload: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
-        "runner_id": "gamer.yaml",
+        "runner_id": "gamer-yaml",
         "entrypoint": entrypoint,
         "device_id": device_id,
         "payload": payload,
@@ -37,7 +37,7 @@ async fn save_resource(
         &t.app,
         req(
             "PUT",
-            &format!("/api/packages/com.test.app/plugins/gamer.yaml/resources/{kind}/{name}.yaml"),
+            &format!("/api/packages/com.test.app/plugins/gamer-yaml/resources/{kind}/{name}.yaml"),
             None,
             &json_headers(sid.to_string()),
             Some(
@@ -56,9 +56,9 @@ async fn save_resource(
 
 /// 直写分区目录（绕过保存期校验，构造「盘上已有」的存量资源形态）。
 fn write_partition_file(t: &TestApp, kind_dir: &str, name: &str, content: &str) {
-    // 直写包插件目录（新布局 packages/<pkg>/plugins/gamer.yaml/<kind>）
+    // 直写包插件目录（新布局 packages/<pkg>/plugins/gamer-yaml/<kind>）
     let dir = t.dir
-        .join("packages/com.test.app/plugins/gamer.yaml")
+        .join("packages/com.test.app/plugins/gamer-yaml")
         .join(kind_dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(name), content).unwrap();
@@ -66,7 +66,7 @@ fn write_partition_file(t: &TestApp, kind_dir: &str, name: &str, content: &str) 
 
 async fn describe_entrypoint(t: &TestApp, sid: &str, entrypoint: &str) -> (StatusCode, serde_json::Value) {
     let uri = format!(
-        "/api/runners/gamer.yaml/entrypoint?entrypoint={}",
+        "/api/runners/gamer-yaml/entrypoint?entrypoint={}",
         urlencode(entrypoint)
     );
     let resp = get_json(t, sid, &uri).await;
@@ -94,10 +94,10 @@ async fn runner_functions_endpoint_serves_native_catalog() {
     let t = build_app("fn-catalog", test_credential("admin123"), Default::default());
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
-    let resp = get_json(&t, &sid, "/api/runners/gamer.yaml/functions").await;
+    let resp = get_json(&t, &sid, "/api/runners/gamer-yaml/functions").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let j = json_body(resp).await;
-    assert_eq!(j["runner_id"], "gamer.yaml");
+    assert_eq!(j["runner_id"], "gamer-yaml");
     let functions = j["functions"].as_array().expect("functions 必须是数组");
     assert!(!functions.is_empty());
     let tap = functions

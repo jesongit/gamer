@@ -1,0 +1,1193 @@
+import { useConfirmDialog } from '../../../../../../web/src/components/ui/useConfirmDialog'
+import { functionCallParams } from '../../script-editor/call-names'
+import { computed, nextTick, onUnmounted, provide, reactive, ref, watch } from 'vue'
+import { api } from '../../../../../../web/src/api'
+import { GAMER_YAML_RUNNER_ID, runYamlFunction, runYamlScript } from '../../gamer-yaml-runner'
+import { FUNCTION_LIBRARY_DEFAULT } from '../../../../../../web/src/gamer-plugin-ids'
+import {
+  applyRunRecord, beginCancel, findRun, pushRunConflict, resetStoreRunState,
+  scriptsData, store, templatesData,
+} from '../../../../../../web/src/store'
+import { isDeviceBusyConflict, isTerminalRunState, sourceLabel, terminalLabel } from '../../../../../../web/src/runs'
+import { useScriptEditorShell } from '../../composables/useScriptEditorShell'
+import { useRawYamlEditor } from '../../composables/useRawYamlEditor'
+import { useFunctionLibrary } from '../../composables/useFunctionLibrary'
+import { useRunArgsFlow } from '../../composables/useRunArgsFlow'
+import { createEditorShellApi } from '../../../../../../web/src/components/console/current-api-adapters'
+import { automationEditorRequest } from './automationEditorBridge'
+import { parseScript, parseFunctionLibrary, serialize } from '../../script-editor/codec'
+import { SE_TARGET_OPTIONS } from '../../script-editor/targets'
+import { startIndexOf } from '../../script-editor/selection'
+import { buildFunctionViews, filterFunctionViews, createPinyinInitials } from '../../console/function-list'
+
+/**
+ * gamer-yaml 面板运行器（console.scripts / console.functions 两个扩展面板的
+ * 共享实现）：运行区（目标选择、只读摘要、从此运行）、编辑外壳
+ * （useScriptEditorShell/rawEditor/fnLib）、call/func 目标参数解析、
+ * 运行参数流程、运行日志与运行状态轮询。
+ *
+ * 面板上下文按资源类型拆分为两份独立作用域（scriptPanel / functionsPanel）：
+ * 编辑模式、目标选择、删除确认等互不串台；编辑器外壳/函数库快照/日志与
+ * 运行轮询是同一设备的同一份机制，保持单例共享。
+ */
+
+export function useConsoleScriptRunner({
+  toast,
+  packageId,
+  restorePackage = previous => { packageId.value = previous },
+  consoleRuntime,
+  templateNames,
+  tplShortName,
+  loadData,
+}) {
+  const confirmDialog = useConfirmDialog()
+  // 资源请求属于当前 hook 实例；Package 切换时递增序号，旧响应不能回写全局候选。
+  let scriptsInflight = null
+  let scriptsInflightPackage = ''
+  let scriptsRequestSeq = 0
+
+  // 面板作用域：每个面板锁定自己的资源类型与编辑模式
+  function createPanelScope(kind) {
+    return {
+      kind,
+      runKind: ref(kind),        // 锁定（面板类型即资源类型；模板分支沿用）
+      scriptMode: ref('run'),    // run | edit | raw（面板独立）
+    }
+  }
+  const scriptScope = createPanelScope('script')
+  const funcScope = createPanelScope('func')
+
+  async function refreshScripts() {
+    const requestedPackage = String(packageId.value || '').trim()
+    if (!requestedPackage) {
+      scriptsRequestSeq += 1
+      scriptsInflight = null
+      scriptsInflightPackage = ''
+      scriptsData.value = []
+      return []
+    }
+    if (scriptsInflight && scriptsInflightPackage === requestedPackage) return scriptsInflight
+
+    const requestSeq = ++scriptsRequestSeq
+    scriptsInflightPackage = requestedPackage
+    const request = api.listScripts(requestedPackage)
+      .then(list => {
+        if (requestSeq === scriptsRequestSeq && String(packageId.value || '').trim() === requestedPackage) {
+          scriptsData.value = Array.isArray(list) ? list : []
+        }
+        return list
+      })
+      .finally(() => {
+        if (requestSeq === scriptsRequestSeq) {
+          scriptsInflight = null
+          scriptsInflightPackage = ''
+        }
+      })
+    scriptsInflight = request
+    return request
+  }
+  watch(packageId, () => {
+    refreshScripts().catch(() => { /* 拉取失败：面板内提示「（无脚本）」等空态 */ })
+  }, { immediate: true })
+
+  // ---------- 共享脚本编辑器外壳（阶段 4） ----------
+  // 模型/命令栈/dirty/保存/409 冲突/校验/跳转全部收敛在 useScriptEditorShell，
+  // 两个面板的编辑态共用同一外壳（任一时刻只有一个面板可见）。
+  // resolvers 提供模板存在性校验（call/func 资源与 args 绑定检查需要目标参数表，客户端暂缺、由服务端权威校验）
+  // codec.serialize 已是函数库与脚本共用的唯一 V1 序列化入口；函数库保存
+  // 直接使用外壳传入的规范文本，不能在此重复转义 `$` 字面量。
+  const editorShellApi = createEditorShellApi(api)
+  const scriptShell = useScriptEditorShell({
+    api: editorShellApi,
+    getContext: () => ({
+      resolveParams: funcParamsFor,
+      resolveTemplate: (n) => {
+        const list = templatesData.value.filter(t => t.pkg === packageId.value)
+        return list.some(t => t.name === n || tplShortName(t.name) === n)
+      },
+    }),
+  })
+  const rawEditor = useRawYamlEditor({ api })
+  // 原文编辑器是两个面板共享的单实例。请求排队保证快速切换时迟到的旧
+  // GET 不会覆盖最后一次选择；独立快照用于弥补 raw composable 在请求期间
+  // 文本发生变化时无法区分“已保存快照”和“新编辑”的限制。
+  let rawLoadSeq = 0
+  let rawLoadTail = Promise.resolve()
+  let rawSavedSnapshot = ''
+  let rawSaveInflight = null
+  // 函数库列表与 func 目标解析（func 步骤「打开函数定义」跳转用）
+  const fnLib = useFunctionLibrary({ api })
+  /** 各面板目标选择（面板独立）。函数面板无「选中文件」态：函数以个体为单位
+   *  平铺展示（buildFunctionViews），运行按 `<pkg>#<名>` 寻址，所有函数库均按所属文件编辑。 */
+  const selScript = ref('')
+  const scriptDeleteConfirmId = ref('')
+  /** 运行按钮可用性：脚本面板看脚本选择 */
+  const canRunTargetScript = computed(() => !!selScript.value)
+  /** 运行区当前选择 id（脚本 id）：编辑、删除按钮与摘要区共用 */
+  const selTargetIdScript = computed(() => selScript.value)
+  watch([selScript, packageId], () => { scriptDeleteConfirmId.value = '' })
+  /**
+   * 函数面板：全部函数以个体为单位平铺（跨文件，每个函数一个视图）。
+   * 每个视图 = {fileId, category, name, model(params+steps)}，摘要区逐函数
+   * 渲染一组（签名 + 步骤卡片 + 运行/编辑/删除）；fnSearch 模糊过滤
+   * （名称/来源文件/拼音首字母，function-list.js）。手动拆分的
+   * `_function*.yaml` 使用相同编辑画布与版本保存。
+   */
+  const funcFnViews = computed(() => buildFunctionViews(fnLib.list, (content, file) => {
+    const parsed = fnLib.parseFunctionFile(content, file)
+    return parsed && parsed.model ? parsed : null
+  }))
+  const fnSearch = ref('')
+  const fnPyInitials = createPinyinInitials()
+  const filteredFnViews = computed(() => filterFunctionViews(funcFnViews.value, fnSearch.value, fnPyInitials))
+  // 编辑态辅助 UI 开关（编辑视图共享外壳，开关随外壳共享）
+  const showYaml = ref(false)
+  /** 进入函数库编辑态时聚焦的函数名（摘要区逐函数「编辑」直达；空 = 默认第一个） */
+  const editFocusFn = ref('')
+  // 子脚本/函数跳转只打开只读预览，不切换当前运行/编辑资源。
+  const resourcePreview = reactive({
+    open: false,
+    kind: 'script',
+    title: '',
+    resource: '',
+    model: null,
+    error: '',
+  })
+  const scripts = computed(() => scriptsData.value)
+
+  // ---------- 函数调用候选与参数解析（V1：函数即名字，无命名空间前缀） ----------
+  // 候选 = 原生插件函数目录（GET /api/runners/gamer-yaml/functions）+ 当前 Package
+  // 函数（fnLib.list + 正在编辑文件的实时函数名）；参数从函数文件内容解析（按内容版本 memo）。
+
+  const nativeFunctions = ref([]) // [{name, description, source, params, returns}]
+  const nativeFunctionsLoaded = ref(false)
+  let nativeFunctionsRequest = null
+
+  function loadNativeFunctions() {
+    if (nativeFunctionsLoaded.value) return
+    if (nativeFunctionsRequest) return nativeFunctionsRequest
+    nativeFunctionsRequest = api.getRunnerFunctions(GAMER_YAML_RUNNER_ID).then(rep => {
+      nativeFunctions.value = Array.isArray(rep?.functions) ? rep.functions : []
+      nativeFunctionsLoaded.value = true
+    }).catch(() => {
+      nativeFunctions.value = []
+    }).finally(() => { nativeFunctionsRequest = null })
+    return nativeFunctionsRequest
+  }
+  void loadNativeFunctions()
+  // 首次加载时插件可能尚未启用；进入编辑和切换 Package 时允许重试。
+  watch([packageId, scriptScope.scriptMode, funcScope.scriptMode], () => { void loadNativeFunctions() })
+
+  const callTargets = computed(() => {
+    const nativeOpts = nativeFunctions.value.map(f => ({
+      target: f.name,
+      label: f.name,
+      group: 'plugin',
+      hint: f.description || '',
+    }))
+    const liveFunctions = scriptShell.kind === 'function_library' && scriptShell.hasModel && Array.isArray(scriptShell.model.functions)
+      ? scriptShell.model.functions
+      : []
+    const liveByName = new Map(liveFunctions.map(f => [f.name, f]))
+    const fnOpts = []
+    const packageNames = new Set()
+    for (const file of fnLib.list) {
+      const names = file.id === scriptShell.resourceId && liveFunctions.length
+        ? liveFunctions.map(f => f.name)
+        : fnLib.namesFor(file)
+      for (const name of names) {
+        if (!name || packageNames.has(name)) continue
+        packageNames.add(name)
+        fnOpts.push({ target: name, label: name, group: 'package' })
+      }
+    }
+    // 新建尚未落盘的默认函数库没有列表条目，也必须立即进入补全。
+    for (const name of liveByName.keys()) {
+      if (!packageNames.has(name)) {
+        packageNames.add(name)
+        fnOpts.push({ target: name, label: name, group: 'package' })
+      }
+    }
+    // 同名冲突不静默：Package 函数与原生函数同名时服务端拒绝运行，此处只保留
+    // 一个稳定候选，避免下拉出现两个无法区分的同名项。
+    const seen = new Set(nativeOpts.map(o => o.target))
+    return [...nativeOpts, ...fnOpts.filter(o => (seen.has(o.target) ? false : true))]
+  })
+
+  const fnParamsMemo = new Map() // `<file>@<内容版本>` → Map(函数名 → ParamDecl[])
+
+  /** target = 函数名：原生目录直查，Package 函数按文件内容解析。 */
+  function funcParamsFor(target) {
+    const name = String(target || '')
+    if (!name) return null
+    const native = nativeFunctions.value.find(f => f.name === name)
+    if (native) return native.params || []
+    // 当前可视化编辑中的函数优先于已加载快照；这覆盖新建函数和未保存参数。
+    if (scriptShell.kind === 'function_library' && scriptShell.hasModel) {
+      const live = scriptShell.model.functions?.find(f => f.name === name)
+      if (live) return functionCallParams(live)
+    }
+    for (const entry of fnLib.list) {
+      if (fnLib.namesFor(entry).includes(name)) {
+        if (typeof entry.content !== 'string' || !entry.content) continue
+        const byName = fnParamsByName(entry)
+        if (byName.has(name)) return byName.get(name)
+      }
+    }
+    return null
+  }
+
+  function fnParamsByName(entry) {
+    // 没有 version 的测试/旧列表也不能用内容长度作缓存键；同长度改稿必须失效。
+    const memoKey = `${entry.id || entry.file || ''}@${entry.version || ''}@${entry.content || ''}`
+    let byName = fnParamsMemo.get(memoKey)
+    if (!byName) {
+      const parsed = parseFunctionLibrary(entry.content ?? '', { file: entry.file || '' })
+      byName = new Map((parsed.model?.functions || []).map(f => [f.name, functionCallParams(f)]))
+      fnParamsMemo.set(memoKey, byName)
+    }
+    return byName
+  }
+
+  function resolveTargetParamsSync(target) {
+    if (!target) return null
+    return funcParamsFor(target)
+  }
+
+  async function resolveTargetParams(target) {
+    const cached = resolveTargetParamsSync(target)
+    if (cached) return cached
+    const entry = fnLib.findByName(target)
+    if (!entry) return null
+    const loaded = await fnLib.loadFile(entry.id)
+    if (!loaded || typeof loaded.content !== 'string') return null
+    const byName = fnParamsByName({ ...entry, ...loaded })
+    return byName.get(String(target || '')) || null
+  }
+
+  function clearCallParamsCache() {
+    fnParamsMemo.clear()
+  }
+  function resolveTargetSync(target) {
+    const params = resolveTargetParamsSync(target)
+    return params ? { params } : null
+  }
+
+  provide(SE_TARGET_OPTIONS, reactive({
+    targets: callTargets,
+    resolveParams: resolveTargetParams,
+    resolveParamsSync: resolveTargetParamsSync,
+  }))
+
+  // 日志原始数据（未过滤），用于按级别切换显示
+  let rawLogs = []
+  // 本次运行开始时间：清空日志区后只显示本次运行产生的日志
+  let runStartTime = 0
+  const liveLogs = ref([])
+  const logBox = ref(null)
+
+  function parseLogTime(s) {
+    if (!s) return 0
+    const d = new Date(s.replace(' ', 'T'))
+    return d.getTime() || 0
+  }
+
+  function scrollLogsToBottom() {
+    nextTick(() => {
+      const el = logBox.value
+      if (el) el.scrollTop = el.scrollHeight
+    })
+  }
+
+  function applyLogFilter() {
+    // 日志级别由脚本顶层 log_level 在服务端过滤（debug/info），前端只按运行开始时间截取
+    const filtered = (rawLogs || []).filter(l => {
+      if (runStartTime && parseLogTime(l.time) < runStartTime) return false
+      return true
+    })
+    liveLogs.value = filtered.map(l => ({ time: l.time.slice(11, 23), level: l.level, msg: l.msg })).reverse()
+    scrollLogsToBottom()
+  }
+
+  async function refreshLogs() {
+    try {
+      const logs = await consoleRuntime.refreshLogs()
+      rawLogs = logs || []
+      applyLogFilter()
+    } catch (e) {}
+  }
+
+  function startLogPolling() {
+    consoleRuntime.startLogPolling(refreshLogs)
+  }
+
+  function stopLogPolling() {
+    consoleRuntime.stopLogPolling()
+  }
+
+  function pushLog(level, msg) {
+    const now = new Date()
+    const t = now.toTimeString().slice(0, 8) + '.' + String(now.getMilliseconds()).padStart(3, '0')
+    liveLogs.value.push({ time: t, level, msg })
+    if (liveLogs.value.length > 30) liveLogs.value.shift()
+    scrollLogsToBottom()
+  }
+
+  /** 退出编辑（脏模型需确认丢弃）；若处于跳转栈中先返回上一资源。
+   *  注意 shell 是 reactive 包装：ref/computed 属性访问即解包，不能再取 .value */
+  async function cancelEditScript(scope) {
+    if (scriptShell.hasModel && scriptShell.dirty && !await confirmDialog('有未保存修改，放弃后无法恢复。', { title: '放弃修改', confirmText: '放弃修改', danger: true })) return
+    if (scriptShell.canJumpBack) {
+      await jumpBack()
+      return
+    }
+    scriptShell.reset()
+    scope.scriptMode.value = 'run'
+    showYaml.value = false
+  }
+
+  /** 新建脚本：空 ScriptModel（保存时落盘到当前 Package）——脚本面板专属 */
+  function startNewScript() {
+    if (!packageId.value) return toast('请先在右上选择配置', 'warn')
+    scriptScope.scriptMode.value = 'edit'
+    showYaml.value = false
+    scriptShell.newScript({ name: '新脚本.yml', pkg: packageId.value })
+  }
+
+  /** 编辑某个函数（摘要组「编辑」直达）：载入所属函数库并聚焦该函数。
+   *  view = 函数视图（function-list.js），编辑态画布锁定单函数。
+   *  默认与拆分函数库共用入口。 */
+  async function editFunction(view) {
+    const f = fnLib.list.find(x => x.id === view?.fileId)
+    if (!f) return toast('函数所在函数库不存在，请刷新列表', 'error')
+    editFocusFn.value = view.name || ''
+    funcScope.scriptMode.value = 'edit'
+    showYaml.value = false
+    try {
+      await scriptShell.loadFunctionFile(f.id)
+    } catch (e) {
+      scriptShell.reset()
+      funcScope.scriptMode.value = 'run'
+      toast('函数库加载失败：' + e.message, 'error')
+    }
+  }
+
+  /** 编辑当前选择（按面板资源类型分发）：函数面板无选中态（组按钮直接
+   *  editFunction(view)），此处只服务脚本面板。 */
+  function editCurrentTarget(scope) {
+    return editCurrentScript()
+  }
+
+  function loadRawSession(kind, id) {
+    const seq = ++rawLoadSeq
+    const request = rawLoadTail.catch(() => {}).then(async () => {
+      // 若请求尚未开始时已经有更新选择，直接跳过旧目标；正在进行的请求
+      // 会自然完成，随后队列中的最后目标再成为编辑器内容。
+      if (seq !== rawLoadSeq) return null
+      const data = await rawEditor.load(kind, id)
+      return seq === rawLoadSeq ? data : null
+    })
+    rawLoadTail = request.catch(() => {})
+    return request
+  }
+
+  /** 进入原文编辑态：直接读取资源原文，不经过前端 YAML codec，保存仍由服务端校验。
+   *  函数面板编辑当前所属函数库；脚本面板编辑当前脚本。 */
+  async function editRawCurrentTarget(scope, view = null) {
+    const id = scope.kind === 'func' ? view?.fileId : selScript.value
+    if (!id) return toast(scope.kind === 'func' ? '请先选择函数' : '请先选择脚本', 'error')
+    scope.scriptMode.value = 'raw'
+    const loadSeqAtStart = rawLoadSeq + 1
+    try {
+      const data = await loadRawSession(scope.kind === 'func' ? 'function' : 'script', id)
+      if (!data) return
+      rawSavedSnapshot = data.content ?? ''
+    } catch (e) {
+      if (rawLoadSeq === loadSeqAtStart) {
+        rawEditor.reset()
+        rawSavedSnapshot = ''
+        scope.scriptMode.value = 'run'
+        toast('原文加载失败：' + e.message, 'error')
+      }
+    }
+  }
+
+  /** 原文保存成功后刷新对应资源列表，避免摘要、函数候选和参数缓存继续使用旧内容。 */
+  async function saveRawScript(scope) {
+    if (rawSaveInflight || rawEditor.loading.value || rawEditor.saving.value) return rawSaveInflight
+    const contentAtStart = rawEditor.content.value
+    const sessionAtStart = {
+      kind: rawEditor.kind.value,
+      id: rawEditor.resourceId.value,
+    }
+    const pending = rawEditor.save().then(r => ({
+      ...r,
+      _contentAtStart: contentAtStart,
+      _sessionAtStart: sessionAtStart,
+    }))
+    rawSaveInflight = pending
+    pending.finally(() => {
+      if (rawSaveInflight === pending) rawSaveInflight = null
+    }).catch(() => {})
+    const r = await pending
+    if (r._sessionAtStart.id !== rawEditor.resourceId.value || r._sessionAtStart.kind !== rawEditor.kind.value) return r
+    if (r.ok) {
+      clearCallParamsCache()
+      fnParamsMemo.clear()
+      const changedDuringSave = rawEditor.content.value !== r._contentAtStart
+      if (rawEditor.kind.value === 'function') await fnLib.refresh(packageId.value)
+      else await refreshScripts()
+      rawSavedSnapshot = changedDuringSave ? rawSavedSnapshot : r._contentAtStart
+      if (!changedDuringSave) {
+        rawEditor.reset()
+        rawSavedSnapshot = ''
+        scope.scriptMode.value = 'run'
+        toast('原文已保存', 'success')
+      } else {
+        // 服务端已保存请求开始时的快照，期间的新文本仍留在编辑器内，
+        // 用户可以继续保存，不把新编辑误报为已完成。
+        toast('已保存先前原文；当前新修改仍未保存', 'warn')
+      }
+    } else if (r.reason === 'invalid') {
+      toast('校验未通过：' + r.diagnostics.slice(0, 3).map(d => d.message).join('；'), 'error')
+    } else if (r.reason === 'conflict') {
+      toast('原文保存遇到版本冲突，请重新进入原文编辑后再试', 'warn')
+    } else if (r.reason !== 'empty') {
+      toast('原文保存失败：' + (r.error?.message || r.error), 'error')
+    }
+  }
+
+  /** 取消原文编辑：有修改时确认丢弃，回到资源运行视图。 */
+  function cancelRawScript(scope) {
+    rawLoadSeq += 1
+    rawEditor.reset()
+    rawSavedSnapshot = ''
+    scope.scriptMode.value = 'run'
+  }
+
+  // ---------- 新建函数（无弹窗、无分类概念）：直接进入默认函数库编辑态 ----------
+  // `_function.yaml` 不存在 → 新建空库（保存时落盘到固定资源路径）；已存在 →
+  // 载入后经命令栈追加一个新函数（可撤销），聚焦它继续编辑。
+  function uniqueFunctionName(base) {
+    const names = new Set([...fnLib.list.flatMap(file => fnLib.namesFor(file)), ...(scriptShell.model?.functions || []).map(fn => fn.name)])
+    if (!names.has(base)) return base
+    let i = 2
+    while (names.has(`${base}${i}`)) i++
+    return `${base}${i}`
+  }
+
+  async function startNewTarget(scope) {
+    if (scope.kind !== 'func') return startNewScript()
+    if (!packageId.value) return toast('请先在右上选择配置', 'warn')
+    funcScope.scriptMode.value = 'edit'
+    showYaml.value = false
+    const requestedPackage = packageId.value
+    try {
+      const files = await fnLib.refresh(requestedPackage, { throwOnError: true })
+      if (requestedPackage !== packageId.value) return
+      const existing = (files || []).find(f => f.file === FUNCTION_LIBRARY_DEFAULT)
+      if (existing) {
+        await scriptShell.loadFunctionFile(existing.id)
+      } else {
+        // 空默认函数库 + 预置空函数 func1：保存时落盘为 automations/_function.yaml
+        const name = uniqueFunctionName('func1')
+        scriptShell.newFunctionFile({ file: FUNCTION_LIBRARY_DEFAULT, pkg: packageId.value, functionName: name })
+        editFocusFn.value = name
+        return
+      }
+      const name = uniqueFunctionName('func1')
+      if (scriptShell.stack?.apply({ type: 'insert_function', name }, '新建函数')) {
+        editFocusFn.value = name
+      }
+    } catch (e) {
+      scriptShell.reset()
+      funcScope.scriptMode.value = 'run'
+      toast('默认函数库加载失败：' + e.message, 'error')
+    }
+  }
+
+  const functionMutationInflight = new Map()
+  function withFunctionMutation(id, work) {
+    const key = String(id || '')
+    if (functionMutationInflight.has(key)) return functionMutationInflight.get(key)
+    const pending = Promise.resolve().then(work)
+    functionMutationInflight.set(key, pending)
+    pending.finally(() => {
+      if (functionMutationInflight.get(key) === pending) functionMutationInflight.delete(key)
+    }).catch(() => {})
+    return pending
+  }
+
+  /** 函数列表操作共用：定位所属函数库文件、修改模型并按版本更新，完成后刷新函数库快照。 */
+  async function updateFunctionFile(view, mutator, successMessage) {
+    const f = fnLib.list.find(x => x.id === view?.fileId)
+    if (!f) {
+      toast('函数所在函数库不存在，请刷新列表', 'warn')
+      return false
+    }
+    return withFunctionMutation(f.id, async () => {
+      let parsed
+      try {
+        const latest = await api.getFunction(f.id)
+        Object.assign(f, latest)
+        parsed = fnLib.parseFunctionFile(f.content ?? '', f.file || '')
+      } catch (e) {
+        toast('函数库解析失败：' + e.message, 'error')
+        return false
+      }
+      if (!parsed?.model || parsed.diagnostics?.length) {
+        toast('该函数库当前内容无法修改，请先进编辑态修复诊断', 'error')
+        return false
+      }
+      const changed = mutator(parsed.model)
+      if (!changed) return false
+      try {
+        await api.updateFunction(f.id, {
+          content: serialize(parsed.model),
+          expected_version: f.version,
+        })
+        await fnLib.refresh(packageId.value)
+        fnParamsMemo.clear()
+        clearCallParamsCache()
+        toast(successMessage, 'success')
+        return true
+      } catch (e) {
+        toast('函数更新失败：' + e.message, 'error')
+        return false
+      }
+    })
+  }
+
+  /** 函数改名写入命令栈，显式保存时由服务端检查名称与引用。 */
+  function renameEditingFunction(fromName, toName) {
+    const current = String(fromName || '').trim()
+    const next = String(toName || '').trim()
+    const functions = scriptShell.model?.functions
+    if (!current || !next || next === current || !Array.isArray(functions)) return false
+    if (functions.some(fn => fn.name === next) || fnLib.list.some(file => file.id !== scriptShell.resourceId && fnLib.namesFor(file).includes(next))) {
+      toast(`已存在同名函数：${next}`, 'warn')
+      return false
+    }
+    const changed = scriptShell.stack?.apply(
+      { type: 'rename_function', from: current, to: next },
+      `重命名函数 ${current} → ${next}`,
+    )
+    if (changed) editFocusFn.value = next
+    return !!changed
+  }
+
+  /** 删除函数按版本写回所属文件；最后一个函数删除后保留空库。 */
+  async function deleteFunction(view) {
+    const f = fnLib.list.find(x => x.id === view?.fileId)
+    if (!f) return toast('函数所在函数库不存在，请刷新列表', 'warn')
+    // 最后一个函数也按版本保存为空库，避免无版本 DELETE 删除并发新增内容。
+    return updateFunctionFile(view, model => {
+      const i = model.functions.findIndex(fn => fn.name === view.name)
+      if (i < 0) {
+        toast(`函数不存在：${view.name}`, 'warn')
+        return false
+      }
+      model.functions.splice(i, 1)
+      return true
+    }, `函数 ${view.name} 已删除`)
+  }
+
+  /** 运行模式：编辑当前选中的脚本（getScript 读取最新内容与版本短码）——脚本面板专属 */
+  async function editCurrentScript() {
+    const s = scripts.value.find(x => x.id === selScript.value)
+    if (!s) return toast('请先选择脚本', 'error')
+    scriptScope.scriptMode.value = 'edit'
+    showYaml.value = false
+    try {
+      await scriptShell.loadScript(s.id)
+    } catch (e) {
+      scriptShell.reset()
+      scriptScope.scriptMode.value = 'run'
+      toast('脚本加载失败：' + e.message, 'error')
+    }
+  }
+
+  // ---------- automation.open_editor 消费端（Phase 7 §10.3） ----------
+  // 视频工作台草稿保存成功后经 automationEditorBridge 请求打开/定位编辑器：
+  // 刷新脚本列表 → 选中目标脚本 → 进入编辑态。只动选择/编辑模式，不改四 Context。
+  // 面板切换由发起方（VideoDraft）经路由 query 完成，此处不重复导航。
+  watch(() => automationEditorRequest.seq, () => {
+    const scriptId = automationEditorRequest.scriptId
+    if (!scriptId) return
+    void (async () => {
+      try {
+        await refreshScripts()
+      } catch { /* 列表刷新失败时下方查找仍可能命中旧缓存 */ }
+      if (!scripts.value.some(x => x.id === scriptId)) {
+        toast(`未找到已保存的草稿脚本：${scriptId}`, 'warn')
+        return
+      }
+      selScript.value = scriptId
+      await editCurrentScript()
+    })()
+  })
+
+  /** 运行模式：删除当前选中的脚本——脚本面板专属 */
+  async function deleteCurrentScript() {
+    const s = scripts.value.find(x => x.id === selScript.value)
+    if (!s) return toast('请先选择脚本', 'error')
+    if (scriptDeleteConfirmId.value !== s.id) {
+      scriptDeleteConfirmId.value = s.id
+      return
+    }
+    try {
+      await api.deleteScript(s.id)
+      await refreshScripts()
+      clearCallParamsCache()
+      if (selScript.value === s.id) selScript.value = ''
+      scriptDeleteConfirmId.value = ''
+      toast('脚本已删除', 'success')
+      return true
+    } catch (e) {
+      scriptDeleteConfirmId.value = ''
+      toast('删除失败：' + e.message, 'error')
+      return false
+    }
+  }
+
+  /** 脚本校验（结构化字段级）由 useScriptEditorShell.diagnostics 提供（validateScript + 解析期诊断） */
+
+  // 结构化编辑保存只有一个共享 shell。手动保存、失焦自动保存和冲突覆盖
+  // 可能在同一事件循环内同时触发；复用同一个 Promise，避免重复 PUT 或
+  // 让后发请求带着已经过期的 expected_version 覆盖前一个请求。
+  let shellSaveInflight = null
+  function saveShell(opts = {}) {
+    if (shellSaveInflight) return shellSaveInflight
+    let savedSnapshot = null
+    try {
+      savedSnapshot = scriptShell.hasModel ? serialize(scriptShell.model) : null
+    } catch {
+      savedSnapshot = null
+    }
+    const pending = Promise.resolve()
+      .then(() => scriptShell.save(opts))
+      .then(result => ({ ...result, _savedSnapshot: savedSnapshot }))
+    shellSaveInflight = pending
+    pending.finally(() => {
+      if (shellSaveInflight === pending) shellSaveInflight = null
+    }).catch(() => {})
+    return pending
+  }
+
+  async function finishShellSave(scope, result) {
+    if (!result?.ok || result._postProcessed) return
+    result._postProcessed = true
+    await afterScriptSaved(scope, result.result, result._savedSnapshot, result._keepOpen)
+  }
+
+  /** 保存编辑中的脚本：shell.save() 序列化模型并携带 expected_version；
+   *  校验失败 → 提示前 3 条诊断；409 version_conflict → shell.conflict 置位，SaveConflictModal 弹出。 */
+  async function saveEditScript(scope, { keepOpen = false } = {}) {
+    if (!scriptShell.hasModel) return
+    if (scriptShell.kind === 'function_library') {
+      // 分类名 = 存储文件名（<分类>.yaml），落盘前必填
+      if (!String(scriptShell.name || '').trim()) return toast('请填写分类', 'error')
+    } else if (!String(scriptShell.name || '').trim()) {
+      return toast('请填写脚本名称', 'error')
+    }
+    if (!scriptShell.pkg && !packageId.value) return toast('请先在右上选择配置', 'warn')
+    const r = await saveShell()
+    if (r.ok) {
+      clearCallParamsCache()
+      if (keepOpen) r._keepOpen = true
+      await finishShellSave(scope, r)
+    } else if (r.reason === 'invalid') {
+      toast('校验未通过：' + r.diagnostics.slice(0, 3).map(d => d.message).join('；'), 'error')
+    } else if (r.reason === 'conflict') {
+      // shell.conflict 已置位，弹窗由 ScriptRunner 渲染（重载 / 覆盖）
+    } else {
+      toast('保存失败：' + (r.error?.message || r.error), 'error')
+    }
+    return r
+  }
+
+  // ---------- 自动保存（编辑区失焦即存）：600ms 防抖合并连续失焦；成功静默，
+  // 校验不通过 / 版本冲突 / 失败 toast 提示（不弹冲突窗、不退出编辑态） ----------
+  let autoSaveTimer = null
+  function autoSaveDebounced(scope) {
+    if (scope.scriptMode.value !== 'edit' || !scriptShell.hasModel) return
+    if (autoSaveTimer) clearTimeout(autoSaveTimer)
+    autoSaveTimer = setTimeout(() => autoSave(scope), 600)
+  }
+  async function autoSave(scope) {
+    autoSaveTimer = null
+    if (scope.scriptMode.value !== 'edit' || !scriptShell.hasModel || !scriptShell.dirty || scriptShell.saving) return
+    const wasNew = !scriptShell.resourceId
+    const previousId = scriptShell.resourceId
+    const r = await saveShell({ suppressConflict: true })
+    if (r.ok) {
+      clearCallParamsCache()
+      // 函数库落盘后刷新分类清单（函数列表与 call 目标候选共用）；
+      // 新建脚本落盘后刷新脚本列表（call 目标下拉候选）
+      if (scriptShell.kind === 'function_library') await fnLib.refresh(packageId.value)
+      else if (wasNew || previousId !== scriptShell.resourceId) await refreshScripts()
+      if (wasNew || previousId !== scriptShell.resourceId) selScript.value = scriptShell.resourceId
+    } else if (r.reason === 'invalid') {
+      toast('自动保存未通过：' + (r.diagnostics?.[0]?.message || '存在校验问题'), 'warn')
+    } else if (r.reason === 'conflict') {
+      toast('自动保存遇到版本冲突，请点「💾 保存」手动处理', 'warn')
+    } else if (r.reason !== 'empty') {
+      toast('自动保存失败：' + (r.error?.message || '未知错误'), 'warn')
+    }
+  }
+
+  /** 保存成功后置：刷新列表、选中保存后的资源（按外壳实际类型归位到对应面板的选择）、退出编辑回到运行视图 */
+  async function afterScriptSaved(scope, rep, savedSnapshot = null, keepOpen = false) {
+    await refreshScripts()
+    if (rep?.id) {
+      if (scriptShell.kind === 'function_library') {
+        await fnLib.refresh(packageId.value)
+      } else {
+        selScript.value = rep.id
+      }
+    }
+    let changedAfterSave = false
+    if (savedSnapshot !== null && scriptShell.hasModel) {
+      try {
+        changedAfterSave = serialize(scriptShell.model) !== savedSnapshot
+      } catch {
+        changedAfterSave = true
+      }
+    }
+    if (changedAfterSave) {
+      // PUT 已保存请求开始时的快照；请求期间产生的新编辑必须留在当前
+      // 画布，不能被 reset 静默丢掉，也不能退出编辑态伪装成全部完成。
+      toast('已保存先前修改；当前新修改仍未保存', 'warn')
+      return
+    }
+    if (!keepOpen) { scriptShell.reset(); scope.scriptMode.value = 'run'; showYaml.value = false }
+    toast('已保存', 'success')
+  }
+
+  /** 409 冲突弹窗：重载磁盘版本（放弃本地修改） */
+  async function onConflictReload() {
+    try {
+      const r = await scriptShell.reload()
+      if (r.ok) toast('已恢复磁盘版本', 'success')
+    } catch (e) {
+      toast('重载失败：' + e.message, 'error')
+    }
+  }
+
+  /** 409 冲突弹窗：强制覆盖（不带 expected_version 重存），成功后同保存收尾 */
+  async function onConflictOverwrite() {
+    const r = await saveShell({ force: true })
+    if (r.ok) {
+      clearCallParamsCache()
+      await finishShellSave(scriptShell.kind === 'function_library' ? funcScope : scriptScope, r)
+    }
+    else if (r.reason === 'error') toast('覆盖失败：' + (r.error?.message || r.error), 'error')
+  }
+
+  /** 409 冲突弹窗：关闭（留在编辑态，可继续改后重试保存） */
+  function onConflictDismiss() {
+    scriptShell.dismissConflict()
+  }
+
+  // 运行状态轮询：以当前 run_id 单次查询 GET /api/runs/:run_id，
+  // 按 record.state 驱动状态机（stopping→停止中、终态→复位空闲并归档）。
+  let runStatusTimer = null
+
+  function startRunStatusPoll() {
+    if (runStatusTimer) clearInterval(runStatusTimer)
+    checkRunStatus()
+    runStatusTimer = setInterval(checkRunStatus, 1000)
+  }
+
+  function stopRunStatusPoll() {
+    if (runStatusTimer) { clearInterval(runStatusTimer); runStatusTimer = null }
+  }
+
+  async function checkRunStatus() {
+    if (!store.running) { stopRunStatusPoll(); return }
+    const rid = store.runId
+    if (!rid) { stopRunStatusPoll(); resetStoreRunState(); return }
+    let rec
+    try {
+      rec = await api.getRun(rid)
+    } catch (e) { return } // 网络抖动等：下轮再试，不提前复位运行态
+    const m = applyRunRecord(rec)
+    if (m && isTerminalRunState(m.state)) {
+      stopRunStatusPoll()
+      const detail = `：${terminalLabel(m.state)}${m.error ? `（${m.error}）` : ''}`
+      toast(`脚本已结束${detail}`, m.state === 'success' ? 'info' : 'warn')
+    }
+  }
+
+  // ---------- 运行模式：只读步骤摘要 + 从此步骤运行（plan §10「只读源码展示/从某行运行」行） ----------
+  // 非编辑态不再展示源码文本：选中脚本解析为 ScriptModel，ScriptSummary 逐顶层卡片给出
+  // 图标 + 中文动作名 + 自然语言摘要；运行起点只经卡片「▶ 从此运行」直发（2026-08-30 用户
+  // 决策：去掉点击卡片选中/取消，顶部「运行」按钮恒从头跑）。解析失败（旧语法残留等）→
+  // summaryError 提示，主视图不给摘要。
+  const summaryModel = computed(() => {
+    const s = scripts.value.find(x => x.id === selScript.value)
+    if (!s) return null
+    try {
+      // 旧 v3 脚本（带 version 字段）带迁移诊断 → 不给摘要（编辑器只读写 V1，提示重写）
+      const parsed = parseScript(s.content ?? '')
+      return parsed.diagnostics.length === 0 ? parsed.model : null
+    } catch {
+      return null
+    }
+  })
+  const summaryError = computed(() => {
+    const s = scripts.value.find(x => x.id === selScript.value)
+    if (!s) return ''
+    if (!summaryModel.value) return '脚本解析失败（可能含旧语法），请进编辑态查看诊断'
+    return ''
+  })
+
+  /** 摘要卡片「▶ 从此运行」（脚本）：顶层步序起点直发 */
+  function runFromStep(scope, uuid) {
+    return runScript(scope, { fromUuid: uuid })
+  }
+
+  /** 摘要卡片「▶ 从此运行」（函数组）：在该函数视图内定位顶层步序后直发 */
+  function runFromFunctionStep(view, uuid) {
+    const startIndex = view?.model ? (view.model.run.findIndex(s => s.uuid === uuid)) : -1
+    return runFunction({ fileId: view.fileId, fnName: view.name, startIndex: startIndex >= 0 ? startIndex : 0 })
+  }
+
+  // ---------- 结构化跳转（V1：call = 函数名；跳到定义该函数的文件） ----------
+
+  /** 函数名 → 定义它的函数库文件 id（原生函数无文件，返回 null）。 */
+  function resolveCallTargetId(fnName) {
+    return fnLib.findByName(fnName)?.id ?? null
+  }
+
+  function closeResourcePreview() {
+    resourcePreview.open = false
+    resourcePreview.kind = 'script'
+    resourcePreview.title = ''
+    resourcePreview.resource = ''
+    resourcePreview.model = null
+    resourcePreview.error = ''
+  }
+
+  /** 摘要 call 卡片「↗ 函数」：只读弹窗展示定义该函数的文件内容，
+   *  不切换当前资源，也不进入编辑器。原生插件函数无文件可跳（提示来源）。 */
+  async function openScriptTarget({ target }) {
+    const fnName = String(target || '').trim()
+    if (!fnName) return
+    if (nativeFunctions.value.some(f => f.name === fnName)) {
+      return toast(`函数 ${fnName} 来自 gamer-yaml 插件（原生函数，随插件提供）`, 'info')
+    }
+    const id = resolveCallTargetId(fnName)
+    if (!id) return toast(`函数 ${fnName} 不在当前配置包中`, 'warn')
+
+    const entry = fnLib.list.find(f => f.id === id)
+    if (!entry) return toast(`函数 ${fnName} 定义文件不存在`, 'warn')
+
+    resourcePreview.open = true
+    resourcePreview.kind = 'function_library'
+    resourcePreview.title = `函数：${fnName}（${entry.file || ''}）`
+    resourcePreview.resource = entry.id
+    resourcePreview.model = null
+    resourcePreview.error = ''
+    try {
+      const parsed = fnLib.parseFunctionFile(entry.content ?? '', entry.file || '')
+      if (!parsed?.model) throw new Error('资源内容为空或无法解析')
+      resourcePreview.model = parsed.model
+      if (parsed.diagnostics?.length) {
+        resourcePreview.error = parsed.diagnostics[0].message || '资源解析失败'
+        resourcePreview.model = null
+      }
+    } catch (e) {
+      resourcePreview.error = '目标内容无法预览：' + (e.message || e)
+    }
+  }
+
+  /** 编辑态跳转返回（call/func 打开目标后）：载回上一资源；栈空时按钮不显示。 */
+  async function jumpBack() {
+    try {
+      await scriptShell.jumpBack()
+    } catch (e) {
+      toast('返回失败：' + e.message, 'error')
+    }
+  }
+
+  // 启动提交中（202 快速返回前的防重复点击位）；run_id 在启动成功那一刻即登记为主键
+  const startPending = ref(false)
+  // 当前展示实例是否处于 stopping（cancel 已发、终态未达）：停止按钮转为禁用「停止中…」，
+  // 避免旧实现立即回空闲导致可再次点运行与停"两个实例"交叠
+  const runStopping = computed(() => {
+    const rec = store.runId ? findRun(store.runId) : null
+    return !!rec && rec.state === 'stopping'
+  })
+
+  /** 设备占用冲突（409 device_busy）：入队弹窗展示对方目标/来源/本地化开始时间，
+   *  提供「仍要查看日志」跳控制台对应设备；不打断本页其他功能 */
+  function openRunConflict(d) {
+    console.warn('[run] device busy (409)', d)
+    pushRunConflict({ ...(d || {}), device_id: store.deviceId })
+  }
+
+  // ---------- 运行参数流程（阶段 5）：目标声明 params 时先弹参数表单，稀疏 args 提交 ----------
+  // exec 完成 API 调用与 run_id 登记；flow 负责表单开关/400 诊断回填字段/覆盖建议缓存/摘要
+  const runArgsFlow = useRunArgsFlow({
+    exec: async ({ id, name, kind, fnName, startIndex, args }) => {
+      startPending.value = true
+      // 每次运行清空日志区域，只显示本次运行产生的日志
+      runStartTime = Date.now()
+      rawLogs = []
+      liveLogs.value = []
+      try {
+        // 函数面板（运行目标=函数库文件）：走函数测试入口运行单个函数
+        const rep = kind === 'function_library'
+          ? await runYamlFunction(id, store.deviceId, { function: fnName || undefined, start_index: startIndex, args })
+          : await runYamlScript(id, store.deviceId, startIndex, args)
+        // 当前运行响应固定含 run_id；启动即登记实例，后续查询只按该主键进行。
+        applyRunRecord({ ...rep, device_id: store.deviceId, script_id: id, source: 'manual', display: name })
+        return rep
+      } finally {
+        startPending.value = false
+      }
+    },
+    notify: ({ summary }) => {
+      toast('脚本已开始运行', 'success')
+      // resolved_args 摘要（默认继承/显式覆盖来源标注）进运行日志区，说明本次实际使用的参数
+      if (summary) pushLog('info', summary)
+      // POST 成功（服务端已登记条目）后才开始轮询，避免设备离线时 connect_device 耗时较长、
+      // 查询先于登记返回导致状态被提前复位
+      startLogPolling()
+      startRunStatusPoll()
+    },
+  })
+
+  /** 运行启动失败统一处理：409 设备占用 → 冲突弹窗；其余写日志 + toast（400 诊断由 flow 消化不经过此） */
+  function handleRunStartError(e) {
+    if (isDeviceBusyConflict(e)) {
+      openRunConflict({ ...(e.data || {}), device_id: store.deviceId })
+    } else {
+      pushLog('error', `执行失败：${e.message}`)
+      toast('脚本执行失败', 'error')
+    }
+  }
+
+  /** 运行/从此步骤运行入口：经服务端 entrypoint schema API 取参数声明（P12.3，
+   *  前端不解析 YAML）→ 无参数直接运行，有参数弹参数表单；
+   *  函数面板：按函数 schema 弹表单，经函数测试入口运行所选函数（缺省 = 文件第一个函数）。
+   *  opts.fromUuid（从此运行）→ 脚本取顶层 steps 序号 / 函数定位目标函数与步序；
+   *  顶部「运行」按钮不传 → 从头跑。守卫失败一律 toast 说明原因，不做静默 no-op；
+   *  schema 加载失败（404 不存在 / 400 无法解析）由 flow 抛结构化错误经 handleRunStartError 提示 */
+  /** 函数运行入口：按函数视图运行（摘要组「▶ 运行」/「从此运行」）。
+   *  经服务端 entrypoint schema API 取参数声明（前端不解析 YAML）→ 有参数弹
+   *  参数表单（400 诊断回填由 flow 消化）。寻址 = `<pkg>#<函数名>`（统一命名
+   *  空间按名解析，与定义文件无关）。 */
+  async function runFunction({ fnName, startIndex = 0 } = {}) {
+    if (startPending.value || store.running) return
+    if (!store.deviceId) return toast('请先在上方选择设备再运行', 'warn')
+    if (!packageId.value) return toast('请先在右上选择配置包', 'warn')
+    if (!fnName) return toast('缺少要运行的函数名', 'warn')
+    try {
+      await runArgsFlow.begin({
+        id: packageId.value,
+        name: `${fnName}()`,
+        kind: 'function_library',
+        fnName,
+        runnerId: GAMER_YAML_RUNNER_ID,
+        entrypoint: `${packageId.value}#${fnName}`,
+        startIndex,
+        templates: templateNames.value,
+        title: '函数参数',
+        submitLabel: '▶ 运行',
+        desc: `运行函数 ${fnName}${startIndex ? `（从第 ${startIndex + 1} 步）` : ''}`,
+      })
+    } catch (e) {
+      handleRunStartError(e)
+    }
+  }
+
+  async function runScript(scope, opts = {}) {
+    if (startPending.value || store.running) return
+    if (!store.deviceId) return toast('请先在上方选择设备再运行', 'warn')
+    if (scope.kind === 'func') {
+      return runFunction(opts)
+    }
+    if (!selScript.value || !scripts.value.find(x => x.id === selScript.value)) return toast('请先选择脚本', 'warn')
+    const s = scripts.value.find(x => x.id === selScript.value)
+    // 运行起点：从此运行 → 顶层 steps 序号（找不到回退 0 从头跑）；顶部运行 → 从头
+    const startIndex = Number.isInteger(opts.startIndex) && opts.startIndex >= 0 ? opts.startIndex : opts.fromUuid && summaryModel.value
+      ? (startIndexOf(summaryModel.value, opts.fromUuid) ?? 0)
+      : 0
+    try {
+      await runArgsFlow.begin({
+        id: s.id,
+        name: s.name,
+        runnerId: GAMER_YAML_RUNNER_ID,
+        entrypoint: s.id,
+        startIndex,
+        templates: templateNames.value,
+        desc: `运行脚本 ${s.name}${startIndex ? `（从第 ${startIndex + 1} 步）` : ''}`,
+      })
+    } catch (e) {
+      handleRunStartError(e)
+    }
+  }
+
+  /** RunParamsModal 提交（客户端校验已过）：稀疏 args 提交；400 invalid_args 由 flow 回填表单标红 */
+  function onRunArgsSubmit({ args }) {
+    runArgsFlow.confirm(args).catch(handleRunStartError)
+  }
+
+  function stopScript() {
+    // 取消只按当前 run_id 寻址；本地先行迁 stopping，终态以轮询为准。
+    const rid = store.runId
+    if (!rid) return
+    beginCancel(rid)
+    api.cancelRun(rid).catch(e => {
+      pushLog('error', `停止失败：${e.message}`)
+      toast('停止失败：' + e.message, 'error')
+    })
+    pushLog('warn', '已发送停止指令，等待脚本退出…')
+    toast('已发送停止指令', 'warn')
+  }
+
+  /** 编辑器模板预览的阈值：脚本沿用当前脚本 config，函数/无 config 时让服务端使用全局值。 */
+  function editorMatchThreshold() {
+    const configured = scriptShell.kind === 'script' ? Number(scriptShell.model?.config?.threshold) : NaN
+    return Number.isFinite(configured) && configured > 0 && configured <= 1 ? configured : undefined
+  }
+
+  function onLogBoxMounted(el) { logBox.value = el }
+
+  /** 页面刷新 / 设备列表就绪后恢复该设备的活动 run：
+   * GET /api/devices/:id/run → {active:true,run:RunRecord}；无活动/请求失败静默跳过。 */
+  async function restoreRunState() {
+    if (!store.deviceId || store.running) return
+    let rep = null
+    try {
+      rep = await api.deviceRun(store.deviceId)
+    } catch (e) { /* 恢复失败不影响进入页面 */ return }
+    if (!rep.active) return // {active:false}：无活动 run，保持空闲展示
+    const rec = rep.run
+    if (!rec?.run_id) return
+    // 运行目标展示名：entrypoint 为主（runner 语义），script_id 为服务端保留的兼容展示字段
+    const target = rec.entrypoint || rec.script_id || ''
+    const srcTag = sourceLabel(rec.source)
+    applyRunRecord({ ...rec, device_id: store.deviceId, display: srcTag ? `${target}（${srcTag}）` : target })
+    selScript.value = target
+    scriptScope.scriptMode.value = 'run'
+    runStartTime = 0   // 不按开始时间过滤，恢复最近日志
+    startLogPolling()
+    startRunStatusPoll()
+    toast(`检测到 ${target}${srcTag ? `（${srcTag}）` : ''} 正在运行，已恢复状态`, 'info')
+  }
+
+  /** 关页保护：有未保存修改时浏览器弹出确认（任一面板的编辑/原文态都算） */
+  function onBeforeUnload(e) {
+    const editing = (scope) => (scope.scriptMode.value === 'edit' && scriptShell.hasModel && scriptShell.dirty)
+      || (scope.scriptMode.value === 'raw' && (
+        rawEditor.dirty.value
+        || (rawEditor.resourceId.value && rawEditor.content.value !== rawSavedSnapshot)
+      ))
+    if (editing(scriptScope) || editing(funcScope)) {
+      e.preventDefault()
+      e.returnValue = ''
+    }
+  }
+
+  onUnmounted(() => {
+    if (autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null }
+    stopRunStatusPoll()
+  })
+
+  async function beforePackageChange(next) {
+    const previous = packageId.value
+    if (next === packageId.value) return true
+    if (scriptShell.saving || rawEditor.saving.value) { toast('正在保存，请稍后切换配置包', 'warn'); return false }
+    if ((scriptShell.dirty || rawEditor.dirty.value) && !await confirmDialog('当前编辑有未保存修改，放弃后将切换配置包。', { title: '切换配置包', confirmText: '放弃并切换', danger: true })) return false
+    if (packageId.value !== previous || scriptShell.saving || rawEditor.saving.value) return false
+    scriptShell.reset()
+    rawEditor.reset()
+    scriptScope.scriptMode.value = 'run'
+    funcScope.scriptMode.value = 'run'
+    return true
+  }
+
+  // 初始化、导入和其他面板也能修改 Package；不能让旧画布在新上下文下运行。
+  // 正常用户切换已由 beforePackageChange 确认，外部切换不能静默丢弃草稿。
+  let restoringPackage = false
+  watch(packageId, (next, previous) => {
+    if (restoringPackage || next === previous) return
+    if (scriptShell.dirty || rawEditor.dirty.value || scriptShell.saving || rawEditor.saving.value) {
+      restoringPackage = true
+      restorePackage(previous)
+      restoringPackage = false
+      toast('请先保存或放弃当前编辑，再切换配置包', 'warn')
+      return
+    }
+    scriptShell.reset()
+    rawEditor.reset()
+    selScript.value = ''
+    editFocusFn.value = ''
+    scriptScope.scriptMode.value = 'run'
+    funcScope.scriptMode.value = 'run'
+  }, { flush: 'sync' })
+
+  /** 面板作用域上下文：同一套共享机制 + 面板锁定的资源类型/编辑模式/选择。
+   *  经 workspace context 注入（core.scriptRunner.scripts / .functions），两个
+   *  扩展面板各自绑定一份，互不串台。 */
+  function buildPanelContext(scope) {
+    return {
+      kind: scope.kind,
+      kindLocked: true,
+      runKind: scope.runKind,
+      scriptMode: scope.scriptMode,
+      packageId, store, startPending, runStopping, stopScript,
+      scriptDeleteConfirmId,
+      // 运行区选择与可用性（函数面板无选中态：函数以个体平铺，按视图操作）
+      selScript,
+      canRunTarget: canRunTargetScript,
+      selTargetId: selTargetIdScript,
+      fnLib, autoSaveDebounced: () => autoSaveDebounced(scope),
+      // 函数列表（跨分类平铺 + 模糊过滤）：逐函数一组（运行/编辑/删除按视图寻址）
+      fnSearch, filteredFnViews,
+      editFunction, runFunction, runFromFunctionStep,
+      runScript: opts => runScript(scope, opts),
+      editCurrentTarget: () => editCurrentTarget(scope),
+      editRawCurrentTarget: view => editRawCurrentTarget(scope, view),
+      startNewTarget: () => startNewTarget(scope),
+      deleteCurrentTarget: () => deleteCurrentScript(),
+      renameEditingFunction, deleteFunction,
+      editCurrentScript, startNewScript, deleteCurrentScript, liveLogs, onLogBoxMounted,
+      // 运行视图：只读摘要 + 运行起点 + call/func 结构化跳转（替代旧源码行点击/文本预览）
+      summaryModel, summaryError,
+      runFromStep: uuid => runFromStep(scope, uuid),
+      openScriptTarget, resourcePreview, closeResourcePreview,
+      // 运行参数表单（阶段 5）：目标声明 params 时点运行/从此运行弹出
+      runArgsFlow, onRunArgsSubmit,
+      // 编辑视图：共享编辑器外壳 + 保存/取消/409 冲突回调
+      shell: scriptShell, raw: rawEditor,
+      saveEditScript: options => saveEditScript(scope, options),
+      cancelEditScript: () => cancelEditScript(scope),
+      saveRawScript: () => saveRawScript(scope),
+      cancelRawScript: () => cancelRawScript(scope),
+      showYaml, templateNames, jumpBack,
+      // 函数编辑态聚焦的函数名（逐函数「编辑」直达；画布锁函数下拉为静态展示）
+      editFocusFn,
+      onConflictReload, onConflictOverwrite, onConflictDismiss,
+      // call/func 目标实参类型回显（同步缓存命中形态），ScriptRunner 经 ctx 传给画布
+      resolveTargetSync,
+    }
+  }
+  const scriptPanel = buildPanelContext(scriptScope)
+  const functionsPanel = buildPanelContext(funcScope)
+
+  return {
+    // 共享机制（Console 壳接线：弹窗/轮询/钩子）
+    scriptShell, rawEditor, fnLib, beforePackageChange,
+    liveLogs, startPending, runStopping, runArgsFlow, onRunArgsSubmit,
+    startLogPolling, stopLogPolling, pushLog,
+    clearCallParamsCache, editorMatchThreshold,
+    startRunStatusPoll, stopRunStatusPoll, restoreRunState, onBeforeUnload,
+    refreshScripts,
+    // 面板作用域上下文（扩展面板经 workspace context 消费）
+    scriptPanel, functionsPanel,
+  }
+}

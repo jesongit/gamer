@@ -15,65 +15,76 @@
       @keyup="onStageKeyUp"
       @click="onStageClick"
     >
-      <!-- 顶部工具条：设备管理 + 应用控制两组；输入模式与通用动作保留在工具条 -->
+      <!-- 两行工具条：设备与配置包 / 应用与投屏操作；组内动作紧随各自对象。 -->
       <div ref="toolbarEl" class="toolbar" data-keyboard-ignore="true" @click="onToolbarClick">
-        <div class="tb-row">
-          <select v-model="store.deviceId" class="select mono tb-dev-select" :disabled="forceReconnecting" aria-label="设备列表" @change="onDeviceSelect">
-            <option :value="null">选择设备…</option>
-            <option v-for="d in devices" :key="d.id" :value="d.id">{{ d.name }} · {{ d.status === 'online' ? '在线' : '离线' }}</option>
-          </select>
-          <button v-if="!connected" class="btn btn-sm btn-primary" :disabled="!store.deviceId || connecting || forceReconnecting" @click="flushAndConnect">{{ forceReconnecting ? '强制重连中…' : connecting ? '连接中…' : '连接' }}</button>
-          <button v-else class="btn btn-sm" @click="disconnect">断开</button>
-          <button class="btn btn-sm" :disabled="scanning || forceReconnecting" @click="refreshDevices" title="刷新设备" aria-label="刷新设备"><UiIcon name="refresh" /></button>
-          <div class="tb-more-wrap">
-            <button
-              class="btn btn-sm"
-              :class="{ active: toolbarMenuOpen === 'device' }"
-              aria-haspopup="menu"
-              :aria-expanded="toolbarMenuOpen === 'device'"
-              title="新增 / 设置 / 安装应用 / 强制重连 / 删除设备"
-              @click.stop="toggleToolbarMenu('device', $event)"
-            ><UiIcon name="more" /></button>
+        <div class="tb-row tb-context-row">
+          <div class="tb-group tb-device-group" role="group" aria-label="设备连接">
+            <span class="tb-label">设备</span>
+            <select v-model="store.deviceId" class="select mono tb-dev-select" :disabled="forceReconnecting" aria-label="设备列表" @change="onDeviceSelect">
+              <option :value="null">选择设备…</option>
+              <option v-for="d in devices" :key="d.id" :value="d.id">{{ d.name }} · {{ d.status === 'online' ? '在线' : '离线' }}</option>
+            </select>
+            <button v-if="!connected" class="btn btn-sm btn-primary" :disabled="!store.deviceId || connecting || forceReconnecting" @click="flushAndConnect"><UiIcon name="connect" />{{ forceReconnecting ? '强制重连中…' : connecting ? '连接中…' : '连接' }}</button>
+            <button v-else class="btn btn-sm" @click="disconnect"><UiIcon name="disconnect" />断开</button>
+            <button class="btn btn-sm" :disabled="scanning || forceReconnecting" @click="refreshDevices" title="刷新设备" aria-label="刷新设备"><UiIcon name="refresh" />刷新</button>
+            <div class="tb-more-wrap">
+              <button
+                class="btn btn-sm btn-icon"
+                :class="{ active: toolbarMenuOpen === 'device' }"
+                aria-haspopup="menu"
+                :aria-expanded="toolbarMenuOpen === 'device'"
+                aria-label="设备更多操作"
+                title="新增 / 设置 / 安装应用 / 强制重连 / 删除设备"
+                @click.stop="toggleToolbarMenu('device', $event)"
+              ><UiIcon name="more" /></button>
+            </div>
           </div>
-          <div class="tb-sep"></div>
-          <!-- 应用下拉（Android 运行目标）：选中即保存为设备配置包名，启动/脚本共用；
-               选项 = 设备配置包名 ∪ 已安装应用（「读取」拉取），Package 数据上下文与此无关 -->
-          <select
-            class="select mono tb-app-select"
-            :value="current?.pkg || ''"
-            :disabled="!current || appSelectSaving"
-            aria-label="应用（Android 运行目标）"
-            title="当前应用目标；选中即保存为设备配置，启动按钮与脚本共用"
-            @change="onAppSelect"
-          >
-            <option value="" :disabled="pkgOptions.length > 0">未选择应用</option>
-            <option v-for="p in pkgOptions" :key="p" :value="p">{{ packageOptionLabel(p) }}</option>
-          </select>
-          <button class="btn btn-sm" :disabled="!store.deviceId || appLoading" :title="appLoading ? '正在读取已安装应用…' : '读取设备已安装应用列表（填充应用下拉，强制刷新缓存）'" @click="loadApps({ force: true })">{{ appLoading ? '读取中…' : '读取' }}</button>
-          <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (current?.pkg || '未选择应用')">启动</button>
-          <PackageContextBar :context="packageContext" compact class="stage-package" />
+          <div class="stage-package">
+            <PackageContextBar :context="packageContext" compact />
+          </div>
         </div>
         <div class="tb-row tb-operation-row">
-          <button class="btn btn-sm btn-icon" title="截图" aria-label="截图" :disabled="!connected" @click="shot"><UiIcon name="image" /></button>
-          <button class="btn btn-sm btn-icon" title="返回" aria-label="返回" :disabled="!connected" @click="key('BACK')"><UiIcon name="back" /></button>
-          <button class="btn btn-sm btn-icon" title="全屏" aria-label="全屏" @click="fullscreen"><UiIcon name="expand" /></button>
-          <!-- plan §27 停止应用收进「功能」菜单：与启动同为设备区 Android 运行目标操作，
-               DataChannel/REST 均走设备配置 pkg（am force-stop） -->
-          <button
-            class="btn btn-sm keyboard-mode-btn"
-            :class="{ active: keyboardMode === 'text' }"
-            :title="keyboardMode === 'text' ? '当前为文本模式，字母和空格按文本发送' : '当前为游戏模式，保留按下/释放按键语义'"
-            @click="toggleKeyboardMode"
-          >{{ keyboardMode === 'text' ? '文本模式' : '游戏模式' }}</button>
-          <div class="tb-more-wrap">
+          <div class="tb-group tb-app-group" role="group" aria-label="应用控制">
+            <span class="tb-label">应用</span>
+            <!-- 应用下拉（Android 运行目标）：选中即保存为设备配置包名，启动/脚本共用；
+                 选项 = 设备配置包名 ∪ 已安装应用（「读取」拉取），Package 数据上下文与此无关 -->
+            <select
+              class="select mono tb-app-select"
+              :value="current?.pkg || ''"
+              :disabled="!current || appSelectSaving"
+              aria-label="应用（Android 运行目标）"
+              title="当前应用目标；选中即保存为设备配置，启动按钮与脚本共用"
+              @change="onAppSelect"
+            >
+              <option value="" :disabled="pkgOptions.length > 0">未选择应用</option>
+              <option v-for="p in pkgOptions" :key="p" :value="p">{{ packageOptionLabel(p) }}</option>
+            </select>
+            <button class="btn btn-sm" :disabled="!store.deviceId || appLoading" :title="appLoading ? '正在读取已安装应用…' : '读取设备已安装应用列表（填充应用下拉，强制刷新缓存）'" @click="loadApps({ force: true })"><UiIcon name="refresh" />{{ appLoading ? '读取中…' : '读取列表' }}</button>
+            <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (current?.pkg || '未选择应用')"><UiIcon name="play" />启动</button>
+            <button class="btn btn-sm btn-danger" @click="stopGame()" :title="'停止应用：' + (current?.pkg || '未选择应用')"><UiIcon name="stop" />停止应用</button>
+          </div>
+          <div class="tb-group tb-control-group" role="group" aria-label="投屏操作">
+            <button class="btn btn-sm" title="截图" aria-label="截图" :disabled="!connected" @click="shot"><UiIcon name="image" />截图</button>
+            <button class="btn btn-sm" title="返回" aria-label="返回" :disabled="!connected" @click="key('BACK')"><UiIcon name="back" />返回</button>
+            <button class="btn btn-sm" title="全屏" aria-label="全屏" @click="fullscreen"><UiIcon name="expand" />全屏</button>
             <button
-              class="btn btn-sm"
-              :class="{ active: toolbarMenuOpen === 'actions' }"
-              aria-haspopup="menu"
-              :aria-expanded="toolbarMenuOpen === 'actions'"
-              title="粘贴 / 截图 / 按键 / 停止应用等"
-              @click.stop="toggleToolbarMenu('actions', $event)"
-            >功能 ▾</button>
+              class="btn btn-sm keyboard-mode-btn"
+              :class="{ active: keyboardMode === 'text' }"
+              :title="keyboardMode === 'text' ? '当前为文本模式，字母和空格按文本发送' : '当前为游戏模式，保留按下/释放按键语义'"
+              @click="toggleKeyboardMode"
+            ><UiIcon name="keyboard" />{{ keyboardMode === 'text' ? '键盘：文本' : '键盘：游戏' }}</button>
+            <div class="tb-more-wrap">
+              <button
+                class="btn btn-sm btn-icon"
+                :class="{ active: toolbarMenuOpen === 'actions' }"
+                aria-haspopup="menu"
+                :aria-expanded="toolbarMenuOpen === 'actions'"
+                aria-label="更多投屏功能"
+                title="更多操控：粘贴 / 截图 / 按键 / 音量等"
+                @click.stop="toggleToolbarMenu('actions', $event)"
+              ><UiIcon name="more" /></button>
+            </div>
+            <span class="tb-label">操控</span>
           </div>
         </div>
       </div>
@@ -81,25 +92,24 @@
       <!-- 菜单脱离横向滚动行挂到 body，避免窄窗口下被工具条裁掉 -->
       <Teleport to="body">
         <span v-if="toolbarMenuOpen" class="tb-more-mask" @click.stop="closeToolbarMenu"></span>
-        <div v-if="toolbarMenuOpen === 'device'" class="tb-more-dropdown tb-more-dropdown-sm tb-more-dropdown-fixed" :style="toolbarMenuStyle" role="menu">
-          <button class="tb-more-item" role="menuitem" :disabled="forceReconnecting" @click="closeToolbarMenu(); startAdd()">＋ 新增设备</button>
-          <button class="tb-more-item" role="menuitem" :disabled="!current || forceReconnecting" @click="closeToolbarMenu(); openSettings()">⚙️ 设备设置</button>
-          <button class="tb-more-item" role="menuitem" :disabled="!current || apkInstalling || forceReconnecting" :title="apkInstalling ? '正在上传并安装 APK…' : '选择本地 .apk 安装包安装到当前设备'" @click="closeToolbarMenu(); installApk()">📦 安装应用</button>
-          <button class="tb-more-item" role="menuitem" :disabled="!current || connecting || forceReconnecting || apkInstalling" title="重启电脑端 ADB 服务并重新连接，会中断所有设备的投屏" @click="closeToolbarMenu(); forceReconnect()">🔌 {{ forceReconnecting ? '强制重连中…' : '强制重连' }}</button>
-          <button class="tb-more-item tb-more-item-danger" role="menuitem" :disabled="!current || forceReconnecting" @click="closeToolbarMenu(); removeDevice()">🗑 删除设备</button>
+        <div v-if="toolbarMenuOpen === 'device'" class="tb-more-dropdown tb-more-dropdown-fixed action-menu" :style="toolbarMenuStyle" role="menu">
+          <button class="tb-more-item action-menu-item" role="menuitem" :disabled="forceReconnecting" @click="closeToolbarMenu(); startAdd()">新增设备</button>
+          <button class="tb-more-item action-menu-item" role="menuitem" :disabled="!current || forceReconnecting" @click="closeToolbarMenu(); openSettings()">设备设置</button>
+          <button class="tb-more-item action-menu-item" role="menuitem" :disabled="!current || apkInstalling || forceReconnecting" :title="apkInstalling ? '正在上传并安装 APK…' : '选择本地 .apk 安装包安装到当前设备'" @click="closeToolbarMenu(); installApk()">安装应用</button>
+          <button class="tb-more-item action-menu-item" role="menuitem" :disabled="!current || connecting || forceReconnecting || apkInstalling" title="重启电脑端 ADB 服务并重新连接，会中断所有设备的投屏" @click="closeToolbarMenu(); forceReconnect()">{{ forceReconnecting ? '强制重连中…' : '强制重连' }}</button>
+          <div class="action-menu-separator" role="separator"></div>
+          <button class="tb-more-item action-menu-item danger" role="menuitem" :disabled="!current || forceReconnecting" @click="closeToolbarMenu(); removeDevice()">删除设备</button>
         </div>
-        <div v-if="toolbarMenuOpen === 'actions'" class="tb-more-dropdown tb-more-dropdown-fixed" :style="toolbarMenuStyle" role="menu">
-          <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); clipboard()">📋 粘贴</button>
-          <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); shot()">📷 截图</button>
-          <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); key('HOME')">🏠 Home</button>
-          <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); key('BACK')">⬅ 返回</button>
-          <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); rotate()">🔄 旋转</button>
-          <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); key('APP_SWITCH')">🪟 最近</button>
-          <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); key('VOL_UP')">🔊＋ 音量加</button>
-          <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); key('VOL_DOWN')">🔊－ 音量减</button>
-          <button class="tb-more-item" role="menuitem" :title="audioMuted ? '取消静音（听游戏声音）' : '静音'" @click="closeToolbarMenu(); toggleAudio()">{{ audioMuted ? '🔊 取消静音' : '🔇 静音' }}</button>
-          <div class="tb-more-sep"></div>
-          <button class="tb-more-item tb-more-item-danger" role="menuitem" @click="closeToolbarMenu(); stopGame()">⏹ 停止应用</button>
+        <div v-if="toolbarMenuOpen === 'actions'" class="tb-more-dropdown tb-more-dropdown-fixed action-menu" :style="toolbarMenuStyle" role="menu">
+          <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); clipboard()">粘贴</button>
+          <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); shot()">截图</button>
+          <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('HOME')">主屏幕</button>
+          <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('BACK')">返回</button>
+          <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); rotate()">旋转</button>
+          <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('APP_SWITCH')">最近应用</button>
+          <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('VOL_UP')">增大音量</button>
+          <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('VOL_DOWN')">减小音量</button>
+          <button class="tb-more-item action-menu-item" role="menuitem" :title="audioMuted ? '取消静音（听游戏声音）' : '静音'" @click="closeToolbarMenu(); toggleAudio()">{{ audioMuted ? '取消静音' : '静音' }}</button>
         </div>
       </Teleport>
 
@@ -215,6 +225,7 @@
 </template>
 
 <script setup>
+import { TemplateCropModal, RunParamsModal, useConsoleTemplates, pushRunEvent, useConsoleScriptRunner, useConsoleKeymap } from "../workspace/official-plugin-ui"
 const confirmDialog = useConfirmDialog()
 import { useConfirmDialog } from '../components/ui/useConfirmDialog'
 import { STAGE_MEDIA_CONTROLLER_KEY } from '../workspace/context'
@@ -238,9 +249,7 @@ import { createWorkspaceLifecycle } from '../workspace/lifecycle'
 import { registerCoreContributions } from '../workspace/core-contributions'
 import { createServerUiContributionAdapter } from '../workspace/plugin-center/adapter/server-ui'
 import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'
-import TemplateCropModal from '../components/console/TemplateCropModal.vue'
 import RunConflictModal from '../components/RunConflictModal.vue'
-import RunParamsModal from '../components/RunParamsModal.vue'
 import { useConsoleRuntime } from '../composables/useConsoleRuntime'
 import { useWebRtcLifecycle } from '../composables/useWebRtcLifecycle'
 import { usePackageContext } from '../composables/usePackageContext'
@@ -250,11 +259,7 @@ import { buildTouchPhase, createKeymapController } from '../keymap-control'
 import { useConsolePanelResize } from '../components/console/useConsolePanelResize'
 import { useConsoleDeviceManager } from '../components/console/useConsoleDeviceManager'
 import { useConsoleStage } from '../components/console/useConsoleStage'
-import { useConsoleTemplates } from '../components/console/useConsoleTemplates'
 import { useConsoleBridgeOverlays } from '../components/console/useConsoleBridgeOverlays'
-import { pushRunEvent } from '../components/console/useRunEvents'
-import { useConsoleScriptRunner } from '../components/console/useConsoleScriptRunner'
-import { useConsoleKeymap } from '../components/console/useConsoleKeymap'
 import { useWebrtcStats } from '../components/console/useWebrtcStats'
 import { useConsoleWorkspacePanels } from '../components/console/useConsoleWorkspacePanels'
 import { createPluginCallAdapter } from '../components/console/current-api-adapters'
@@ -338,7 +343,7 @@ async function loadData() {
 const {
   devices, current, currentName, currentApplication,
   mode, form, scanning, configApplying, settingsOpen,
-  kindInfo, screenSummary, formDirty,
+  screenSummary, formDirty,
   startAdd, openSettings, cancelSettings, onDeviceSelect, refreshDeviceStatus, refreshDevices,
   saveSettings, flushAndConnect, addDevice, removeDevice, disconnect, loadApps,
   forceReconnecting, forceReconnect,
@@ -1265,41 +1270,24 @@ onUnmounted(() => {
 .crop-actions { display: flex; gap: 8px; }
 .crop-actions .btn-primary { margin-left: auto; }
 
-/* 工具条：设备管理与投屏控制合并为同一横向行，窄窗口时横向滚动 */
+/* 两行分别配置上下文与执行操作；窄面板按整组换行，不拆散对象与按钮。 */
 .toolbar {
-  display: flex; align-items: center;
-  flex: 0 0 auto; background: var(--bg-1); border-bottom: 1px solid var(--border);
-  padding: 8px 10px;
-  box-sizing: border-box;
+  display:flex; flex-direction:column; align-items:stretch; flex:none;
+  background:var(--bg-1); border-bottom:1px solid var(--border);
 }
-.tb-row {
-  display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
-  min-height: 29px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
-}
-.tb-row::-webkit-scrollbar { display: none; width: 0; height: 0; }
-.tb-row > .btn, .tb-row > .select, .tb-more-wrap, .tb-sep { flex-shrink: 0; }
-.tb-sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
-.tb-more-wrap { position: relative; display: inline-flex; }
-.keyboard-mode-btn.active { color: var(--accent-2); }
-/* 工具条应用下拉（Android 运行目标）：选中即保存为设备配置包名 */
-.tb-app-select { flex: 0 1 auto; min-width: 150px; max-width: 240px; padding: 4px 6px; font-size: 12px; }
+.tb-row { display:flex; align-items:center; flex-wrap:wrap; gap:8px 16px; min-width:0; min-height:40px; padding:6px 10px; }
+.tb-row + .tb-row { border-top:1px solid var(--border); }
+.tb-group { display:flex; align-items:center; gap:6px; min-width:0; }
+.tb-label { flex:none; font-size:12px; color:var(--text-2); white-space:nowrap; }
+.tb-device-group, .tb-app-group { flex:0 1 auto; flex-wrap:wrap; max-width:100%; }
+.tb-control-group { flex:0 1 auto; flex-wrap:wrap; justify-content:flex-end; max-width:100%; margin-left:auto; }
+.tb-row .btn { flex:none; height:28px; min-width:28px; justify-content:center; padding:3px 7px; }
+.tb-dev-select, .tb-app-select { field-sizing:content; flex:0 1 auto; min-width:0; max-width:100%; width:auto; font-size:13px; }
+.toolbar .stage-package { margin-left:auto; flex:0 1 auto; min-width:0; max-width:100%; }
+.tb-more-wrap { position:relative; display:inline-flex; flex:none; }
+.keyboard-mode-btn.active { color:var(--accent-2); }
 .tb-more-mask { position: fixed; inset: 0; z-index: 20; }
-.tb-more-dropdown {
-  display: flex; flex-direction: column; min-width: 168px; padding: 4px; gap: 2px;
-  background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
-}
-.tb-more-dropdown-sm { min-width: 128px; }
 .tb-more-dropdown-fixed { position: fixed; z-index: 30; }
-.tb-more-item {
-  display: flex; align-items: center; gap: 6px; text-align: left; white-space: nowrap;
-  padding: 6px 10px; border: none; background: none; border-radius: var(--radius-sm);
-  color: var(--text-0); font-size: 12px; cursor: pointer;
-}
-.tb-more-item:hover { background: var(--bg-3); }
-.tb-more-item:disabled { color: var(--text-2); opacity: .5; cursor: not-allowed; background: none; }
-.tb-more-item-danger:hover { color: var(--danger); }
-.tb-more-sep { height: 1px; margin: 3px 6px; background: var(--border); }
 .btn.active { border-color: var(--accent-2); color: var(--accent-2); }
 /* ===== 左右分区与右侧面板 ===== */
 .console.is-panel-resizing,
@@ -1320,9 +1308,6 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* 工具条设备下拉（设备管理收进工具条后的宽度约束） */
-.tb-dev-select { flex: 0 1 auto; min-width: 130px; max-width: 200px; padding: 4px 6px; font-size: 12px; }
-
 .panel-sec {
   background: var(--bg-1); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 14px; display: flex; flex-direction: column; gap: 10px;
@@ -1338,20 +1323,6 @@ onUnmounted(() => {
 .run-actions .more-wrap { position: relative; flex: 1; }
 .run-actions .more-wrap .btn { width: 100%; }
 .more-mask { position: fixed; inset: 0; z-index: 20; }
-.more-dropdown {
-  position: absolute; right: 0; top: calc(100% + 4px); z-index: 30;
-  display: flex; flex-direction: column; min-width: 120px; padding: 4px; gap: 2px;
-  background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
-}
-.more-item {
-  display: flex; align-items: center; gap: 6px; text-align: left; white-space: nowrap;
-  padding: 6px 10px; border: none; background: none; border-radius: var(--radius-sm);
-  color: var(--text-0); font-size: 12px; cursor: pointer;
-}
-.more-item:hover { background: var(--bg-3); }
-.more-item:disabled { color: var(--text-2); opacity: .5; cursor: not-allowed; }
-.more-item.danger:hover { color: var(--danger); }
 
 /* 脚本页签 */
 .panel-sec.script-tab { flex: 1; min-height: 0; overflow: hidden; }
@@ -1505,7 +1476,7 @@ onUnmounted(() => {
 /* 二次裁切占满整个模板区域 */
 .crop-panel-full { flex: 1; min-height: 0; border-top: none; padding-top: 0; }
 .crop-panel-full .crop-stage { flex: 1; min-height: 0; min-width: 0; }
-.console{flex-direction:column;padding:0;gap:0;background:var(--bg-0)}.console-body{flex:1;min-height:0;display:flex;gap:0}.stage{border:0;border-radius:0;background:var(--bg-0)}.toolbar{display:flex;flex-direction:column;align-items:stretch;padding:0;background:var(--bg-1)}.tb-row{overflow:visible;min-height:39px;padding:5px 10px;gap:5px}.tb-row+.tb-row{border-top:1px solid var(--border)}.tb-row .btn{height:28px;min-width:28px;justify-content:center;padding:3px 7px}.tb-dev-select{width:148px;min-width:90px;flex:1 1 148px!important}.tb-app-select{min-width:110px;width:150px;max-width:190px;flex:1 1 150px!important}.stage-package{margin-left:auto;flex:1 1 240px;min-width:160px}.tb-operation-row{justify-content:flex-start}.panel{padding:0;border:0;border-radius:0;min-width:0;max-width:none;background:var(--bg-2);display:flex;flex-direction:column;gap:0;flex:none}.panel-resizer{flex:0 0 6px;width:6px;margin:0;border:0;border-left:1px solid var(--border);border-right:1px solid var(--border);border-radius:0;background:var(--chrome)}.panel-resizer:hover,.panel-resizer.active{background:var(--accent)}.app-hint{top:90px}.global-page .console-body{overflow:hidden}
-@media(max-width:1100px){.tb-row{flex-wrap:wrap}.stage-package{max-width:none}.tb-operation-row{flex-wrap:nowrap}}
+.console{flex-direction:column;padding:0;gap:0;background:var(--bg-0)}.console-body{flex:1;min-height:0;display:flex;gap:0}.stage{border:0;border-radius:0;background:var(--bg-0)}.panel{padding:0;border:0;border-radius:0;min-width:0;max-width:none;background:var(--bg-2);display:flex;flex-direction:column;gap:0;flex:none}.panel-resizer{flex:0 0 6px;width:6px;margin:0;border:0;border-left:1px solid var(--border);border-right:1px solid var(--border);border-radius:0;background:var(--chrome)}.panel-resizer:hover,.panel-resizer.active{background:var(--accent)}.app-hint{top:90px}.global-page .console-body{overflow:hidden}
+
 @media(max-width:800px){.console-body{flex-direction:column;overflow:auto}.stage{flex:none;height:48vh;min-height:300px}.panel{width:100%!important;min-height:55vh;flex:1}.panel-resizer{display:none}.global-page .panel{min-height:0}.global-page .console-body{overflow:hidden}}
 </style>

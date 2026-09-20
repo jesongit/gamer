@@ -121,7 +121,7 @@ pub(super) async fn api_vision_test_template(
     }
     let plugin = req.plugin.trim().to_string();
     if plugin.is_empty() {
-        return ApiError::bad_request("plugin 必填（模板所在插件 id，如 gamer.yaml）")
+        return ApiError::bad_request("plugin 必填（模板所在插件 id，如 gamer-yaml）")
             .into_response();
     }
     let name = req.name.trim().to_string();

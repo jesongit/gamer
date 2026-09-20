@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Phase 7 无设备 E2E：ffmpeg 生成小视频 → 导入 → 动作缝创建模板 → 离线匹配 →
-# 草稿生成/保存 → automations 列表 → gamer.yaml stop 后制作动作 409。
+# 草稿生成/保存 → automations 列表 → gamer-yaml stop 后制作动作 409。
 # 临时端口 + 临时数据目录，用完即停。不触达任何设备/ADB。
 # 注意：heredoc 内的 Python 一律用 bytes([...])/chr() 构造控制字节，不用反斜杠转义。
 set -uo pipefail
@@ -89,20 +89,20 @@ CODE=$(curl -s -b "$JAR" -o "$WORK/pkg.json" -w '%{http_code}' -H 'Content-Type:
   -d '{"id":"e2e-pkg","name":"E2E"}' "$BASE/api/packages")
 if [ "$CODE" = "201" ] || [ "$CODE" = "409" ]; then ok "package ready ($CODE)"; else bad "package $CODE"; cat "$WORK/pkg.json"; fi
 
-step "安装并启动 gamer.yaml（官方 .gplugin，免签名 + 权限确认头）"
-GP="$ROOT/web/public/plugins/gamer.yaml-3.1.1.gplugin"
+step "安装并启动 gamer-yaml（官方 .gplugin，免签名 + 权限确认头）"
+GP="$ROOT/web/public/plugins/gamer-yaml-3.1.1.gplugin"
 CODE=$(curl -s -b "$JAR" -o "$WORK/ext.json" -w '%{http_code}' -X POST \
   -H 'Content-Type: application/octet-stream' -H 'X-Gamer-Extension-Source: official' -H 'X-Gamer-Permission-Confirm: true' \
   --data-binary @"$GP" "$BASE/api/extensions")
 STATE=$(python -c "import json;print(json.load(open('$WORK/ext.json')).get('state',''))" 2>/dev/null)
 echo "  install -> $CODE state=$STATE"
 if [ "$STATE" != "running" ]; then
-  curl -s -b "$JAR" -o /dev/null -X POST "$BASE/api/extensions/gamer.yaml/enable"
-  CODE=$(curl -s -b "$JAR" -o "$WORK/start.json" -w '%{http_code}' -X POST "$BASE/api/extensions/gamer.yaml/start")
+  curl -s -b "$JAR" -o /dev/null -X POST "$BASE/api/extensions/gamer-yaml/enable"
+  CODE=$(curl -s -b "$JAR" -o "$WORK/start.json" -w '%{http_code}' -X POST "$BASE/api/extensions/gamer-yaml/start")
   STATE=$(python -c "import json;print(json.load(open('$WORK/start.json')).get('state',''))" 2>/dev/null)
   echo "  start -> $CODE state=$STATE"
 fi
-if [ "$STATE" = "running" ]; then ok "gamer.yaml running"; else bad "gamer.yaml 未 running"; fi
+if [ "$STATE" = "running" ]; then ok "gamer-yaml running"; else bad "gamer-yaml 未 running"; fi
 
 step "动作缝 template.create_from_frame（帧上框选白块区域）"
 curl -s -b "$JAR" -o "$WORK/frame.png" "$BASE/api/media/$MEDIA_ID/frame?pts_us=$PTS"
@@ -132,19 +132,19 @@ json.dump(payload, open(sys.argv[3], 'w'), ensure_ascii=False)
 print('  frame %dx%d, crop 24x24 (%d bytes)' % (w, h, len(crop)))
 PY
 CODE=$(curl -s -b "$JAR" -o "$WORK/tpl.json" -w '%{http_code}' -H 'Content-Type: application/json' \
-  --data @"$WORK/payload.json" "$BASE/api/extensions/gamer.yaml/call")
+  --data @"$WORK/payload.json" "$BASE/api/extensions/gamer-yaml/call")
 TPL_NAME=$(getf "$WORK/tpl.json" "d['name']")
 if [ "$CODE" = "200" ] && [ -n "$TPL_NAME" ]; then ok "template created: $TPL_NAME"; else bad "create_template $CODE"; cat "$WORK/tpl.json" 2>/dev/null; fi
 
 step "templates 列表出现且为合法 8-bit 灰度 PNG"
 curl -s -b "$JAR" -o "$WORK/tpls.json" \
-  "$BASE/api/packages/e2e-pkg/plugins/gamer.yaml/resources?prefix=templates%2F"
+  "$BASE/api/packages/e2e-pkg/plugins/gamer-yaml/resources?prefix=templates%2F"
 COUNT=$(python -c "import json;print(len(json.load(open('$WORK/tpls.json'))['resources']))" 2>/dev/null)
 if [ -n "$COUNT" ] && [ "$COUNT" -ge 1 ]; then ok "templates count=$COUNT"; else bad "templates empty"; fi
 TPL_PATH=$(python -c "import json;print(json.load(open('$WORK/tpls.json'))['resources'][0]['path'])" 2>/dev/null)
 TPL_ENC=$(qenc "$TPL_PATH")
 curl -s -b "$JAR" -o "$WORK/tpl.png" \
-  "$BASE/api/packages/e2e-pkg/plugins/gamer.yaml/resources/${TPL_ENC}"
+  "$BASE/api/packages/e2e-pkg/plugins/gamer-yaml/resources/${TPL_ENC}"
 python - "$WORK/tpl.png" <<'PY'
 import sys
 PNG_MAGIC = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
@@ -164,7 +164,7 @@ python - "$WORK/tpl.json" "$WORK/visionreq.json" "$MEDIA_ID" "$PTS" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 if isinstance(d, dict) and isinstance(d.get('data'), dict): d = d['data']
-body = {"pkg": "e2e-pkg", "plugin": "gamer.yaml", "name": d['short_name'],
+body = {"pkg": "e2e-pkg", "plugin": "gamer-yaml", "name": d['short_name'],
         "threshold": 0.8, "media_id": sys.argv[3], "pts_us": int(sys.argv[4])}
 json.dump(body, open(sys.argv[2], 'w'), ensure_ascii=False)
 PY
@@ -220,7 +220,7 @@ cat > "$WORK/draftreq.json" <<JSON
   "comments": {"ev-1": "点白块", "ev-2": "需人工补 text"}}}
 JSON
 CODE=$(curl -s -b "$JAR" -o "$WORK/draft.json" -w '%{http_code}' -H 'Content-Type: application/json' \
-  --data @"$WORK/draftreq.json" "$BASE/api/extensions/gamer.yaml/call")
+  --data @"$WORK/draftreq.json" "$BASE/api/extensions/gamer-yaml/call")
 YAML_TEXT=$(getf "$WORK/draft.json" "d['yaml']")
 if [ "$CODE" = "200" ] && [ -n "$YAML_TEXT" ]; then ok "draft generated"; else bad "create_draft $CODE"; cat "$WORK/draft.json" 2>/dev/null; fi
 python - "$WORK/draft.json" <<'PY'
@@ -247,23 +247,23 @@ json.dump({"action": "automation.save_draft",
           open(sys.argv[2], 'w'), ensure_ascii=False)
 PY
 CODE=$(curl -s -b "$JAR" -o "$WORK/saved.json" -w '%{http_code}' -H 'Content-Type: application/json' \
-  --data @"$WORK/savereq.json" "$BASE/api/extensions/gamer.yaml/call")
+  --data @"$WORK/savereq.json" "$BASE/api/extensions/gamer-yaml/call")
 SAVED_ID=$(getf "$WORK/saved.json" "d['id']")
 if [ "$CODE" = "200" ] && [ "$SAVED_ID" = "e2e-pkg/draft-e2e.yaml" ]; then ok "saved id=$SAVED_ID"; else bad "save_draft $CODE"; cat "$WORK/saved.json" 2>/dev/null; fi
 
 step "automations 列表出现草稿脚本"
 curl -s -b "$JAR" -o "$WORK/autos.json" \
-  "$BASE/api/packages/e2e-pkg/plugins/gamer.yaml/resources?prefix=automations%2F"
+  "$BASE/api/packages/e2e-pkg/plugins/gamer-yaml/resources?prefix=automations%2F"
 ACOUNT=$(python -c "import json;print(len(json.load(open('$WORK/autos.json'))['resources']))" 2>/dev/null)
 if [ -n "$ACOUNT" ] && [ "$ACOUNT" -ge 1 ]; then ok "automations count=$ACOUNT"; else bad "automations empty"; fi
 
-step "重名拒绝 + gamer.yaml stop → 制作动作禁用（409），vision 离线仍可用"
+step "重名拒绝 + gamer-yaml stop → 制作动作禁用（409），vision 离线仍可用"
 CODE=$(curl -s -b "$JAR" -o "$WORK/dup.json" -w '%{http_code}' -H 'Content-Type: application/json' \
-  --data @"$WORK/savereq.json" "$BASE/api/extensions/gamer.yaml/call")
+  --data @"$WORK/savereq.json" "$BASE/api/extensions/gamer-yaml/call")
 if grep -q "已存在" "$WORK/dup.json" 2>/dev/null; then ok "重名拒绝（结构化提示 overwrite）"; else bad "dup expected 已存在 got $CODE"; cat "$WORK/dup.json" 2>/dev/null; fi
-curl -s -b "$JAR" -o /dev/null -X POST "$BASE/api/extensions/gamer.yaml/stop"
+curl -s -b "$JAR" -o /dev/null -X POST "$BASE/api/extensions/gamer-yaml/stop"
 CODE=$(curl -s -b "$JAR" -o "$WORK/gated.json" -w '%{http_code}' -H 'Content-Type: application/json' \
-  --data @"$WORK/draftreq.json" "$BASE/api/extensions/gamer.yaml/call")
+  --data @"$WORK/draftreq.json" "$BASE/api/extensions/gamer-yaml/call")
 if [ "$CODE" = "409" ]; then ok "create_draft gated -> 409"; else bad "gate expected 409 got $CODE"; cat "$WORK/gated.json" 2>/dev/null; fi
 CODE=$(curl -s -b "$JAR" -o "$WORK/vision2.json" -w '%{http_code}' -H 'Content-Type: application/json' \
   --data @"$WORK/visionreq.json" \

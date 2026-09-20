@@ -13,12 +13,12 @@ const evidence=[]
 async function check(name, fn) { await fn(); evidence.push({name,passed:true}); console.log('PASS '+name) }
 try {
   const {api}=await vite.ssrLoadModule('/src/api.js')
-  const archive=await readFile(new URL('../web/public/plugins/gamer.yaml-3.1.2.gplugin',import.meta.url))
+  const archive=await readFile(new URL('../web/public/plugins/gamer-yaml-3.1.2.gplugin',import.meta.url))
   await check('实际 YAML guest 更新到 3.1.2',async()=>{
     const installed=(await api.listExtensions()).extensions || []
-    const yaml = installed.find(e=>e.id==='gamer.yaml')
+    const yaml = installed.find(e=>e.id==='gamer-yaml')
     if(yaml?.version === '3.1.2') assert.equal(yaml.version, '3.1.2')
-    else if(yaml) await api.updateExtension('gamer.yaml',archive,{permissionConfirmed:true})
+    else if(yaml) await api.updateExtension('gamer-yaml',archive,{permissionConfirmed:true})
     else await api.installExtension(archive,{permissionConfirmed:true})
   })
   const pkg='ui-completion-'+Date.now()

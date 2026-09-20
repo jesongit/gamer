@@ -473,7 +473,7 @@ pub struct SaveBinaryValidation<'a> {
     pub store: &'a PackageStore,
 }
 
-/// 单插件资源内容钩子。扩展在组合根注册（gamer.yaml / gamer.keymap）；
+/// 单插件资源内容钩子。扩展在组合根注册（gamer-yaml / gamer-keymap）；
 /// 未注册 = 该插件资源保存不做内容校验（裸 Core 语义）。
 pub trait ResourceHandler: Send + Sync {
     /// 保存前内容校验；Err = 结构化诊断 JSON（HTTP 400 透传，格式由扩展定）。
@@ -1288,8 +1288,8 @@ mod tests {
     fn scope_id_validation_is_strict() {
         for ok in [
             "a",
-            "gamer.yaml",
-            "gamer.keymap",
+            "gamer-yaml",
+            "gamer-keymap",
             "official.hsr.daily",
             "9lives",
             "a-b_c.d",
@@ -1359,10 +1359,10 @@ version = "1.2.0"
 [targets.android]
 packages = ["com.miHoYo.hkrpg", "com.HoYoverse.hkrpgoversea"]
 
-[plugins."gamer.yaml"]
+[plugins."gamer-yaml"]
 required = true
 
-[plugins."gamer.keymap"]
+[plugins."gamer-keymap"]
 required = false
 "#;
         let manifest = parse_package_toml(text.as_bytes()).unwrap();
@@ -1371,8 +1371,8 @@ required = false
         assert_eq!(manifest.revision, 1);
         assert_eq!(manifest.android_targets.len(), 2);
         assert_eq!(manifest.plugins.len(), 2);
-        assert!(manifest.plugins["gamer.yaml"].required);
-        assert!(!manifest.plugins["gamer.keymap"].required);
+        assert!(manifest.plugins["gamer-yaml"].required);
+        assert!(!manifest.plugins["gamer-keymap"].required);
 
         // 序列化 → 再解析往返一致
         let reparsed = parse_package_toml(serialize_package_toml(&manifest).as_bytes()).unwrap();
@@ -1453,7 +1453,7 @@ required = false
     fn package_lifecycle_create_list_duplicate_delete() {
         let (store, dir) = temp_store("lifecycle");
         let mut plugins = BTreeMap::new();
-        plugins.insert("gamer.yaml".to_string(), true);
+        plugins.insert("gamer-yaml".to_string(), true);
         let manifest = store
             .create_package(PackageInput {
                 id: "official.demo".into(),
@@ -1476,7 +1476,7 @@ required = false
         store
             .write_text(
                 "official.demo",
-                "gamer.yaml",
+                "gamer-yaml",
                 "automations/daily.yaml",
                 "version: 3\nsteps: []\n",
                 None,
@@ -1486,7 +1486,7 @@ required = false
         let stats = store.stats("official.demo").unwrap();
         assert_eq!(stats.files, 1);
         assert_eq!(stats.plugins.len(), 1);
-        assert_eq!(stats.plugins[0].plugin, "gamer.yaml");
+        assert_eq!(stats.plugins[0].plugin, "gamer-yaml");
 
         // 复制为新包：资源随拷、manifest 换 id、revision 归 1
         let copy = store
@@ -1496,7 +1496,7 @@ required = false
         assert_eq!(copy.revision, 1);
         assert_eq!(copy.name.as_deref(), Some("演示"));
         let copied = store
-            .read_text("user.demo", "gamer.yaml", "automations/daily.yaml")
+            .read_text("user.demo", "gamer-yaml", "automations/daily.yaml")
             .unwrap()
             .unwrap();
         assert!(copied.content.contains("version: 3"));
@@ -1563,7 +1563,7 @@ required = false
         let entry = store
             .write_text(
                 "a.b",
-                "gamer.yaml",
+                "gamer-yaml",
                 "automations/main.yaml",
                 "steps: []\n",
                 None,
@@ -1577,7 +1577,7 @@ required = false
         store
             .write_text(
                 "a.b",
-                "gamer.yaml",
+                "gamer-yaml",
                 "automations/sub/inner.yaml",
                 "x: 1\n",
                 None,
@@ -1589,7 +1589,7 @@ required = false
         let err = store
             .write_text(
                 "a.b",
-                "gamer.yaml",
+                "gamer-yaml",
                 "automations/main.yaml",
                 "x",
                 None,
@@ -1600,7 +1600,7 @@ required = false
         let err = store
             .write_text(
                 "a.b",
-                "gamer.yaml",
+                "gamer-yaml",
                 "automations/main.yaml",
                 "x",
                 Some("bad"),
@@ -1613,7 +1613,7 @@ required = false
         store
             .write_text(
                 "a.b",
-                "gamer.yaml",
+                "gamer-yaml",
                 "automations/main.yaml",
                 "steps: []\n",
                 Some(&version),
@@ -1624,7 +1624,7 @@ required = false
         store
             .write_text(
                 "a.b",
-                "gamer.yaml",
+                "gamer-yaml",
                 "automations/main.yaml",
                 "steps: []\n",
                 None,
@@ -1634,37 +1634,37 @@ required = false
 
         // 读取
         let read = store
-            .read_text("a.b", "gamer.yaml", "automations/main.yaml")
+            .read_text("a.b", "gamer-yaml", "automations/main.yaml")
             .unwrap()
             .unwrap();
         assert!(read.content.starts_with("steps:"));
         assert!(store
-            .read_text("a.b", "gamer.yaml", "automations/missing.yaml")
+            .read_text("a.b", "gamer-yaml", "automations/missing.yaml")
             .unwrap()
             .is_none());
         assert!(store
-            .read_text("a.b", "gamer.yaml", "../escape")
+            .read_text("a.b", "gamer-yaml", "../escape")
             .unwrap()
             .is_none());
 
         // 字节资源 + 条件更新
         let raw = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00];
         let written = store
-            .write_binary("a.b", "gamer.yaml", "templates/icon.png", &raw, None, false)
+            .write_binary("a.b", "gamer-yaml", "templates/icon.png", &raw, None, false)
             .unwrap();
         assert_eq!(written.size, 9);
         assert_eq!(
             store
-                .read_binary("a.b", "gamer.yaml", "templates/icon.png")
+                .read_binary("a.b", "gamer-yaml", "templates/icon.png")
                 .unwrap(),
             Some(raw.to_vec())
         );
         assert!(store
-            .write_binary("a.b", "gamer.yaml", "templates/icon.png", b"x", None, false)
+            .write_binary("a.b", "gamer-yaml", "templates/icon.png", b"x", None, false)
             .is_err());
 
         // 列表（递归 + 文本探测）
-        let list = store.list("a.b", "gamer.yaml", "").unwrap();
+        let list = store.list("a.b", "gamer-yaml", "").unwrap();
         let paths: Vec<String> = list.iter().map(|e| e.path.clone()).collect();
         assert_eq!(
             paths,
@@ -1680,18 +1680,18 @@ required = false
         assert!(list[2].content.is_none());
 
         // 子目录前缀列表
-        let sub = store.list("a.b", "gamer.yaml", "automations/sub").unwrap();
+        let sub = store.list("a.b", "gamer-yaml", "automations/sub").unwrap();
         assert_eq!(sub.len(), 1);
 
         // 删除 + 空目录清理
         store
-            .delete_resource("a.b", "gamer.yaml", "automations/sub/inner.yaml")
+            .delete_resource("a.b", "gamer-yaml", "automations/sub/inner.yaml")
             .unwrap();
         assert!(!dir
-            .join("packages/a.b/plugins/gamer.yaml/automations/sub")
+            .join("packages/a.b/plugins/gamer-yaml/automations/sub")
             .exists());
         assert!(store
-            .delete_resource("a.b", "gamer.yaml", "automations/sub/inner.yaml")
+            .delete_resource("a.b", "gamer-yaml", "automations/sub/inner.yaml")
             .is_err());
     }
 
@@ -1702,13 +1702,13 @@ required = false
         // 任意穿越尝试（含逃向 shared/ 与其他插件目录）都落到校验失败
         for evil in ["../../shared/evil", "../other-plugin/x", "/abs", "a/../.."] {
             assert!(
-                store.resource_path("a.b", "gamer.yaml", evil).is_err(),
+                store.resource_path("a.b", "gamer-yaml", evil).is_err(),
                 "{evil:?}"
             );
         }
         // 非法 plugin id 直接拒绝
         assert!(store.plugin_dir("a.b", "../other").is_err());
-        assert!(store.plugin_dir("../escape", "gamer.yaml").is_err());
+        assert!(store.plugin_dir("../escape", "gamer-yaml").is_err());
     }
 
     #[test]
@@ -1718,7 +1718,7 @@ required = false
         store
             .write_binary(
                 "a.b",
-                "gamer.yaml",
+                "gamer-yaml",
                 "templates/icon#1_2_3_4.png",
                 b"png",
                 None,
@@ -1727,7 +1727,7 @@ required = false
             .unwrap();
         // 短名 → 唯一 # 候选
         let hit = store
-            .resolve_short_path("a.b", "gamer.yaml", "templates/icon.png")
+            .resolve_short_path("a.b", "gamer-yaml", "templates/icon.png")
             .unwrap();
         assert_eq!(
             hit.file_name().unwrap().to_string_lossy(),
@@ -1737,7 +1737,7 @@ required = false
         store
             .write_binary(
                 "a.b",
-                "gamer.yaml",
+                "gamer-yaml",
                 "templates/full.png",
                 b"png",
                 None,
@@ -1745,16 +1745,16 @@ required = false
             )
             .unwrap();
         let hit = store
-            .resolve_short_path("a.b", "gamer.yaml", "templates/full.png")
+            .resolve_short_path("a.b", "gamer-yaml", "templates/full.png")
             .unwrap();
         assert_eq!(hit.file_name().unwrap().to_string_lossy(), "full.png");
         // 零候选
         assert!(store
-            .resolve_short_path("a.b", "gamer.yaml", "templates/missing.png")
+            .resolve_short_path("a.b", "gamer-yaml", "templates/missing.png")
             .is_err());
         // 扩展名不参与跨类匹配
         assert!(store
-            .resolve_short_path("a.b", "gamer.yaml", "automations/icon.yaml")
+            .resolve_short_path("a.b", "gamer-yaml", "automations/icon.yaml")
             .is_err());
     }
 
@@ -1784,7 +1784,7 @@ required = false
         store
             .write_text(
                 "a.b",
-                "gamer.yaml",
+                "gamer-yaml",
                 "automations/a.yaml",
                 "不是 YAML 的内容",
                 None,
@@ -1792,11 +1792,11 @@ required = false
             )
             .unwrap();
         // 注册后：同样内容被拒绝，诊断 JSON 原样透传
-        store.register_handler("gamer.yaml", Arc::new(RejectingHandler));
+        store.register_handler("gamer-yaml", Arc::new(RejectingHandler));
         let err = store
             .validate_save(SaveValidation {
                 package: "a.b",
-                plugin: "gamer.yaml",
+                plugin: "gamer-yaml",
                 path: "automations/b.yaml",
                 content: "随便",
                 store: &store,
@@ -1804,7 +1804,7 @@ required = false
             .unwrap_err();
         assert_eq!(err[0]["code"], "yaml.bad");
         // 注记透明合并（列表）
-        let list = store.list("a.b", "gamer.yaml", "").unwrap();
+        let list = store.list("a.b", "gamer-yaml", "").unwrap();
         assert_eq!(list[0].meta["len"], list[0].content.as_ref().unwrap().len());
     }
 
@@ -1816,7 +1816,7 @@ required = false
         store.create_package(input("a.b")).unwrap();
         let path = "automations/main.yaml";
         store
-            .write_text("a.b", "gamer.yaml", path, "seed\n", None, true)
+            .write_text("a.b", "gamer-yaml", path, "seed\n", None, true)
             .unwrap();
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let mut handles = Vec::new();
@@ -1830,7 +1830,7 @@ required = false
             handles.push(std::thread::spawn(move || {
                 barrier.wait();
                 store
-                    .write_text("a.b", "gamer.yaml", path, &payload, None, true)
+                    .write_text("a.b", "gamer-yaml", path, &payload, None, true)
                     .unwrap();
                 payload
             }));
@@ -1840,7 +1840,7 @@ required = false
             seen.push(handle.join().unwrap());
         }
         let content = store
-            .read_text("a.b", "gamer.yaml", path)
+            .read_text("a.b", "gamer-yaml", path)
             .unwrap()
             .unwrap()
             .content;

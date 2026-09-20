@@ -1,4 +1,4 @@
-// chrome-devtools-mcp 测试驱动：通过 MCP 协议驱动 Chrome 测试 GameBot 前端
+// chrome-devtools-mcp 测试驱动：通过 MCP 协议驱动 Chrome 测试 Gamer 前端
 // 用法: node mcp.mjs <command> [args...]
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'

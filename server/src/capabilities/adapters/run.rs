@@ -13,10 +13,10 @@ use crate::run_manager::{CancelOutcome, RunManager, RunSource, StartError, Start
 use super::ResourceAdapter;
 
 /// run.submit 能力提交的手动脚本运行固定路由到的自动化 runner id（当前由
-/// gamer.yaml 扩展经 ADR-13 注册缝提供）。这是 Core 侧的路由语义字符串——
+/// gamer-yaml 扩展经 ADR-13 注册缝提供）。这是 Core 侧的路由语义字符串——
 /// Core 不解读其内容、不依赖该扩展的任何符号；id 与扩展市场包 id 一致，
 /// 由 P11.9 守卫测试白名单约束。
-pub(crate) const AUTOMATION_RUNNER_ID: &str = "gamer.yaml";
+pub(crate) const AUTOMATION_RUNNER_ID: &str = "gamer-yaml";
 
 /// Native bridge from the small capability request to the generic RunManager.
 ///

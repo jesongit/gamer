@@ -1,4 +1,4 @@
-//! GameBot 游戏自动化助手服务端
+//! Gamer 游戏自动化助手服务端
 //!
 //! 架构：设备通过 adb 接入，服务端作为 scrcpy 客户端（官方 scrcpy-server）
 //! 采集 H.264 视频 + 注入控制；视频流经 WebRTC 转推浏览器；
@@ -100,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
         info!(dir = %dir.display(), "file logging with daily rotation enabled");
     }
 
-    info!("GameBot server v{} starting...", env!("CARGO_PKG_VERSION"));
+    info!("Gamer server v{} starting...", env!("CARGO_PKG_VERSION"));
     // 最终生效配置来源 + 非敏感摘要（敏感项如 password 绝不进入日志）
     info!(
         source = %loaded.source,
@@ -248,7 +248,7 @@ async fn main() -> anyhow::Result<()> {
     let mut shutdown_rx = shutdown.subscribe();
     let app = ctx.router(db, cfg.clone(), shutdown.clone(), auth, update);
     let listener = TcpListener::bind(cfg.listen_addr()).await?;
-    info!("GameBot server ready on http://{}", cfg.listen_addr());
+    info!("Gamer server ready on http://{}", cfg.listen_addr());
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -324,8 +324,8 @@ impl RuntimeServices {
             Ok(false) => {}
             Err(error) => tracing::warn!(%error, "默认配置包播种失败（忽略）"),
         }
-        // 扩展内容钩子注册（组合根引导期）——gamer.yaml 的脚本/函数/模板
-        // 校验与 gamer.keymap 的方案校验。裸 Core（不注册）时保存不做内容
+        // 扩展内容钩子注册（组合根引导期）——gamer-yaml 的脚本/函数/模板
+        // 校验与 gamer-keymap 的方案校验。裸 Core（不注册）时保存不做内容
         // 校验（§8.9 验收锚点）。
         extensions::gamer_yaml::register_resource_handlers(&packages);
         extensions::video::project::register_resource_handlers(&packages);
@@ -339,7 +339,7 @@ impl RuntimeServices {
             db.clone(),
         ));
         let runs = Arc::new(run_manager::RunManager::new(executor.clone()));
-        // ADR-13：裸 Core 组合——Scheduler 不再预置任何 runner；gamer.yaml 的
+        // ADR-13：裸 Core 组合——Scheduler 不再预置任何 runner；gamer-yaml 的
         // 定时 runner 由扩展 start 生命周期经 registrar 钩子注册。
         let scheduler = Arc::new(scheduler::Scheduler::new(db.clone()));
         let capabilities = capabilities::adapters::build_registry(
@@ -423,7 +423,7 @@ fn install_drain(slot: &DrainSlot, ctx: &RuntimeServices) {
 }
 
 /// 更新子系统装配（两种启动路径共用）：controller 按部署形态选择（launcher
-/// named pipe / Docker external / 直跑 unsupported）→ 策略存储（config 基线 +
+/// named pipe / 直跑 unsupported）→ 策略存储（config 基线 +
 /// state/ 持久化覆盖）→ workload 源（活跃运行/viewer/cron/升级事务）→ 服务 →
 /// 协调器后台任务。
 fn spawn_update_stack(
@@ -470,7 +470,7 @@ async fn serve(
 ) -> anyhow::Result<()> {
     let mut shutdown_rx = shutdown.subscribe();
     let listener = TcpListener::bind(cfg.listen_addr()).await?;
-    info!("GameBot server ready on http://{}", cfg.listen_addr());
+    info!("Gamer server ready on http://{}", cfg.listen_addr());
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),

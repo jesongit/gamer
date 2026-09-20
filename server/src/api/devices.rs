@@ -25,7 +25,6 @@ use crate::webrtc::{remove_and_teardown_viewer, ViewerDisconnectReason};
 struct DeviceView {
     id: String,
     name: String,
-    kind: String,
     addr: String,
     screen_mode: String,
     vd_res: Option<String>,
@@ -42,9 +41,14 @@ struct DeviceView {
 /// 转换为错误配置或可能污染日志/路径的输入。
 pub(super) fn validate_device_req(req: &CreateDeviceReq) -> Result<(), ApiError> {
     validate_text_field(&req.name, "设备名称", 255)?;
-    validate_text_field(&req.kind, "设备类型", 64)?;
-    if let Some(addr) = req.addr.as_deref().filter(|v| !v.is_empty()) {
-        validate_text_field(addr, "设备地址", 255)?;
+    if let Some(addr) = req.addr.as_deref() {
+        validate_text_field(addr, "ADB 地址或序列号", 255)?;
+        if addr.trim().is_empty() || addr.chars().any(char::is_whitespace) || addr.starts_with('-')
+        {
+            return Err(ApiError::bad_request(
+                "请填写完整 ADB 序列号或 host:port 地址，不允许空格",
+            ));
+        }
     }
     if let Some(mode) = req.screen_mode.as_deref() {
         if !matches!(mode, "mirror" | "virtual") {
@@ -94,8 +98,7 @@ pub(super) fn session_affecting_change(prev: &Device, next: &Device, global_fps:
             .unwrap_or("1920x1080")
             .to_ascii_lowercase()
     };
-    prev.kind != next.kind
-        || prev.addr.trim() != next.addr.trim()
+    prev.addr.trim() != next.addr.trim()
         || prev.screen_mode != next.screen_mode
         || norm_res(prev.vd_res.as_ref()) != norm_res(next.vd_res.as_ref())
         || prev.vd_dpi.unwrap_or(0) != next.vd_dpi.unwrap_or(0)
@@ -137,7 +140,6 @@ fn render_device_views(
         out.push(DeviceView {
             id: d.id.clone(),
             name: d.name.clone(),
-            kind: d.kind.clone(),
             addr: d.addr.clone(),
             screen_mode: match d.screen_mode {
                 ScreenMode::Mirror => "mirror".into(),
@@ -180,7 +182,6 @@ pub(super) async fn api_scan_devices(State(st): State<AppState>) -> Response {
 #[derive(Deserialize)]
 pub(super) struct CreateDeviceReq {
     pub(super) name: String,
-    pub(super) kind: String,
     pub(super) addr: Option<String>,
     pub(super) screen_mode: Option<String>,
     pub(super) vd_res: Option<String>,
@@ -196,11 +197,17 @@ pub(super) async fn api_create_device(
     if let Err(err) = validate_device_req(&req) {
         return err.into_response();
     }
+    if req
+        .addr
+        .as_deref()
+        .is_none_or(|addr| addr.trim().is_empty())
+    {
+        return ApiError::bad_request("请填写 ADB 地址或序列号，或使用扫描设备").into_response();
+    }
     let id = Uuid::new_v4().simple().to_string();
     let device = Device {
         id,
         name: req.name,
-        kind: req.kind,
         addr: req.addr.unwrap_or_default(),
         screen_mode: if req.screen_mode.as_deref() == Some("virtual") {
             ScreenMode::Virtual
@@ -238,7 +245,6 @@ pub(super) async fn api_update_device(
     let device = Device {
         id: id.clone(),
         name: req.name,
-        kind: req.kind,
         addr: req.addr.unwrap_or_else(|| existing.addr.clone()),
         screen_mode: if req.screen_mode.as_deref() == Some("virtual") {
             ScreenMode::Virtual
@@ -304,11 +310,7 @@ pub(super) async fn api_device_apps(
         Ok(None) => return ApiError::not_found("设备不存在").into_response(),
         Err(err) => return ApiError::internal(err.to_string()).into_response(),
     };
-    let serial = if device.addr.is_empty() {
-        "usb".to_string()
-    } else {
-        device.addr.clone()
-    };
+    let serial = device.addr.clone();
     list_device_apps(&st, &serial).await
 }
 
@@ -467,16 +469,7 @@ pub(super) async fn api_install_apk(
     if let Err(err) = validate_apk_upload(q.filename.trim(), &body) {
         return err.into_response();
     }
-    let configured = if device.addr.is_empty() {
-        "usb".to_string()
-    } else {
-        device.addr.clone()
-    };
-    let serial = st
-        .devices
-        .adb
-        .resolve_serial(&configured, &device.name)
-        .await;
+    let serial = device.addr.clone();
     if serial.trim().is_empty() {
         return err_response(StatusCode::BAD_REQUEST, "设备未接入 adb，无法安装");
     }

@@ -54,21 +54,21 @@ describe('Phase 1 plugin center contracts（免签名市场）', () => {
       schema_version: 2,
       plugins: [
         {
-          id: 'gamer.yaml', version: '3.1.1', name: '自动化',
-          download_url: '/plugins/gamer.yaml-3.1.1.gplugin',
+          id: 'gamer-yaml', version: '3.1.1', name: '自动化',
+          download_url: '/plugins/gamer-yaml-3.1.1.gplugin',
           sha256: 'a'.repeat(64), size: 100,
           execution: { kind: 'wasm' },
           permissions: ['resource.read'],
         },
         {
-          id: 'gamer.keymap', version: '1.0.1', name: '按键映射',
-          download_url: '/plugins/gamer.keymap-1.0.1.gplugin',
+          id: 'gamer-keymap', version: '1.0.1', name: '按键映射',
+          download_url: '/plugins/gamer-keymap-1.0.1.gplugin',
           sha256: 'b'.repeat(64),
           execution: { kind: 'wasm' },
         },
         {
-          id: 'gamer.video', version: '1.0.0', name: '视频工作台',
-          download_url: '/plugins/gamer.video-1.0.0.gplugin',
+          id: 'gamer-video', version: '1.0.0', name: '视频工作台',
+          download_url: '/plugins/gamer-video-1.0.0.gplugin',
           sha256: 'c'.repeat(64),
           execution: { kind: 'builtin', host_version: '>=1.3.0' },
           permissions: ['media.read'],
@@ -77,7 +77,7 @@ describe('Phase 1 plugin center contracts（免签名市场）', () => {
     })
     expect(registry.plugins).toHaveLength(3)
     const [yaml, keymap, video] = registry.plugins
-    expect(yaml).toMatchObject({ id: 'gamer.yaml', version: '3.1.1', source: 'official', execution: { kind: 'wasm' } })
+    expect(yaml).toMatchObject({ id: 'gamer-yaml', version: '3.1.1', source: 'official', execution: { kind: 'wasm' } })
     expect(keymap.execution).toEqual({ kind: 'wasm' })
     expect(video.execution).toEqual({ kind: 'builtin', host_version: '>=1.3.0' })
     expect(executionLabel(video.execution)).toContain('宿主预置')
@@ -114,12 +114,12 @@ describe('Phase 1 plugin center contracts（免签名市场）', () => {
     fetch.mockResolvedValueOnce(archiveResponse(bytes))
     // digest stub 返回全零 → 与全零哈希匹配
     const result = await downloadFixedVersion({
-      id: 'gamer.yaml', version: '3.1.1', name: '自动化',
-      download_url: 'https://example.test/gamer.yaml-3.1.1.gplugin',
+      id: 'gamer-yaml', version: '3.1.1', name: '自动化',
+      download_url: 'https://example.test/gamer-yaml-3.1.1.gplugin',
       sha256: '0'.repeat(64),
       execution: { kind: 'wasm' },
     })
-    expect(fetch).toHaveBeenCalledWith('https://example.test/gamer.yaml-3.1.1.gplugin', expect.any(Object))
+    expect(fetch).toHaveBeenCalledWith('https://example.test/gamer-yaml-3.1.1.gplugin', expect.any(Object))
     expect(result.bytes).toEqual(bytes)
     expect(result.file.type).toBe('application/zip')
     expect(isProductionRemoteUi('https://example.test/ui/index.html')).toBe(true)
@@ -129,8 +129,8 @@ describe('Phase 1 plugin center contracts（免签名市场）', () => {
     const bytes = new Uint8Array([80, 75, 3, 4])
     fetch.mockResolvedValueOnce(archiveResponse(bytes))
     const failure = downloadFixedVersion({
-      id: 'gamer.yaml', version: '3.1.1', name: '自动化',
-      download_url: 'https://example.test/gamer.yaml-3.1.1.gplugin',
+      id: 'gamer-yaml', version: '3.1.1', name: '自动化',
+      download_url: 'https://example.test/gamer-yaml-3.1.1.gplugin',
       sha256: 'a'.repeat(64),
     })
     await expect(failure).rejects.toMatchObject({ code: 'hash_mismatch' })
@@ -139,8 +139,8 @@ describe('Phase 1 plugin center contracts（免签名市场）', () => {
 
   it('official market entries without a fixed sha256 are refused before download', async () => {
     await expect(downloadFixedVersion({
-      id: 'gamer.yaml', version: '3.1.1', name: '自动化',
-      download_url: 'https://example.test/gamer.yaml-3.1.1.gplugin',
+      id: 'gamer-yaml', version: '3.1.1', name: '自动化',
+      download_url: 'https://example.test/gamer-yaml-3.1.1.gplugin',
       source: 'official',
     })).rejects.toMatchObject({ code: 'missing_hash' })
   })
@@ -150,13 +150,13 @@ describe('Phase 1 plugin center contracts（免签名市场）', () => {
     expect(installPolicy({ kind: 'official' })).toMatchObject({ allowed: true, requiresWarning: false })
     expect(installPolicy({ kind: 'local', label: '本地文件' })).toMatchObject({ allowed: true, requiresWarning: true })
     expect(installPolicy({ kind: 'url', label: 'https://x' }).warning).toContain('来源非官方')
-    expect(lifecyclePrompt('disable', { id: 'gamer.yaml', version: '3.1.1', state: 'enabled' })).toMatch(/停用 gamer\.yaml@3\.1\.1/)
+    expect(lifecyclePrompt('disable', { id: 'gamer-yaml', version: '3.1.1', state: 'enabled' })).toMatch(/停用 gamer-yaml@3\.1\.1/)
   })
 
   it('maps typed install/download errors to human-readable hints', () => {
     expect(installErrorText(Object.assign(new Error('x'), { code: 'hash_mismatch' }))).toContain('不污染已装版本')
     expect(installErrorText(Object.assign(new Error('x'), { code: 'host_feature_unavailable' }))).toContain('升级 Gamer')
-    expect(installErrorText(Object.assign(new Error('插件 gamer.video@1.0.0 的安装包在发布源不存在（404）'), {
+    expect(installErrorText(Object.assign(new Error('插件 gamer-video@1.0.0 的安装包在发布源不存在（404）'), {
       code: 'download_not_found', name: 'RegistryError',
     }))).toContain('404')
     expect(installErrorText(Object.assign(new Error('x'), { code: 'download_network_error' }))).toContain('网络')
@@ -166,7 +166,7 @@ describe('Phase 1 plugin center contracts（免签名市场）', () => {
   })
 
   it('sends the official source header and permission confirmation without a registry proof header', async () => {
-    fetch.mockResolvedValueOnce(jsonResponse(200, { id: 'gamer.yaml', version: '3.1.1' }))
+    fetch.mockResolvedValueOnce(jsonResponse(200, { id: 'gamer-yaml', version: '3.1.1' }))
     await api.inspectExtension(new Blob([new Uint8Array([1])]), {
       source: 'official', permissionConfirmed: true,
     })
@@ -200,7 +200,7 @@ describe('Phase 1 plugin center contracts（免签名市场）', () => {
 
   it('exposes inspect, management, and uninstall data policy through the API', async () => {
     fetch
-      .mockResolvedValueOnce(jsonResponse(200, { id: 'gamer.yaml', version: '3.1.1' }))
+      .mockResolvedValueOnce(jsonResponse(200, { id: 'gamer-yaml', version: '3.1.1' }))
       .mockResolvedValueOnce(jsonResponse(200, { ok: true }))
       .mockResolvedValueOnce(jsonResponse(200, { extensions: [] }))
       .mockResolvedValueOnce({ ok: true, status: 204, headers: { get: () => null } })
@@ -208,24 +208,24 @@ describe('Phase 1 plugin center contracts（免签名市场）', () => {
     await api.inspectExtension(archive)
     await api.installExtension(archive)
     await api.getExtensionManagement()
-    await api.uninstallExtension('gamer.yaml', '3.1.1', { deleteData: true })
+    await api.uninstallExtension('gamer-yaml', '3.1.1', { deleteData: true })
     expect(fetch.mock.calls[0][0]).toBe('/api/extensions/inspect')
     expect(fetch.mock.calls[0][1].headers['Content-Type']).toBe('application/zip')
     expect(fetch.mock.calls[1][0]).toBe('/api/extensions')
     expect(fetch.mock.calls[2][0]).toBe('/api/extensions/management')
-    expect(fetch.mock.calls[3][0]).toBe('/api/extensions/gamer.yaml/3.1.1?delete_data=1')
-    expect(uninstallPrompt({ id: 'gamer.yaml', version: '3.1.1', state: 'enabled' }, true)).toMatch(/删除该插件的用户数据/)
+    expect(fetch.mock.calls[3][0]).toBe('/api/extensions/gamer-yaml/3.1.1?delete_data=1')
+    expect(uninstallPrompt({ id: 'gamer-yaml', version: '3.1.1', state: 'enabled' }, true)).toMatch(/删除该插件的用户数据/)
   })
 
   it('enable/disable hit the collapsed lifecycle endpoints（V1：enable 即启动）', async () => {
     fetch
-      .mockResolvedValueOnce(jsonResponse(200, { id: 'gamer.yaml', state: 'running' }))
-      .mockResolvedValueOnce(jsonResponse(200, { id: 'gamer.yaml', state: 'disabled' }))
-    const enabled = await api.enableExtension('gamer.yaml')
-    expect(fetch.mock.calls[0][0]).toBe('/api/extensions/gamer.yaml/enable')
+      .mockResolvedValueOnce(jsonResponse(200, { id: 'gamer-yaml', state: 'running' }))
+      .mockResolvedValueOnce(jsonResponse(200, { id: 'gamer-yaml', state: 'disabled' }))
+    const enabled = await api.enableExtension('gamer-yaml')
+    expect(fetch.mock.calls[0][0]).toBe('/api/extensions/gamer-yaml/enable')
     expect(enabled).toMatchObject({ state: 'running' })
-    const disabled = await api.disableExtension('gamer.yaml')
-    expect(fetch.mock.calls[1][0]).toBe('/api/extensions/gamer.yaml/disable')
+    const disabled = await api.disableExtension('gamer-yaml')
+    expect(fetch.mock.calls[1][0]).toBe('/api/extensions/gamer-yaml/disable')
     expect(disabled).toMatchObject({ state: 'disabled' })
   })
 })

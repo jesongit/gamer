@@ -13,7 +13,6 @@
 #   2) jrottenberg/ffmpeg:6-alpine 入口即 ffmpeg 参数、且镜像内无 ffprobe，
 #      IDR 位点校验与 PNG/模板尺寸断言不可运行（需注释掉相关 Assert）。
 #   参考命令（PowerShell，在仓库根目录；实际生成参数以 $encArgs 为准）：
-#     docker run --rm -v "${PWD}:/w" -w /w jrottenberg/ffmpeg:6-alpine <encArgs...> /w/server/testdata/perf/stream.h264
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -47,7 +46,7 @@ function Write-Utf8NoBom {
 # ---------- 依赖检查 ----------
 foreach ($tool in @('ffmpeg', 'ffprobe')) {
     $cmd = Get-Command $tool -ErrorAction SilentlyContinue
-    Assert ($null -ne $cmd) "$tool not found on PATH. Install a libx264-enabled ffmpeg build (see header comment for docker fallback)."
+    Assert ($null -ne $cmd) "$tool not found on PATH. Install a libx264-enabled ffmpeg build."
 }
 $ffVersionFull = (Invoke-FfmpegTool -Exe 'ffmpeg' -Argv @('-hide_banner', '-version'))[0]
 Write-Host "[deps] $ffVersionFull"
@@ -284,7 +283,7 @@ $readme = @'
    decoy 区域裁片）按 YAML 引擎 find 语义完整一轮（一次截图 + 1+N 次 NCC）。
 
 统计口径按 OPTIMIZATION_PLAN.md §11.1：p50 / p95 / 最大值，另记 CPU 与峰值内存；
-Windows 与 Docker/Linux 至少各跑一轮。禁止把 README 中任何 `<50ms` 式定性描述当验收依据。
+Windows 与 Linux 至少各跑一轮。禁止把 README 中任何 `<50ms` 式定性描述当验收依据。
 
 ## 消费入口约定
 

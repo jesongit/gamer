@@ -758,9 +758,15 @@ impl SessionShared {
                 if let Some(root) = self.dir.parent() {
                     let archive = root.join(".recording-history").join(&self.id.0);
                     if std::fs::create_dir_all(&archive).is_ok() {
-                        let _ = crate::core::fs::atomic_write(&archive.join("session.json"), s.as_bytes());
+                        let _ = crate::core::fs::atomic_write(
+                            &archive.join("session.json"),
+                            s.as_bytes(),
+                        );
                         if let Some(id) = self.dir.file_name().and_then(|id| id.to_str()) {
-                            let _ = crate::core::fs::atomic_write(&archive.join("event-source.txt"), id.as_bytes());
+                            let _ = crate::core::fs::atomic_write(
+                                &archive.join("event-source.txt"),
+                                id.as_bytes(),
+                            );
                         }
                     }
                 }
@@ -1032,26 +1038,57 @@ impl RecordingService {
 
     /// 真实会话目录，包含未生成素材的失败/取消记录；最新优先。
     pub fn history(&self) -> anyhow::Result<Vec<serde_json::Value>> {
-        let mut ids: std::collections::BTreeSet<String> = self.inner.sessions.lock().keys().cloned().collect();
-        for (root, nested) in [(self.inner.data_root.clone(), true), (self.inner.data_root.join(".recording-history"), false)] {
-            let entries = match std::fs::read_dir(root) { Ok(entries) => entries, Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue, Err(e) => return Err(e.into()) };
+        let mut ids: std::collections::BTreeSet<String> =
+            self.inner.sessions.lock().keys().cloned().collect();
+        for (root, nested) in [
+            (self.inner.data_root.clone(), true),
+            (self.inner.data_root.join(".recording-history"), false),
+        ] {
+            let entries = match std::fs::read_dir(root) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
             for entry in entries.flatten() {
-                let path = if nested { entry.path().join("recording/session.json") } else { entry.path().join("session.json") };
+                let path = if nested {
+                    entry.path().join("recording/session.json")
+                } else {
+                    entry.path().join("session.json")
+                };
                 if let Ok(text) = std::fs::read_to_string(path) {
-                    if let Ok(meta) = serde_json::from_str::<RecordingSessionMeta>(&text) { ids.insert(meta.id.0); }
+                    if let Ok(meta) = serde_json::from_str::<RecordingSessionMeta>(&text) {
+                        ids.insert(meta.id.0);
+                    }
                 }
             }
         }
         let mut sessions = Vec::new();
         for id in ids {
             if let Ok(meta) = self.status(&RecordingId(id)) {
-                let missing: Vec<_> = meta.segments.iter().filter(|segment| !self.inner.data_root.join(&segment.media_id.0).join("metadata.json").is_file()).map(|segment| segment.media_id.0.clone()).collect();
+                let missing: Vec<_> = meta
+                    .segments
+                    .iter()
+                    .filter(|segment| {
+                        !self
+                            .inner
+                            .data_root
+                            .join(&segment.media_id.0)
+                            .join("metadata.json")
+                            .is_file()
+                    })
+                    .map(|segment| segment.media_id.0.clone())
+                    .collect();
                 let mut value = serde_json::to_value(meta)?;
                 value["missing_media"] = json!(missing);
                 sessions.push(value);
             }
         }
-        sessions.sort_by(|a, b| b["started_at"].as_str().cmp(&a["started_at"].as_str()).then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
+        sessions.sort_by(|a, b| {
+            b["started_at"]
+                .as_str()
+                .cmp(&a["started_at"].as_str())
+                .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+        });
         Ok(sessions)
     }
 
@@ -1070,7 +1107,9 @@ impl RecordingService {
         self.load_from_disk(id)
             .map(|(meta, dir)| {
                 if meta.event_count > 0 && !dir.join("recording").is_dir() {
-                    return Err(anyhow::anyhow!("recording_events_missing: 录制事件来源素材已删除"));
+                    return Err(anyhow::anyhow!(
+                        "recording_events_missing: 录制事件来源素材已删除"
+                    ));
                 }
                 Ok(read_events_dir(&dir))
             })
@@ -1106,19 +1145,39 @@ impl RecordingService {
     /// 续录；已收口段完好，当前段素材停留在 importing 不可见）。
     fn load_from_disk(&self, id: &RecordingId) -> Option<(RecordingSessionMeta, PathBuf)> {
         // 归档 id 来自路由，不能允许路径穿越。
-        if id.0.is_empty() || !id.0.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') { return None; }
+        if id.0.is_empty()
+            || !id
+                .0
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return None;
+        }
         let archive = self.inner.data_root.join(".recording-history").join(&id.0);
         if let Ok(text) = std::fs::read_to_string(archive.join("session.json")) {
             if let Ok(mut meta) = serde_json::from_str::<RecordingSessionMeta>(&text) {
                 if meta.id == *id {
-                    if matches!(meta.state, RecordingState::Recording | RecordingState::Finalizing) {
+                    if matches!(
+                        meta.state,
+                        RecordingState::Recording | RecordingState::Finalizing
+                    ) {
                         meta.state = RecordingState::Interrupted;
                         meta.ended_at = Some(now_rfc3339());
                         meta.error = Some("服务重启导致录制中断（已收口部分保留）".into());
-                        if let Ok(text) = serde_json::to_string_pretty(&meta) { let _ = crate::core::fs::atomic_write(&archive.join("session.json"), text.as_bytes()); }
+                        if let Ok(text) = serde_json::to_string_pretty(&meta) {
+                            let _ = crate::core::fs::atomic_write(
+                                &archive.join("session.json"),
+                                text.as_bytes(),
+                            );
+                        }
                     }
-                    let source = std::fs::read_to_string(archive.join("event-source.txt")).unwrap_or_default();
-                    if !source.is_empty() && source.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+                    let source = std::fs::read_to_string(archive.join("event-source.txt"))
+                        .unwrap_or_default();
+                    if !source.is_empty()
+                        && source
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                    {
                         return Some((meta, self.inner.data_root.join(source)));
                     }
                 }
@@ -1345,7 +1404,11 @@ mod tests {
         assert_eq!(service.history().unwrap()[0]["state"], "cancelled");
         std::fs::remove_dir_all(&shared.dir).unwrap();
         assert_eq!(service.history().unwrap()[0]["id"], shared.id.0);
-        let archive = root.path().join(".recording-history").join(&shared.id.0).join("session.json");
+        let archive = root
+            .path()
+            .join(".recording-history")
+            .join(&shared.id.0)
+            .join("session.json");
         let mut meta = shared.meta_snapshot();
         meta.state = RecordingState::Recording;
         std::fs::write(archive, serde_json::to_vec(&meta).unwrap()).unwrap();

@@ -22,7 +22,7 @@ function optionalId(value: unknown): string | null {
 function deviceSnapshot(value: unknown) {
   const device = readValue(value as never) as Record<string, unknown> | null | undefined
   if (!device) return null
-  return { id: device.id || null, name: device.name || device.id || null, status: device.status || null, kind: device.kind || null, addr: device.addr || null }
+  return { id: device.id || null, name: device.name || device.id || null, status: device.status || null, addr: device.addr || null }
 }
 
 function sizeSnapshot(value: unknown) {

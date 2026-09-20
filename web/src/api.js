@@ -6,7 +6,7 @@
 // (package_id, plugin_id, path) 三元组；目录语义归插件定义）；
 // 运行统一走 POST /api/runs（runner_id + entrypoint + payload，ADR-12/13：执行
 // 目标按 runner 分发）。本封装只提供 runner 无关的通用 run()；具体 runner 的
-// 包装（如 YAML 自动化 runner）归扩展前端侧（gamer-yaml-runner.js 等），Core API 层
+// 包装（如 YAML 自动化 runner）归扩展前端侧（插件 runner 模块 等），Core API 层
 // 不认识任何 runner 注册 id。
 import { handleUnauthorized } from './auth'
 import {
@@ -222,6 +222,9 @@ function extensionUploadOptions(options = {}) {
 }
 
 export const api = {
+  // Core media frame navigation, also used when the video business plugin is absent.
+  mediaFrames: (id, ptsUs) => req('GET', `/api/media/${encodeURIComponent(id)}/frames${ptsUs == null ? '' : `?pts_us=${Math.max(0, Math.round(Number(ptsUs)))}`}`),
+  mediaFrameNeighbors: (id, index) => req('GET', `/api/media/${encodeURIComponent(id)}/frames/${Math.max(0, Math.round(Number(index) || 0))}`),
   // 登录/会话/退出见 src/auth.js（阶段 2 Cookie 会话；本封装不持有认证端点）
 
   // 扩展生命周期与动态 UI contribution
@@ -438,7 +441,7 @@ export const api = {
 
   // ---- 扩展资源兼容封装（id 字面量唯一归宿 = gamer-plugin-ids.js；资源 id 契约
   // "<package-id>/<文件路径>" 不变，仅首段语义从 Android 包名切换为 Package id，
-  // 目录段由插件语义补全；runner 包装仍归 gamer-yaml-runner.js）----
+  // 目录段由插件语义补全；runner 包装仍归 插件 runner 模块）----
   // 按键映射（映射插件 mappings/ 目录）
   listKeymaps: async (packageId) => {
     const rep = await api.listPluginResources(packageId, KEYMAP_PLUGIN_ID, KEYMAP_DIR)
@@ -593,7 +596,7 @@ export const api = {
   // 统一执行入口（P11.6 / ADR-12）：POST /api/runs {runner_id, entrypoint,
   // device_id, payload}——runner_id 为 runner 注册 id（分发目标），entrypoint 为
   // runner 私有寻址，payload 为 runner 私有不透明值；本方法对具体 runner 保持
-  // 无知（具体 runner 的包装见扩展前端侧 gamer-yaml-runner.js）。
+  // 无知（具体 runner 的包装见扩展前端侧 插件 runner 模块）。
   // 成功 202 {run_id, state, resolved_args}；参数诊断 400 {error:"invalid_args",
   // diagnostics:[...]}；设备占用 409 {error:"device_busy", ...}；运行依赖缺失
   //（runner 未注册）424 {code:"dependency_unavailable"}

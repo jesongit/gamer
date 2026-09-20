@@ -25,7 +25,7 @@ try {
   const results = []
   for (const pkg of await readdir(packages, { withFileTypes: true })) {
     if (!pkg.isDirectory() || pkg.name.startsWith('.')) continue
-    const plugin = resolve(packages, pkg.name, 'plugins/gamer.yaml')
+    const plugin = resolve(packages, pkg.name, 'plugins/gamer-yaml')
     const all = await files(plugin)
     const libraries = all.filter(path => /[\\/]automations[\\/]/.test(path) && /^_function.*\.yaml$/.test(basename(path)))
     const knownFunctions = new Set(native.map(f => f.name))

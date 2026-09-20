@@ -17,12 +17,12 @@
 
 | 文件（相对于 server/data/packages） | 原因 |
 |---|---|
-| `com.mihoyo.hkrpg/plugins/gamer.yaml/functions/工具.yaml` | 旧 functions/ 目录，缺 functions 包装 |
-| `com.tencent.nrc/plugins/gamer.yaml/functions/verify_lib.yaml` | 旧 functions/ 目录，缺 functions 包装 |
-| `com.tencent.nrc/plugins/gamer.yaml/automations/verify_a.yml` | 已删除的 version 字段 |
-| `com.tencent.nrc/plugins/gamer.yaml/automations/加灵.yml` | 非 V1 顶层字段，缺 run |
+| `com.mihoyo.hkrpg/plugins/gamer-yaml/functions/工具.yaml` | 旧 functions/ 目录，缺 functions 包装 |
+| `com.tencent.nrc/plugins/gamer-yaml/functions/verify_lib.yaml` | 旧 functions/ 目录，缺 functions 包装 |
+| `com.tencent.nrc/plugins/gamer-yaml/automations/verify_a.yml` | 已删除的 version 字段 |
+| `com.tencent.nrc/plugins/gamer-yaml/automations/加灵.yml` | 非 V1 顶层字段，缺 run |
 
-通过的业务文件为 `com.mihoyo.hkrpg/plugins/gamer.yaml/automations/每日任务.yml`。逐条诊断、测试输出和 API 报告在 `server/target/yaml-acceptance/`；扫描脚本可对实际部署的其他 Package 根目录重复执行。
+通过的业务文件为 `com.mihoyo.hkrpg/plugins/gamer-yaml/automations/每日任务.yml`。逐条诊断、测试输出和 API 报告在 `server/target/yaml-acceptance/`；扫描脚本可对实际部署的其他 Package 根目录重复执行。
 
 模板空列表补充验收：本地两个业务包仍有 54 + 3 张模板文件；修复模板面板仅挂载时加载、遗漏异步 Package 恢复的问题，并拒绝旧 Package 请求覆盖当前列表。两项新增测试先复现失败、修复后通过；隔离浏览器登录及整页刷新后，无需切换配置，打开模板面板均显示已有 `button.png`。
 

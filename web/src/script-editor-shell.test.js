@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
-import { useScriptEditorShell } from './composables/useScriptEditorShell'
-import { parseFunctionLibrary, serialize } from './script-editor/codec'
-import { createCall, createControl } from './script-editor/factories'
-import { lit } from './script-editor/model'
-import { stripUuids } from './script-editor/__tests__/helpers'
+import { useScriptEditorShell } from '../../plugins/gamer-yaml/ui/src/composables/useScriptEditorShell'
+import { parseFunctionLibrary, serialize } from '../../plugins/gamer-yaml/ui/src/script-editor/codec'
+import { createCall, createControl } from '../../plugins/gamer-yaml/ui/src/script-editor/factories'
+import { lit } from '../../plugins/gamer-yaml/ui/src/script-editor/model'
+import { stripUuids } from '../../plugins/gamer-yaml/ui/src/script-editor/__tests__/helpers'
 
 /**
  * 编辑器外壳（V1）：加载 → 编辑（命令栈）→ dirty → 保存（expected_version）→

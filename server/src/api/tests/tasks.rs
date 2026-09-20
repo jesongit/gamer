@@ -2,7 +2,7 @@ use super::*;
 
 // ---------- P11.1：统一 /api/tasks（ADR-12 模型）HTTP 契约 ----------
 
-const YAML_RUNNER: &str = "gamer.yaml";
+const YAML_RUNNER: &str = "gamer-yaml";
 
 fn task_body(name: &str, runner_id: &str, entrypoint: &str) -> serde_json::Value {
     serde_json::json!({
@@ -275,7 +275,7 @@ async fn task_presets_use_new_schema_and_instantiate_independently() {
 
 /// UI 支撑只读端点：GET /api/runners、GET /api/schedule-providers。
 /// P11.2 裸 Core 语义（ADR-13）：测试组合根不接扩展 registrar，没有任何
-/// runner 注册——/api/runners 为空数组；gamer.yaml 任务仍可保存，但立即
+/// runner 注册——/api/runners 为空数组；gamer-yaml 任务仍可保存，但立即
 /// 运行会因 runner 缺失进入 dependency_missing。cron provider 仍内置注册。
 #[tokio::test]
 async fn runner_and_schedule_provider_lists_are_exposed() {
@@ -288,18 +288,18 @@ async fn runner_and_schedule_provider_lists_are_exposed() {
 
     let resp = get_json(&t, &sid, "/api/runners").await;
     let runners = json_body(resp).await;
-    // 测试装配与生产组合根等价：gamer.yaml 扩展 Running 期间其 runner 在册；
+    // 测试装配与生产组合根等价：gamer-yaml 扩展 Running 期间其 runner 在册；
     // 裸 Core（无扩展 start）为空的语义由 scheduler 单测锁定
-    assert_eq!(runners.as_array().unwrap().len(), 1, "装配含 gamer.yaml runner");
-    assert_eq!(runners[0]["runner_id"], "gamer.yaml");
-    assert_eq!(runners[0]["owner_extension_id"], "gamer.yaml");
+    assert_eq!(runners.as_array().unwrap().len(), 1, "装配含 gamer-yaml runner");
+    assert_eq!(runners[0]["runner_id"], "gamer-yaml");
+    assert_eq!(runners[0]["owner_extension_id"], "gamer-yaml");
 
     let resp = get_json(&t, &sid, "/api/schedule-providers").await;
     let providers = json_body(resp).await;
     assert_eq!(providers.as_array().unwrap().len(), 1);
     assert_eq!(providers[0]["provider_id"], "cron");
 
-    // gamer.yaml 任务可保存（runner 未注册不阻止保存），立即运行 → 显式
+    // gamer-yaml 任务可保存（runner 未注册不阻止保存），立即运行 → 显式
     // 依赖缺失（任务保留），响应里带 runner_id 诊断。
     let resp = post_json(
         &t,
@@ -328,7 +328,7 @@ async fn runner_and_schedule_provider_lists_are_exposed() {
 // ---------- P12.11（计划 §16.7）：Task params 全链 ----------
 //
 // Program.params → TaskBoard 保存（runner.payload.args）→ /api/tasks/:id/run
-// → gamer.yaml runner 门禁重绑 → 执行器收到绑定后的全量类型化覆盖。
+// → gamer-yaml runner 门禁重绑 → 执行器收到绑定后的全量类型化覆盖。
 // 手动路径（POST /api/runs）的参数桥已有 entrypoint_schema 验收；本测试补
 // 「保存任务 → 运行 → payload 生效」的 api 级证据与非法 payload 的 400 门禁。
 
@@ -384,7 +384,7 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
     // 1. 保存带参数声明的 V1 脚本（TaskBoard 参数表单的数据源 = entrypoint schema）
-    let resp = put_package_text(&t, &sid, "com.example.game", "gamer.yaml", "automations/daily.yaml", "params:\n  msg:\n    type: string\n    default: \"默认\"\n  count:\n    type: integer\n    default: 3\nrun:\n  - log: $msg\n").await;
+    let resp = put_package_text(&t, &sid, "com.example.game", "gamer-yaml", "automations/daily.yaml", "params:\n  msg:\n    type: string\n    default: \"默认\"\n  count:\n    type: integer\n    default: 3\nrun:\n  - log: $msg\n").await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
 
     // 2. TaskBoard 保存任务：payload.args 携带用户填写的稀疏实参
@@ -419,7 +419,7 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
     assert_eq!(resp.status(), StatusCode::ACCEPTED, "{:?}", json_body(resp).await);
     let run_id = json_body(resp).await["run_id"].as_str().unwrap().to_string();
 
-    // 4. 执行器收到的 payload = 绑定后的全量参数对象（gamer.yaml 私有 wire：
+    // 4. 执行器收到的 payload = 绑定后的全量参数对象（gamer-yaml 私有 wire：
     //    {target, args: <对象>, strict_args: false}）；任务实参覆盖默认值，
     //    未填参数取声明默认值。
     let mut captured = None;
@@ -480,7 +480,7 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
 
     // 6. 非法 payload 门禁（任务保存时 payload 不透明，运行时才校验）：
     //    必填参数缺失 → 400 + 结构化诊断消息。
-    let resp = put_package_text(&t, &sid, "com.example.game", "gamer.yaml", "automations/required.yaml", "params:\n  secret:\n    type: string\n    required: true\nrun:\n  - log: $secret\n").await;
+    let resp = put_package_text(&t, &sid, "com.example.game", "gamer-yaml", "automations/required.yaml", "params:\n  secret:\n    type: string\n    required: true\nrun:\n  - log: $secret\n").await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
     let resp = post_json(
         &t,

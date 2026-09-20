@@ -29,6 +29,8 @@ pub(crate) enum Permission {
     MediaRecord,
     MediaWrite,
     MediaEventsRead,
+    /// Explicitly trusted same-origin UI module; never implied by iframe access.
+    UiHost,
 }
 
 impl Permission {
@@ -54,6 +56,7 @@ impl Permission {
             "media.record" => Ok(Self::MediaRecord),
             "media.write" => Ok(Self::MediaWrite),
             "media.events.read" => Ok(Self::MediaEventsRead),
+            "ui.host" => Ok(Self::UiHost),
             forbidden
                 if forbidden == "filesystem"
                     || forbidden.starts_with("filesystem.")
@@ -93,6 +96,7 @@ impl Permission {
             Self::MediaRecord => "media.record",
             Self::MediaWrite => "media.write",
             Self::MediaEventsRead => "media.events.read",
+            Self::UiHost => "ui.host",
         }
     }
 
@@ -113,6 +117,7 @@ impl Permission {
             | Self::MediaRecord
             | Self::MediaWrite
             | Self::MediaEventsRead => HostApiDomain::Media,
+            Self::UiHost => HostApiDomain::Ui,
         }
     }
 }

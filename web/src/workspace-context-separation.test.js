@@ -3,11 +3,11 @@ import { ref } from 'vue'
 import { createWorkspaceContext } from './workspace/context'
 import { api } from './api'
 import { scriptsData, templatesData } from './store'
-import { useFunctionLibrary } from './composables/useFunctionLibrary'
+import { useFunctionLibrary } from '../../plugins/gamer-yaml/ui/src/composables/useFunctionLibrary'
 import {
   ensureGamerYamlResources,
   gamerYamlEntrypointOptions,
-} from './components/task/gamer-yaml-resources'
+} from '../../plugins/gamer-yaml/ui/src/components/task/gamer-yaml-resources'
 import { resolveGamerYamlAppPackages } from './components/task/builtin-runner-editors'
 
 afterEach(() => {
@@ -21,7 +21,7 @@ describe('P3-CONTEXT：Device/App/Package/Plugin/Stage 分离', () => {
     const device = ref({ id: 'device-1', name: '测试设备', pkg: 'com.android.game' })
     const androidPackageName = ref('com.android.game')
     const currentPackageId = ref('content.daily')
-    const activePluginId = ref('gamer.yaml')
+    const activePluginId = ref('gamer-yaml')
     const connected = ref(true)
     const stage = ref({
       kind: ref('media'),
@@ -45,7 +45,7 @@ describe('P3-CONTEXT：Device/App/Package/Plugin/Stage 分离', () => {
 
     expect(await context.uiBridge.context.get()).toEqual({
       device: {
-        id: 'device-1', name: '测试设备', status: null, kind: null, addr: null,
+        id: 'device-1', name: '测试设备', status: null, addr: null,
       },
       deviceId: 'device-1',
       app: {
@@ -56,8 +56,8 @@ describe('P3-CONTEXT：Device/App/Package/Plugin/Stage 分离', () => {
       androidPackageName: 'com.android.game',
       package: { id: 'content.daily', content_package: 'content.daily' },
       currentPackageId: 'content.daily',
-      plugin: { id: 'gamer.yaml' },
-      activePluginId: 'gamer.yaml',
+      plugin: { id: 'gamer-yaml' },
+      activePluginId: 'gamer-yaml',
       theme: expect.objectContaining({ name: 'gamer-dark', controlHeight: 28 }),
       connected: true,
       stage: {
@@ -82,7 +82,7 @@ describe('P3-CONTEXT：Device/App/Package/Plugin/Stage 分离', () => {
     })
   })
 
-  it('gamer.yaml 任务保存分别使用设备 Android 包名和当前 Package ID', () => {
+  it('gamer-yaml 任务保存分别使用设备 Android 包名和当前 Package ID', () => {
     expect(resolveGamerYamlAppPackages('content.daily/main.yaml', {
       packageId: 'content.daily',
       deviceId: 'device-1',

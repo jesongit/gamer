@@ -161,11 +161,7 @@ impl ScrcpySession {
         device: &Device,
     ) -> anyhow::Result<SessionHandle> {
         let adb = adb.clone();
-        let serial = if device.addr.is_empty() {
-            "usb".to_string()
-        } else {
-            device.addr.clone()
-        };
+        let serial = device.addr.clone();
         info!(device = %device.name, serial = %serial, "connecting scrcpy session");
 
         // 1. 确保 adb transport 可用。只有网络地址（IP:port）才用 adb connect；
@@ -173,7 +169,7 @@ impl ScrcpySession {
         //    "cannot resolve host" 假错误，掩盖真实的 offline/未授权/拔出状态。
         //    USB/mDNS 掉到 offline 时先 adb reconnect offline 恢复一次（免拔线）
         if !adb.is_connected(&serial).await {
-            if device.addr.contains(':') {
+            if super::adb::is_network_endpoint(&device.addr) {
                 adb.connect(&device.addr).await?;
             } else {
                 let _ = adb
@@ -867,7 +863,7 @@ mod tests {
         let device = Device {
             id: format!("device-test-{}", uuid::Uuid::new_v4().simple()),
             name: "lifecycle-test".into(),
-            kind: "wifi".into(),
+
             addr: "test-serial".into(),
             screen_mode: mode,
             vd_res: Some("1920x1080".into()),

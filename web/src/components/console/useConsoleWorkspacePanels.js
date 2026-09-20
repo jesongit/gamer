@@ -1,12 +1,12 @@
 import { onUnmounted, ref, watch } from 'vue'
-import { isRemoteKeymapRunning } from '../../gamer-keymap-extension'
+import { isRemoteKeymapRunning } from '../../workspace/official-plugin-ui'
 
 /**
  * Console 右侧 Workspace 接线：URL panel 同步（hash 路由 query）、
  * 服务端扩展 UI 贡献轮询、远端 keymap 运行态与手柄输入轮询。
  * 面板注册完全由服务端 ui_contributions 驱动（runtime=core 面板挂宿主组件），
  * 本模块不再做任何本地回退注册；keymap 扩展 id 知识收敛在
- * gamer-keymap-extension.js（唯一前端配置点），此处只消费其运行态判定。
+ * 插件 UI 接入层（唯一前端配置点），此处只消费其运行态判定。
  */
 export function useConsoleWorkspacePanels({
   route,

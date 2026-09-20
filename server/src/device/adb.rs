@@ -1,7 +1,6 @@
 //! adb 命令封装（通过 adb 可执行文件）
 //!
 //! 支持：redroid / USB / 无线 adb / 模拟器统一接入。
-//! Docker 镜像内置 android-tools-adb；USB 设备需 --device 直通。
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -327,55 +326,11 @@ impl Adb {
         Ok(list)
     }
 
-    /// 解析设备配置 serial → 实际 adb transport（`adb devices -l` 的显示名）。
-    ///
-    /// 设备连接方式变化后（USB 直连 ↔ Android 11+ 无线调试），`adb devices`
-    /// 的显示名与配置里的 serial 会失配：
-    /// - USB 直连：显示为 serial（如 `HIUWUCNJOBEEOZDY`）→ 精确匹配
-    /// - 无线调试 mDNS：显示为 `adb-<serial>-<token>._adb-tls-connect._tcp` → 子串匹配
-    /// - 无线 adb IP:port：显示为 `192.168.31.96:43461` → 按 model 匹配
-    ///
-    /// 匹配优先级：精确 → 子串（双向）→ model == 设备 name。
-    /// 全部失配时原样返回配置 serial（保持旧行为，错误信息更清晰）。
-    pub async fn resolve_serial(&self, configured: &str, name: &str) -> String {
-        let out = self
-            .run(&["devices", "-l"], Duration::from_secs(10))
-            .await
-            .unwrap_or_default();
-        let mut by_model: Option<String> = None;
-        for line in out.lines().skip(1) {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() < 2 || parts[1] != "device" {
-                continue;
-            }
-            let ts = parts[0].to_string();
-            if ts == configured {
-                return ts;
-            }
-            // mDNS 名包含 serial（adb-<serial>-...）；反向子串（serial 恰好是 transport 前缀等）
-            if (ts.contains(configured) && !configured.is_empty())
-                || (configured.contains(&ts) && !ts.is_empty())
-            {
-                return ts;
-            }
-            let model = parts
-                .iter()
-                .find_map(|p| p.strip_prefix("model:"))
-                .unwrap_or("");
-            if !model.is_empty() && model == name && by_model.is_none() {
-                by_model = Some(ts);
-            }
-        }
-        by_model.unwrap_or_else(|| configured.to_string())
-    }
-
     /// serial 是否已连接（避免重复 connect / mDNS serial 无法 connect）
     pub async fn is_connected(&self, serial: &str) -> bool {
         match self.list_devices().await {
-            // 子串匹配兜底：传入的 serial 可能是 mDNS 名/IP:port（与配置 serial 不同）
-            Ok(list) => list
-                .iter()
-                .any(|s| s == serial || (s.contains(serial) && !serial.is_empty())),
+            // 仅完整 serial 相等；不按型号或子串猜测运行目标
+            Ok(list) => list.iter().any(|s| s == serial),
             Err(_) => false,
         }
     }
@@ -389,9 +344,40 @@ pub fn is_safe_pkg(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
 }
 
+/// Only explicit host:port endpoints may be passed to `adb connect`.
+/// USB serial, emulator serial and mDNS service names are already ADB transports.
+pub fn is_network_endpoint(value: &str) -> bool {
+    let Some((host, port)) = value.rsplit_once(':') else {
+        return false;
+    };
+    !host.is_empty()
+        && !host.chars().any(char::is_whitespace)
+        && port.parse::<u16>().is_ok_and(|port| port != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_safe_pkg;
+
+    #[test]
+    fn only_explicit_network_endpoints_are_reconnected() {
+        for value in ["127.0.0.1:5555", "phone.local:43461", "[::1]:5555"] {
+            assert!(super::is_network_endpoint(value), "{value}");
+        }
+        for value in [
+            "",
+            "SERIAL123",
+            "emulator-5554",
+            "adb-serial-token._adb-tls-connect._tcp",
+            "host:0",
+            "host:65536",
+            "host:abc",
+            ":5555",
+            "bad host:5555",
+        ] {
+            assert!(!super::is_network_endpoint(value), "{value}");
+        }
+    }
 
     #[test]
     fn shell_package_boundary_rejects_argument_and_command_injection() {

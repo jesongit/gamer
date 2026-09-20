@@ -2,7 +2,7 @@
 name = "gamer-server"
 version = "0.1.1"
 edition = "2021"
-description = "GameBot 游戏自动化助手服务端：scrcpy 设备控制 + WebRTC 推流 + 模板匹配 + YAML 自动化 + 定时任务"
+description = "Gamer 游戏自动化助手服务端：scrcpy 设备控制 + WebRTC 推流 + 模板匹配 + YAML 自动化 + 定时任务"
 
 [features]
 # Phase 10 收口：WASM 插件运行时进入默认构建（插件中心/官方市场为产品能力）。
@@ -76,4 +76,4 @@ wit-component = "0.254.0"
 tower = { version = "0.4", features = ["util"] }
 # V1 权威解释器：仅测试原生编译（生产执行走 WASM guest，同一份源码；
 # 计划 Phase 2：不为测试另写参考解释器）
-yaml-interp = { path = "guests/yaml-interp" }
+yaml-interp = { path = "../plugins/gamer-yaml/interpreter" }

@@ -21,20 +21,20 @@ describe('iframe 面板 plugin.call 经 UI Bridge 转发到 REST', () => {
     const pluginCall = createPluginCallAdapter(api)
     const result = await pluginCall(
       { action: 'list_scripts', values: { pkg: 'com.game' } },
-      { pluginId: 'gamer.yaml', panelId: 'automation' },
+      { pluginId: 'gamer-yaml', panelId: 'automation' },
     )
     expect(api.callExtension).toHaveBeenCalledTimes(1)
-    expect(api.callExtension).toHaveBeenCalledWith('gamer.yaml', 'list_scripts', { pkg: 'com.game' })
+    expect(api.callExtension).toHaveBeenCalledWith('gamer-yaml', 'list_scripts', { pkg: 'com.game' })
     expect(result).toEqual({ ok: true, result: 'done' })
   })
 
   it('payload 形态兜底：字符串按裸 action，缺 values 补空对象', async () => {
     const api = fakeApi()
     const pluginCall = createPluginCallAdapter(api)
-    await pluginCall('refresh', { pluginId: 'gamer.yaml', panelId: 'functions' })
-    await pluginCall({ action: 'refresh' }, { pluginId: 'gamer.yaml', panelId: 'functions' })
-    expect(api.callExtension).toHaveBeenNthCalledWith(1, 'gamer.yaml', 'refresh', {})
-    expect(api.callExtension).toHaveBeenNthCalledWith(2, 'gamer.yaml', 'refresh', {})
+    await pluginCall('refresh', { pluginId: 'gamer-yaml', panelId: 'functions' })
+    await pluginCall({ action: 'refresh' }, { pluginId: 'gamer-yaml', panelId: 'functions' })
+    expect(api.callExtension).toHaveBeenNthCalledWith(1, 'gamer-yaml', 'refresh', {})
+    expect(api.callExtension).toHaveBeenNthCalledWith(2, 'gamer-yaml', 'refresh', {})
   })
 
   it('注入 pluginCall 后，workspace context 的 uiBridge 按 iframe 请求封套转发 plugin.call', async () => {
@@ -45,9 +45,9 @@ describe('iframe 面板 plugin.call 经 UI Bridge 转发到 REST', () => {
       { id: 'req-1', method: 'plugin.call', params: { action: 'reload', values: { hard: true } } },
       ctx.uiBridge,
       port,
-      { pluginId: 'gamer.yaml', panelId: 'automation' },
+      { pluginId: 'gamer-yaml', panelId: 'automation' },
     )
-    expect(api.callExtension).toHaveBeenCalledWith('gamer.yaml', 'reload', { hard: true })
+    expect(api.callExtension).toHaveBeenCalledWith('gamer-yaml', 'reload', { hard: true })
     expect(port.messages[0]).toMatchObject({
       type: BRIDGE_RESPONSE_TYPE, id: 'req-1', ok: true,
       result: { ok: true, result: 'done' },
@@ -64,7 +64,7 @@ describe('iframe 面板 plugin.call 经 UI Bridge 转发到 REST', () => {
       { id: 'req-2', method: 'plugin.call', params: { action: 'refresh' } },
       ctx.uiBridge,
       port,
-      { pluginId: 'gamer.yaml', panelId: 'automation' },
+      { pluginId: 'gamer-yaml', panelId: 'automation' },
     )
     expect(port.messages[0]).toMatchObject({ type: BRIDGE_RESPONSE_TYPE, id: 'req-2', ok: false })
     expect(port.messages[0].error).toEqual({ code: 'bridge_error', message: '插件未运行' })
@@ -72,7 +72,7 @@ describe('iframe 面板 plugin.call 经 UI Bridge 转发到 REST', () => {
 
   it('未注入 pluginCall 时 plugin.call 报 plugin_call_unavailable（原始缺口的行为基线）', async () => {
     const ctx = createWorkspaceContext({})
-    await expect(ctx.uiBridge.dispatch('plugin.call', { action: 'x' }, { pluginId: 'gamer.yaml' }))
+    await expect(ctx.uiBridge.dispatch('plugin.call', { action: 'x' }, { pluginId: 'gamer-yaml' }))
       .rejects.toMatchObject({ code: 'plugin_call_unavailable' })
   })
 })

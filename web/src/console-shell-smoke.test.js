@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import './test-plugin-modules'
 import { describe, expect, it, vi } from 'vitest'
 
 // Console 壳挂载冒烟：phase-05 拆分后 Console.vue 只保留装配接线，
@@ -55,14 +56,14 @@ describe('Console 壳挂载冒烟（拆分后装配接线）', () => {
       expect(wrapper.exists()).toBe(true)
       expect(wrapper.text()).toContain('选择设备…')
       expect(wrapper.text()).toContain('连接')
-      // 工具条两组布局：应用区 = 应用下拉（未配置时占位「未选择应用」）+ 读取 + 启动；
-      // 停止应用/粘贴/按键等收进「更多 / 功能」下拉（Teleport 在此已 stub，
+      // 应用区 = 应用下拉（未配置时占位「未选择应用」）+ 读取 + 启动 + 停止应用；
+      // 粘贴/按键等收进操控区的更多下拉（Teleport 在此已 stub，
       // 菜单内容不渲染，只断言两个触发按钮），菜单结构由 console-components 静态回归锁定
       expect(wrapper.find('button[title^="新增 / 设置"]').exists()).toBe(true)
       expect(wrapper.text()).toContain('未选择应用')
       expect(wrapper.text()).toContain('读取')
       expect(wrapper.text()).toContain('启动')
-      expect(wrapper.text()).toContain('功能 ▾')
+      expect(wrapper.find('[aria-label="更多投屏功能"]').exists()).toBe(true)
       const toolbar = wrapper.find('.toolbar')
       expect(toolbar.find('.keymap-select').exists()).toBe(false)
       expect(toolbar.find('.stage-source-btn').exists()).toBe(false)
@@ -154,7 +155,7 @@ describe('Market 页挂载冒烟（T5b：分区渲染 插件市场/配置市场 
               version: '1.2.0',
               download_url: '/packages/official.hsr.daily-1.2.0.gamerpkg',
               android_targets: ['com.MiHoYo.hkrpg'],
-              required_plugins: ['gamer.yaml'],
+              required_plugins: ['gamer-yaml'],
               author: 'gamer.dev',
             }],
           }),
@@ -169,7 +170,7 @@ describe('Market 页挂载冒烟（T5b：分区渲染 插件市场/配置市场 
       expect(wrapper.text()).toContain('official.hsr.daily')
       expect(wrapper.text()).toContain('v1.2.0')
       expect(wrapper.text()).toContain('com.MiHoYo.hkrpg')
-      expect(wrapper.text()).toContain('gamer.yaml')
+      expect(wrapper.text()).toContain('gamer-yaml')
       expect(wrapper.text()).toContain('gamer.dev')
       expect(wrapper.text()).toContain('安装')
     } finally {

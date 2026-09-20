@@ -6,7 +6,7 @@
            时间戳均为 RFC3339 UTC 串（不携带服务端本地偏移），无法可靠推导 →
            常显兜底文案 -->
       <div class="tz-hint" data-testid="server-tz-hint">
-        任务按服务端本地时区执行（Docker 部署可用 TZ 配置）
+        任务按服务端本地时区执行
       </div>
     </div>
 

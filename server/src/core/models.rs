@@ -552,10 +552,10 @@ mod tests {
     #[test]
     fn run_request_is_runner_agnostic_and_round_trips_payload() {
         let payload = RunPayload::new(serde_json::json!({"args": {"count": 2}}));
-        let request = RunRequest::for_app(app(), "gamer.yaml", "daily", payload).unwrap();
+        let request = RunRequest::for_app(app(), "gamer-yaml", "daily", payload).unwrap();
 
         let json = serde_json::to_value(&request).unwrap();
-        assert_eq!(json["runner_id"], "gamer.yaml");
+        assert_eq!(json["runner_id"], "gamer-yaml");
         assert_eq!(json["entrypoint"], "daily");
         assert_eq!(json["payload"]["args"]["count"], 2);
         assert_eq!(serde_json::from_value::<RunRequest>(json).unwrap(), request);
@@ -567,7 +567,7 @@ mod tests {
         let error = RunRequest::new(
             other_device,
             app(),
-            "gamer.yaml",
+            "gamer-yaml",
             "daily",
             RunPayload::default(),
         )
@@ -579,7 +579,7 @@ mod tests {
     #[test]
     fn run_request_deserialization_keeps_device_scope_invariant() {
         let request =
-            RunRequest::for_app(app(), "gamer.yaml", "daily", RunPayload::default()).unwrap();
+            RunRequest::for_app(app(), "gamer-yaml", "daily", RunPayload::default()).unwrap();
         let mut json = serde_json::to_value(request).unwrap();
         json["device_id"] = serde_json::json!("device-2");
 
@@ -588,20 +588,20 @@ mod tests {
 
     #[test]
     fn resource_id_is_logical_and_plugin_scoped() {
-        let id = ResourceId::new("official.example", "gamer.yaml", "templates/status.png").unwrap();
+        let id = ResourceId::new("official.example", "gamer-yaml", "templates/status.png").unwrap();
 
         assert_eq!(id.package(), "official.example");
-        assert_eq!(id.plugin(), "gamer.yaml");
+        assert_eq!(id.plugin(), "gamer-yaml");
         assert_eq!(id.path(), "templates/status.png");
         assert_eq!(
             id.composite_key(),
-            "official.example/gamer.yaml/templates/status.png"
+            "official.example/gamer-yaml/templates/status.png"
         );
     }
 
     #[test]
     fn resource_id_composite_key_rejects_traversal_without_pathbuf() {
-        let id = ResourceId::from_composite_key("official.example/gamer.yaml/templates/status.png")
+        let id = ResourceId::from_composite_key("official.example/gamer-yaml/templates/status.png")
             .unwrap();
         assert_eq!(id.path(), "templates/status.png");
         assert!(ResourceId::from_composite_key("official.example/../secret.png").is_err());
@@ -615,7 +615,7 @@ mod tests {
         assert!(DeviceId::new(" ").is_err());
         assert!(AppPackageId::new("official/example").is_err());
         assert!(AndroidPackageName::new("com.example\n.game").is_err());
-        assert!(ResourceId::new("official.example", "gamer.yaml", "").is_err());
+        assert!(ResourceId::new("official.example", "gamer-yaml", "").is_err());
         // 插件维度同样走严格 id 语法（隔离前缀不可被构造出来）
         assert!(ResourceId::new("official.example", "..", "x").is_err());
     }

@@ -35,7 +35,7 @@ examples/hello/
 ```sh
 rustup target add wasm32-unknown-unknown     # 首次
 cd sdk/examples/echo-minimal
-pwsh ./build.ps1                             # 产物 dist/com.example.echo-1.0.0.gplugin
+pwsh ./build.ps1                             # 产物 dist/gamer-echo-1.0.0.gplugin
 # 按 README.md 里的 curl 序列 inspect → install → call
 ```
 

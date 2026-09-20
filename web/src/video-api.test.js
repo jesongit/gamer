@@ -4,7 +4,7 @@
  * 的 URL / 方法 / body / 查询参数与错误形态（带 status 的 Error）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ptsFromTime, videoApi } from './components/video/videoApi'
+import { ptsFromTime, videoApi } from '../../plugins/gamer-video/ui/src/components/video/videoApi'
 
 /** 够用的 Response 桩：request() 只读 ok/status/headers(content-type)/json。 */
 function jsonResponse(status, body, contentType = 'application/json') {
@@ -28,6 +28,17 @@ afterEach(() => {
 })
 
 describe('videoApi 媒体端点（合同 §1）', () => {
+  it('录制历史使用列表接口，并将旧服务的 404 区分于空历史', async () => {
+    fetchStub.mockResolvedValueOnce(jsonResponse(200, { sessions: [{ id: 'recording-1' }] }))
+    await expect(videoApi.recordingHistory()).resolves.toEqual([{ id: 'recording-1' }])
+    expect(fetchStub).toHaveBeenCalledWith('/api/recording', expect.objectContaining({ method: 'GET' }))
+    fetchStub.mockResolvedValueOnce(jsonResponse(404, null))
+    await expect(videoApi.recordingHistory()).rejects.toMatchObject({ status: 404, code: 'recording_history_unavailable', message: expect.stringContaining('重新构建并重启后端') })
+    fetchStub.mockResolvedValueOnce(jsonResponse(200, { sessions: [] }))
+    await expect(videoApi.recordingHistory()).resolves.toEqual([])
+    fetchStub.mockResolvedValueOnce(jsonResponse(500, { error: '读取失败' }))
+    await expect(videoApi.recordingHistory()).rejects.toMatchObject({ status: 500, message: '读取失败' })
+  })
   it('listMedia → GET /api/media，解包 media 数组', async () => {
     const meta = { id: 'm1', name: 'a.mp4' }
     fetchStub.mockResolvedValue(jsonResponse(200, { media: [meta] }))
@@ -121,12 +132,12 @@ describe('videoApi 录制端点（合同 §2）', () => {
 })
 
 describe('videoApi 草稿（合同 §5 call 通路）与工具函数', () => {
-  it('createVideoDraft → POST /api/extensions/gamer.yaml/call action=automation.create_draft，取 data 返回', async () => {
+  it('createVideoDraft → POST /api/extensions/gamer-yaml/call action=automation.create_draft，取 data 返回', async () => {
     const data = { yaml: 'version: 3\nsteps: []', diagnostics: [] }
     fetchStub.mockResolvedValue(jsonResponse(200, { ok: true, data }))
     await expect(videoApi.createVideoDraft('r-1', ['e1', 'e2'])).resolves.toBe(data)
     const [url, options] = fetchStub.mock.calls[0]
-    expect(url).toBe('/api/extensions/gamer.yaml/call')
+    expect(url).toBe('/api/extensions/gamer-yaml/call')
     expect(options.method).toBe('POST')
     expect(JSON.parse(options.body)).toEqual({
       action: 'automation.create_draft',
@@ -196,15 +207,15 @@ describe('videoApi 草稿（合同 §5 call 通路）与工具函数', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Phase 7 §10.1/§10.3：gamer.yaml 动作清单缝 + vision 离线测试 + 媒体引用同步
+// Phase 7 §10.1/§10.3：gamer-yaml 动作清单缝 + vision 离线测试 + 媒体引用同步
 // ---------------------------------------------------------------------------
 
-describe('videoApi 动作清单缝（gamer.yaml call）', () => {
-  it('createVideoDraft → POST /api/extensions/gamer.yaml/call（action + values，comments 可选）', async () => {
+describe('videoApi 动作清单缝（gamer-yaml call）', () => {
+  it('createVideoDraft → POST /api/extensions/gamer-yaml/call（action + values，comments 可选）', async () => {
     fetchStub.mockResolvedValue(jsonResponse(200, { data: { yaml: 'version: 3', diagnostics: [] } }))
     await videoApi.createVideoDraft('rec-1', ['b', 'a'], { b: '注释' })
     const [url, options] = fetchStub.mock.calls[0]
-    expect(url).toBe('/api/extensions/gamer.yaml/call')
+    expect(url).toBe('/api/extensions/gamer-yaml/call')
     expect(options.method).toBe('POST')
     expect(JSON.parse(options.body)).toEqual({
       action: 'automation.create_draft',
@@ -257,7 +268,7 @@ describe('videoApi 动作清单缝（gamer.yaml call）', () => {
     const [url, options] = fetchStub.mock.calls[0]
     expect(url).toBe('/api/capabilities/vision/test')
     expect(JSON.parse(options.body)).toEqual({
-      pkg: 'pkg', plugin: 'gamer.yaml', name: 'tpl', threshold: 0.85,
+      pkg: 'pkg', plugin: 'gamer-yaml', name: 'tpl', threshold: 0.85,
       region: [10, 0, 101, 50], media_id: 'm1', frame_index: 5,
     })
   })
@@ -266,22 +277,22 @@ describe('videoApi 动作清单缝（gamer.yaml call）', () => {
     fetchStub.mockResolvedValue(jsonResponse(200, { hit: false }))
     await videoApi.visionTestTemplate({ packageId: 'pkg', name: 't', frame: { mediaId: 'm1', ptsUs: 42 } })
     expect(JSON.parse(fetchStub.mock.calls[0][1].body)).toEqual({
-      pkg: 'pkg', plugin: 'gamer.yaml', name: 't', media_id: 'm1', pts_us: 42,
+      pkg: 'pkg', plugin: 'gamer-yaml', name: 't', media_id: 'm1', pts_us: 42,
     })
     await videoApi.visionTestTemplate({ packageId: 'pkg', name: 't' })
-    expect(JSON.parse(fetchStub.mock.calls[1][1].body)).toEqual({ pkg: 'pkg', plugin: 'gamer.yaml', name: 't' })
+    expect(JSON.parse(fetchStub.mock.calls[1][1].body)).toEqual({ pkg: 'pkg', plugin: 'gamer-yaml', name: 't' })
   })
 
   it('setMediaRefs → POST /api/media/:id/refs（全量替换 body）', async () => {
     fetchStub.mockResolvedValue(jsonResponse(200, { id: 'm1', refs: [] }))
     await videoApi.setMediaRefs('m1', [
-      { packageId: 'pkg', pluginId: 'gamer.video', kind: 'project' },
+      { packageId: 'pkg', pluginId: 'gamer-video', kind: 'project' },
     ])
     const [url, options] = fetchStub.mock.calls[0]
     expect(url).toBe('/api/media/m1/refs')
     expect(options.method).toBe('POST')
     expect(JSON.parse(options.body)).toEqual({
-      refs: [{ package_id: 'pkg', plugin_id: 'gamer.video', kind: 'project' }],
+      refs: [{ package_id: 'pkg', plugin_id: 'gamer-video', kind: 'project' }],
     })
   })
 })

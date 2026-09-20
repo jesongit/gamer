@@ -2,7 +2,7 @@ use super::*;
 
 // ---------- 统一执行入口（POST /api/runs，P11.6）----------
 //
-// 经 TimerRunnerRegistry 分发到 gamer.yaml runner（测试装配同步注册）；
+// 经 TimerRunnerRegistry 分发到 gamer-yaml runner（测试装配同步注册）；
 // payload/entrypoint 语义为 runner 私有契约。
 
 /// 挂起到取消的假执行器（真实 RunManager 语义下测 router 行为）。
@@ -58,7 +58,7 @@ impl crate::run_manager::RunExecutor for HangExecutor {
 
 fn dispatch_body(entrypoint: &str, payload: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
-        "runner_id": "gamer.yaml",
+        "runner_id": "gamer-yaml",
         "entrypoint": entrypoint,
         "device_id": "d1",
         "payload": payload,
@@ -98,7 +98,7 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     });
     let name = body["name"].as_str().unwrap().to_string();
     let content = body["content"].as_str().unwrap().to_string();
-    let resp = put_package_text(&t, &sid, "com.test.app", "gamer.yaml", &format!("automations/{name}"), &content).await;
+    let resp = put_package_text(&t, &sid, "com.test.app", "gamer-yaml", &format!("automations/{name}"), &content).await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
 
     // 错误的显式资源上下文必须在提交时拒绝，不能等到 WASM 编译后读取模板才报错。
@@ -201,7 +201,7 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     assert_eq!(context.android_package.as_str(), "com.example.game");
     // 执行阶段模板寻址必须能构造合法的资源三元组，不能把 #函数名带进 Package。
     crate::core::ResourceId::new(
-        context.content_package.unwrap().as_str(), "gamer.yaml", "templates/指南.png"
+        context.content_package.unwrap().as_str(), "gamer-yaml", "templates/指南.png"
     ).unwrap();
 
     // 设备互斥：同设备第二个函数运行 → 409，busy 摘要携带展示标签
@@ -280,7 +280,7 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     });
     let name = body["name"].as_str().unwrap().to_string();
     let content = body["content"].as_str().unwrap().to_string();
-    let resp = put_package_text(&t, &sid, "com.test.app", "gamer.yaml", &format!("automations/{name}"), &content).await;
+    let resp = put_package_text(&t, &sid, "com.test.app", "gamer-yaml", &format!("automations/{name}"), &content).await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
     let resp = post_json(
         &t,
@@ -327,7 +327,7 @@ async fn dispatch_without_registered_runner_reports_dependency_missing() {
     );
     seed_device(&t, "d1", "com.example.game").await;
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
-    // build_app 已注册 gamer.yaml；用未知 runner_id 断言依赖缺失分发语义
+    // build_app 已注册 gamer-yaml；用未知 runner_id 断言依赖缺失分发语义
     let resp = post_json(
         &t,
         &sid,

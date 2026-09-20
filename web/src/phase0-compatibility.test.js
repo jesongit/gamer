@@ -58,7 +58,7 @@ describe('Phase 0 shared compatibility fixtures', () => {
       'schedule',
     ])
     expect(task.app).toMatchObject({ device_id: 'fixture-device' })
-    expect(task.runner).toMatchObject({ runner_id: 'gamer.yaml', entrypoint: 'phase0_smoke.yaml' })
+    expect(task.runner).toMatchObject({ runner_id: 'gamer-yaml', entrypoint: 'phase0_smoke.yaml' })
     expect(task.runner.payload).toEqual({ args: {} })
     expect(task.schedule).toEqual({ provider_id: 'cron', config: { expression: '0 */15 * * * * *' } })
     expect(task.enabled).toBe(true)

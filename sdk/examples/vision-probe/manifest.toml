@@ -3,7 +3,7 @@
 # host_api 域——权限声明必须先于真实调用存在，否则宿主在 capability 边界
 # 返回 kind=denied（对照 hello 的 probe_denied 动作）。
 manifest_version = 2
-id = "com.example.visionprobe"
+id = "gamer-vision-probe"
 version = "1.0.0"
 name = "视觉探针示例"
 description = "声明 device/vision/input 权限并真实调用受控 Host API：resolve 设备 → capture 一帧 → 采样颜色；tap 默认 dry-run，不触达真机"

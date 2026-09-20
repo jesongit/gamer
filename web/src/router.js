@@ -8,7 +8,11 @@ const routes = [
     component: () => import('./layouts/MainLayout.vue'),
     children: [
       { path: '', redirect: '/console' },
-      { path: 'console', name: 'Console', component: () => import('./views/Console.vue') },
+      { path: 'console', name: 'Console', component: async () => {
+        const { preparePluginModules } = await import('./workspace/plugin-module-loader')
+        await preparePluginModules()
+        return import('./views/Console.vue')
+      } },
       { path: '/:pathMatch(.*)*', redirect: '/console' }
     ]
   }

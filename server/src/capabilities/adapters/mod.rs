@@ -339,14 +339,14 @@ mod tests {
         seed_template(
             &store,
             "com.test.game",
-            "gamer.yaml",
+            "gamer-yaml",
             "automations/daily.yaml",
             b"steps: []\n",
         );
         let resources = Arc::new(ResourceAdapter::new(store));
         let entry = resources
             .resolve(
-                &ResourceId::new("com.test.game", "gamer.yaml", "automations/daily.yaml").unwrap(),
+                &ResourceId::new("com.test.game", "gamer-yaml", "automations/daily.yaml").unwrap(),
             )
             .await
             .unwrap();
@@ -365,7 +365,7 @@ mod tests {
             .upsert_device(&crate::store::Device {
                 id: "d1".into(),
                 name: "d1".into(),
-                kind: "usb".into(),
+
                 addr: String::new(),
                 screen_mode: crate::store::ScreenMode::Mirror,
                 vd_res: None,

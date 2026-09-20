@@ -7,7 +7,7 @@ use super::*;
 const DORMANT_KEYMAP_YAML: &str = "version: 1\nname: dormant\nbindings:\n  - key: KeyW\n    action:\n      type: hold\n      at: [0.25, 0.75]\n";
 
 /// 构造含 dormant 插件数据的 .gamerpkg：
-/// - `plugins/gamer.keymap/mappings/`（keymap 扩展未安装时的既有方案数据）
+/// - `plugins/gamer-keymap/mappings/`（keymap 扩展未安装时的既有方案数据）
 /// - `plugins/vendor.ocr.example/`（Core 完全不认识的第三方插件数据）
 fn dormant_package_archive() -> Vec<u8> {
     craft_zip(vec![
@@ -20,7 +20,7 @@ version = "1.0.0"
 [targets.android]
 packages = ["com.miHoYo.hkrpg"]
 
-[plugins."gamer.keymap"]
+[plugins."gamer-keymap"]
 required = false
 
 [plugins."vendor.ocr.example"]
@@ -30,7 +30,7 @@ required = false
             .to_vec(),
         ),
         (
-            "plugins/gamer.keymap/mappings/dormant.yaml",
+            "plugins/gamer-keymap/mappings/dormant.yaml",
             DORMANT_KEYMAP_YAML.as_bytes().to_vec(),
         ),
         (
@@ -56,8 +56,8 @@ async fn dormant_plugin_data_survives_import_duplicate_and_serves_later_start() 
         .as_array()
         .unwrap()
         .iter()
-        .any(|entry| entry["id"] == "gamer.keymap");
-    assert!(!listed, "测试前置失败：gamer.keymap 不应已安装");
+        .any(|entry| entry["id"] == "gamer-keymap");
+    assert!(!listed, "测试前置失败：gamer-keymap 不应已安装");
 
     // 导入含 dormant 插件数据的包 → 201（plan §5.1/§5.2：缺插件允许导入）
     let imported = send(
@@ -76,14 +76,14 @@ async fn dormant_plugin_data_survives_import_duplicate_and_serves_later_start() 
     assert_eq!(manifest["id"], "official.hsr.daily");
     let plugins = manifest["plugins"].as_array().unwrap();
     assert!(
-        plugins.contains(&serde_json::json!({"id": "gamer.keymap", "required": false})),
+        plugins.contains(&serde_json::json!({"id": "gamer-keymap", "required": false})),
         "manifest 应保留 optional 依赖声明: {plugins:?}"
     );
 
     // 数据保留：盘上原样（不被解释、不被删）
     let dormant_yaml = t
         .dir
-        .join("packages/official.hsr.daily/plugins/gamer.keymap/mappings/dormant.yaml");
+        .join("packages/official.hsr.daily/plugins/gamer-keymap/mappings/dormant.yaml");
     assert!(dormant_yaml.is_file(), "dormant keymap 数据必须原样保留");
     let unknown_bin = t
         .dir
@@ -99,7 +99,7 @@ async fn dormant_plugin_data_survives_import_duplicate_and_serves_later_start() 
     let read_back = get_json(
         &t,
         &sid,
-        "/api/packages/official.hsr.daily/plugins/gamer.keymap/resources/mappings/dormant.yaml",
+        "/api/packages/official.hsr.daily/plugins/gamer-keymap/resources/mappings/dormant.yaml",
     )
     .await;
     assert_eq!(read_back.status(), StatusCode::OK);
@@ -130,7 +130,7 @@ async fn dormant_plugin_data_survives_import_duplicate_and_serves_later_start() 
     assert_eq!(duplicated.status(), StatusCode::CREATED, "{}", json_body(duplicated).await);
     assert!(t
         .dir
-        .join("packages/user.hsr.custom/plugins/gamer.keymap/mappings/dormant.yaml")
+        .join("packages/user.hsr.custom/plugins/gamer-keymap/mappings/dormant.yaml")
         .is_file());
     assert!(t
         .dir
@@ -164,7 +164,7 @@ async fn dormant_plugin_data_survives_import_duplicate_and_serves_later_start() 
     assert!(!t.dir.join("packages/user.hsr.custom").exists());
 }
 
-/// 安装 gamer.keymap 后直接消费导入时带来的 dormant 数据（plan §6「后续安装
+/// 安装 gamer-keymap 后直接消费导入时带来的 dormant 数据（plan §6「后续安装
 /// 插件后自动恢复对应能力」）：start 携带 `{package_id, android_package}` 双
 /// 字段上下文，profile 从既有 `mappings/` 数据加载成功。
 #[cfg(feature = "wasm-runtime")]
@@ -209,7 +209,7 @@ async fn installed_keymap_plugin_starts_directly_on_dormant_data() {
 
     // 安装即用已 Running：disable（运行中自动 stop → Disabled），再以 dormant
     // 数据上下文 enable（enable = 启用 + 携带 profile 启动）
-    let stopped = post_json(&t, &sid, "/api/extensions/gamer.keymap/disable", serde_json::json!({})).await;
+    let stopped = post_json(&t, &sid, "/api/extensions/gamer-keymap/disable", serde_json::json!({})).await;
     assert_eq!(stopped.status(), StatusCode::OK);
 
     // 已有 dormant 数据直接可用：package_id 数据上下文 + 方案名 → Running。
@@ -217,7 +217,7 @@ async fn installed_keymap_plugin_starts_directly_on_dormant_data() {
     let started = post_json(
         &t,
         &sid,
-        "/api/extensions/gamer.keymap/enable",
+        "/api/extensions/gamer-keymap/enable",
         serde_json::json!({
             "app_context": {
                 "device_id": "device-1",
@@ -230,14 +230,14 @@ async fn installed_keymap_plugin_starts_directly_on_dormant_data() {
     .await;
     assert_eq!(started.status(), StatusCode::OK, "{}", json_body(started).await);
     assert_eq!(json_body(started).await["state"], "running");
-    let stopped = post_json(&t, &sid, "/api/extensions/gamer.keymap/disable", serde_json::json!({})).await;
+    let stopped = post_json(&t, &sid, "/api/extensions/gamer-keymap/disable", serde_json::json!({})).await;
     assert_eq!(stopped.status(), StatusCode::OK);
 
     // 数据上下文缺失 → 400（android_package 不再承担数据分区语义）
     let missing_context = post_json(
         &t,
         &sid,
-        "/api/extensions/gamer.keymap/enable",
+        "/api/extensions/gamer-keymap/enable",
         serde_json::json!({
             "app_context": {
                 "device_id": "device-1",
@@ -258,7 +258,7 @@ async fn installed_keymap_plugin_starts_directly_on_dormant_data() {
     let no_scheme = post_json(
         &t,
         &sid,
-        "/api/extensions/gamer.keymap/enable",
+        "/api/extensions/gamer-keymap/enable",
         serde_json::json!({
             "app_context": {
                 "device_id": "device-1",
@@ -280,7 +280,7 @@ async fn installed_keymap_plugin_starts_directly_on_dormant_data() {
         &t.app,
         req(
             "DELETE",
-            "/api/extensions/gamer.keymap/1.0.0",
+            "/api/extensions/gamer-keymap/1.0.0",
             None,
             &json_headers(sid),
             None,
@@ -290,6 +290,6 @@ async fn installed_keymap_plugin_starts_directly_on_dormant_data() {
     assert_eq!(uninstalled.status(), StatusCode::NO_CONTENT);
     assert!(t
         .dir
-        .join("packages/official.hsr.daily/plugins/gamer.keymap/mappings/dormant.yaml")
+        .join("packages/official.hsr.daily/plugins/gamer-keymap/mappings/dormant.yaml")
         .is_file());
 }

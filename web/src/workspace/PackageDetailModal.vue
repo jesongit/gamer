@@ -34,7 +34,7 @@
           <div class="field">
             <span>插件依赖（逐行 id + required；允许声明未安装插件）</span>
             <div v-for="(dep, i) in ctx.detailModal.form.plugins" :key="`dep-${i}`" class="plugin-dep-row">
-              <input v-model="dep.id" class="input mono" placeholder="插件 id，如 gamer.yaml" spellcheck="false" />
+              <input v-model="dep.id" class="input mono" placeholder="插件 id，如 gamer-yaml" spellcheck="false" />
               <label class="dep-required"><input v-model="dep.required" type="checkbox" />必需</label>
               <button type="button" class="btn btn-sm" @click="ctx.removePluginDep(i)">移除</button>
             </div>

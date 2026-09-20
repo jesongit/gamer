@@ -24,17 +24,17 @@ function detailRep(overrides = {}) {
       id: 'com.demo', name: 'Demo', version: '1.2.3', author: 'alice', revision: 7,
       targets: { android: { packages: ['com.miHoYo.hkrpg'] } },
       plugins: [
-        { id: 'gamer.yaml', required: true },
-        { id: 'gamer.keymap', required: false },
+        { id: 'gamer-yaml', required: true },
+        { id: 'gamer-keymap', required: false },
       ],
     },
     stats: {
       files: 12, bytes: 2048,
-      plugins: [{ plugin: 'gamer.yaml', files: 10, bytes: 1024 }],
+      plugins: [{ plugin: 'gamer-yaml', files: 10, bytes: 1024 }],
     },
     plugin_states: [
-      { plugin: 'gamer.yaml', required: true, state: 'available' },
-      { plugin: 'gamer.keymap', required: false, state: 'missing_optional' },
+      { plugin: 'gamer-yaml', required: true, state: 'available' },
+      { plugin: 'gamer-keymap', required: false, state: 'missing_optional' },
     ],
     ...overrides,
   }
@@ -180,14 +180,14 @@ describe('PackageDetailModal（plan §18/§21/§37 + §17）', () => {
     expect(ctx.detailModal.form.name).toBe('Demo')
     expect(ctx.detailModal.form.androidPackagesText).toBe('com.miHoYo.hkrpg')
     expect(ctx.detailModal.form.plugins).toEqual([
-      { id: 'gamer.yaml', required: true },
-      { id: 'gamer.keymap', required: false },
+      { id: 'gamer-yaml', required: true },
+      { id: 'gamer-keymap', required: false },
     ])
 
     const inputs = wrapper.findAll('.detail-edit input.input')
     await inputs[1].setValue('2.0.0')          // version
     await inputs[3].setValue('com.A, com.B')   // android targets
-    // 插件依赖行：勾掉第二行 gamer.keymap 的 required
+    // 插件依赖行：勾掉第二行 gamer-keymap 的 required
     const checks = wrapper.findAll('.plugin-dep-row input[type="checkbox"]')
     await checks[1].setValue(false)
 
@@ -201,7 +201,7 @@ describe('PackageDetailModal（plan §18/§21/§37 + §17）', () => {
       version: '2.0.0',
       author: 'alice',
       targets: { android: { packages: ['com.A', 'com.B'] } },
-      plugins: { 'gamer.yaml': true, 'gamer.keymap': false },
+      plugins: { 'gamer-yaml': true, 'gamer-keymap': false },
       expected_revision: 7,
     })
     expect(ctx.detailModal.editing).toBe(false)
@@ -251,7 +251,7 @@ describe('PackageDetailModal（plan §18/§21/§37 + §17）', () => {
       version: '2.0.0',
       author: 'alice',
       targets: { android: { packages: ['com.miHoYo.hkrpg'] } },
-      plugins: { 'gamer.yaml': true, 'gamer.keymap': false },
+      plugins: { 'gamer-yaml': true, 'gamer-keymap': false },
       force: true,
     })
     expect(ctx.detailModal.editing).toBe(false)
@@ -289,13 +289,13 @@ describe('导入覆盖弹窗 Required Plugin 缺失提示（plan §36）', () =>
       existing: {
         id: 'pkg.demo', name: 'Demo', version: '1.0.0',
         plugins: [
-          { id: 'gamer.yaml', required: true },
+          { id: 'gamer-yaml', required: true },
           { id: 'other.plugin', required: true },
           { id: 'opt.plugin', required: false },
         ],
       },
     }))
-    api.listExtensions.mockResolvedValue({ extensions: [{ id: 'gamer.yaml', state: 'Running' }] })
+    api.listExtensions.mockResolvedValue({ extensions: [{ id: 'gamer-yaml', state: 'Running' }] })
     const ctx = usePackageContext({ api, toast })
     await ctx.importPackage(fileLike(bytes))
 
@@ -347,6 +347,21 @@ describe('导入覆盖弹窗 Required Plugin 缺失提示（plan §36）', () =>
     expect(warning.exists()).toBe(true)
     expect(warning.text()).toContain('缺少插件 other.plugin')
     expect(warning.text()).toContain('导入后部分功能不可用，安装插件后自动恢复')
+  })
+
+  it('配置包菜单选择动作后收起，删除仍先确认且不直接发送请求', async () => {
+    const { api } = setup()
+    api.deletePackage = vi.fn()
+    const ctx = usePackageContext({ api, toast: vi.fn() })
+    const wrapper = mount(PackageContextBar, { props: { context: ctx }, global: { stubs: { teleport: true } } })
+    const menu = wrapper.get('details.pkg-more')
+    menu.element.open = true
+    await wrapper.get('[aria-label="删除配置"]').trigger('click')
+    expect(menu.element.open).toBe(false)
+    expect(ctx.deleteModal.open).toBe(true)
+    expect(ctx.deleteModal.target.id).toBe('com.demo')
+    expect(api.deletePackage).not.toHaveBeenCalled()
+    wrapper.unmount()
   })
 
   it('顶栏「详情」按钮打开 PackageDetailModal（当前包为空时禁用）', async () => {

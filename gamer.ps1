@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-  GameBot (gamer) 项目启动管理脚本：同时管理后端 gamer-server 与前端 Vite。
+  Gamer (gamer) 项目启动管理脚本：同时管理后端 gamer-server 与前端 Vite。
 
 .DESCRIPTION
   start / stop / restart / rebuild / status 默认同时作用于前后端：
@@ -551,6 +551,14 @@ function Start-Frontend {
 
     # 依赖缺失时自动安装
     Ensure-FrontendDeps
+    $missingPluginUi = @('gamer-yaml', 'gamer-keymap', 'gamer-video') | Where-Object {
+        -not (Test-Path -LiteralPath (Join-Path $WebDir "public\plugin-ui\$_\plugin.js"))
+    }
+    if ($missingPluginUi) {
+        Invoke-NativeChecked -Desc '前端: 构建独立插件 UI ...' -Cmd {
+            & node (Join-Path $Root 'sdk\ui\build-modules.mjs')
+        }
+    }
 
     Write-Host "前端: 启动 vite dev（端口 $FrontendPort）..."
     Write-Host ("前端日志: {0}，stderr: {1}" -f $FrontendLog, $FrontendErrLog)
@@ -758,7 +766,7 @@ function Test-AdbUsb {
 $Port = Get-ServerPort
 $DataDir = Get-DataDir
 $Both = -not $BackendOnly -and -not $FrontendOnly
-Write-Host ("== gamer.ps1：GameBot 前后端管理（后端端口 {0} / 前端端口 {1}）==" -f $Port, $FrontendPort)
+Write-Host ("== gamer.ps1：Gamer 前后端管理（后端端口 {0} / 前端端口 {1}）==" -f $Port, $FrontendPort)
 
 switch ($Command) {
     'start' {

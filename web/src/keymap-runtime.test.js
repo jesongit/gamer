@@ -9,7 +9,7 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import { ref } from 'vue'
-import { useConsoleKeymap } from './components/console/useConsoleKeymap'
+import { useConsoleKeymap } from '../../plugins/gamer-keymap/ui/src/components/console/useConsoleKeymap'
 
 const KEYMAP_YAML = [
   'version: 1',

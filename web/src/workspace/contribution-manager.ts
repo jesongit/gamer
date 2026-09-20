@@ -46,7 +46,7 @@ export interface CorePanelDescriptor {
   getProps?: (context: Record<string, unknown>) => Record<string, unknown>
 }
 
-export type ResolveCoreComponent = (componentKey: string) => CorePanelDescriptor | null
+export type ResolveCoreComponent = (componentKey: string, pluginId?: string) => CorePanelDescriptor | null
 
 export interface ManifestContributionOptions {
   runtime?: ExtensionRuntime
@@ -108,7 +108,7 @@ function panelFromManifest(
   let descriptor: CorePanelDescriptor | null = null
   if (item.runtime === 'core') {
     const componentKey = String(item.component || '').trim()
-    descriptor = options.resolveCore?.(componentKey) || unknownCorePanel(componentKey)
+    descriptor = options.resolveCore?.(componentKey, pluginId) || unknownCorePanel(componentKey)
   }
   const aliases = [
     ...new Set([

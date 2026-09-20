@@ -20,14 +20,14 @@ import {
   orientedSize,
   orientedToEncoded,
   referenceToEncoded,
-} from './components/video/calibration'
+} from '../../plugins/gamer-video/ui/src/components/video/calibration'
 import {
   alignEvents,
   eventMediaPosition,
   eventSourceLabel,
   segmentForTimeline,
   sortEvents,
-} from './components/video/recordingEvents'
+} from '../../plugins/gamer-video/ui/src/components/video/recordingEvents'
 import {
   assetStatus,
   isMarkerStale,
@@ -42,8 +42,8 @@ import {
   withMarker,
   withMarkerText,
   withoutMarker,
-} from './components/video/videoProject'
-import { videoApi } from './components/video/videoApi'
+} from '../../plugins/gamer-video/ui/src/components/video/videoProject'
+import { videoApi } from '../../plugins/gamer-video/ui/src/components/video/videoApi'
 
 const MEDIA = { id: 'm1', name: '录制.mp4', sha256: 'a'.repeat(64), duration_us: 6_500_000, width: 1920, height: 1080 }
 
@@ -308,20 +308,20 @@ describe('videoApi 项目端点（Package 资源 API）', () => {
   it('listProjectEntries → GET resources?prefix=projects/，解包 resources 数组', async () => {
     fetchStub.mockResolvedValue(jsonResponse(200, { resources: [{ path: 'projects/p1.json', content: '{}' }] }))
     await expect(videoApi.listProjectEntries('my pkg')).resolves.toHaveLength(1)
-    expect(fetchStub.mock.calls[0][0]).toBe(`/api/packages/my%20pkg/plugins/gamer.video/resources?prefix=${encodeURIComponent('projects/')}`)
+    expect(fetchStub.mock.calls[0][0]).toBe(`/api/packages/my%20pkg/plugins/gamer-video/resources?prefix=${encodeURIComponent('projects/')}`)
   })
 
   it('getProject / putProject / deleteProject / projectUrl 走三元组路径（%2F 安全分段编码）', async () => {
     fetchStub.mockResolvedValue(jsonResponse(200, { path: 'projects/p1.json', content: '{}', version: 'abc123' }))
     const entry = await videoApi.getProject('pkg', 'p1')
     expect(entry.version).toBe('abc123')
-    expect(fetchStub.mock.calls[0][0]).toBe('/api/packages/pkg/plugins/gamer.video/resources/projects/p1.json')
+    expect(fetchStub.mock.calls[0][0]).toBe('/api/packages/pkg/plugins/gamer-video/resources/projects/p1.json')
 
     fetchStub.mockResolvedValue(jsonResponse(200, { version: 'def456', ok: true }))
     const saved = await videoApi.putProject('pkg', 'p1', '{"k":1}', { expectedVersion: 'abc123' })
     expect(saved.version).toBe('def456')
     const [url, options] = fetchStub.mock.calls[1]
-    expect(url).toBe('/api/packages/pkg/plugins/gamer.video/resources/projects/p1.json')
+    expect(url).toBe('/api/packages/pkg/plugins/gamer-video/resources/projects/p1.json')
     expect(options.method).toBe('PUT')
     expect(JSON.parse(options.body)).toEqual({ content: '{"k":1}', expected_version: 'abc123' })
 
@@ -331,9 +331,9 @@ describe('videoApi 项目端点（Package 资源 API）', () => {
 
     fetchStub.mockResolvedValue(jsonResponse(204, null))
     await expect(videoApi.deleteProject('pkg', 'p1')).resolves.toBeNull()
-    expect(fetchStub.mock.calls[3][0]).toBe('/api/packages/pkg/plugins/gamer.video/resources/projects/p1.json')
+    expect(fetchStub.mock.calls[3][0]).toBe('/api/packages/pkg/plugins/gamer-video/resources/projects/p1.json')
     // URL 构造器不发请求
-    expect(videoApi.projectUrl('pkg', 'p.1_x')).toBe('/api/packages/pkg/plugins/gamer.video/resources/projects/p.1_x.json')
+    expect(videoApi.projectUrl('pkg', 'p.1_x')).toBe('/api/packages/pkg/plugins/gamer-video/resources/projects/p.1_x.json')
   })
 
   it('putProject 保存冲突（409 invalid_content/version_conflict）原样上抛 status/code', async () => {
@@ -348,7 +348,7 @@ describe('videoApi 项目端点（Package 资源 API）', () => {
     fetchStub.mockResolvedValue(jsonResponse(200, { ok: true, path: 'projects/p2.json' }))
     await videoApi.renameProject('pkg', 'p1', 'p2')
     const [url, options] = fetchStub.mock.calls[0]
-    expect(url).toBe('/api/packages/pkg/plugins/gamer.video/rename')
+    expect(url).toBe('/api/packages/pkg/plugins/gamer-video/rename')
     expect(options.method).toBe('POST')
     expect(JSON.parse(options.body)).toEqual({ path: 'projects/p1.json', new_path: 'projects/p2.json' })
   })

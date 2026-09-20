@@ -66,7 +66,7 @@ mod update_flow_tests {
         let body = serde_json::json!({ "content": content, "force": true }).to_string();
         let request = HttpRequest::builder()
             .method("PUT")
-            .uri(format!("/api/packages/com.test.app/plugins/gamer.yaml/resources/automations/{name}"))
+            .uri(format!("/api/packages/com.test.app/plugins/gamer-yaml/resources/automations/{name}"))
             .header(axum::http::header::COOKIE, sid)
             .header(axum::http::header::CONTENT_TYPE, "application/json")
             .body(Body::from(body))
@@ -154,11 +154,11 @@ mod update_flow_tests {
         let executor = Arc::new(BlockingExec { started });
         let runs = Arc::new(crate::run_manager::RunManager::new(executor));
         let scheduler = Arc::new(Scheduler::new(db.clone()));
-        // gamer.yaml timer runner 注册（与生产扩展 start 生命周期等价）
+        // gamer-yaml timer runner 注册（与生产扩展 start 生命周期等价）
         scheduler
             .register_runner_for_tests(
-                "gamer.yaml",
-                "gamer.yaml",
+                "gamer-yaml",
+                "gamer-yaml",
                 Arc::new(crate::extensions::gamer_yaml::timer_yaml::YamlTimerRunner::new(
                     db.clone(),
                     runs.clone(),
@@ -397,7 +397,7 @@ mod update_flow_tests {
             .upsert_device(&Device {
                 id: "dev-1".into(),
                 name: "dev-1".into(),
-                kind: "wifi".into(),
+
                 addr: "127.0.0.1:5555".into(),
                 screen_mode: ScreenMode::Mirror,
                 vd_res: None,
@@ -416,7 +416,7 @@ mod update_flow_tests {
             &sid,
             "/api/runs",
             serde_json::json!({
-                "runner_id": "gamer.yaml",
+                "runner_id": "gamer-yaml",
                 "entrypoint": "com.test.app/forever.yaml",
                 "device_id": "dev-1"
             }),
@@ -504,7 +504,7 @@ mod update_flow_tests {
         for uri in [
             "/api/devices",
             "/api/tasks",
-            "/api/packages/com.test.app/plugins/gamer.yaml/resources",
+            "/api/packages/com.test.app/plugins/gamer-yaml/resources",
             "/api/system/info",
         ] {
             let resp = get_json(&t, &sid, uri).await;

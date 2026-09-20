@@ -10,7 +10,7 @@ vi.mock('./api', () => ({
   api: { listTemplates: vi.fn() },
 }))
 
-vi.mock('./components/video/videoApi', async importOriginal => {
+vi.mock('../../plugins/gamer-video/ui/src/components/video/videoApi', async importOriginal => {
   const actual = await importOriginal()
   return {
     ...actual,
@@ -24,10 +24,10 @@ vi.mock('./components/video/videoApi', async importOriginal => {
   }
 })
 
-import VideoTimeline from './components/video/VideoTimeline.vue'
-import TemplateStudio from './components/video/TemplateStudio.vue'
+import VideoTimeline from '../../plugins/gamer-video/ui/src/components/video/VideoTimeline.vue'
+import TemplateStudio from '../../plugins/gamer-video/ui/src/components/video/TemplateStudio.vue'
 import { api } from './api'
-import { videoApi } from './components/video/videoApi'
+import { videoApi } from '../../plugins/gamer-video/ui/src/components/video/videoApi'
 
 const MEDIA_A = { id: 'media-a', name: 'A.mp4', duration_us: 2_000_000, width: 100, height: 50 }
 const MEDIA_B = { id: 'media-b', name: 'B.mp4', duration_us: 3_000_000, width: 200, height: 100 }

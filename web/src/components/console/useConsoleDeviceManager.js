@@ -44,16 +44,10 @@ export function useConsoleDeviceManager({
   ]
   // 帧率仅提供具体数值（无"自动"选项），默认 30
   const fpsPresets = [15, 30, 60, 120]
-  const types = [
-    { key: 'redroid', label: 'redroid 容器', icon: '🐳' },
-    { key: 'usb', label: 'USB 直连', icon: '🔌' },
-    { key: 'wifi', label: '无线 adb', icon: '📶' },
-    { key: 'emu', label: '模拟器', icon: '🖥️' }
-  ]
   // 表单状态：'edit' 编辑现有设备 / 'add' 手动新增（均在设置弹窗内完成）
   // 默认配置：分辨率 1920x1080 · 帧率 30 · DPI 自动（0）
   const mode = ref('edit')
-  const form = reactive({ name: '', kind: 'redroid', addr: '', screen_mode: 'virtual', vd_res: '1920x1080', vd_dpi: 0, fps: 30 })
+  const form = reactive({ name: '', addr: '', screen_mode: 'virtual', vd_res: '1920x1080', vd_dpi: 0, fps: 30 })
   const scanning = consoleRuntime.scanning
   // 配置保存进行中标志：防止重复提交
   const configApplying = ref(false)
@@ -94,11 +88,6 @@ export function useConsoleDeviceManager({
     return label && label !== pkg ? `${label} · ${pkg}` : pkg
   }
 
-  /** 接入方式展示（新增时可选，编辑时只读徽章） */
-  function kindInfo(k) {
-    return types.find(t => t.key === k) || { key: k, label: k || '未知', icon: '📱' }
-  }
-
   /** 编辑模式概览里的屏幕摘要（与配置表单区分开，避免重复） */
   const screenSummary = computed(() => {
     return formatScreenSummary(current.value)
@@ -120,7 +109,6 @@ export function useConsoleDeviceManager({
   function loadForm(d) {
     mode.value = 'edit'
     form.name = d.name || ''
-    form.kind = d.kind || 'redroid'
     form.addr = d.addr || ''
     form.screen_mode = d.screen_mode || 'virtual'
     form.vd_res = d.vd_res || '1920x1080'
@@ -148,7 +136,6 @@ export function useConsoleDeviceManager({
   function startAdd() {
     mode.value = 'add'
     form.name = ''
-    form.kind = 'redroid'
     form.addr = ''
     form.screen_mode = 'virtual'
     form.vd_res = '1920x1080'
@@ -235,7 +222,6 @@ export function useConsoleDeviceManager({
   function buildPayload() {
     return {
       name: form.name.trim(),
-      kind: form.kind,
       addr: form.addr.trim(),
       screen_mode: form.screen_mode,
       vd_res: form.screen_mode === 'virtual' ? form.vd_res.trim() : null,
@@ -251,8 +237,7 @@ export function useConsoleDeviceManager({
    *  仅名称变更时服务端保持会话，前端据此前提示「不断开投屏」。 */
   function castingParamsChanged(d, p) {
     const normRes = s => String(s || '').trim().toLowerCase() || '1920x1080'
-    return d.kind !== p.kind
-      || (d.addr || '').trim() !== p.addr
+    return (d.addr || '').trim() !== p.addr
       || (d.screen_mode || 'virtual') !== p.screen_mode
       || normRes(d.vd_res) !== normRes(p.vd_res)
       || Number(d.vd_dpi || 0) !== Number(p.vd_dpi || 0)
@@ -269,6 +254,7 @@ export function useConsoleDeviceManager({
     if (!d || configApplying.value) return
     const payload = buildPayload()
     if (!payload.name) return toast('请填写设备名称', 'error')
+    if (!payload.addr) return toast('请填写 ADB 地址或序列号', 'error')
     const wasConnected = connected.value
     const castingChanged = castingParamsChanged(d, payload)
     configApplying.value = true
@@ -324,6 +310,7 @@ export function useConsoleDeviceManager({
   async function addDevice() {
     const payload = buildPayload()
     if (!payload.name) return toast('请填写设备名称', 'error')
+    if (!payload.addr) return toast('请填写 ADB 地址或序列号', 'error')
     try {
       const r = await api.createDevice(payload)
       await loadData()
@@ -430,7 +417,6 @@ export function useConsoleDeviceManager({
       // 整包提交，只改 pkg 字段，避免把未提交字段清空
       await api.updateDevice(d.id, {
         name: d.name,
-        kind: d.kind,
         addr: d.addr || '',
         screen_mode: d.screen_mode || 'virtual',
         vd_res: d.screen_mode === 'virtual' ? (d.vd_res || null) : null,
@@ -469,7 +455,7 @@ export function useConsoleDeviceManager({
     if (!toolbarMenuOpen.value) return
     const rect = e?.currentTarget?.getBoundingClientRect()
     if (!rect) return
-    const menuWidth = 168
+    const menuWidth = 140 // 与公共 action-menu 的最小宽度一致
     toolbarMenuStyle.top = `${Math.round(rect.bottom + 4)}px`
     toolbarMenuStyle.left = `${Math.round(Math.max(8, Math.min(rect.left, window.innerWidth - menuWidth - 8)))}px`
   }
@@ -594,15 +580,15 @@ export function useConsoleDeviceManager({
   })
 
   const deviceSettingsContext = {
-    settingsOpen, mode, form, types, vdPresets, fpsPresets, formDirty,
-    configApplying, saveSettings, cancelSettings, current, connected, kindInfo, screenSummary,
+    settingsOpen, mode, form, vdPresets, fpsPresets, formDirty,
+    configApplying, saveSettings, cancelSettings, current, connected, screenSummary,
   }
 
   return {
     // 设备与设置弹窗
-    vdPresets, fpsPresets, types, mode, form, scanning, configApplying,
+    vdPresets, fpsPresets, mode, form, scanning, configApplying,
     appList, appLoading, currentApplication, devices, current, currentName, pkgOptions, packageOptionLabel,
-    kindInfo, screenSummary, formDirty, settingsOpen,
+    screenSummary, formDirty, settingsOpen,
     loadForm,
     startAdd, openSettings, cancelSettings, onDeviceSelect, refreshDeviceStatus, refreshDevices,
     saveSettings, flushAndConnect, addDevice, removeDevice, disconnect, loadApps,

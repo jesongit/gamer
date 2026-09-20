@@ -1,6 +1,6 @@
 //! SQLite 持久化：设备、定时任务、运行日志。
 //!
-//! 数据库从当前 schema v3 空库创建（无 legacy `tasks` 表）；v1 历史库经
+//! 数据库从当前 schema v4 空库创建（无 legacy `tasks` 表）；v1 历史库经
 //! v1→v2（Timer Core 泛化）与 v2→v3（Task 模型收口）逐级迁移，user_version=0
 //! 仍拒绝自动补齐。
 
@@ -35,9 +35,7 @@ pub enum ScreenMode {
 pub struct Device {
     pub id: String,
     pub name: String,
-    /// 接入类型: redroid / usb / wifi / emu
-    pub kind: String,
-    /// adb 地址（usb 为空）
+    /// ADB serial 或 host:port，不推断设备类别
     pub addr: String,
     pub screen_mode: ScreenMode,
     /// 虚拟屏分辨率 WxH（如 1920x1080）
@@ -193,11 +191,10 @@ fn open_connection(path: &Path) -> anyhow::Result<Connection> {
     Ok(conn)
 }
 
-const SCHEMA_V3_DDL: &str = r#"
+const SCHEMA_V4_DDL: &str = r#"
 CREATE TABLE devices (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    kind TEXT NOT NULL,
     addr TEXT NOT NULL DEFAULT '',
     screen_mode TEXT NOT NULL DEFAULT 'mirror',
     vd_res TEXT,
@@ -270,16 +267,16 @@ fn ensure_schema(conn: &mut Connection, is_new_database: bool) -> anyhow::Result
             version == 0,
             "new database has unexpected user_version={version}"
         );
-        conn.execute_batch(SCHEMA_V3_DDL)?;
+        conn.execute_batch(SCHEMA_V4_DDL)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        return validate_schema_v3(conn);
+        return validate_schema_v4(conn);
     }
 
     match version {
         0 => anyhow::bail!(
-            "database schema is unversioned (user_version=0); back up and remove gamer.db to rebuild schema v3"
+            "database schema is unversioned (user_version=0); back up and remove gamer.db to rebuild schema v4"
         ),
-        SCHEMA_VERSION => validate_schema_v3(conn),
+        SCHEMA_VERSION => validate_schema_v4(conn),
         other => apply_schema_migrations(conn, other),
     }
 }
@@ -290,12 +287,12 @@ fn ensure_schema(conn: &mut Connection, is_new_database: bool) -> anyhow::Result
 /// is rejected before this function is ever reached.
 fn apply_schema_migrations(conn: &mut Connection, from_version: i64) -> anyhow::Result<()> {
     crate::migrations::run_migrations(conn, from_version, crate::migrations::MIGRATIONS)?;
-    validate_schema_v3(conn)
+    validate_schema_v4(conn)
 }
 
 /// v3 结构校验。启动路径与 maintenance CLI（DATA-005 migrate 迁移后校验）
 /// 共用同一实现，保证「迁移后开放」的判定一致。
-pub(crate) fn validate_schema_v3(conn: &Connection) -> anyhow::Result<()> {
+pub(crate) fn validate_schema_v4(conn: &Connection) -> anyhow::Result<()> {
     let mut stmt = conn.prepare(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     )?;
@@ -314,7 +311,7 @@ pub(crate) fn validate_schema_v3(conn: &Connection) -> anyhow::Result<()> {
     .collect::<Vec<_>>();
     anyhow::ensure!(
         tables == expected_tables,
-        "schema v3 is incomplete: expected tables {expected_tables:?}, found {tables:?}; back up and rebuild gamer.db"
+        "schema v4 is incomplete: expected tables {expected_tables:?}, found {tables:?}; back up and rebuild gamer.db"
     );
 
     validate_table(
@@ -323,7 +320,6 @@ pub(crate) fn validate_schema_v3(conn: &Connection) -> anyhow::Result<()> {
         &[
             ("id", "TEXT", 0, 1),
             ("name", "TEXT", 1, 0),
-            ("kind", "TEXT", 1, 0),
             ("addr", "TEXT", 1, 0),
             ("screen_mode", "TEXT", 1, 0),
             ("vd_res", "TEXT", 0, 0),
@@ -440,7 +436,7 @@ pub(crate) fn validate_schema_v3(conn: &Connection) -> anyhow::Result<()> {
 /// Compatibility name retained for maintenance callers while the validator
 /// now checks the complete v3 schema.
 pub(crate) fn validate_schema_v1(conn: &Connection) -> anyhow::Result<()> {
-    validate_schema_v3(conn)
+    validate_schema_v4(conn)
 }
 
 /// v1→v2 migration.  Legacy rows are copied into generic timer rows; the old
@@ -496,7 +492,7 @@ SELECT
     CASE WHEN instr(script_id, '/') > 1
          THEN substr(script_id, 1, instr(script_id, '/') - 1)
          ELSE 'legacy' END,
-    'gamer.yaml',
+    'gamer-yaml',
     script_id,
     json_object('args', json(args_json), 'param_signature', param_signature),
     json_object('kind', 'cron', 'value', json_object('expression', cron)),
@@ -589,7 +585,7 @@ fn validate_table(
         .collect::<Vec<_>>();
     anyhow::ensure!(
         actual == expected,
-        "schema v3 is incomplete: table {table} has unexpected columns; back up and rebuild gamer.db"
+        "schema v4 is incomplete: table {table} has unexpected columns; back up and rebuild gamer.db"
     );
     Ok(())
 }
@@ -612,12 +608,12 @@ fn validate_index(
         .find(|(name, _)| name == index);
     let Some((_, is_unique)) = found else {
         anyhow::bail!(
-            "schema v3 is incomplete: missing index {index}; back up and rebuild gamer.db"
+            "schema v4 is incomplete: missing index {index}; back up and rebuild gamer.db"
         );
     };
     anyhow::ensure!(
         is_unique == expected_unique,
-        "schema v3 is incomplete: index {index} has unexpected uniqueness; back up and rebuild gamer.db"
+        "schema v4 is incomplete: index {index} has unexpected uniqueness; back up and rebuild gamer.db"
     );
     let pragma = format!("PRAGMA index_info('{index}')");
     let mut stmt = conn.prepare(&pragma)?;
@@ -630,7 +626,7 @@ fn validate_index(
         .collect::<Vec<_>>();
     anyhow::ensure!(
         actual_columns == expected_columns,
-        "schema v3 is incomplete: index {index} has unexpected columns; back up and rebuild gamer.db"
+        "schema v4 is incomplete: index {index} has unexpected columns; back up and rebuild gamer.db"
     );
     Ok(())
 }
@@ -1037,23 +1033,22 @@ impl Store {
     pub fn list_devices(&self) -> anyhow::Result<Vec<Device>> {
         self.request(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, kind, addr, screen_mode, vd_res, vd_dpi, pkg, fps, created_at FROM devices ORDER BY created_at",
+                "SELECT id, name, addr, screen_mode, vd_res, vd_dpi, pkg, fps, created_at FROM devices ORDER BY created_at",
             )?;
             let rows = stmt.query_map([], |r| {
                 Ok(Device {
                     id: r.get(0)?,
                     name: r.get(1)?,
-                    kind: r.get(2)?,
-                    addr: r.get(3)?,
-                    screen_mode: match r.get::<_, String>(4)?.as_str() {
+                    addr: r.get(2)?,
+                    screen_mode: match r.get::<_, String>(3)?.as_str() {
                         "virtual" => ScreenMode::Virtual,
                         _ => ScreenMode::Mirror,
                     },
-                    vd_res: r.get(5)?,
-                    vd_dpi: r.get(6)?,
-                    pkg: r.get(7)?,
-                    fps: r.get(8)?,
-                    created_at: r.get(9)?,
+                    vd_res: r.get(4)?,
+                    vd_dpi: r.get(5)?,
+                    pkg: r.get(6)?,
+                    fps: r.get(7)?,
+                    created_at: r.get(8)?,
                 })
             })?;
             Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1066,24 +1061,23 @@ impl Store {
             let mut stmt = conn.prepare(
                 // 注意：`\` 续行会吞掉行首缩进，"created_at" 后必须显式留空格，
                 // 否则拼出 created_atFROM 导致 PUT /api/devices/:id 全挂
-                "SELECT id, name, kind, addr, screen_mode, vd_res, vd_dpi, pkg, fps, created_at \
+                "SELECT id, name, addr, screen_mode, vd_res, vd_dpi, pkg, fps, created_at \
                  FROM devices WHERE id = ?1",
             )?;
             match stmt.query_row([id], |r| {
                 Ok(Device {
                     id: r.get(0)?,
                     name: r.get(1)?,
-                    kind: r.get(2)?,
-                    addr: r.get(3)?,
-                    screen_mode: match r.get::<_, String>(4)?.as_str() {
+                    addr: r.get(2)?,
+                    screen_mode: match r.get::<_, String>(3)?.as_str() {
                         "virtual" => ScreenMode::Virtual,
                         _ => ScreenMode::Mirror,
                     },
-                    vd_res: r.get(5)?,
-                    vd_dpi: r.get(6)?,
-                    pkg: r.get(7)?,
-                    fps: r.get(8)?,
-                    created_at: r.get(9)?,
+                    vd_res: r.get(4)?,
+                    vd_dpi: r.get(5)?,
+                    pkg: r.get(6)?,
+                    fps: r.get(7)?,
+                    created_at: r.get(8)?,
                 })
             }) {
                 Ok(device) => Ok(Some(device)),
@@ -1097,14 +1091,13 @@ impl Store {
         let d = d.clone();
         self.request(move |conn| {
             conn.execute(
-                r#"INSERT INTO devices (id, name, kind, addr, screen_mode, vd_res, vd_dpi, pkg, fps, created_at)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                r#"INSERT INTO devices (id, name, addr, screen_mode, vd_res, vd_dpi, pkg, fps, created_at)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                    ON CONFLICT(id) DO UPDATE SET
-                     name=?2, kind=?3, addr=?4, screen_mode=?5, vd_res=?6, vd_dpi=?7, pkg=?8, fps=?9"#,
+                     name=?2, addr=?3, screen_mode=?4, vd_res=?5, vd_dpi=?6, pkg=?7, fps=?8"#,
                 rusqlite::params![
                     d.id,
                     d.name,
-                    d.kind,
                     d.addr,
                     match d.screen_mode {
                         ScreenMode::Mirror => "mirror",
@@ -1132,23 +1125,22 @@ impl Store {
     pub async fn list_devices_async(&self) -> anyhow::Result<Vec<Device>> {
         self.request_async(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, kind, addr, screen_mode, vd_res, vd_dpi, pkg, fps, created_at FROM devices ORDER BY created_at",
+                "SELECT id, name, addr, screen_mode, vd_res, vd_dpi, pkg, fps, created_at FROM devices ORDER BY created_at",
             )?;
             let rows = stmt.query_map([], |r| {
                 Ok(Device {
                     id: r.get(0)?,
                     name: r.get(1)?,
-                    kind: r.get(2)?,
-                    addr: r.get(3)?,
-                    screen_mode: match r.get::<_, String>(4)?.as_str() {
+                    addr: r.get(2)?,
+                    screen_mode: match r.get::<_, String>(3)?.as_str() {
                         "virtual" => ScreenMode::Virtual,
                         _ => ScreenMode::Mirror,
                     },
-                    vd_res: r.get(5)?,
-                    vd_dpi: r.get(6)?,
-                    pkg: r.get(7)?,
-                    fps: r.get(8)?,
-                    created_at: r.get(9)?,
+                    vd_res: r.get(4)?,
+                    vd_dpi: r.get(5)?,
+                    pkg: r.get(6)?,
+                    fps: r.get(7)?,
+                    created_at: r.get(8)?,
                 })
             })?;
             Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1160,24 +1152,23 @@ impl Store {
         let id = id.to_string();
         self.request_async(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, kind, addr, screen_mode, vd_res, vd_dpi, pkg, fps, created_at \
+                "SELECT id, name, addr, screen_mode, vd_res, vd_dpi, pkg, fps, created_at \
                  FROM devices WHERE id = ?1",
             )?;
             match stmt.query_row([id], |r| {
                 Ok(Device {
                     id: r.get(0)?,
                     name: r.get(1)?,
-                    kind: r.get(2)?,
-                    addr: r.get(3)?,
-                    screen_mode: match r.get::<_, String>(4)?.as_str() {
+                    addr: r.get(2)?,
+                    screen_mode: match r.get::<_, String>(3)?.as_str() {
                         "virtual" => ScreenMode::Virtual,
                         _ => ScreenMode::Mirror,
                     },
-                    vd_res: r.get(5)?,
-                    vd_dpi: r.get(6)?,
-                    pkg: r.get(7)?,
-                    fps: r.get(8)?,
-                    created_at: r.get(9)?,
+                    vd_res: r.get(4)?,
+                    vd_dpi: r.get(5)?,
+                    pkg: r.get(6)?,
+                    fps: r.get(7)?,
+                    created_at: r.get(8)?,
                 })
             }) {
                 Ok(device) => Ok(Some(device)),
@@ -1192,14 +1183,13 @@ impl Store {
         let d = d.clone();
         self.request_async(move |conn| {
             conn.execute(
-                r#"INSERT INTO devices (id, name, kind, addr, screen_mode, vd_res, vd_dpi, pkg, fps, created_at)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                r#"INSERT INTO devices (id, name, addr, screen_mode, vd_res, vd_dpi, pkg, fps, created_at)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                    ON CONFLICT(id) DO UPDATE SET
-                     name=?2, kind=?3, addr=?4, screen_mode=?5, vd_res=?6, vd_dpi=?7, pkg=?8, fps=?9"#,
+                     name=?2, addr=?3, screen_mode=?4, vd_res=?5, vd_dpi=?6, pkg=?7, fps=?8"#,
                 rusqlite::params![
                     d.id,
                     d.name,
-                    d.kind,
                     d.addr,
                     match d.screen_mode {
                         ScreenMode::Mirror => "mirror",
@@ -2299,7 +2289,7 @@ PRAGMA user_version = 1;
         let store = Store::open(&cfg).unwrap();
         let tasks = store.list_timer_tasks().unwrap();
         assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].runner_id, "gamer.yaml");
+        assert_eq!(tasks[0].runner_id, "gamer-yaml");
         assert_eq!(tasks[0].entrypoint, "com.example/daily.yaml");
         assert_eq!(tasks[0].payload["args"], serde_json::json!({}));
         // v1→v2 先按旧 JSON 形态落行，v2→v3 统一改写为 provider/config
@@ -2379,12 +2369,12 @@ CREATE TABLE task_presets (
 CREATE INDEX idx_task_presets_package ON task_presets(app_package);
 INSERT INTO timer_tasks (id, name, device_id, android_package, content_package,
     runner_id, entrypoint, payload_json, schedule_json, state, enabled, created_at, updated_at)
-VALUES ('t1', 'T', 'd1', 'com.example', 'com.example', 'gamer.yaml', 'com.example/daily.yaml',
+VALUES ('t1', 'T', 'd1', 'com.example', 'com.example', 'gamer-yaml', 'com.example/daily.yaml',
         '{"args":{}}', '{"kind":"cron","value":{"expression":"0 8 * * *"}}',
         'active', 1, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z');
 INSERT INTO task_presets (id, app_package, name, runner_id, entrypoint,
     payload_json, schedule_json, created_at)
-VALUES ('p1', 'official.xxx', 'P', 'gamer.yaml', 'run', '{}',
+VALUES ('p1', 'official.xxx', 'P', 'gamer-yaml', 'run', '{}',
         '{"kind":"cron","value":{"expression":"*/5 * * * *"}}', '2026-09-01T00:00:00Z');
 PRAGMA user_version = 2;
 "#,
@@ -2584,12 +2574,12 @@ PRAGMA user_version = 2;
         fs::remove_dir_all(dir).unwrap();
     }
 
-    /// DATA-002：全新建库得到**确定的 schema v3**——表/列（含顺序、类型、
+    /// DATA-002：全新建库得到**确定的 schema v4**——表/列（含顺序、类型、
     /// NOT NULL、PK）与索引（含唯一性、列序）的完整快照与硬编码期望逐一比对。
     /// 任何 DDL 漂移（新增列、改类型、动索引）都必须显式更新此快照并同步
     /// schema-policy 契约，防止「新库 schema」悄悄分叉。
     #[test]
-    fn new_database_schema_matches_v3_snapshot() {
+    fn new_database_schema_matches_v4_snapshot() {
         let (cfg, dir) = temp_config("schema-snapshot");
         let db_path = dir.join("gamer.db");
         let store = Store::open(&cfg).unwrap();
@@ -2598,14 +2588,13 @@ PRAGMA user_version = 2;
         let conn = Connection::open(&db_path).unwrap();
         let actual = dump_schema(&conn);
         let expected = serde_json::json!({
-            "user_version": 3,
+            "user_version": 4,
             "tables": [
                 {
                     "name": "devices",
                     "columns": [
                         { "name": "id", "type": "TEXT", "notnull": 0, "pk": 1 },
                         { "name": "name", "type": "TEXT", "notnull": 1, "pk": 0 },
-                        { "name": "kind", "type": "TEXT", "notnull": 1, "pk": 0 },
                         { "name": "addr", "type": "TEXT", "notnull": 1, "pk": 0 },
                         { "name": "screen_mode", "type": "TEXT", "notnull": 1, "pk": 0 },
                         { "name": "vd_res", "type": "TEXT", "notnull": 0, "pk": 0 },
@@ -2728,7 +2717,7 @@ PRAGMA user_version = 2;
         let store = Store::open(&cfg).unwrap();
         drop(store);
         let conn = Connection::open(&db_path).unwrap();
-        conn.pragma_update(None, "user_version", 4).unwrap();
+        conn.pragma_update(None, "user_version", 5).unwrap();
         drop(conn);
 
         let error = match Store::open(&cfg) {
@@ -2737,7 +2726,7 @@ PRAGMA user_version = 2;
         };
         assert!(error
             .to_string()
-            .contains("unsupported database schema version 4"));
+            .contains("unsupported database schema version 5"));
 
         fs::remove_dir_all(dir).unwrap();
     }
@@ -2756,7 +2745,7 @@ PRAGMA user_version = 2;
             Ok(_) => panic!("incomplete database must fail fast"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("schema v3 is incomplete"));
+        assert!(error.to_string().contains("schema v4 is incomplete"));
 
         fs::remove_dir_all(dir).unwrap();
     }
@@ -2818,7 +2807,7 @@ PRAGMA user_version = 2;
         let device = Device {
             id: "dev-1".into(),
             name: "投屏机".into(),
-            kind: "usb".into(),
+
             addr: "SERIAL123".into(),
             screen_mode: ScreenMode::Virtual,
             vd_res: Some("1920x1080".into()),
@@ -3025,5 +3014,58 @@ PRAGMA user_version = 2;
         );
         drop(store);
         fs::remove_dir_all(dir).ok();
+    }
+}
+
+/// v4: all devices use ADB; transport selection is independent of screen mode.
+pub(crate) fn migrate_v3_to_v4(tx: &rusqlite::Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch("ALTER TABLE devices DROP COLUMN kind;")?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod adb_schema_tests {
+    #[test]
+    fn migration_keeps_device_identity_application_and_display_settings() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE devices (id TEXT PRIMARY KEY, name TEXT, kind TEXT, addr TEXT, screen_mode TEXT, vd_res TEXT, vd_dpi INTEGER, pkg TEXT, fps INTEGER, created_at TEXT);
+            INSERT INTO devices VALUES ('d1', '我的设备', 'emu', '127.0.0.1:7555', 'virtual', '1920x1080', 420, 'com.example.game', 30, '2026-09-20');").unwrap();
+        let tx = db.transaction().unwrap();
+        super::migrate_v3_to_v4(&tx).unwrap();
+        tx.commit().unwrap();
+        let row = db
+            .query_row(
+                "SELECT id,name,addr,screen_mode,vd_res,vd_dpi,pkg,fps,created_at FROM devices",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, i64>(5)?,
+                        r.get::<_, String>(6)?,
+                        r.get::<_, i64>(7)?,
+                        r.get::<_, String>(8)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "d1".into(),
+                "我的设备".into(),
+                "127.0.0.1:7555".into(),
+                "virtual".into(),
+                "1920x1080".into(),
+                420,
+                "com.example.game".into(),
+                30,
+                "2026-09-20".into()
+            )
+        );
+        assert!(db.prepare("SELECT kind FROM devices").is_err());
     }
 }

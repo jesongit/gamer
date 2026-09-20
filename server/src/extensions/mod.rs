@@ -18,9 +18,11 @@ mod archive;
 mod builtin;
 mod error;
 
-/// gamer.yaml 扩展（YAML 栈边界）：见 gamer_yaml/mod.rs。
+/// gamer-yaml 扩展（YAML 栈边界）：见 gamer_yaml/mod.rs。
+#[path = "../../../plugins/gamer-yaml/host/mod.rs"]
 pub(crate) mod gamer_yaml;
 mod host_api;
+#[path = "../../../plugins/gamer-keymap/host/mod.rs"]
 mod keymap;
 mod manifest;
 mod model;
@@ -28,8 +30,9 @@ mod permissions;
 mod service;
 mod store;
 mod ui;
-/// gamer.video builtin 扩展（视频工作台，实施合同 §5）：manifest 常量 +
+/// gamer-video builtin 扩展（视频工作台，实施合同 §5）：manifest 常量 +
 /// 内置注册表条目；无 guest、无 Runner（执行体是宿主进程内服务）。
+#[path = "../../../plugins/gamer-video/host/mod.rs"]
 pub(crate) mod video;
 mod wasm;
 mod wit;
@@ -741,6 +744,9 @@ mod tests {
     fn wit_contract_contains_every_versioned_domain() {
         assert_eq!(wit::WIT_PACKAGE_VERSION, HOST_API_VERSION);
         for domain in HostApiDomain::ALL {
+            if domain == HostApiDomain::Ui {
+                continue;
+            } // Browser SDK, not a WIT interface.
             let wit_name = if domain == HostApiDomain::Resource {
                 "resources"
             } else {

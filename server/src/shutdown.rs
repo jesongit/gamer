@@ -3,7 +3,7 @@
 //! 三种触发源共用同一条 drain 入口：
 //! - API 请求（`POST /api/shutdown`，`api::system::api_shutdown`）；
 //! - Ctrl+C（`tokio::signal::ctrl_c`，全平台）；
-//! - SIGTERM（`cfg(unix)`，容器 `docker stop` 路径）。
+//! - SIGTERM（`cfg(unix)`，容器 服务管理器停止 路径）。
 //!
 //! drain 序列即原 `/api/shutdown` 内联的会话拆解（[`drain_sessions`]）：
 //! RunManager drain（拒绝新 run → 等待/超时强停活动任务）→ 踢全部 viewer

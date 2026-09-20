@@ -22,7 +22,7 @@ vi.mock('./components/console/useConsoleStage', async importOriginal => {
   return { ...actual, requestStageMedia: vi.fn() }
 })
 
-vi.mock('./components/video/videoApi', async importOriginal => {
+vi.mock('../../plugins/gamer-video/ui/src/components/video/videoApi', async importOriginal => {
   const actual = await importOriginal()
   return {
     ...actual,
@@ -43,9 +43,9 @@ vi.mock('./components/video/videoApi', async importOriginal => {
   }
 })
 
-import VideoWorkbench from './components/video/VideoWorkbench.vue'
+import VideoWorkbench from '../../plugins/gamer-video/ui/src/components/video/VideoWorkbench.vue'
 import { requestStageMedia } from './components/console/useConsoleStage'
-import { videoApi } from './components/video/videoApi'
+import { videoApi } from '../../plugins/gamer-video/ui/src/components/video/videoApi'
 import { devicesData, store } from './store'
 import { packageStore } from './package-store'
 
@@ -96,7 +96,7 @@ function installDefaults() {
   videoApi.getMedia.mockResolvedValue({ id: 'media-a', refs: [] })
   videoApi.setMediaRefs.mockResolvedValue({})
   videoApi.gamerYamlCapabilities.mockResolvedValue({
-    id: 'gamer.yaml', state: 'running', running: true,
+    id: 'gamer-yaml', state: 'running', running: true,
     actions: [
       { action: 'automation.create_draft', version: '1' },
       { action: 'automation.save_draft', version: '1' },
@@ -173,10 +173,10 @@ describe('P5-WB-INTEGRATOR VideoWorkbench 父装配', () => {
     expect(JSON.parse(videoApi.putProject.mock.calls[0][2]).assets.map(asset => asset.media_id))
       .toEqual(['media-a', 'media-b'])
     expect(videoApi.setMediaRefs).toHaveBeenCalledWith('media-a', [
-      { package_id: 'pkg-a', plugin_id: 'gamer.video', kind: 'project' },
+      { package_id: 'pkg-a', plugin_id: 'gamer-video', kind: 'project' },
     ])
     expect(videoApi.setMediaRefs).toHaveBeenCalledWith('media-b', [
-      { package_id: 'pkg-a', plugin_id: 'gamer.video', kind: 'project' },
+      { package_id: 'pkg-a', plugin_id: 'gamer-video', kind: 'project' },
     ])
     wrapper.unmount()
   })
@@ -230,7 +230,7 @@ describe('P5-WB-INTEGRATOR VideoWorkbench 父装配', () => {
       packageId: 'pkg-a', name: 'from-video', yaml: 'run:\n  - tap: [1, 2]\n', overwrite: false,
     })
     expect(routerPush).toHaveBeenCalledWith(expect.objectContaining({
-      query: expect.objectContaining({ panel: 'gamer.yaml:automation' }),
+      query: expect.objectContaining({ panel: 'gamer-yaml:automation' }),
     }))
     wrapper.unmount()
   })

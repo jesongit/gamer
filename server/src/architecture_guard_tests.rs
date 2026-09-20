@@ -19,14 +19,14 @@
 //!   owner_extension_id）/ 任务 dependency_missing 与自动恢复；另核 disable
 //!   运行中=自动 stop 与 reconcile_startup 恢复路径。
 //! - §14.4 Bare Core：零已装扩展时全部基础 API 可用（system/info、tasks 全
-//!   CRUD、通用资源存取、runners 空、设备列表空），不要求 gamer.yaml /
-//!   gamer.keymap 存在。
-//! - §14.5 YAML Isolation：无 gamer.yaml → 任务保存成功、派发 424
+//!   CRUD、通用资源存取、runners 空、设备列表空），不要求 gamer-yaml /
+//!   gamer-keymap 存在。
+//! - §14.5 YAML Isolation：无 gamer-yaml → 任务保存成功、派发 424
 //!   dependency_missing 且任务保留；安装+启动 → 同一任务自动恢复 Active 且
 //!   派发进入执行层（202 + run 记录）。
-//! - §14.6 Keymap Isolation：无 gamer.keymap → 输入事件直通（pass-through）。
+//! - §14.6 Keymap Isolation：无 gamer-keymap → 输入事件直通（pass-through）。
 //!   「有扩展 → 经 keymap runtime 消费」的整合入口是
-//!   `extensions/keymap/mod.rs` 的 `real_keymap_gplugin_invokes_wit_and_native_capabilities`
+//!   `plugins/gamer-keymap/host/mod.rs` 的 `real_keymap_gplugin_invokes_wit_and_native_capabilities`
 //!   与 `real_keymap_guest_consumes_user_profile_yaml`（真实 fixture guest），
 //!   此处不重复造轮子。
 //! - §14.7 v3-Only Guard（P12.9）：全仓生产源码（含 extensions/）禁现
@@ -55,18 +55,14 @@ use crate::store::Db;
 
 /// 本守卫文件自身（扫描豁免：夹具装配必须引用扩展类型构造生产形态环境）。
 const SELF_FILE: &str = "architecture_guard_tests.rs";
-/// 扩展内容语义目录：YAML 栈与 Keymap 栈的物理归属（ADR-11）。
-const EXTENSION_SOURCE_DIRS: &[&str] = &["extensions/gamer_yaml", "extensions/keymap"];
-/// 若存在亦豁免的扩展内文件（当前不存在，防未来漂移）。
-const EXTENSION_SOURCE_FILES: &[&str] = &["extensions/gamer_yaml/wasm_host.rs"];
-
 struct SourceFile {
     /// 相对 server/src/ 的 POSIX 风格路径（与白名单条目的 file 字段比对）。
     file: String,
     lines: Vec<String>,
 }
 
-/// 收集受守卫的源文件：server/src/**/*.rs，减去扩展内容目录与本文件。
+/// 收集受守卫的源文件：server/src/**/*.rs，减去本文件。
+/// 插件业务已移至仓库 plugins/，不再为已删除的旧目录保留扫描豁免。
 fn guarded_sources() -> Vec<SourceFile> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
@@ -80,15 +76,13 @@ fn guarded_sources() -> Vec<SourceFile> {
         for entry in entries {
             let rel = relative_to_src(&entry);
             if entry.is_dir() {
-                if !EXTENSION_SOURCE_DIRS.contains(&rel.as_str()) {
-                    stack.push(entry);
-                }
+                stack.push(entry);
                 continue;
             }
             if !entry.extension().is_some_and(|ext| ext == "rs") {
                 continue;
             }
-            if rel == SELF_FILE || EXTENSION_SOURCE_FILES.contains(&rel.as_str()) {
+            if rel == SELF_FILE {
                 continue;
             }
             let text = std::fs::read_to_string(&entry)
@@ -190,7 +184,7 @@ const BOUNDARY_ALLOWS: &[Allow] = &[
     Allow {
         file: "main.rs",
         snippet: "YamlTimerRunnerRegistrar::new(",
-        reason: "组合根：gamer.yaml 的 TimerRunner registrar 注入 ExtensionService（ADR-13 注册缝）",
+        reason: "组合根：gamer-yaml 的 TimerRunner registrar 注入 ExtensionService（ADR-13 注册缝）",
     },
     Allow {
         file: "main.rs",
@@ -200,29 +194,29 @@ const BOUNDARY_ALLOWS: &[Allow] = &[
     // —— 扩展机制文件（extensions/service.rs，非 gamer_yaml 目录）——
     Allow {
         file: "extensions/service.rs",
-        snippet: "gamer.yaml 的 run_yaml_program",
+        snippet: "gamer-yaml 的 run_yaml_program",
         reason: "扩展机制 doc 注释：instance_free 模型举例（门面函数名）",
     },
     Allow {
         file: "extensions/service.rs",
         snippet: "YamlTimerRunnerRegistrar::new(",
-        reason: "extensions/service.rs #[cfg(test)]：启动对账测试的 gamer.yaml registrar 夹具（两处同形）",
+        reason: "extensions/service.rs #[cfg(test)]：启动对账测试的 gamer-yaml registrar 夹具（两处同形）",
     },
     // —— 测试代码（#[cfg(test)] 模块/测试文件；夹具允许构造扩展类型） ——
     Allow {
         file: "api/tests.rs",
         snippet: "YamlTimerRunner::new(",
-        reason: "api 测试装配：与生产等价预注册 gamer.yaml runner（HTTP 集成夹具）",
+        reason: "api 测试装配：与生产等价预注册 gamer-yaml runner（HTTP 集成夹具）",
     },
     Allow {
         file: "api/tests.rs",
         snippet: "YamlTimerRunner::functions_describer(),",
-        reason: "api 测试装配：gamer.yaml 原生函数目录描述器（与生产 start 生命周期同构）",
+        reason: "api 测试装配：gamer-yaml 原生函数目录描述器（与生产 start 生命周期同构）",
     },
     Allow {
         file: "api/tests/update.rs",
         snippet: "YamlTimerRunner::new(",
-        reason: "update API 测试装配：gamer.yaml runner 夹具",
+        reason: "update API 测试装配：gamer-yaml runner 夹具",
     },
 ];
 
@@ -473,7 +467,7 @@ const DEPENDENCY_ALLOWS: &[Allow] = &[
     Allow {
         file: "main.rs",
         snippet: "extensions::gamer_yaml::register_resource_handlers",
-        reason: "组合根：注册 gamer.yaml 资源内容校验钩子（裸 Core 不注册则保存不做内容校验）",
+        reason: "组合根：注册 gamer-yaml 资源内容校验钩子（裸 Core 不注册则保存不做内容校验）",
     },
     Allow {
         file: "main.rs",
@@ -500,12 +494,12 @@ const DEPENDENCY_ALLOWS: &[Allow] = &[
     Allow {
         file: "api/tests.rs",
         snippet: "gamer_yaml::timer_yaml::YamlTimerRunner::new",
-        reason: "api 测试装配：预注册 gamer.yaml runner",
+        reason: "api 测试装配：预注册 gamer-yaml runner",
     },
     Allow {
         file: "api/tests.rs",
         snippet: "gamer_yaml::timer_yaml::YamlTimerRunner::functions_describer",
-        reason: "api 测试装配：gamer.yaml 原生函数目录描述器（与生产 start 生命周期同构）",
+        reason: "api 测试装配：gamer-yaml 原生函数目录描述器（与生产 start 生命周期同构）",
     },
     Allow {
         file: "api/tests.rs",
@@ -525,7 +519,7 @@ const DEPENDENCY_ALLOWS: &[Allow] = &[
     Allow {
         file: "api/tests/update.rs",
         snippet: "gamer_yaml::timer_yaml::YamlTimerRunner::new",
-        reason: "update API 测试装配：gamer.yaml runner 夹具",
+        reason: "update API 测试装配：gamer-yaml runner 夹具",
     },
 ];
 
@@ -587,6 +581,17 @@ fn architecture_guard_v3_only_bans_v2_identifiers_in_all_sources() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     let mut stack = vec![root];
+    let plugins = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../plugins");
+    for source in [
+        "gamer-yaml/host",
+        "gamer-yaml/guest/src",
+        "gamer-yaml/interpreter/src",
+        "gamer-keymap/host",
+        "gamer-keymap/guest/src",
+        "gamer-video/host",
+    ] {
+        stack.push(plugins.join(source));
+    }
     while let Some(dir) = stack.pop() {
         let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
             .unwrap_or_else(|e| panic!("读取目录 {} 失败: {e}", dir.display()))
@@ -642,15 +647,15 @@ fn architecture_guard_v3_only_bans_v2_identifiers_in_all_sources() {
 // HTTP 集成共享装配（§14.3 / §14.4 / §14.5）
 // ===========================================================================
 
-/// gamer.yaml 扩展 id（安装/生命周期路由参数）。
-const YAML_ID: &str = "gamer.yaml";
-/// gamer.yaml 市场包 manifest 版本：从 YAML_EXTENSION_MANIFEST_TOML 现场解析，
+/// gamer-yaml 扩展 id（安装/生命周期路由参数）。
+const YAML_ID: &str = "gamer-yaml";
+/// gamer-yaml 市场包 manifest 版本：从 YAML_EXTENSION_MANIFEST_TOML 现场解析，
 /// 与 manifest 常量同源（硬编码曾在 3.1.0 升版时漂移导致按版本卸载 404）。
 fn yaml_market_version() -> String {
     crate::extensions::parse_manifest(
         crate::extensions::gamer_yaml::YAML_EXTENSION_MANIFEST_TOML.as_bytes(),
     )
-    .expect("内嵌 gamer.yaml manifest 必须可解析")
+    .expect("内嵌 gamer-yaml manifest 必须可解析")
     .version()
     .as_str()
     .to_owned()
@@ -718,7 +723,7 @@ fn build_app(core: &CoreDeps) -> GuardApp {
         ),
     );
     let runs = Arc::new(crate::run_manager::RunManager::new(executor.clone()));
-    // ADR-13：裸 Core 组合——Scheduler 不预置任何 runner；gamer.yaml 的定时
+    // ADR-13：裸 Core 组合——Scheduler 不预置任何 runner；gamer-yaml 的定时
     // runner 由扩展 start 生命周期经 registrar 钩子注册。
     let scheduler = Arc::new(Scheduler::new(core.db.clone()));
     let capabilities = crate::capabilities::adapters::build_registry(
@@ -816,7 +821,7 @@ fn zip_headers(cookie: &str) -> Vec<(String, String)> {
     vec![
         (header::COOKIE.to_string(), cookie.to_string()),
         (header::CONTENT_TYPE.to_string(), "application/zip".into()),
-        // gamer.yaml manifest 声明完整权限集：全新安装需要显式权限确认。
+        // gamer-yaml manifest 声明完整权限集：全新安装需要显式权限确认。
         ("x-gamer-permission-confirm".to_string(), "1".into()),
     ]
 }
@@ -901,7 +906,7 @@ fn task_body(name: &str, runner_id: &str, entrypoint: &str) -> serde_json::Value
     })
 }
 
-/// gamer.yaml 安装包：无实例执行模型下 start 不读 guest 字节，占位 wasm 即可
+/// gamer-yaml 安装包：无实例执行模型下 start 不读 guest 字节，占位 wasm 即可
 /// 完成完整生命周期（真实 v3 运行验收在 gamer_yaml 扩展自身的端到端测试）。
 fn gamer_yaml_archive() -> Vec<u8> {
     let mut archive = Vec::new();
@@ -916,6 +921,8 @@ fn gamer_yaml_archive() -> Vec<u8> {
             .unwrap();
         writer.start_file("plugin.wasm", options).unwrap();
         writer.write_all(b"\0asm\x01\0\0\0").unwrap();
+        writer.start_file("ui/plugin.js", options).unwrap();
+        writer.write_all(b"export const sdkVersion = 1;").unwrap();
         writer.finish().unwrap();
     }
     archive
@@ -935,7 +942,7 @@ async fn install_yaml_running(app: &axum::Router, cookie: &str) {
     )
     .await;
     let status = response.status();
-    assert_eq!(status, StatusCode::CREATED, "安装 gamer.yaml");
+    assert_eq!(status, StatusCode::CREATED, "安装 gamer-yaml");
     assert_eq!(body_json(response).await["state"], "running");
 }
 
@@ -964,7 +971,7 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
         ),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::CREATED, "安装 gamer.yaml");
+    assert_eq!(response.status(), StatusCode::CREATED, "安装 gamer-yaml");
     // 安装即用（2026-09-05）：install 自动 enable→start，响应即 Running。
     assert_eq!(body_json(response).await["state"], "running");
 
@@ -995,7 +1002,7 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
     assert_eq!(
         panels,
         vec!["automation", "functions", "templates"],
-        "gamer.yaml 的 core-runtime 面板随安装发布"
+        "gamer-yaml 的 core-runtime 面板随安装发布"
     );
     let runners = get_json(&guard.app, &cookie, "/api/runners").await;
     assert_eq!(runners.as_array().unwrap().len(), 1);
@@ -1194,7 +1201,7 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
         let mut states = store.read_state().unwrap();
         let record = states
             .get_mut(&crate::extensions::ExtensionId::parse(YAML_ID).unwrap())
-            .expect("gamer.yaml 状态记录");
+            .expect("gamer-yaml 状态记录");
         record.state = crate::extensions::ExtensionState::Running;
         store.write_state(&states).unwrap();
     }
@@ -1232,7 +1239,7 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
 // §14.4 Bare Core Test
 // ===========================================================================
 
-/// 零已装扩展：全部基础 API 可用，任何端点不因 gamer.yaml / gamer.keymap 缺席
+/// 零已装扩展：全部基础 API 可用，任何端点不因 gamer-yaml / gamer-keymap 缺席
 /// 而失败。投屏只测 API 面（设备列表空；真机链路见 tests/README.md 外部边界）。
 #[tokio::test]
 async fn architecture_guard_bare_core_serves_full_base_api_with_zero_extensions() {
@@ -1441,7 +1448,7 @@ fn valid_png() -> Vec<u8> {
 // §14.5 YAML Isolation Test
 // ===========================================================================
 
-/// 无 gamer.yaml：runner=gamer.yaml 任务保存成功；派发 → 424 dependency_missing
+/// 无 gamer-yaml：runner=gamer-yaml 任务保存成功；派发 → 424 dependency_missing
 /// 且任务保留；安装（占位 wasm 即可）+ 启动 → 同一任务**自动**恢复 Active 且
 /// 派发进入执行层（202 + run 记录）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1450,7 +1457,7 @@ async fn architecture_guard_isolation_yaml_task_survives_extension_absence_and_r
     let guard = build_app(&core);
     let cookie = login(&guard.app).await;
 
-    // 无 gamer.yaml（未安装）：任务保存成功（ADR-12：保存边界不拒绝未知 runner）。
+    // 无 gamer-yaml（未安装）：任务保存成功（ADR-12：保存边界不拒绝未知 runner）。
     let (status, created) = post_json(
         &guard.app,
         &cookie,
@@ -1481,7 +1488,7 @@ async fn architecture_guard_isolation_yaml_task_survives_extension_absence_and_r
     let tasks = get_json(&guard.app, &cookie, "/api/tasks").await;
     assert_eq!(tasks.as_array().unwrap().len(), 1, "任务保留，不删除");
 
-    // 安装 gamer.yaml（占位 wasm 即可：无实例执行模型）+ 启动。
+    // 安装 gamer-yaml（占位 wasm 即可：无实例执行模型）+ 启动。
     install_yaml_running(&guard.app, &cookie).await;
 
     // 同一任务自动恢复 Active（无需人工 enable/resume）。
@@ -1490,7 +1497,7 @@ async fn architecture_guard_isolation_yaml_task_survives_extension_absence_and_r
     assert!(task["suspend_reason"].is_null());
     assert!(!task["next_wakeup"].is_null());
 
-    // 保存脚本资源（Package API；gamer.yaml 扩展钩子已注册 = V1 校验生效，
+    // 保存脚本资源（Package API；gamer-yaml 扩展钩子已注册 = V1 校验生效，
     // 内容为 V1 直接通过）后派发进入执行层：202 + run 记录（不再 424）。
     let script = "run:
   - log: guard isolation
@@ -1507,7 +1514,7 @@ async fn architecture_guard_isolation_yaml_task_survives_extension_absence_and_r
         &guard.app,
         request(
             "PUT",
-            "/api/packages/com.guard.app/plugins/gamer.yaml/resources/automations/daily.yaml",
+            "/api/packages/com.guard.app/plugins/gamer-yaml/resources/automations/daily.yaml",
             &json_headers(&cookie),
             Some(
                 serde_json::json!({"content": script})
@@ -1582,9 +1589,9 @@ async fn architecture_guard_isolation_yaml_task_survives_extension_absence_and_r
 // §14.6 Keymap Isolation Test
 // ===========================================================================
 
-/// 无 gamer.keymap（未安装/未启动）：键盘事件直通（`dispatch_keymap_input`
+/// 无 gamer-keymap（未安装/未启动）：键盘事件直通（`dispatch_keymap_input`
 /// 返回 pass：不消费、无动作）——「有扩展 → 经 keymap runtime 消费」的整合
-/// 入口见 `extensions/keymap/mod.rs` 的
+/// 入口见 `plugins/gamer-keymap/host/mod.rs` 的
 /// `real_keymap_gplugin_invokes_wit_and_native_capabilities` /
 /// `real_keymap_guest_consumes_user_profile_yaml`（真实 fixture guest；WASM
 /// 消费与 profile 覆盖语义由它们锁定），此处不重复。
@@ -1596,7 +1603,7 @@ async fn architecture_guard_isolation_keymap_missing_extension_passes_input_thro
         crate::capabilities::CapabilityRegistry::default(),
     );
 
-    // 零扩展：未安装 gamer.keymap，也未安装任何其他扩展。
+    // 零扩展：未安装 gamer-keymap，也未安装任何其他扩展。
     assert!(service.list().unwrap().is_empty());
 
     let device =

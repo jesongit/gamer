@@ -1335,7 +1335,7 @@ mod tests {
         let app = crate::core::AppContext::for_test("d1", "com.test.app").unwrap();
         let request = RunRequest::for_app(
             app,
-            "gamer.yaml",
+            "gamer-yaml",
             "com.test.app/common.yaml#login",
             crate::core::RunPayload::empty(),
         )

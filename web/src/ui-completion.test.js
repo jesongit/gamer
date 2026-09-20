@@ -5,9 +5,9 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createOperationFeedback, OPERATION_FEEDBACK_KEY } from './workspace/operation-feedback'
 import OperationStatusBar from './workspace/OperationStatusBar.vue'
 import { useOperationStatus } from './components/ui/useOperationStatus'
-import { pushRunEvent, useRunEvents } from './components/console/useRunEvents'
-import { useConsoleScriptRunner } from './components/console/useConsoleScriptRunner'
-import RunErrorLocation from './components/console/RunErrorLocation.vue'
+import { pushRunEvent, useRunEvents } from '../../plugins/gamer-yaml/ui/src/components/console/useRunEvents'
+import { useConsoleScriptRunner } from '../../plugins/gamer-yaml/ui/src/components/console/useConsoleScriptRunner'
+import RunErrorLocation from '../../plugins/gamer-yaml/ui/src/components/console/RunErrorLocation.vue'
 import { api } from './api'
 import { connectGamer, applyGamerTheme } from '../../sdk/ui/gamer-ui.js'
 
@@ -49,11 +49,11 @@ it('状态便捷动作失败显示详情，不成为未处理异常', async () =
 it('同插件旧子面板卸载不会清掉新面板的状态', async () => {
   const feedback = createOperationFeedback(), oldOpen = ref(true), newOpen = ref(false)
   const Child = defineComponent({ props: ['label'], setup(props) { useOperationStatus(() => ({ text: props.label })); return () => h('div') } })
-  wrapper = mount(defineComponent({ setup() { return () => [oldOpen.value ? h(Child, { key: 'old', label: '项目未保存' }) : null, newOpen.value ? h(Child, { key: 'new', label: '草稿未保存' }) : null] } }), { global: { provide: { [OPERATION_FEEDBACK_KEY]: feedback, 'gamer-panel-owner': ref('gamer.video') } } })
+  wrapper = mount(defineComponent({ setup() { return () => [oldOpen.value ? h(Child, { key: 'old', label: '项目未保存' }) : null, newOpen.value ? h(Child, { key: 'new', label: '草稿未保存' }) : null] } }), { global: { provide: { [OPERATION_FEEDBACK_KEY]: feedback, 'gamer-panel-owner': ref('gamer-video') } } })
   newOpen.value = true; await flushPromises()
-  expect(feedback.state.plugins['gamer.video'].text).toBe('草稿未保存')
+  expect(feedback.state.plugins['gamer-video'].text).toBe('草稿未保存')
   oldOpen.value = false; await flushPromises()
-  expect(feedback.state.plugins['gamer.video'].text).toBe('草稿未保存')
+  expect(feedback.state.plugins['gamer-video'].text).toBe('草稿未保存')
 })
 
 it('迟到操作不覆盖新反馈，切换面板后未完成的首个操作不能复活', () => {

@@ -3,7 +3,7 @@
 //! `POST /api/packages/:pkg/plugins/:plugin/rename`，body
 //! `{path, new_path}`（均相对 `plugins/<plugin>/`）。实现 =
 //! [`PackageStore::rename_resource`]：先经该插件注册的
-//! [`ResourceHandler::before_rename`] 钩子（gamer.yaml 的模板引用 v3 AST
+//! [`ResourceHandler::before_rename`] 钩子（gamer-yaml 的模板引用 v3 AST
 //! 同步改写），钩子成功后才原子移动文件，失败不动任何文件。
 //!
 //! 独立成模块的原因：资源 CRUD 面已在 api/packages.rs 一次定型，重命名是

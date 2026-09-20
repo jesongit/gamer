@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
-import VideoProjects from './components/video/VideoProjects.vue'
+import VideoProjects from '../../plugins/gamer-video/ui/src/components/video/VideoProjects.vue'
 import {
   assetIdentityStatus,
   newProject,
@@ -12,7 +12,7 @@ import {
   withPrimaryProjectAsset,
   withProjectAsset,
   withoutProjectAsset,
-} from './components/video/videoProject'
+} from '../../plugins/gamer-video/ui/src/components/video/videoProject'
 
 const HASH_A = 'a'.repeat(64)
 const HASH_B = 'b'.repeat(64)

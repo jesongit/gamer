@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { useRawYamlEditor } from './composables/useRawYamlEditor'
+import { useRawYamlEditor } from '../../plugins/gamer-yaml/ui/src/composables/useRawYamlEditor'
 
 const SCRIPT = 'steps:\n  - log: hello\n'
 const FUNCTIONS = 'login:\n  steps: []\n'

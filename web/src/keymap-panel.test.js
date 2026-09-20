@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
-import KeymapPanel from './components/console/KeymapPanel.vue'
+import KeymapPanel from '../../plugins/gamer-keymap/ui/src/components/console/KeymapPanel.vue'
 
 function keymapContext(overrides = {}) {
   return {

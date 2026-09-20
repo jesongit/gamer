@@ -1,6 +1,7 @@
+import './test-plugin-modules'
 // RunnerEditorContribution 注册表单测（P11.1 §6.7 轻量 V1 契约）：
 // - 按 runner_id 注册/获取/枚举/反注册；同 id 重复注册以最后一次为准；
-// - gamer.yaml 内置贡献形状：title/entrypoints（异步候选，保障 store 就绪）/
+// - gamer-yaml 内置贡献形状：title/entrypoints（异步候选，保障 store 就绪）/
 //   entrypointEditor（ScriptPicker + 纯受控 autoPick:false）/payloadEditor/resolveAppPackages。
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -57,7 +58,7 @@ describe('runner-editors 注册表', () => {
   })
 })
 
-describe('gamer.yaml 内置贡献', () => {
+describe('gamer-yaml 内置贡献', () => {
   it('形状契约：title/entrypoints/entrypointEditor/payloadEditor/resolveAppPackages 齐备', () => {
     const unregister = registerGamerYamlRunnerEditor()
     const contrib = getRunnerEditor(GAMER_YAML_RUNNER_ID)
@@ -100,8 +101,8 @@ describe('gamer.yaml 内置贡献', () => {
 
   it('entrypoints(ctx)：拉取脚本进 store 后返回候选（value=脚本 id）', async () => {
     stubFetch([
-      { url: '/api/packages/com.demo/plugins/gamer.yaml/resources?prefix=automations', body: { resources: [{ package: 'com.demo', path: 'automations/main.yml', content: 'steps: []', version: 'v1', updated_at: '', size: 1 }] } },
-      { url: '/api/packages/com.demo/plugins/gamer.yaml/resources?prefix=templates', body: { resources: [] } },
+      { url: '/api/packages/com.demo/plugins/gamer-yaml/resources?prefix=automations', body: { resources: [{ package: 'com.demo', path: 'automations/main.yml', content: 'steps: []', version: 'v1', updated_at: '', size: 1 }] } },
+      { url: '/api/packages/com.demo/plugins/gamer-yaml/resources?prefix=templates', body: { resources: [] } },
     ])
     const unregister = registerGamerYamlRunnerEditor()
     const contrib = getRunnerEditor(GAMER_YAML_RUNNER_ID)

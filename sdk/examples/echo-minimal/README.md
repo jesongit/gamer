@@ -15,7 +15,7 @@ guest 内 `use gamer::host::...`）。
 ```sh
 rustup target add wasm32-unknown-unknown   # 首次
 pwsh ./build.ps1
-# 产物：dist/com.example.echo-1.0.0.gplugin
+# 产物：dist/gamer-echo-1.0.0.gplugin
 ```
 
 原始命令（跨 shell / 仓库外同样适用，`$SIGNER` =
@@ -28,8 +28,8 @@ cargo run --release --bin componentize -- \
   target/plugin.component.wasm
 $SIGNER inspect --manifest manifest.toml
 $SIGNER pack --manifest manifest.toml --wasm target/plugin.component.wasm \
-  --out dist/com.example.echo-1.0.0.gplugin
-$SIGNER verify --archive dist/com.example.echo-1.0.0.gplugin
+  --out dist/gamer-echo-1.0.0.gplugin
+$SIGNER verify --archive dist/gamer-echo-1.0.0.gplugin
 ```
 
 ## 安装与调用（curl）
@@ -43,22 +43,22 @@ curl -s -c cookies.txt -X POST "$BASE/api/login" \
 # 安装（无权限增量 → 不需要确认头；安装即自动 enable→start）
 curl -s -b cookies.txt -X POST "$BASE/api/extensions" \
   -H 'Content-Type: application/octet-stream' \
-  --data-binary @dist/com.example.echo-1.0.0.gplugin
+  --data-binary @dist/gamer-echo-1.0.0.gplugin
 
 # 调用公开 command（action 必须是 manifest 按钮集合里的名字）
-curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.echo/call" \
+curl -s -b cookies.txt -X POST "$BASE/api/extensions/gamer-echo/call" \
   -H 'Content-Type: application/json' \
   -d '{"action":"sum","values":{"a":19,"b":55}}'
 # → {"action":"sum","ok":true,"sum":74.0}
 
 # 未声明的 action 被宿主拒绝（declarative 按钮白名单）
-curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.echo/call" \
+curl -s -b cookies.txt -X POST "$BASE/api/extensions/gamer-echo/call" \
   -H 'Content-Type: application/json' -d '{"action":"evil","values":{}}'
 # → 400 插件调用被拒绝
 
 # 卸载（Running 先 disable）
-curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.echo/disable"
-curl -s -b cookies.txt -X DELETE "$BASE/api/extensions/com.example.echo/1.0.0"
+curl -s -b cookies.txt -X POST "$BASE/api/extensions/gamer-echo/disable"
+curl -s -b cookies.txt -X DELETE "$BASE/api/extensions/gamer-echo/1.0.0"
 ```
 
 浏览器侧：右侧插件面板出现「Echo 示例」（declarative 表单：回显 / 求和）。

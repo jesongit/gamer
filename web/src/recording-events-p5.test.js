@@ -3,7 +3,7 @@ import {
   filterRecordingEvents,
   formatRecordingEventTime,
   normalizeRecordingEvent,
-} from './components/video/recordingEvents'
+} from '../../plugins/gamer-video/ui/src/components/video/recordingEvents'
 
 describe('P5 recordingEvents UI model', () => {
   const events = [

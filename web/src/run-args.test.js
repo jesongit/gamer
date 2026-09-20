@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from './api'
-import { runYamlFunction, runYamlScript } from './gamer-yaml-runner'
-import { useRunArgsFlow } from './composables/useRunArgsFlow'
+import { runYamlFunction, runYamlScript } from '../../plugins/gamer-yaml/ui/src/gamer-yaml-runner'
+import { useRunArgsFlow } from '../../plugins/gamer-yaml/ui/src/composables/useRunArgsFlow'
 import { readFileSync } from 'node:fs'
 
 /**
@@ -40,7 +40,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('runYamlScript / runYamlFunction 请求体（gamer.yaml 经 api.run 统一执行入口）', () => {
+describe('runYamlScript / runYamlFunction 请求体（gamer-yaml 经 api.run 统一执行入口）', () => {
   it('runYamlScript：POST /api/runs {runner_id, entrypoint, device_id, payload}；空 args 不携带', async () => {
     const calls = stubFetch([
       { method: 'POST', url: '/api/runs', body: { run_id: 'r1', state: 'starting' } },
@@ -50,7 +50,7 @@ describe('runYamlScript / runYamlFunction 请求体（gamer.yaml 经 api.run 统
       url: '/api/runs',
       method: 'POST',
       body: {
-        runner_id: 'gamer.yaml',
+        runner_id: 'gamer-yaml',
         entrypoint: 'com.demo/main.yaml',
         content_package: 'com.demo',
         device_id: 'dev1',
@@ -69,7 +69,7 @@ describe('runYamlScript / runYamlFunction 请求体（gamer.yaml 经 api.run 统
       function: 'login', start_index: 1, args: { account: 'a.png' },
     })
     expect(calls[0].body).toEqual({
-      runner_id: 'gamer.yaml',
+      runner_id: 'gamer-yaml',
       entrypoint: 'com.demo#login',
       content_package: 'com.demo',
       device_id: 'dev1',
@@ -115,7 +115,7 @@ describe('runYamlScript / runYamlFunction 请求体（gamer.yaml 经 api.run 统
 
 // V1 descriptor：account（template，必填）+ timeout（duration，默认 30s，带说明）
 const DESCRIPTOR_WITH_PARAMS = {
-  runner_id: 'gamer.yaml',
+  runner_id: 'gamer-yaml',
   entrypoint: 'com.demo/main.yaml',
   kind: 'script',
   format: 'yaml-params-v1',
@@ -131,7 +131,7 @@ const EMPTY_DESCRIPTOR = {
   schema: [],
 }
 
-const BEGIN_OPTS = { id: 's1', runnerId: 'gamer.yaml', entrypoint: 'com.demo/main.yaml' }
+const BEGIN_OPTS = { id: 's1', runnerId: 'gamer-yaml', entrypoint: 'com.demo/main.yaml' }
 
 function memoryStorage() {
   const m = new Map()
@@ -145,14 +145,14 @@ function memoryStorage() {
 describe('useRunArgsFlow', () => {
   it('默认 loadParams 走 api.getEntrypointParams：GET entrypoint descriptor（整体编码），schema 适配进弹窗', async () => {
     const calls = stubFetch([
-      { method: 'GET', url: '/api/runners/gamer.yaml/entrypoint', body: DESCRIPTOR_WITH_PARAMS },
+      { method: 'GET', url: '/api/runners/gamer-yaml/entrypoint', body: DESCRIPTOR_WITH_PARAMS },
       { method: 'POST', url: '/api/runs', body: { run_id: 'r9' } },
     ])
     const exec = vi.fn().mockResolvedValue({ run_id: 'r9', state: 'starting' })
     const flow = useRunArgsFlow({ exec, notify: () => {} })
     const r = await flow.begin({ ...BEGIN_OPTS, startIndex: 1 })
     expect(r).toEqual({ form: true })
-    expect(calls[0].url).toBe('/api/runners/gamer.yaml/entrypoint?entrypoint=com.demo%2Fmain.yaml')
+    expect(calls[0].url).toBe('/api/runners/gamer-yaml/entrypoint?entrypoint=com.demo%2Fmain.yaml')
     expect(flow.modal.params.map(p => [p.name, p.type, p.default])).toEqual([
       ['account', 'template', null],
       ['timeout', 'duration', '30s'],
@@ -166,7 +166,7 @@ describe('useRunArgsFlow', () => {
     const flow = useRunArgsFlow({ exec, notify: n => notes.push(n), loadParams })
     const r = await flow.begin({ ...BEGIN_OPTS, name: 'main.yaml' })
     expect(r).toEqual({ form: false })
-    expect(loadParams).toHaveBeenCalledWith({ runnerId: 'gamer.yaml', entrypoint: 'com.demo/main.yaml' })
+    expect(loadParams).toHaveBeenCalledWith({ runnerId: 'gamer-yaml', entrypoint: 'com.demo/main.yaml' })
     expect(exec).toHaveBeenCalledWith(expect.objectContaining({ id: 's1', args: undefined, startIndex: 0 }))
     expect(flow.modal.open).toBe(false)
     expect(notes[0].summary).toBe('')
@@ -307,11 +307,11 @@ describe('useRunArgsFlow schema 加载失败（P12.3：不弹参数框，结构�
     const flow = useRunArgsFlow({
       exec: vi.fn(),
       notify: () => {},
-      loadParams: vi.fn().mockRejectedValue(base({ error: 'runner_not_found', runner_id: 'gamer.yaml' }, 404)),
+      loadParams: vi.fn().mockRejectedValue(base({ error: 'runner_not_found', runner_id: 'gamer-yaml' }, 404)),
     })
     await expect(flow.begin(BEGIN_OPTS)).rejects.toMatchObject({
       code: 'runner_not_found',
-      message: expect.stringContaining('gamer.yaml'),
+      message: expect.stringContaining('gamer-yaml'),
     })
   })
 
@@ -328,11 +328,11 @@ describe('Console 运行参数接线', () => {
   const read = p => readFileSync(new URL(p, import.meta.url), 'utf8')
   const consoleSrc = read('./views/Console.vue')
   // Console 拆分后：运行参数流程实现移入脚本运行 composable
-  const runnerSrc = read('./components/console/useConsoleScriptRunner.js')
+  const runnerSrc = read('../../plugins/gamer-yaml/ui/src/components/console/useConsoleScriptRunner.js')
 
   it('Console：运行入口走参数流程（弹窗 + 稀疏 args + 409 冲突 + 摘要日志）', () => {
     expect(runnerSrc).toContain("import { useRunArgsFlow } from '../../composables/useRunArgsFlow'")
-    expect(consoleSrc).toContain("import RunParamsModal from '../components/RunParamsModal.vue'")
+    expect(consoleSrc).toContain("RunParamsModal")
     expect(consoleSrc).toContain('<RunParamsModal')
     expect(runnerSrc).toContain('runYamlScript(id, store.deviceId, startIndex, args)')
     expect(runnerSrc).toContain("import { GAMER_YAML_RUNNER_ID, runYamlFunction, runYamlScript } from '../../gamer-yaml-runner'")

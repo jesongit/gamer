@@ -818,7 +818,7 @@ fn rgb_hue_saturation([r, g, b]: [u8; 3]) -> (f32, f32) {
 /// （小体积声明超大分辨率，数十倍放大内存占用）。超限报清晰 4xx 文案。
 ///
 /// 生产入口 = Package REST 字节 PUT 的 ResourceHandler 字节钩子
-/// （gamer.yaml 的 templates/ 保存期归一化）。
+/// （gamer-yaml 的 templates/ 保存期归一化）。
 pub fn reencode_template_png(bytes: &[u8], grayscale_only: bool) -> anyhow::Result<Vec<u8>> {
     let img = decode_image_limited(bytes, TEMPLATE_MAX_INPUT_BYTES, "图片")?;
     let normalized = if grayscale_only {

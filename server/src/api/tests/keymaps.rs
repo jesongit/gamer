@@ -2,7 +2,7 @@ use super::*;
 
 // Package API（plan §2-§15）：插件资源经
 // `/api/packages/:pkg/plugins/:plugin/resources/*path` 存取；插件数据隔离在
-// `plugins/<plugin>/` 前缀内。gamer.keymap 的方案注记（显示名 name /
+// `plugins/<plugin>/` 前缀内。gamer-keymap 的方案注记（显示名 name /
 // binding_count / valid / diagnostics）由扩展注册的 ResourceHandler 提供。
 
 const KEYMAP_V1: &str = "version: 1\nname: 战斗方案\nbindings:\n  - key: Space\n    action:\n      type: tap\n      at: [0.72, 0.86]\n  - key: KeyE\n    action:\n      type: swipe\n      from: [0.4, 0.8]\n      to: [0.6, 0.8]\n      duration_ms: 300\n";
@@ -10,7 +10,7 @@ const KEYMAP_V1: &str = "version: 1\nname: 战斗方案\nbindings:\n  - key: Spa
 const KEYMAP_V2: &str = "version: 1\nname: 探索方案\nbindings:\n  - key: KeyW\n    action:\n      type: hold\n      at: [0.5, 0.5]\n";
 
 fn pkg_base(pkg: &str) -> String {
-    format!("/api/packages/{pkg}/plugins/gamer.keymap/resources")
+    format!("/api/packages/{pkg}/plugins/gamer-keymap/resources")
 }
 
 #[tokio::test]
@@ -56,7 +56,7 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
     assert_eq!(resp.status(), StatusCode::OK, "{}", json_body(resp).await);
     let created = json_body(resp).await;
     assert_eq!(created["package"], "com.test.app");
-    assert_eq!(created["plugin"], "gamer.keymap");
+    assert_eq!(created["plugin"], "gamer-keymap");
     assert_eq!(created["path"], "mappings/combat.yaml");
     assert_eq!(created["name"], "战斗方案");
     assert_eq!(created["binding_count"], 2);
@@ -65,7 +65,7 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
     assert_eq!(v1.len(), 12);
     assert!(t
         .dir
-        .join("packages/com.test.app/plugins/gamer.keymap/mappings/combat.yaml")
+        .join("packages/com.test.app/plugins/gamer-keymap/mappings/combat.yaml")
         .is_file());
 
     // 已存在文件：无 expected_version → 409 version_required
@@ -214,7 +214,7 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-/// 存储层直接探针：PackageStore.read_text 命中 `plugins/gamer.keymap/mappings/`
+/// 存储层直接探针：PackageStore.read_text 命中 `plugins/gamer-keymap/mappings/`
 /// 下的方案文件（路径 = 包数据根的新布局）。
 #[tokio::test]
 async fn keymap_store_read_text_probe() {
@@ -251,7 +251,7 @@ async fn keymap_store_read_text_probe() {
     })
     .unwrap();
     let hit = store
-        .read_text("com.test.app", "gamer.keymap", "mappings/combat.yaml")
+        .read_text("com.test.app", "gamer-keymap", "mappings/combat.yaml")
         .unwrap();
     assert!(hit.is_some());
 }
@@ -326,6 +326,6 @@ async fn keymaps_reject_invalid_yaml_fields_coordinates_and_duplicates() {
     }
     assert!(!t
         .dir
-        .join("packages/com.test.app/plugins/gamer.keymap/mappings/bad.yaml")
+        .join("packages/com.test.app/plugins/gamer-keymap/mappings/bad.yaml")
         .exists());
 }

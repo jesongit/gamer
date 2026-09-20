@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { pushRunEvent, runEventTopIndex, useRunEvents } from './components/console/useRunEvents'
+import { pushRunEvent, runEventTopIndex, useRunEvents } from '../../plugins/gamer-yaml/ui/src/components/console/useRunEvents'
 
 /**
  * 运行可视化事件分发与高亮映射（P12.6 / 契约 §6）：

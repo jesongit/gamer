@@ -51,7 +51,7 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
             "name": "演示包",
             "version": "1.0.0",
             "targets": {"android": {"packages": ["com.example.game"]}},
-            "plugins": {"gamer.yaml": true, "gamer.keymap": false},
+            "plugins": {"gamer-yaml": true, "gamer-keymap": false},
         }),
     )
     .await;
@@ -61,9 +61,9 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
     assert_eq!(created["revision"], 1);
     assert_eq!(created["targets"]["android"]["packages"][0], "com.example.game");
     // plugins 依赖按 plugin-id 字典序（BTreeMap）
-    assert_eq!(created["plugins"][0]["id"], "gamer.keymap");
+    assert_eq!(created["plugins"][0]["id"], "gamer-keymap");
     assert_eq!(created["plugins"][0]["required"], false);
-    assert_eq!(created["plugins"][1]["id"], "gamer.yaml");
+    assert_eq!(created["plugins"][1]["id"], "gamer-yaml");
     assert_eq!(created["plugins"][1]["required"], true);
     // 目录落位：package.toml + shared/ + plugins/
     let pkg_dir = t.dir.join("packages/official.demo");
@@ -87,7 +87,7 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
         &t.app,
         req(
             "PUT",
-            &resource_url("official.demo", "gamer.yaml", "automations/daily.yaml"),
+            &resource_url("official.demo", "gamer-yaml", "automations/daily.yaml"),
             None,
             &json_headers(sid.clone()),
             Some(serde_json::json!({"content": script}).to_string()),
@@ -105,7 +105,7 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
         &t.app,
         req_bytes(
             "PUT",
-            &resource_url("official.demo", "gamer.yaml", "templates/icon.png"),
+            &resource_url("official.demo", "gamer-yaml", "templates/icon.png"),
             None,
             &[
                 (axum::http::header::CONTENT_TYPE.to_string(), "image/png".into()),
@@ -121,7 +121,7 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
     let resp = get_json(
         &t,
         &sid,
-        &resource_url("official.demo", "gamer.yaml", "automations/daily.yaml"),
+        &resource_url("official.demo", "gamer-yaml", "automations/daily.yaml"),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -133,7 +133,7 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
     let resp = get_json(
         &t,
         &sid,
-        &resource_url("official.demo", "gamer.yaml", "templates/icon.png"),
+        &resource_url("official.demo", "gamer-yaml", "templates/icon.png"),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -146,7 +146,7 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
         &t.app,
         req(
             "PUT",
-            &resource_url("official.demo", "gamer.yaml", "automations/daily.yaml"),
+            &resource_url("official.demo", "gamer-yaml", "automations/daily.yaml"),
             None,
             &json_headers(sid.clone()),
             Some(
@@ -161,7 +161,7 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
     let resp = get_json(
         &t,
         &sid,
-        "/api/packages/official.demo/plugins/gamer.yaml/resources",
+        "/api/packages/official.demo/plugins/gamer-yaml/resources",
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -200,7 +200,7 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
     let resp = get_json(
         &t,
         &sid,
-        &resource_url("user.demo", "gamer.yaml", "automations/daily.yaml"),
+        &resource_url("user.demo", "gamer-yaml", "automations/daily.yaml"),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -289,7 +289,7 @@ async fn package_import_conflicts_then_atomic_overwrite() {
         &t.app,
         req(
             "PUT",
-            &resource_url("official.imp", "gamer.yaml", "automations/first.yaml"),
+            &resource_url("official.imp", "gamer-yaml", "automations/first.yaml"),
             None,
             &json_headers(sid.clone()),
             Some(serde_json::json!({"content": "run:\n  - log: v1\n"}).to_string()),
@@ -347,7 +347,7 @@ async fn package_import_conflicts_then_atomic_overwrite() {
         &t.app,
         req(
             "PUT",
-            &resource_url("official.imp", "gamer.yaml", "automations/first.yaml"),
+            &resource_url("official.imp", "gamer-yaml", "automations/first.yaml"),
             None,
             &json_headers(sid.clone()),
             Some(
@@ -397,7 +397,7 @@ async fn package_import_conflicts_then_atomic_overwrite() {
     let resp = get_json(
         &t,
         &sid,
-        &resource_url("official.imp", "gamer.yaml", "automations/first.yaml"),
+        &resource_url("official.imp", "gamer-yaml", "automations/first.yaml"),
     )
     .await;
     assert!(json_body(resp).await["content"]
@@ -431,7 +431,7 @@ async fn package_import_conflicts_then_atomic_overwrite() {
     let resp = get_json(
         &t,
         &sid,
-        &resource_url("official.imp", "gamer.yaml", "automations/first.yaml"),
+        &resource_url("official.imp", "gamer-yaml", "automations/first.yaml"),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -500,11 +500,11 @@ async fn package_presets_publish_on_import_and_duplicate() {
     assert_eq!(resp.status(), StatusCode::CREATED);
     let preset_dir = t
         .dir
-        .join("packages/official.preset/plugins/gamer.yaml/presets");
+        .join("packages/official.preset/plugins/gamer-yaml/presets");
     std::fs::create_dir_all(&preset_dir).unwrap();
     std::fs::write(
         preset_dir.join("daily.yaml"),
-        "name: \u{6bcf}\u{65e5}\u{9886}\u{53d6}\nrunner_id: gamer.yaml\nentrypoint: run\npayload: {}\nschedule:\n  kind: cron\n  value:\n    expression: \"0 8 * * *\"\n",
+        "name: \u{6bcf}\u{65e5}\u{9886}\u{53d6}\nrunner_id: gamer-yaml\nentrypoint: run\npayload: {}\nschedule:\n  kind: cron\n  value:\n    expression: \"0 8 * * *\"\n",
     )
     .unwrap();
 
@@ -561,7 +561,7 @@ async fn package_presets_publish_on_import_and_duplicate() {
         .find(|p| p["id"] == "official.preset:每日领取")
         .expect("包内预设必须以 <package-id>:<名> 发布")
         .clone();
-    assert_eq!(daily["runner"]["runner_id"], "gamer.yaml");
+    assert_eq!(daily["runner"]["runner_id"], "gamer-yaml");
     assert_eq!(daily["app_package"], "official.preset");
 
     // 复制包 → 新包 id 下的预设同样发布（幂等：重复复制不产生第二行）
@@ -606,7 +606,7 @@ async fn template_upload_rename_rewrites_references_and_still_matches() {
     create_package(
         &t,
         &sid,
-        serde_json::json!({"id": "official.tpl", "plugins": {"gamer.yaml": true}}),
+        serde_json::json!({"id": "official.tpl", "plugins": {"gamer-yaml": true}}),
     )
     .await;
 
@@ -616,7 +616,7 @@ async fn template_upload_rename_rewrites_references_and_still_matches() {
         &t.app,
         req_bytes(
             "PUT",
-            &resource_url("official.tpl", "gamer.yaml", "templates/reward.png"),
+            &resource_url("official.tpl", "gamer-yaml", "templates/reward.png"),
             None,
             &[
                 (axum::http::header::COOKIE.to_string(), sid.clone()),
@@ -638,7 +638,7 @@ async fn template_upload_rename_rewrites_references_and_still_matches() {
         &t,
         &sid,
         "official.tpl",
-        "gamer.yaml",
+        "gamer-yaml",
         "automations/daily.yaml",
         script,
     )
@@ -649,7 +649,7 @@ async fn template_upload_rename_rewrites_references_and_still_matches() {
     let resp = post_json(
         &t,
         &sid,
-        "/api/packages/official.tpl/plugins/gamer.yaml/rename",
+        "/api/packages/official.tpl/plugins/gamer-yaml/rename",
         serde_json::json!({
             "path": "templates/reward.png",
             "new_path": "templates/bonus.png",
@@ -665,7 +665,7 @@ async fn template_upload_rename_rewrites_references_and_still_matches() {
     let resp = get_json(
         &t,
         &sid,
-        &resource_url("official.tpl", "gamer.yaml", "templates/bonus.png"),
+        &resource_url("official.tpl", "gamer-yaml", "templates/bonus.png"),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -673,7 +673,7 @@ async fn template_upload_rename_rewrites_references_and_still_matches() {
         &t.app,
         req(
             "GET",
-            &resource_url("official.tpl", "gamer.yaml", "templates/reward.png"),
+            &resource_url("official.tpl", "gamer-yaml", "templates/reward.png"),
             None,
             &json_headers(sid.clone()),
             None,
@@ -686,7 +686,7 @@ async fn template_upload_rename_rewrites_references_and_still_matches() {
     let resp = get_json(
         &t,
         &sid,
-        &resource_url("official.tpl", "gamer.yaml", "automations/daily.yaml"),
+        &resource_url("official.tpl", "gamer-yaml", "automations/daily.yaml"),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -698,7 +698,7 @@ async fn template_upload_rename_rewrites_references_and_still_matches() {
     let resp = post_json(
         &t,
         &sid,
-        "/api/packages/official.tpl/plugins/gamer.yaml/rename",
+        "/api/packages/official.tpl/plugins/gamer-yaml/rename",
         serde_json::json!({"path": "templates/bonus.png", "new_path": "templates/bonus.png"}),
     )
     .await;
@@ -707,7 +707,7 @@ async fn template_upload_rename_rewrites_references_and_still_matches() {
         &t.app,
         req_bytes(
             "PUT",
-            &resource_url("official.tpl", "gamer.yaml", "templates/other.png"),
+            &resource_url("official.tpl", "gamer-yaml", "templates/other.png"),
             None,
             &[
                 (axum::http::header::COOKIE.to_string(), sid.clone()),
@@ -724,7 +724,7 @@ async fn template_upload_rename_rewrites_references_and_still_matches() {
     let resp = post_json(
         &t,
         &sid,
-        "/api/packages/official.tpl/plugins/gamer.yaml/rename",
+        "/api/packages/official.tpl/plugins/gamer-yaml/rename",
         serde_json::json!({"path": "templates/other.png", "new_path": "templates/bonus.png"}),
     )
     .await;
@@ -750,7 +750,7 @@ async fn template_upload_rename_rewrites_references_and_still_matches() {
         .unwrap();
     let renamed_bytes = t
         .dir
-        .join("packages/official.tpl/plugins/gamer.yaml/templates/bonus.png");
+        .join("packages/official.tpl/plugins/gamer-yaml/templates/bonus.png");
     let template_png = std::fs::read(&renamed_bytes).unwrap();
     let matched = crate::matcher::match_template(&crate::matcher::MatchRequest {
         screen_png,
@@ -778,7 +778,7 @@ async fn vision_test_requires_explicit_plugin() {
     create_package(
         &t,
         &sid,
-        serde_json::json!({"id": "official.vision", "plugins": {"gamer.yaml": true}}),
+        serde_json::json!({"id": "official.vision", "plugins": {"gamer-yaml": true}}),
     )
     .await;
     // 单插件包也不允许省略 plugin（旧「唯一插件目录兜底」猜测已删）：
@@ -822,7 +822,7 @@ async fn vision_test_requires_explicit_plugin() {
         serde_json::json!({
             "device_id": "d1",
             "pkg": "official.vision",
-            "plugin": "gamer.yaml",
+            "plugin": "gamer-yaml",
             "name": "ghost.png",
         }),
     )
@@ -843,7 +843,7 @@ async fn template_upload_binary_hook_normalizes_and_rejects_garbage() {
     let resp = create_package(
         &t,
         &sid,
-        serde_json::json!({"id": "official.tpl", "plugins": {"gamer.yaml": true}}),
+        serde_json::json!({"id": "official.tpl", "plugins": {"gamer-yaml": true}}),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED, "{}", json_body(resp).await);
@@ -865,7 +865,7 @@ async fn template_upload_binary_hook_normalizes_and_rejects_garbage() {
         &t.app,
         req_bytes(
             "PUT",
-            &resource_url("official.tpl", "gamer.yaml", "templates/icon.png"),
+            &resource_url("official.tpl", "gamer-yaml", "templates/icon.png"),
             None,
             &[
                 (axum::http::header::CONTENT_TYPE.to_string(), "image/png".into()),
@@ -884,7 +884,7 @@ async fn template_upload_binary_hook_normalizes_and_rejects_garbage() {
     let resp = get_json(
         &t,
         &sid,
-        &resource_url("official.tpl", "gamer.yaml", "templates/icon.png"),
+        &resource_url("official.tpl", "gamer-yaml", "templates/icon.png"),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -906,7 +906,7 @@ async fn template_upload_binary_hook_normalizes_and_rejects_garbage() {
         &t.app,
         req_bytes(
             "PUT",
-            &resource_url("official.tpl", "gamer.yaml", "templates/icon.png"),
+            &resource_url("official.tpl", "gamer-yaml", "templates/icon.png"),
             None,
             &[
                 (axum::http::header::CONTENT_TYPE.to_string(), "image/png".into()),
@@ -924,7 +924,7 @@ async fn template_upload_binary_hook_normalizes_and_rejects_garbage() {
         &t.app,
         req_bytes(
             "PUT",
-            &resource_url("official.tpl", "gamer.yaml", "templates/broken.png"),
+            &resource_url("official.tpl", "gamer-yaml", "templates/broken.png"),
             None,
             &[
                 (axum::http::header::CONTENT_TYPE.to_string(), "application/octet-stream".into()),
@@ -947,7 +947,7 @@ async fn template_upload_binary_hook_normalizes_and_rejects_garbage() {
         &t.app,
         req_bytes(
             "PUT",
-            &resource_url("official.tpl", "gamer.yaml", "assets/blob.bin"),
+            &resource_url("official.tpl", "gamer-yaml", "assets/blob.bin"),
             None,
             &[
                 (axum::http::header::CONTENT_TYPE.to_string(), "application/octet-stream".into()),
@@ -961,7 +961,7 @@ async fn template_upload_binary_hook_normalizes_and_rejects_garbage() {
     let resp = get_json(
         &t,
         &sid,
-        &resource_url("official.tpl", "gamer.yaml", "assets/blob.bin"),
+        &resource_url("official.tpl", "gamer-yaml", "assets/blob.bin"),
     )
     .await;
     let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
@@ -993,7 +993,7 @@ async fn package_import_with_media_restores_bytes_and_releases_refs_on_delete() 
                 "name": "clip.mp4",
                 "sha256": sha,
                 "size": clip.len(),
-                "plugin_id": "gamer.video",
+                "plugin_id": "gamer-video",
                 "kind": "project",
                 "included": included,
             }],
@@ -1041,7 +1041,7 @@ version = "1.0.0"
     assert_eq!(meta["sha256"], sha.as_str());
     assert_eq!(meta["size"], clip.len() as u64);
     assert_eq!(meta["refs"][0]["package_id"], "official.media.demo");
-    assert_eq!(meta["refs"][0]["plugin_id"], "gamer.video");
+    assert_eq!(meta["refs"][0]["plugin_id"], "gamer-video");
 
     // —— 覆盖导入「仅引用」版（included=false、无字节）→ 引用重挂 ——
     let refs_only = craft_zip(vec![

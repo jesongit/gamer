@@ -7,8 +7,9 @@ import vue from '@vitejs/plugin-vue'
 // 此处全局 environment 保持 node 不变，仅挂 vue 插件以转译 .vue 单文件组件。
 export default defineConfig({
   plugins: [vue()],
+  resolve: { dedupe: ["vue", "vue-router"] },
   test: {
     environment: 'node',
-    include: ['src/*.test.js', 'src/script-editor/**/*.test.js'],
+    include: ['src/*.test.js'],
   },
 })

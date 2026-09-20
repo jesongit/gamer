@@ -1,0 +1,95 @@
+{
+  "api": [
+    "api"
+  ],
+  "gamer-plugin-ids": [
+    "FUNCTION_LIBRARY_DEFAULT",
+    "GAMER_VIDEO_PLUGIN_ID",
+    "GAMER_YAML_AUTOMATION_PANEL_KEY",
+    "GAMER_YAML_PLUGIN_ID",
+    "KEYMAP_PLUGIN_ID",
+    "TEMPLATE_DIR",
+    "VIDEO_PROJECT_DIR"
+  ],
+  "vue": [
+    "computed",
+    "defineAsyncComponent",
+    "inject",
+    "nextTick",
+    "onActivated",
+    "onBeforeUnmount",
+    "onDeactivated",
+    "onMounted",
+    "onUnmounted",
+    "provide",
+    "reactive",
+    "ref",
+    "shallowRef",
+    "watch"
+  ],
+  "store": [
+    "applyRunRecord",
+    "beginCancel",
+    "devicesData",
+    "findRun",
+    "pushRunConflict",
+    "resetStoreRunState",
+    "runRegistry",
+    "scriptsData",
+    "store",
+    "templatesData"
+  ],
+  "components/ui/useConfirmDialog": [
+    "useConfirmDialog"
+  ],
+  "components/ui/UiIcon.vue": [
+    "default"
+  ],
+  "components/ui/useOperationStatus": [
+    "useOperationStatus"
+  ],
+  "runs": [
+    "isDeviceBusyConflict",
+    "isTerminalRunState",
+    "sourceLabel",
+    "terminalLabel"
+  ],
+  "components/console/current-api-adapters": [
+    "createEditorShellApi"
+  ],
+  "workspace/operation-feedback": [
+    "operationReporter"
+  ],
+  "console/geometry": [
+    "defaultTemplateName",
+    "deviceRectStyle",
+    "selectionToDeviceRect",
+    "toDeviceCoord"
+  ],
+  "auth": [
+    "handleUnauthorized"
+  ],
+  "vue-router": [
+    "useRouter"
+  ],
+  "workspace/context": [
+    "STAGE_MEDIA_CONTROLLER_KEY"
+  ],
+  "components/console/useConsoleStage": [
+    "requestStageMedia"
+  ],
+  "package-store": [
+    "packageStore",
+    "selectPackage"
+  ],
+  "keymap-control": [
+    "normalizeKeymap",
+    "validateKeymap"
+  ],
+  "components/task/runner-editors": [
+    "registerRunnerEditor"
+  ],
+  "workspace/plugin-messages": [
+    "pluginMessageChannel"
+  ]
+}

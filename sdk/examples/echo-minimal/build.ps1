@@ -1,5 +1,5 @@
-# Build script for the "echo-minimal" example plugin (Windows PowerShell).
-# Produces dist/com.example.echo-<version>.gplugin using the repo's own
+﻿# Build script for the "echo-minimal" example plugin (Windows PowerShell).
+# Produces dist/gamer-echo-<version>.gplugin using the repo's own
 # tools/plugin-signer CLI. No signing key is needed (unsigned by design).
 #
 # Usage:

@@ -19,11 +19,11 @@ const videoMocks = vi.hoisted(() => ({
 }))
 
 vi.mock('./api', () => ({ api: mocks }))
-vi.mock('./components/video/videoApi', () => ({ videoApi: videoMocks }))
+vi.mock('../../plugins/gamer-video/ui/src/components/video/videoApi', () => ({ videoApi: videoMocks }))
 
-import { useConsoleTemplates } from './components/console/useConsoleTemplates'
-import TemplateStudio from './components/video/TemplateStudio.vue'
-import { templateShortName } from './console/template-resource'
+import { useConsoleTemplates } from '../../plugins/gamer-yaml/ui/src/components/console/useConsoleTemplates'
+import TemplateStudio from '../../plugins/gamer-video/ui/src/components/video/TemplateStudio.vue'
+import { templateShortName } from '../../plugins/gamer-yaml/ui/src/console/template-resource'
 
 function createTemplate(name = 'hero#100_200_500_500.png', version = 'v-old') {
   return { name, pkg: 'pkg-a', version, updated_at: '', size: 3 }
@@ -94,7 +94,7 @@ describe('模板资源替换安全性（P1-T）', () => {
     expect(mocks.createTemplate).not.toHaveBeenCalled()
     expect(mocks.putPluginResourceBytes).toHaveBeenCalledWith(
       'pkg-a',
-      'gamer.yaml',
+      'gamer-yaml',
       `templates/${existing.name}`,
       new Uint8Array([65, 66, 67]),
       { expectedVersion: 'v-old' },
@@ -122,7 +122,7 @@ describe('模板资源替换安全性（P1-T）', () => {
 
     expect(mocks.putPluginResourceBytes).toHaveBeenCalledWith(
       'pkg-a',
-      'gamer.yaml',
+      'gamer-yaml',
       `templates/${existing.name}`,
       new Uint8Array([68, 69, 70]),
       { expectedVersion: 'v-old' },
@@ -144,10 +144,10 @@ describe('模板资源替换安全性（P1-T）', () => {
     await templates.overwriteTemplate()
 
     expect(mocks.getPluginResource).toHaveBeenCalledWith(
-      'pkg-a', 'gamer.yaml', `templates/${existing.name}`,
+      'pkg-a', 'gamer-yaml', `templates/${existing.name}`,
     )
     expect(mocks.putPluginResourceBytes).toHaveBeenCalledWith(
-      'pkg-a', 'gamer.yaml', `templates/${existing.name}`,
+      'pkg-a', 'gamer-yaml', `templates/${existing.name}`,
       new Uint8Array([65, 66, 67]),
       { expectedVersion: expect.stringMatching(/^[0-9a-f]{12}$/) },
     )
@@ -186,7 +186,7 @@ describe('模板资源替换安全性（P1-T）', () => {
 
     expect(mocks.putPluginResourceBytes).toHaveBeenCalledWith(
       'pkg-a',
-      'gamer.yaml',
+      'gamer-yaml',
       'templates/hero#100_200_500_500.png',
       new Uint8Array([65, 66, 67]),
       {},
@@ -209,7 +209,7 @@ describe('模板资源替换安全性（P1-T）', () => {
 
     expect(mocks.importTemplateBytes).not.toHaveBeenCalled()
     expect(mocks.putPluginResourceBytes).toHaveBeenCalledWith(
-      'pkg-a', 'gamer.yaml', 'templates/new.png', new Uint8Array([1, 2, 3]), {},
+      'pkg-a', 'gamer-yaml', 'templates/new.png', new Uint8Array([1, 2, 3]), {},
     )
     wrapper.unmount()
   })
@@ -292,7 +292,7 @@ describe('模板资源替换安全性（P1-T）', () => {
     expect(mocks.deleteTemplate).not.toHaveBeenCalled()
     expect(mocks.putPluginResourceBytes).toHaveBeenCalledWith(
       'pkg-a',
-      'gamer.yaml',
+      'gamer-yaml',
       `templates/${existing.name}`,
       new Uint8Array([65, 66, 67]),
       { expectedVersion: 'v-old' },

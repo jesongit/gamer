@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# PERF offline benchmark entry point for Linux/Docker.
+# PERF offline benchmark entry point for Linux.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)

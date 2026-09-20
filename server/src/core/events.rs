@@ -91,7 +91,11 @@ pub struct RuntimeEvent {
 
 impl RuntimeEvent {
     pub fn new(device_id: DeviceId, kind: RuntimeEventKind) -> Self {
-        Self { device_id, kind, trace: None }
+        Self {
+            device_id,
+            kind,
+            trace: None,
+        }
     }
 }
 

@@ -25,7 +25,7 @@ pub(crate) struct BuiltinExtensionDescriptor {
     pub(crate) host_version: &'static str,
 }
 
-/// 宿主预置扩展注册表（编译期固定；下载包不可扩展）。gamer.video 是首个注册项。
+/// 宿主预置扩展注册表（编译期固定；下载包不可扩展）。gamer-video 是首个注册项。
 pub(crate) const BUILTIN_EXTENSIONS: &[BuiltinExtensionDescriptor] =
     &[BuiltinExtensionDescriptor {
         id: super::video::VIDEO_EXTENSION_ID,
@@ -57,7 +57,7 @@ mod tests {
     fn video_is_registered_and_unknown_ids_are_not() {
         let video = ExtensionId::parse(super::super::video::VIDEO_EXTENSION_ID).unwrap();
         assert!(is_builtin_extension(&video));
-        let descriptor = builtin_extension("gamer.video").expect("gamer.video 必须已注册");
+        let descriptor = builtin_extension("gamer-video").expect("gamer-video 必须已注册");
         assert_eq!(descriptor.name, "视频工作台");
         assert!(descriptor.host_version.starts_with(">="));
 
@@ -93,9 +93,9 @@ mod tests {
     async fn builtin_package_without_wasm_installs_and_starts_running() {
         let temp = tempfile::TempDir::new().unwrap();
         let service = ExtensionService::for_data_root(temp.path(), CapabilityRegistry::default());
-        let archive = builtin_archive("gamer.video", "gamer.video", false);
+        let archive = builtin_archive("gamer-video", "gamer-video", false);
         let installed = service.install(&archive).await.unwrap();
-        assert_eq!(installed.id().as_str(), "gamer.video");
+        assert_eq!(installed.id().as_str(), "gamer-video");
         assert!(is_builtin_extension(installed.id()));
 
         service.enable(installed.id()).await.unwrap();
@@ -109,7 +109,7 @@ mod tests {
     async fn builtin_package_carrying_plugin_wasm_is_rejected() {
         let temp = tempfile::TempDir::new().unwrap();
         let service = ExtensionService::for_data_root(temp.path(), CapabilityRegistry::default());
-        let archive = builtin_archive("gamer.video", "gamer.video", true);
+        let archive = builtin_archive("gamer-video", "gamer-video", true);
         let error = service.install(&archive).await.unwrap_err();
         assert!(
             matches!(error, ExtensionError::InvalidArchive(ref message) if message.contains("plugin.wasm")),

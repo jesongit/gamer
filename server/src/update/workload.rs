@@ -261,7 +261,7 @@ mod tests {
             "enabled",
             "Enabled cron",
             app.clone(),
-            "gamer.yaml",
+            "gamer-yaml",
             "pkg/script.yaml",
             serde_json::json!({}),
             schedule,

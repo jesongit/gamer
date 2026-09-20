@@ -3,7 +3,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 
-vi.mock('./components/video/videoApi', () => ({
+vi.mock('../../plugins/gamer-video/ui/src/components/video/videoApi', () => ({
   videoApi: {
     recordingHistory: vi.fn(async () => []),
     activeRecording: vi.fn(async () => null),
@@ -16,15 +16,15 @@ vi.mock('./components/video/videoApi', () => ({
   },
 }))
 
-import MediaLibrary from './components/video/MediaLibrary.vue'
-import { videoApi } from './components/video/videoApi'
+import MediaLibrary from '../../plugins/gamer-video/ui/src/components/video/MediaLibrary.vue'
+import { videoApi } from '../../plugins/gamer-video/ui/src/components/video/videoApi'
 import { devicesData } from './store'
 
 const MEDIA = [
   {
     id: 'recording-a', name: '战斗-上午.mp4', source: 'recording', state: 'ready',
     created_at: '2026-09-08T08:00:00Z', duration_us: 30e6, device_id: 'dev-a',
-    refs: [{ package_id: 'pkg-a', plugin_id: 'gamer.video', kind: 'project' }],
+    refs: [{ package_id: 'pkg-a', plugin_id: 'gamer-video', kind: 'project' }],
   },
   {
     id: 'recording-b', name: '战斗-长录制.mp4', source: 'recording', state: 'completed',
@@ -94,7 +94,7 @@ describe('P5-MEDIA 素材库与录制历史', () => {
     await button.trigger('click')
     await button.trigger('click')
     await flushPromises()
-    expect(wrapper.find('[data-testid="media-error"]').text()).toContain('pkg-a / gamer.video / project')
+    expect(wrapper.find('[data-testid="media-error"]').text()).toContain('pkg-a / gamer-video / project')
     expect(videoApi.deleteMedia).toHaveBeenCalledWith('recording-a')
     wrapper.unmount()
   })

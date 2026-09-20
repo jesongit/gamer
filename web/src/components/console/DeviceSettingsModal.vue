@@ -7,16 +7,8 @@
         <button class="btn btn-ghost btn-sm" @click="ctx.cancelSettings">✕</button>
       </div>
       <div class="modal-body">
-        <ConsoleDeviceSummary v-if="ctx.mode === 'edit' && ctx.current" :device="ctx.current" :connected="ctx.connected" :kind-icon="ctx.kindInfo(ctx.current.kind).icon" :kind-label="ctx.kindInfo(ctx.current.kind).label" :screen-summary="ctx.screenSummary" />
-        <template v-if="ctx.mode === 'add'">
-          <div class="form-item">
-            <label>接入方式</label>
-            <div class="type-picker">
-              <div v-for="t in ctx.types" :key="t.key" class="type-opt" :class="{ sel: ctx.form.kind === t.key }" @click="ctx.form.kind = t.key"><span class="type-icon">{{ t.icon }}</span><span>{{ t.label }}</span></div>
-            </div>
-          </div>
-          <div class="form-item"><label>ADB 地址 <span class="muted">（redroid / 无线 adb / 模拟器需要填写）</span></label><input v-model="ctx.form.addr" class="input mono" placeholder="redroid:5555 或 192.168.1.88:5555" /></div>
-        </template>
+        <ConsoleDeviceSummary v-if="ctx.mode === 'edit' && ctx.current" :device="ctx.current" :connected="ctx.connected" :screen-summary="ctx.screenSummary" />
+        <div class="form-item"><label>ADB 地址或序列号</label><input v-model="ctx.form.addr" class="input mono" placeholder="192.168.1.88:5555 / emulator-5554 / ADB serial" /><span class="muted">可通过工具条刷新扫描设备；网络设备填写 host:port，已连接设备填写完整序列号。</span></div>
         <div class="form-item"><label>设备名称</label><input v-model="ctx.form.name" class="input" placeholder="例如：红米 Note12 挂机号" /></div>
         <div class="form-item">
           <label>屏幕模式</label>

@@ -7,7 +7,7 @@
     "content_package": "phase0_smoke"
   },
   "runner": {
-    "runner_id": "gamer.yaml",
+    "runner_id": "gamer-yaml",
     "entrypoint": "phase0_smoke.yaml",
     "payload": {
       "args": {}

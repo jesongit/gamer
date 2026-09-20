@@ -8,7 +8,7 @@ use serde::Deserialize;
 use super::error::{ExtensionError, ExtensionResult};
 use super::host_api::{HostApiDomain, HostApiRequirement};
 use super::model::{validate_display_name, ExtensionId, ExtensionPath, ExtensionVersion};
-use super::permissions::PermissionSet;
+use super::permissions::{Permission, PermissionSet};
 
 pub(crate) const MANIFEST_VERSION: u32 = 2;
 /// 存量安装目录仍可能持有 v1 manifest（旧版本服务端安装的包）。读端（快照/
@@ -17,6 +17,38 @@ pub(crate) const MANIFEST_VERSION_LEGACY: u32 = 1;
 pub(crate) const MANIFEST_FILE_NAME: &str = "manifest.toml";
 /// 约定俗成的 WASM entry 名。builtin 包不得携带该文件（防伪装执行类型）。
 pub(crate) const CONVENTIONAL_WASM_ENTRY: &str = "plugin.wasm";
+
+#[cfg(test)]
+mod host_ui_permission_tests {
+    use super::*;
+
+    #[test]
+    fn downloadable_core_module_requires_explicit_permission_and_sdk_requirement() {
+        let source = include_str!("../../../plugins/gamer-yaml/manifest.toml");
+        assert!(parse_manifest(source.as_bytes()).is_ok());
+        for invalid in [
+            source.replace("\"ui.host\", ", ""),
+            source.replace("ui = \"^1.0\"", ""),
+        ] {
+            assert!(parse_manifest(invalid.as_bytes())
+                .unwrap_err()
+                .to_string()
+                .contains("ui.host"));
+        }
+    }
+
+    #[test]
+    fn core_module_cannot_load_remote_html_or_parent_paths() {
+        let source = include_str!("../../../plugins/gamer-yaml/manifest.toml");
+        for entry in [
+            "https://other.invalid/plugin.js",
+            "ui/../plugin.js",
+            "ui/index.html",
+        ] {
+            assert!(parse_manifest(source.replace("ui/plugin.js", entry).as_bytes()).is_err());
+        }
+    }
+}
 
 /// 后端执行类型（manifest v2 `[execution]`）。与 `ui.contributions.runtime`
 /// （界面渲染类型）严格分离：wasm/builtin 插件都可以带任意 runtime 的 UI。
@@ -582,6 +614,8 @@ struct RawHostApiRequirements {
     log: Option<String>,
     #[serde(default)]
     media: Option<String>,
+    #[serde(default)]
+    ui: Option<String>,
 }
 
 impl RawHostApiRequirements {
@@ -596,6 +630,7 @@ impl RawHostApiRequirements {
             (HostApiDomain::Runtime, self.runtime),
             (HostApiDomain::Log, self.log),
             (HostApiDomain::Media, self.media),
+            (HostApiDomain::Ui, self.ui),
         ];
         let mut requirements = BTreeMap::new();
         for (domain, raw) in values {
@@ -674,6 +709,17 @@ fn parse_manifest_with_versions(
         .into_iter()
         .map(parse_ui_contribution)
         .collect::<ExtensionResult<Vec<_>>>()?;
+
+    if ui
+        .iter()
+        .any(|item| item.runtime() == UiRuntime::Core && item.entry().is_some())
+        && (!permissions.allows(Permission::UiHost) || host_api.get(HostApiDomain::Ui).is_none())
+    {
+        return Err(ExtensionError::InvalidManifest(
+            "core UI module requires explicit ui.host permission and host_api.ui version"
+                .to_string(),
+        ));
+    }
 
     Ok(ExtensionManifest {
         manifest_version: raw.manifest_version,
@@ -918,10 +964,14 @@ fn parse_ui_contribution(raw: RawUiContribution) -> ExtensionResult<UiContributi
                 "iframe contribution 必须指定 entry".to_string(),
             ));
         }
-        (UiRuntime::Core, Some(_)) => {
-            return Err(ExtensionError::InvalidManifest(
-                "core contribution 不能带 entry（面板由宿主组件渲染）".to_string(),
-            ));
+        (UiRuntime::Core, Some(entry)) => {
+            let entry = ExtensionPath::parse(&entry)?;
+            if !entry.as_str().starts_with("ui/") || !entry.as_str().ends_with(".js") {
+                return Err(ExtensionError::InvalidManifest(
+                    "core contribution entry 必须是 ui/ 下的 JavaScript 模块".to_string(),
+                ));
+            }
+            Some(entry)
         }
         (UiRuntime::Core, None) => None,
     };
@@ -1249,30 +1299,30 @@ mod tests {
     fn builtin_execution_requires_builtin_id_and_rejects_entry() {
         let base = |body: &str| -> Vec<u8> { body.as_bytes().to_vec() };
         let valid = base(
-            "manifest_version = 2\nid = \"gamer.video\"\nversion = \"1.0.0\"\nname = \"V\"\n\
-             [execution]\nkind = \"builtin\"\nbuiltin_id = \"gamer.video\"\n",
+            "manifest_version = 2\nid = \"gamer-video\"\nversion = \"1.0.0\"\nname = \"V\"\n\
+             [execution]\nkind = \"builtin\"\nbuiltin_id = \"gamer-video\"\n",
         );
         let parsed = parse_manifest(&valid).unwrap();
         assert_eq!(parsed.execution().kind(), ExecutionKind::Builtin);
-        assert_eq!(parsed.execution().builtin_id(), Some("gamer.video"));
+        assert_eq!(parsed.execution().builtin_id(), Some("gamer-video"));
         assert!(parsed.entry().is_none());
 
         // 缺 builtin_id
         let no_id = base(
-            "manifest_version = 2\nid = \"gamer.video\"\nversion = \"1.0.0\"\nname = \"V\"\n\
+            "manifest_version = 2\nid = \"gamer-video\"\nversion = \"1.0.0\"\nname = \"V\"\n\
              [execution]\nkind = \"builtin\"\n",
         );
         assert!(parse_manifest(&no_id).is_err());
         // builtin 带 entry（伪装 guest）
         let with_entry = base(
-            "manifest_version = 2\nid = \"gamer.video\"\nversion = \"1.0.0\"\nname = \"V\"\nentry = \"plugin.wasm\"\n\
-             [execution]\nkind = \"builtin\"\nbuiltin_id = \"gamer.video\"\n",
+            "manifest_version = 2\nid = \"gamer-video\"\nversion = \"1.0.0\"\nname = \"V\"\nentry = \"plugin.wasm\"\n\
+             [execution]\nkind = \"builtin\"\nbuiltin_id = \"gamer-video\"\n",
         );
         assert!(parse_manifest(&with_entry).is_err());
         // wasm 声明 builtin_id（伪装内置）
         let wasm_with_builtin = base(
             "manifest_version = 2\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\n\
-             [execution]\nkind = \"wasm\"\nbuiltin_id = \"gamer.video\"\n",
+             [execution]\nkind = \"wasm\"\nbuiltin_id = \"gamer-video\"\n",
         );
         assert!(parse_manifest(&wasm_with_builtin).is_err());
         // 未知 kind

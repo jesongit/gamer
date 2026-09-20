@@ -11,9 +11,9 @@
          kind = wasm | builtin），经 signer inspect 解析元数据——id/version/
          name/description/publisher/permissions/host_api/ui 全部以 manifest 为
          唯一权威源，本脚本不再维护第二份。
-      3. wasm 包构建对应 guest Component（keymap 源 server/guests/keymap-guest、
-         yaml 源 server/guests/yaml-guest）；builtin 包（gamer.video）无 guest、
-         只打 manifest，不携带任何占位 WASM。
+      3. wasm 包构建对应 guest Component（keymap 源 plugins/gamer-keymap/guest、
+         yaml 源 plugins/gamer-yaml/guest）；builtin 包（gamer-video）无 guest、
+         打 manifest 与 UI，不携带任何占位 WASM。
       4. signer pack 出 .gplugin（zip：manifest.toml + plugin.wasm + 附加文件，
          无 signature.sig）——先落在 staging 临时目录。
       5. 产物自检：signer verify 重走 zip 中央目录/entry magic 校验 + 重新计算
@@ -33,7 +33,7 @@
     registry.json 输出路径（默认 <repo>\web\public\registry.json）。
 
 .PARAMETER ManifestsRoot
-    插件 manifest 根目录（默认 <repo>\tools\plugins）；每个子目录的
+    插件 manifest 根目录（默认 <repo>\plugins）；每个子目录的
     manifest.toml 即一个待构建插件。
 
 .PARAMETER ChecksumsFile
@@ -57,6 +57,7 @@ param(
     [string]$ManifestsRoot,
     [string]$ChecksumsFile,
     [string]$Publisher = 'gamer.dev',
+    [string]$Plugin,
     [switch]$KeepStaleArtifacts
 )
 
@@ -65,7 +66,7 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $ServerDir = Join-Path $RepoRoot 'server'
 $SignerDir = Join-Path $RepoRoot 'tools\plugin-signer'
-if (-not $ManifestsRoot) { $ManifestsRoot = Join-Path $RepoRoot 'tools\plugins' }
+if (-not $ManifestsRoot) { $ManifestsRoot = Join-Path $RepoRoot 'plugins' }
 if (-not $OutputDir) { $OutputDir = Join-Path $RepoRoot 'web\public\plugins' }
 if (-not $RegistryFile) { $RegistryFile = Join-Path $RepoRoot 'web\public\registry.json' }
 $TargetRoot = Join-Path $ServerDir 'target\plugin-build'
@@ -74,8 +75,8 @@ $SignerExe = Join-Path $TargetRoot 'release\gamer-plugin-signer.exe'
 
 # guest 构建配方（源码位置与 wasm 产物名；版本/元数据一律来自 manifest.toml）。
 $GuestRecipes = @{
-    'gamer.keymap' = @{ Dir = Join-Path $ServerDir 'guests\keymap-guest'; Lib = 'gamer_keymap_guest.wasm' }
-    'gamer.yaml'   = @{ Dir = Join-Path $ServerDir 'guests\yaml-guest';  Lib = 'gamer_yaml_guest.wasm' }
+    'gamer-keymap' = @{ Dir = Join-Path $RepoRoot 'plugins\gamer-keymap\guest'; Lib = 'gamer_keymap_guest.wasm' }
+    'gamer-yaml'   = @{ Dir = Join-Path $RepoRoot 'plugins\gamer-yaml\guest';  Lib = 'gamer_yaml_guest.wasm' }
 }
 
 # PS 5.1 坑：EAP=Stop 下原生命令 stderr 输出会被包装成 ErrorRecord 中断脚本
@@ -141,6 +142,7 @@ Invoke-Native 'cargo' @(
 # ---- 2. 枚举 manifest 并解析元数据 ----
 Write-Host "===[2/6] 读取插件 manifest（$ManifestsRoot）===" -ForegroundColor Cyan
 $manifestFiles = @(Get-ChildItem -Path $ManifestsRoot -Directory -ErrorAction SilentlyContinue |
+    Where-Object { -not $Plugin -or $_.Name -eq $Plugin } |
     ForEach-Object { Join-Path $_.FullName 'manifest.toml' } |
     Where-Object { Test-Path $_ } |
     Sort-Object)
@@ -215,6 +217,12 @@ foreach ($package in $packages) {
     $out = Join-Path $stagingRoot $name
     $packArgs = @('pack', '--manifest', $package.Manifest, '--out', $out)
     if ($package.Component) { $packArgs += @('--wasm', $package.Component) }
+    Invoke-Native 'node' @((Join-Path $RepoRoot 'sdk\ui\build-modules.mjs'), $package.Id) $RepoRoot | Out-Host
+    $uiRoot = Join-Path (Split-Path -Parent $package.Manifest) 'dist\ui'
+    foreach ($asset in Get-ChildItem -LiteralPath $uiRoot -File -Recurse | Sort-Object FullName) {
+        $relative = Get-RelativeReleasePath $uiRoot $asset.FullName
+        $packArgs += @('--file', "ui/$relative=$($asset.FullName)")
+    }
     $packOutput = Invoke-Native $SignerExe $packArgs $RepoRoot
     $package.Artifact = $out
     $package.Name = $name
@@ -267,6 +275,9 @@ function New-RegistryEntry {
 }
 
 $entries = @($packages | ForEach-Object { New-RegistryEntry $_ })
+if ($Plugin -and (Test-Path -LiteralPath $RegistryFile)) {
+    $entries += @((Read-JsonFile $RegistryFile).plugins | Where-Object { $_.id -ne $Plugin })
+}
 $registry = [ordered]@{
     schema_version = 2
     generated_at = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -295,7 +306,7 @@ try {
     Move-Item -Path $registryTmp -Destination $RegistryFile -Force
     Write-Host "  registry v2 已生成: $RegistryFile（$($entries.Count) 个条目）"
 
-    if (-not $KeepStaleArtifacts) {
+    if (-not $KeepStaleArtifacts -and -not $Plugin) {
         $produced = @($packages | ForEach-Object { (Join-Path $OutputDir $_.Name) })
         $stale = @(Get-ChildItem -Path $OutputDir -Filter '*.gplugin' -File |
             Where-Object { $produced -notcontains $_.FullName })
@@ -330,9 +341,16 @@ try {
     }
 }
 finally {
-    if (Test-Path $stagingRoot) { Remove-Item -Path $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    if (Test-Path -LiteralPath $stagingRoot) {
+        $resolvedStaging = (Resolve-Path -LiteralPath $stagingRoot).Path
+        $tempBoundary = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+        if (-not $resolvedStaging.StartsWith($tempBoundary, [StringComparison]::OrdinalIgnoreCase) -or -not ([IO.Path]::GetFileName($resolvedStaging)).StartsWith('gamer-plugins-')) {
+            throw "拒绝清理不在构建临时目录内的路径: $resolvedStaging"
+        }
+        Remove-Item -LiteralPath $resolvedStaging -Recurse -Force -ErrorAction SilentlyContinue
+    }
     # 移动成功后 tmp 已不存在；仍存在说明失败中途退出，清掉避免污染 web/public
-    if (Test-Path $registryTmp) { Remove-Item -Path $registryTmp -Force -ErrorAction SilentlyContinue }
+    if (Test-Path -LiteralPath $registryTmp) { Remove-Item -LiteralPath $registryTmp -Force -ErrorAction SilentlyContinue }
 }
 
 Write-Host 'OK 官方插件产物构建完成（无签名；registry schema_version=2）。' -ForegroundColor Green

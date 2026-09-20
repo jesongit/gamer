@@ -150,7 +150,7 @@ describe('usePackageContext（plan §28：导入/导出/新建/复制/删除）'
     const { api, toast, download } = setup()
     api.getPackage.mockResolvedValue({
       media_refs: [
-        { id: 'clip01', name: 'clip.mp4', size: 2048, plugin_id: 'gamer.video', kind: 'project', state: 'ready' },
+        { id: 'clip01', name: 'clip.mp4', size: 2048, plugin_id: 'gamer-video', kind: 'project', state: 'ready' },
       ],
       media_total_bytes: 2048,
     })

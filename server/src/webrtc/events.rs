@@ -34,7 +34,9 @@ impl EventSink for ViewerEventSink {
             let mut payload = serde_json::to_value(event.kind)?;
             if let Some(object) = payload.as_object_mut() {
                 object.insert("type".into(), serde_json::json!("se"));
-                if let Some(trace) = event.trace { object.insert("trace".into(), trace); }
+                if let Some(trace) = event.trace {
+                    object.insert("trace".into(), trace);
+                }
             }
             dc.send_text(payload.to_string()).await?;
             Ok(())

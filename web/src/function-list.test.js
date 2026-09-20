@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, it, expect } from 'vitest'
-import { buildFunctionViews, filterFunctionViews, createPinyinInitials } from './console/function-list'
+import { buildFunctionViews, filterFunctionViews, createPinyinInitials } from '../../plugins/gamer-yaml/ui/src/console/function-list'
 import { isFunctionLibraryFile } from './gamer-plugin-ids'
 
 const files = [

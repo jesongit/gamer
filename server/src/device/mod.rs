@@ -429,22 +429,6 @@ impl DeviceManager {
             tokio::time::sleep(Duration::from_millis(1000)).await;
         }
 
-        // 解析 adb transport：设备连接方式变化后（USB ↔ 无线调试 mDNS/IP:port），
-        // 配置里的 serial 与 `adb devices` 显示名会失配（resolve_serial 按
-        // 精确/子串/model 匹配），否则 push/reverse/-s 全部找不到设备。
-        let mut device = device;
-        {
-            let resolved = self.adb.resolve_serial(&device.addr, &device.name).await;
-            if !resolved.is_empty() && resolved != device.addr {
-                info!(device = %device.name, from = %device.addr, to = %resolved, "adb transport resolved");
-                device.addr = resolved.clone();
-                // 写回运行时设备：后续截图/屏幕保活等 adb 操作直接使用解析后的 transport
-                if let Some(rt) = self.devices.write().get_mut(id) {
-                    rt.device.addr = resolved;
-                }
-            }
-        }
-
         info!(device = %device.name, device_id = %id, "connecting...");
         let result = ScrcpySession::connect(&self.adb, &self.cfg, &device).await;
         let handle: SessionHandle = match result {
@@ -920,8 +904,7 @@ impl DeviceManager {
     /// 常驻本地 server 无需补连
     pub async fn connect_wireless_adb(&self) {
         for (d, _, _) in self.list_snapshot() {
-            let addressable = d.addr.contains(':') || d.addr.contains('.');
-            if d.kind == "wifi" && addressable {
+            if adb::is_network_endpoint(&d.addr) {
                 if let Err(e) = self.adb.connect(&d.addr).await {
                     debug!(device = %d.name, addr = %d.addr, "adb connect failed: {}", e);
                 }
@@ -952,36 +935,14 @@ impl DeviceManager {
                 .iter()
                 .find_map(|p| p.strip_prefix("model:"))
                 .map(|m| m.replace('_', " "));
-            // kind 按整行判定：`usb:` 标记是 USB 的铁证；带冒号 / adb- 前缀是
-            // 网络接入；其余（实测小米 HyperOS USB 不带 usb: 标记）保守按 usb。
-            // 无线与 USB 共用串号时 -l 无法区分传输，kind 只影响无线保活门控
-            let kind = infer_device_kind(&serial, &parts);
-            // 去重 + 地址同步：精确/子串/model 匹配（USB↔无线切换、无线 IP 变化后
-            // serial 会变，见 adb.rs resolve_serial）；匹配到的旧设备更新 addr/kind，
-            // 避免同一台设备重复入库
-            let matched = existing.iter_mut().find(|d| {
-                if !d.addr.is_empty() {
-                    d.addr == serial
-                        || (!serial.is_empty() && d.addr.contains(&serial))
-                        || (!d.addr.is_empty() && serial.contains(&d.addr))
-                        || (model.is_some() && model.as_deref() == Some(d.name.as_str()))
-                } else {
-                    kind == "usb" && d.kind == "usb"
-                }
-            });
-            if let Some(old) = matched {
-                if old.addr != serial || old.kind != kind {
-                    old.addr = serial.clone();
-                    old.kind = kind.to_string();
-                    self.upsert_device(old).await?;
-                }
+            // ADB serial is the identity: identical model names are different devices.
+            if existing.iter().any(|d| d.addr == serial) {
                 continue;
             }
             let name = model.clone().unwrap_or_else(|| short_serial(&serial));
             let device = Device {
                 id: uuid::Uuid::new_v4().simple().to_string(),
                 name,
-                kind: kind.to_string(),
                 addr: serial,
                 screen_mode: ScreenMode::Mirror,
                 vd_res: None,
@@ -1130,11 +1091,7 @@ impl DeviceManager {
     }
 
     fn serial_of(device: &crate::store::Device) -> String {
-        if device.addr.is_empty() {
-            "usb".to_string()
-        } else {
-            device.addr.clone()
-        }
+        device.addr.clone()
     }
 
     /// 解析虚拟屏 display id（dumpsys display 中 type=VIRTUAL 且分辨率匹配 scrcpy 虚拟屏）
@@ -1197,23 +1154,6 @@ fn extract_rect(line: &str) -> Option<(i64, i64)> {
     let x2 = it.next()?.trim().parse::<i64>().ok()?;
     let y2 = it.next()?.trim().parse::<i64>().ok()?;
     Some((x2, y2))
-}
-
-/// 从 `adb devices -l` 行推断接入方式：emulator-* → 模拟器；行带 `usb:` 标记 → USB；
-/// ip:port / adb-* mDNS → 无线；其余 → USB。
-/// 注意部分设备（实测小米 HyperOS）USB 传输也不带 `usb:` 标记，且无线调试与
-/// USB 共用同一串号——无法从 -l 输出区分，保守按 usb（kind 只影响无线保活
-/// 门控与展示，误判无功能副作用：保活另按「地址可寻址」把关）
-fn infer_device_kind(serial: &str, parts: &[&str]) -> &'static str {
-    if serial.starts_with("emulator-") {
-        "emu"
-    } else if parts.iter().any(|p| p.starts_with("usb:")) {
-        "usb"
-    } else if serial.contains(':') || serial.starts_with("adb-") {
-        "wifi"
-    } else {
-        "usb"
-    }
 }
 
 /// 缩短过长的 serial（如 mDNS 形式）用于默认设备名

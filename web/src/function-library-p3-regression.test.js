@@ -1,12 +1,12 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest'
-import { useFunctionLibrary } from './composables/useFunctionLibrary'
+import { useFunctionLibrary } from '../../plugins/gamer-yaml/ui/src/composables/useFunctionLibrary'
 import {
   buildFunctionViews,
   functionFileCategory,
   isDefaultFunctionFile,
-} from './console/function-list'
-import { parseFunctionLibrary, serialize } from './script-editor/codec'
+} from '../../plugins/gamer-yaml/ui/src/console/function-list'
+import { parseFunctionLibrary, serialize } from '../../plugins/gamer-yaml/ui/src/script-editor/codec'
 
 const source = `functions:
   login:

@@ -1,3 +1,4 @@
+import './test-plugin-modules'
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 const { dialogDecision } = vi.hoisted(() => ({ dialogDecision: vi.fn() }))
@@ -11,7 +12,7 @@ import { runConflicts, scriptsData, templatesData, devicesData, tasksData } from
 /**
  * TaskBoard（Console 任务页签）ADR-12 通用任务表单测试（P11.1 §6.6/§6.7）：
  * - 表单 = 名称/设备/触发方式(provider)/执行器(runner)/执行目标/参数/启用；
- * - 执行目标与参数由 RunnerEditorContribution 渲染（gamer.yaml：ScriptPicker + ParamsForm），
+ * - 执行目标与参数由 RunnerEditorContribution 渲染（gamer-yaml：ScriptPicker + ParamsForm），
  *   TaskBoard 不 import 业务组件、不读 scriptsData/templatesData（源码边界断言）；
  * - 未知 runner / 未注册 provider 降级与只读保留；dependency_missing 呈现与恢复；
  * - 保存 body 为 ADR-12 嵌套形状（runner.payload / schedule.config）。
@@ -22,7 +23,7 @@ const read = (p) => readFileSync(join(process.cwd(), 'src', p), 'utf8')
 // 参数表单声明自 V1 起来自服务端 entrypoint schema API（参数声明数组形态）：
 // enable（boolean 默认 true）+ timeout（duration 默认 30s，带说明）
 const ENTRYPOINT_DESCRIPTOR = {
-  runner_id: 'gamer.yaml',
+  runner_id: 'gamer-yaml',
   entrypoint: 'com.demo/main.yml',
   kind: 'script',
   format: 'yaml-params-v1',
@@ -70,14 +71,14 @@ const TASKS = [
   {
     id: 't1', name: '每日签到', enabled: true, state: 'active',
     app: { device_id: 'dev1', android_package: 'com.demo', content_package: 'com.demo' },
-    runner: { runner_id: 'gamer.yaml', entrypoint: 'com.demo/main.yml', payload: { args: { enable: false, timeout: '12s' } } },
+    runner: { runner_id: 'gamer-yaml', entrypoint: 'com.demo/main.yml', payload: { args: { enable: false, timeout: '12s' } } },
     schedule: { provider_id: 'cron', config: { expression: '0 8 * * *' } },
     next_wakeup: '2026-09-06T00:00:00Z', last_result: '',
   },
   {
     id: 't2', name: '挂机', enabled: false, state: 'suspended', suspend_reason: 'disabled',
     app: { device_id: 'dev2', android_package: 'com.demo', content_package: 'com.demo' },
-    runner: { runner_id: 'gamer.yaml', entrypoint: 'com.demo/main.yml', payload: { args: { timeout: '45s' } } },
+    runner: { runner_id: 'gamer-yaml', entrypoint: 'com.demo/main.yml', payload: { args: { timeout: '45s' } } },
     schedule: { provider_id: 'cron', config: { expression: '*/10 * * * *' } },
     last_result: '成功',
   },
@@ -115,16 +116,16 @@ afterEach(() => {
 
 function baseRoutes() {
   return [
-    { method: 'GET', url: '/api/packages/com.demo/plugins/gamer.yaml/resources?prefix=automations',
+    { method: 'GET', url: '/api/packages/com.demo/plugins/gamer-yaml/resources?prefix=automations',
       body: { resources: SCRIPTS.map(x => ({ package: x.package, path: `automations/${x.name}`, content: x.content || '', version: 'v1', updated_at: '', size: 1 })) } },
-    { method: 'GET', url: '/api/runners/gamer.yaml/entrypoint', body: ENTRYPOINT_DESCRIPTOR },
-    { method: 'GET', url: '/api/packages/com.demo/plugins/gamer.yaml/resources?prefix=templates',
+    { method: 'GET', url: '/api/runners/gamer-yaml/entrypoint', body: ENTRYPOINT_DESCRIPTOR },
+    { method: 'GET', url: '/api/packages/com.demo/plugins/gamer-yaml/resources?prefix=templates',
       body: { resources: [{ package: 'com.demo', path: 'templates/账号155#392_519_526_932.png', version: 'v1', updated_at: '', size: 1 }] } },
     { method: 'GET', url: '/api/devices', body: [
       { id: 'dev1', name: '设备一', pkg: 'com.demo' }, { id: 'dev2', name: '设备二', pkg: 'com.demo' },
     ] },
     { method: 'GET', url: '/api/runners', body: [
-      { runner_id: 'gamer.yaml' },
+      { runner_id: 'gamer-yaml' },
     ] },
     { method: 'GET', url: '/api/schedule-providers', body: [
       { provider_id: 'cron' },
@@ -194,12 +195,12 @@ describe('列表：ADR-12 行映射与状态呈现', () => {
     routes.find(r => r.url === '/api/tasks').body = [{
       ...TASKS[0],
       state: 'dependency_missing',
-      suspend_reason: 'missing_dependency=gamer.yaml',
+      suspend_reason: 'missing_dependency=gamer-yaml',
     }]
     routes.push({ method: 'POST', url: '/api/tasks/t1/resume', body: { ...TASKS[0], state: 'active', suspend_reason: '' } })
     const { wrapper, calls } = await mountView(routes)
     expect(wrapper.find('[data-testid="state-badge"]').text()).toContain('依赖缺失')
-    expect(wrapper.find('[data-testid="dep-hint"]').text()).toContain('缺少依赖：gamer.yaml')
+    expect(wrapper.find('[data-testid="dep-hint"]').text()).toContain('缺少依赖：gamer-yaml')
     const row = wrapper.findAll('tbody tr')[0]
     await row.findAll('button').find(b => b.attributes('title')?.includes('恢复调度')).trigger('click')
     await flushPromises()
@@ -310,10 +311,10 @@ describe('新建任务：贡献渲染 + cron 触发方式 + 保存 ADR-12 body',
     expect(wrapper.find('[data-testid="cron-input"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="config-json"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="manual-provider-input"]').exists()).toBe(false)
-    // 执行器下拉显示贡献 title；选中 gamer.yaml 后渲染执行目标与参数区
+    // 执行器下拉显示贡献 title；选中 gamer-yaml 后渲染执行目标与参数区
     const runnerSelect = wrapper.find('[data-testid="runner-select"]')
     expect(runnerSelect.findAll('option').map(o => o.text())).toContain('YAML 脚本')
-    expect(runnerSelect.element.value).toBe('gamer.yaml')
+    expect(runnerSelect.element.value).toBe('gamer-yaml')
     expect(wrapper.find('.spicker').exists()).toBe(true) // ScriptPicker（经贡献）
     // 未选执行目标前：参数区提示先选目标
     expect(wrapper.find('[data-testid="gy-pick-first"]').exists()).toBe(true)
@@ -339,7 +340,7 @@ describe('新建任务：贡献渲染 + cron 触发方式 + 保存 ADR-12 body',
     routes.find(r => r.url.includes('prefix=automations')).body = {
       resources: [{ package: 'com.demo', path: `automations/${tmpl.name}`, content: tmpl.content, version: 'v1', updated_at: '', size: 1 }],
     }
-    routes.find(r => r.url === '/api/runners/gamer.yaml/entrypoint').body = TMPL_DESCRIPTOR
+    routes.find(r => r.url === '/api/runners/gamer-yaml/entrypoint').body = TMPL_DESCRIPTOR
     const { wrapper } = await mountView(routes)
     await openAdd(wrapper)
     await wrapper.find('.sp-name').setValue('com.demo/main.yml')
@@ -365,7 +366,7 @@ describe('新建任务：贡献渲染 + cron 触发方式 + 保存 ADR-12 body',
       name: '新任务',
       enabled: true,
       app: { device_id: 'dev1', android_package: 'com.demo', content_package: 'com.demo' },
-      runner: { runner_id: 'gamer.yaml', entrypoint: 'com.demo/main.yml' },
+      runner: { runner_id: 'gamer-yaml', entrypoint: 'com.demo/main.yml' },
       schedule: { provider_id: 'cron', config: { expression: '0 8 * * *' } },
     })
     expect(posted.body.runner.payload.args).toEqual({})
@@ -404,7 +405,7 @@ describe('编辑任务：payload.args 采用与保存形状', () => {
     const { wrapper, calls } = await mountView(routes)
     await openEdit(wrapper, 0)
     // 表单按 entrypoint schema 渲染（声明经 GET /api/runners/:runner_id/entrypoint——P12.3）
-    expect(calls.some(c => c.method === 'GET' && c.url.startsWith('/api/runners/gamer.yaml/entrypoint'))).toBe(true)
+    expect(calls.some(c => c.method === 'GET' && c.url.startsWith('/api/runners/gamer-yaml/entrypoint'))).toBe(true)
     const form = wrapper.find('[data-testid="params-form"]')
     expect(form.exists()).toBe(true)
     expect(form.findAll('.pf-row')).toHaveLength(2)
@@ -419,7 +420,7 @@ describe('编辑任务：payload.args 采用与保存形状', () => {
       id: 't1', name: '每日签到',
       app: { device_id: 'dev1', android_package: 'com.demo', content_package: 'com.demo' },
       runner: {
-        runner_id: 'gamer.yaml',
+        runner_id: 'gamer-yaml',
         entrypoint: 'com.demo/main.yml',
         payload: { args: { enable: false, timeout: '12s' } },
       },
@@ -483,7 +484,7 @@ describe('未知/未注册 runner：占位 + 只读 JSON，其他字段可改、
 
   it('已注册但无贡献的 runner：占位「未提供编辑器」，保存保留 entrypoint/payload', async () => {
     const routes = baseRoutes()
-    routes.find(r => r.url === '/api/runners').body = [{ runner_id: 'gamer.yaml' }, { runner_id: 'gamer.macro' }]
+    routes.find(r => r.url === '/api/runners').body = [{ runner_id: 'gamer-yaml' }, { runner_id: 'gamer.macro' }]
     routes.push({ method: 'PUT', url: '/api/tasks/t1', body: {} })
     const { wrapper, calls } = await mountView(routes)
     await openEdit(wrapper, 0)
@@ -590,12 +591,12 @@ describe('服务端时区标识（P11.1 后任务时间戳均为 UTC 串，常�
     routes.find(r => r.url === '/api/tasks').body = []
     const { wrapper } = await mountView(routes)
     expect(wrapper.find('[data-testid="server-tz-hint"]').text())
-      .toContain('任务按服务端本地时区执行（Docker 部署可用 TZ 配置）')
+      .toContain('任务按服务端本地时区执行')
   })
 
   it('有任务同样显示兜底文案（next_wakeup 为 UTC 串不携带本地偏移）', async () => {
     const { wrapper } = await mountView(baseRoutes())
     expect(wrapper.find('[data-testid="server-tz-hint"]').text())
-      .toContain('任务按服务端本地时区执行（Docker 部署可用 TZ 配置）')
+      .toContain('任务按服务端本地时区执行')
   })
 })

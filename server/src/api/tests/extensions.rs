@@ -491,7 +491,7 @@ async fn official_plugin_market_end_to_end_with_committed_artifacts() {
         .map(|entry| entry["id"].as_str().unwrap())
         .collect();
     assert!(
-        ids.contains(&"gamer.keymap") && ids.contains(&"gamer.yaml"),
+        ids.contains(&"gamer-keymap") && ids.contains(&"gamer-yaml"),
         "官方市场至少包含 keymap 与 yaml，得到 {ids:?}"
     );
 
@@ -536,11 +536,11 @@ async fn official_plugin_market_end_to_end_with_committed_artifacts() {
             "{id} 官方安装被拒绝"
         );
         // 安装即用（2026-09-05）：官方安装自动 enable → start。keymap 长驻实例
-        // 真实启动 → Running；gamer.yaml 为无实例模型（start 仅注册 timer
+        // 真实启动 → Running；gamer-yaml 为无实例模型（start 仅注册 timer
         // runner），测试装配未接 registrar 走通用实例路径失败 → 降级 Enabled
         // （生产 main.rs 接线 registrar 后即 Running）。
         let state = json_body(installed).await["state"].clone();
-        if id == "gamer.yaml" {
+        if id == "gamer-yaml" {
             assert_eq!(state, "enabled", "{id} 安装后应降级为 Enabled");
         } else {
             assert_eq!(state, "running", "{id} 安装后应为 Running");
@@ -565,7 +565,7 @@ async fn official_plugin_market_end_to_end_with_committed_artifacts() {
         !panels
             .iter()
             .any(|panel| panel == "automation" || panel == "functions"),
-        "Enabled 降级的 gamer.yaml 不应出现面板：{panels:?}"
+        "Enabled 降级的 gamer-yaml 不应出现面板：{panels:?}"
     );
 
     // 卸载守卫拒绝 Running：先 disable（运行中自动 stop）再逐个卸载。
@@ -669,7 +669,7 @@ entry = "ui/index.html"
     }
 }
 
-/// Phase 4/8 验收：无任何已安装扩展（含 gamer.yaml）时，基础设备控制 REST 与
+/// Phase 4/8 验收：无任何已安装扩展（含 gamer-yaml）时，基础设备控制 REST 与
 /// capability 注册表完全可用——零业务资源发行基线不受扩展生命周期影响。
 #[tokio::test]
 async fn baseline_control_and_capabilities_work_without_installed_extensions() {

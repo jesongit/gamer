@@ -7,7 +7,7 @@
     </div>
     <div class="sum-row">
       <span class="sum-label">接入</span>
-      <span class="sum-value"><span class="kind-badge">{{ kindIcon }} {{ kindLabel }}</span></span>
+      <span class="sum-value"><span class="kind-badge">ADB</span></span>
     </div>
     <div class="sum-row">
       <span class="sum-label">地址</span>
@@ -26,8 +26,6 @@ import { computed } from 'vue'
 const props = defineProps({
   device: { type: Object, required: true },
   connected: { type: Boolean, default: false },
-  kindIcon: { type: String, default: '📱' },
-  kindLabel: { type: String, default: '' },
   screenSummary: { type: String, default: '—' },
 })
 

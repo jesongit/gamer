@@ -1,3 +1,4 @@
+import { loadInstalledModules } from '../../plugin-module-loader'
 import type { PanelRegistry } from '../../registry'
 import { registerServerUiContributions } from '../../contribution-manager'
 import type { ServerUiContribution } from '../../contribution-manager'
@@ -53,6 +54,8 @@ export function createServerUiContributionAdapter(
     const contributions = Array.isArray(response.ui_contributions)
       ? response.ui_contributions
       : []
+    if (!options.resolveCore) await loadInstalledModules(response)
+    if (requestGeneration !== generation) return response
     const previous = registration
     registration = null
     previous?.dispose()

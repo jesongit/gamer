@@ -4,8 +4,8 @@ import { defineComponent, h, ref } from 'vue'
 import { mount, flushPromises } from '@vue/test-utils'
 import { api } from './api'
 import { scriptsData, templatesData } from './store'
-import { useConsoleScriptRunner } from './components/console/useConsoleScriptRunner'
-import ScriptRunner from './components/console/ScriptRunner.vue'
+import { useConsoleScriptRunner } from '../../plugins/gamer-yaml/ui/src/components/console/useConsoleScriptRunner'
+import ScriptRunner from '../../plugins/gamer-yaml/ui/src/components/console/ScriptRunner.vue'
 import catalog from '../../tools/yaml-tests/native-functions.json'
 
 let wrapper
@@ -48,5 +48,6 @@ it('首次函数目录不可用：进入编辑会重试，内置函数仍可从�
   expect(getFunctions).toHaveBeenCalledTimes(2)
   expect(wrapper.get('input[aria-label="脚本名称"]').element.value).toBe('新脚本')
   await wrapper.findAll('button').find(b => b.text() === '+ 步骤').trigger('click')
-  expect(wrapper.find('[aria-label="调用 wait_find"]').exists()).toBe(true)
+  // 添加列表通过 Teleport 脱离编辑区滚动裁切，菜单仍消费同一函数目录。
+  expect(document.body.querySelector('[aria-label="调用 wait_find"]')).not.toBeNull()
 })

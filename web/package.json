@@ -8,11 +8,11 @@
     "node": ">=20"
   },
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
+    "dev": "node ../sdk/ui/build-modules.mjs && vite",
+    "build": "node ../sdk/ui/build-modules.mjs && vite build",
     "preview": "vite preview",
     "test": "vitest",
-    "test:run": "vitest run"
+    "test:run": "node ../sdk/ui/build-modules.mjs --install-only && vitest run && pnpm --dir ../plugins/gamer-yaml/ui test && pnpm --dir ../plugins/gamer-keymap/ui test && pnpm --dir ../plugins/gamer-video/ui test"
   },
   "dependencies": {
     "fflate": "^0.8.3",

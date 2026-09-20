@@ -3,7 +3,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { defineComponent, h, ref } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 import { api } from './api'
-import { useConsoleTemplates } from './components/console/useConsoleTemplates'
+import { useConsoleTemplates } from '../../plugins/gamer-yaml/ui/src/components/console/useConsoleTemplates'
 
 let wrapper
 afterEach(() => { wrapper?.unmount(); vi.restoreAllMocks() })

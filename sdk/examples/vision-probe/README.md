@@ -30,11 +30,11 @@ guest 源码要点（`src/lib.rs`）：
 ```sh
 rustup target add wasm32-unknown-unknown   # 首次
 pwsh ./build.ps1
-# 产物：dist/com.example.visionprobe-1.0.0.gplugin
+# 产物：dist/gamer-vision-probe-1.0.0.gplugin
 ```
 
 原始命令与 hello 示例完全同构（把 crate 名换成
-`vision_probe_plugin_guest`、包名换成 `com.example.visionprobe`），见
+`vision_probe_plugin_guest`、包名换成 `gamer-vision-probe`），见
 `../hello/README.md`。
 
 ## 安装与验证权限真实生效
@@ -46,22 +46,22 @@ BASE=http://127.0.0.1:8443
 # inspect：确认 permissions/host_api 与预期一致
 curl -s -b cookies.txt -X POST "$BASE/api/extensions/inspect" \
   -H 'Content-Type: application/octet-stream' \
-  --data-binary @dist/com.example.visionprobe-1.0.0.gplugin
+  --data-binary @dist/gamer-vision-probe-1.0.0.gplugin
 
 # 安装（权限增量 → 需要 x-gamer-permission-confirm）
 curl -s -b cookies.txt -X POST "$BASE/api/extensions" \
   -H 'Content-Type: application/octet-stream' \
   -H 'x-gamer-permission-confirm: true' \
-  --data-binary @dist/com.example.visionprobe-1.0.0.gplugin
+  --data-binary @dist/gamer-vision-probe-1.0.0.gplugin
 
 # 对不存在的设备调用 probe：错误应来自 device.resolve 阶段且 kind != denied
 # （= 通过了权限门禁；若 kind=denied 说明权限声明没有生效）
-curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.visionprobe/call" \
+curl -s -b cookies.txt -X POST "$BASE/api/extensions/gamer-vision-probe/call" \
   -H 'Content-Type: application/json' \
   -d '{"action":"probe","values":{"device_id":"selftest-nonexistent","x":10,"y":10}}'
 
 # 对真实在线设备：probe 返回采样像素 rgb；tap 未勾选 confirm_tap 时只 dry-run
-curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.visionprobe/call" \
+curl -s -b cookies.txt -X POST "$BASE/api/extensions/gamer-vision-probe/call" \
   -H 'Content-Type: application/json' \
   -d '{"action":"tap","values":{"device_id":"<真实设备id>","x":100,"y":100}}'
 ```

@@ -36,15 +36,15 @@ try {
   await api.createPackage({ id: pkg, name: 'YAML 全链路验收' })
   await check('安装实际 YAML 插件并获取全部 18 个函数 Schema', async () => {
     const extensions = await api.listExtensions()
-    if (!(extensions.extensions || []).some(e => e.id === 'gamer.yaml')) {
-      const archive = await readFile(`${root}/web/public/plugins/gamer.yaml-3.1.1.gplugin`)
+    if (!(extensions.extensions || []).some(e => e.id === 'gamer-yaml')) {
+      const archive = await readFile(`${root}/web/public/plugins/gamer-yaml-3.1.1.gplugin`)
       await api.installExtension(archive, { permissionConfirmed: true, source: 'official' })
     }
-    const catalog = await api.getRunnerFunctions('gamer.yaml')
+    const catalog = await api.getRunnerFunctions('gamer-yaml')
     assert.equal(catalog.functions.length, 18)
     await writeFile(new URL('native-functions.json', qa), JSON.stringify(catalog.functions, null, 2))
   })
-  const catalog = await api.getRunnerFunctions('gamer.yaml')
+  const catalog = await api.getRunnerFunctions('gamer-yaml')
   const knownFunctions = new Set([...catalog.functions.map(f => f.name), 'echo_value', 'nested_echo', 'early_return', '每日任务跳转'])
   const templateBytes = await readFile(`${root}/server/testdata/perf/templates/perf_corner_menu#dr.png`)
   await api.importTemplateBytes('button.png', templateBytes, pkg)
@@ -71,7 +71,7 @@ try {
         const list = await api.listScripts(pkg)
         assert.ok(list.some(entry => entry.id === created.id && entry.package === pkg && entry.name === file && entry.content === reopened.content), JSON.stringify(list))
       }
-      const descriptor = await api.getEntrypointParams('gamer.yaml', kind === 'script' ? created.id : `${pkg}#echo_value`)
+      const descriptor = await api.getEntrypointParams('gamer-yaml', kind === 'script' ? created.id : `${pkg}#echo_value`)
       assert.equal(descriptor.format, 'yaml-params-v1')
       if (file === 'flow.yaml') assert.equal(descriptor.schema.length, 11)
     })
@@ -103,7 +103,7 @@ try {
     assert.ok(reopened.model.functions.some(f => f.name === '每日任务跳转'))
     const entries = await api.listFunctions(pkg)
     assert.ok(entries.find(f => f.id === edit.resourceId).functions.includes('每日任务跳转'))
-    const descriptor = await api.getEntrypointParams('gamer.yaml', `${pkg}#每日任务跳转`)
+    const descriptor = await api.getEntrypointParams('gamer-yaml', `${pkg}#每日任务跳转`)
     assert.equal(descriptor.schema[0].name, 'value')
     const script = shell()
     script.newScript({ pkg, name: '中文函数调用.yaml' })
@@ -156,7 +156,7 @@ try {
   await check('定时任务的 YAML 入口与参数保存、回读、删除', async () => {
     const created = await api.saveTask({ name: 'YAML 验收任务',
       app: { device_id: 'qa-offline', android_package: 'com.example.qa', content_package: pkg },
-      runner: { runner_id: 'gamer.yaml', entrypoint: `${pkg}/flow.yaml`, payload: { args: { count: 3 } } },
+      runner: { runner_id: 'gamer-yaml', entrypoint: `${pkg}/flow.yaml`, payload: { args: { count: 3 } } },
       schedule: { provider_id: 'cron', config: { expression: '0 8 * * *' } }, enabled: false,
     })
     const task = await api.getTask(created.id)

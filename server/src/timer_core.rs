@@ -405,7 +405,7 @@ pub enum TimerRunnerError {
     DependencyMissing(String),
     Invalid(String),
     /// 结构化参数诊断（手动运行 400 透传；detail 形态由 runner 自定，Core
-    /// 不解读——gamer.yaml 传脚本参数五元组诊断列表）。
+    /// 不解读——gamer-yaml 传脚本参数五元组诊断列表）。
     InvalidDetail {
         message: String,
         detail: serde_json::Value,
@@ -1826,19 +1826,19 @@ mod tests {
         assert!(registry.list_runners().is_empty(), "裸 Core 无注册 runner");
 
         registry
-            .register_runner("fake.runner", "gamer.yaml", runner.clone())
+            .register_runner("fake.runner", "gamer-yaml", runner.clone())
             .unwrap();
         let listed = registry.list_runners();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].runner_id, "fake.runner");
-        assert_eq!(listed[0].owner_extension_id, "gamer.yaml");
+        assert_eq!(listed[0].owner_extension_id, "gamer-yaml");
         assert!(registry.contains("fake.runner"));
         assert!(registry.get_runner("fake.runner").is_some());
         assert!(registry.get_runner("other.runner").is_none());
 
         // 同 owner 重复注册 = 原地替换（不洁重启缝）；跨 owner 抢注被拒
         registry
-            .register_runner("fake.runner", "gamer.yaml", runner.clone())
+            .register_runner("fake.runner", "gamer-yaml", runner.clone())
             .unwrap();
         assert!(registry
             .register_runner("fake.runner", "other.ext", runner.clone())
@@ -1852,17 +1852,17 @@ mod tests {
         assert!(registry.register_runner("some.runner", "", runner).is_err());
 
         // unregister_owner 只摘自己的，幂等
-        let removed = registry.unregister_owner("gamer.yaml");
+        let removed = registry.unregister_owner("gamer-yaml");
         assert_eq!(removed, vec!["fake.runner".to_string()]);
         assert!(registry.list_runners().is_empty());
-        assert!(registry.unregister_owner("gamer.yaml").is_empty());
+        assert!(registry.unregister_owner("gamer-yaml").is_empty());
 
         // unregister_runner 对未知 id 明确报错
         assert!(registry.unregister_runner("fake.runner").is_err());
         registry
             .register_runner(
                 "fake.runner",
-                "gamer.yaml",
+                "gamer-yaml",
                 Arc::new(FakeRunner {
                     id: "fake.runner",
                     submissions: AtomicUsize::new(0),
@@ -1881,7 +1881,7 @@ mod tests {
         let (db, dir) = test_db("runner-unregister-suspend");
         let mut active = test_task();
         active.id = "active".into();
-        active.runner_id = "gamer.yaml".into();
+        active.runner_id = "gamer-yaml".into();
         active.next_wakeup = Some(Utc::now() + chrono::Duration::minutes(5));
         let mut foreign = test_task();
         foreign.id = "foreign".into();
@@ -1894,13 +1894,13 @@ mod tests {
         let mut already_missing = test_task();
         already_missing.id = "already".into();
         already_missing.state = TaskState::DependencyMissing;
-        already_missing.suspend_reason = Some("missing_dependency=gamer.yaml".into());
+        already_missing.suspend_reason = Some("missing_dependency=gamer-yaml".into());
         for task in [&active, &foreign, &manual, &already_missing] {
             db.upsert_timer_task_async(task).await.unwrap();
         }
         let core = TimerCore::new(db.clone());
         assert_eq!(
-            core.suspend_tasks_missing_runner("gamer.yaml")
+            core.suspend_tasks_missing_runner("gamer-yaml")
                 .await
                 .unwrap(),
             1,
@@ -1911,7 +1911,7 @@ mod tests {
         assert_eq!(suspended.state, TaskState::DependencyMissing);
         assert_eq!(
             suspended.suspend_reason.as_deref(),
-            Some("missing_dependency=gamer.yaml")
+            Some("missing_dependency=gamer-yaml")
         );
         assert!(suspended.enabled, "enabled 用户原意保留");
         assert!(suspended.next_wakeup.is_none(), "唤醒游标清空");
@@ -1935,7 +1935,7 @@ mod tests {
                 .unwrap()
                 .suspend_reason
                 .as_deref(),
-            Some("missing_dependency=gamer.yaml")
+            Some("missing_dependency=gamer-yaml")
         );
         drop(core);
         drop(db);
@@ -1947,10 +1947,10 @@ mod tests {
         let (db, dir) = test_db("runner-register-resume");
         let mut missing = test_task();
         missing.id = "missing".into();
-        missing.runner_id = "gamer.yaml".into();
+        missing.runner_id = "gamer-yaml".into();
         missing.schedule = TaskSchedule::new("fixed", serde_json::json!({})).unwrap();
         missing.state = TaskState::DependencyMissing;
-        missing.suspend_reason = Some("missing_dependency=gamer.yaml".into());
+        missing.suspend_reason = Some("missing_dependency=gamer-yaml".into());
         let mut other_reason = test_task();
         other_reason.id = "other-reason".into();
         other_reason.state = TaskState::DependencyMissing;
@@ -1969,7 +1969,7 @@ mod tests {
         }
         let core = TimerCore::new(db.clone());
         assert_eq!(
-            core.resume_tasks_missing_runner("gamer.yaml", &FixedDelaySchedule)
+            core.resume_tasks_missing_runner("gamer-yaml", &FixedDelaySchedule)
                 .await
                 .unwrap(),
             1,
@@ -2191,7 +2191,7 @@ mod tests {
             TaskSchedule::new("cron", serde_json::json!({"expression": "0 8 * * *"})).unwrap();
         let preset = PackagePreset {
             name: "每日领取".into(),
-            runner_id: "gamer.yaml".into(),
+            runner_id: "gamer-yaml".into(),
             entrypoint: "run".into(),
             payload: serde_json::json!({}),
             schedule: schedule.clone(),

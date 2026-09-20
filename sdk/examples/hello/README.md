@@ -31,7 +31,7 @@ rustup target add wasm32-unknown-unknown   # guest 目标
 
 ```sh
 pwsh ./build.ps1
-# 产物：dist/com.example.hello-1.0.0.gplugin
+# 产物：dist/gamer-hello-1.0.0.gplugin
 ```
 
 等价的原始命令（跨 shell / 仓库外复制本目录后适用，`$SIGNER` 指向从
@@ -48,9 +48,9 @@ cargo run --release --bin componentize -- \
 $SIGNER inspect --manifest manifest.toml
 # 4. 打包 .gplugin（manifest.toml + plugin.wasm，无签名）
 $SIGNER pack --manifest manifest.toml --wasm target/plugin.component.wasm \
-  --out dist/com.example.hello-1.0.0.gplugin
+  --out dist/gamer-hello-1.0.0.gplugin
 # 5. 产物自检（zip 结构 + manifest + \0asm magic）
-$SIGNER verify --archive dist/com.example.hello-1.0.0.gplugin
+$SIGNER verify --archive dist/gamer-hello-1.0.0.gplugin
 ```
 
 ## 安装并调用（curl）
@@ -66,22 +66,22 @@ curl -s -c cookies.txt -X POST "$BASE/api/login" \
 # inspect 预览（安装前确认执行形态/权限/宿主要求）
 curl -s -b cookies.txt -X POST "$BASE/api/extensions/inspect" \
   -H 'Content-Type: application/octet-stream' \
-  --data-binary @dist/com.example.hello-1.0.0.gplugin
+  --data-binary @dist/gamer-hello-1.0.0.gplugin
 
 # 安装（首次装带权限增量，需要 x-gamer-permission-confirm；安装即自动 enable→start）
 curl -s -b cookies.txt -X POST "$BASE/api/extensions" \
   -H 'Content-Type: application/octet-stream' \
   -H 'x-gamer-permission-confirm: true' \
-  --data-binary @dist/com.example.hello-1.0.0.gplugin
+  --data-binary @dist/gamer-hello-1.0.0.gplugin
 
 # 禁用 → 带 app_context 启用（enable 会直接启动，把数据上下文指向一个 Package）
-curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.hello/disable"
-curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.hello/enable" \
+curl -s -b cookies.txt -X POST "$BASE/api/extensions/gamer-hello/disable"
+curl -s -b cookies.txt -X POST "$BASE/api/extensions/gamer-hello/enable" \
   -H 'Content-Type: application/json' \
   -d '{"app_context":{"device_id":"selftest","android_package":"com.example.app","content_package":"hello-data"}}'
 
 # 调用公开 command（action 必须是 manifest declarative 按钮集合里的名字）
-curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.hello/call" \
+curl -s -b cookies.txt -X POST "$BASE/api/extensions/gamer-hello/call" \
   -H 'Content-Type: application/json' \
   -d '{"action":"greet","values":{"message":"你好","level":"info"}}'
 # → {"ok":true,"action":"greet","echo":"你好","logged_at_level":"info"}
@@ -90,15 +90,15 @@ curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.hello/call" \
 curl -s -b cookies.txt -X POST "$BASE/api/packages" \
   -H 'Content-Type: application/json' -d '{"id":"hello-data","name":"Hello 数据"}'
 curl -s -b cookies.txt -X PUT \
-  "$BASE/api/packages/hello-data/plugins/com.example.hello/resources/data/state.json" \
+  "$BASE/api/packages/hello-data/plugins/gamer-hello/resources/data/state.json" \
   -H 'Content-Type: application/json' \
   -d '{"content":"{\"counter\":1}"}'
-curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.hello/call" \
+curl -s -b cookies.txt -X POST "$BASE/api/extensions/gamer-hello/call" \
   -H 'Content-Type: application/json' -d '{"action":"check_resource","values":{}}'
 # → {"ok":true,"found":true,"bytes":...}；删掉该资源后再调 → found:false
 
 # 权限闭集负向自检（未声明 device.read，宿主必须拒绝）
-curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.hello/call" \
+curl -s -b cookies.txt -X POST "$BASE/api/extensions/gamer-hello/call" \
   -H 'Content-Type: application/json' -d '{"action":"probe_denied","values":{}}'
 # → {"ok":true,"denied":true,"kind":"denied",...}
 
@@ -108,8 +108,8 @@ curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.hello/call" \
 卸载（Running 先 disable；插件 Package 私有数据默认保留）：
 
 ```sh
-curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.hello/disable"
-curl -s -b cookies.txt -X DELETE "$BASE/api/extensions/com.example.hello/1.0.0"
+curl -s -b cookies.txt -X POST "$BASE/api/extensions/gamer-hello/disable"
+curl -s -b cookies.txt -X DELETE "$BASE/api/extensions/gamer-hello/1.0.0"
 ```
 
 ## 浏览器侧
