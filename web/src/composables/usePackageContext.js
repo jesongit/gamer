@@ -12,6 +12,10 @@ import {
   packageStore, loadPackages, selectPackage, refreshPackages, currentPackageId,
 } from '../package-store'
 
+// 配置包 manifest 的默认版本，与服务端产品版本独立。
+const PACKAGE_INITIAL_VERSION = '1.0.0'
+const PACKAGE_EMPTY_VERSION = '0.1.0'
+
 /** Package id 输入规整：小写域 [a-z0-9._-]，与服务端 validate_scope_id 对齐。 */
 export function normalizePackageId(value) {
   return String(value || '').trim().toLowerCase()
@@ -273,7 +277,7 @@ export function usePackageContext({
   // ---------- 新建 / 复制（同一表单弹窗） ----------
   const formModal = reactive({
     open: false, mode: 'create', submitting: false, error: '',
-    form: { id: '', name: '', version: '1.0.0', androidPackagesText: '' },
+    form: { id: '', name: '', version: PACKAGE_INITIAL_VERSION, androidPackagesText: '' },
   })
 
   function unwrap(value) {
@@ -315,7 +319,7 @@ export function usePackageContext({
     formModal.mode = 'create'
     // 默认 Android Targets = `*`（通用配置、零插件依赖）；需要绑定具体应用时
     // 改填包名或用「填入当前应用」。
-    formModal.form = { id: '', name: '', version: '1.0.0', androidPackagesText: '*' }
+    formModal.form = { id: '', name: '', version: PACKAGE_INITIAL_VERSION, androidPackagesText: '*' }
     formModal.error = ''
     formModal.open = true
   }
@@ -328,7 +332,7 @@ export function usePackageContext({
     formModal.form = {
       id: `user.${id.replace(/^user\./, '')}.copy`,
       name: src?.name ? `${src.name}（副本）` : '',
-      version: src?.version || '1.0.0',
+      version: src?.version || PACKAGE_INITIAL_VERSION,
       androidPackagesText: (src?.targets?.android?.packages || []).join(', '),
     }
     formModal.error = ''
@@ -354,7 +358,7 @@ export function usePackageContext({
     const toast = beginReport()
     if (formModal.submitting) return
     const id = normalizePackageId(formModal.form.id)
-    const version = formModal.form.version.trim() || '0.1.0'
+    const version = formModal.form.version.trim() || PACKAGE_EMPTY_VERSION
     const name = formModal.form.name.trim()
     const androidPackages = parseAndroidPackages(formModal.form.androidPackagesText)
     if (!isValidPackageId(id)) {

@@ -2379,7 +2379,6 @@ fn declarative_actions(manifest: &ExtensionManifest) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    #[path = "../../service_m01_tests.rs"]
     mod m01_tests;
 
     use super::*;

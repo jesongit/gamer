@@ -13,6 +13,7 @@
 #     2) 行内含 scrcpy/adb/ffmpeg 依赖与协议版本语境（如 scrcpy-server 3.3.3 绑定）——
 #        依赖版本不是产品版本；
 #     3) web/package.json 的 version 是包元数据，计划 §6.1 明确允许，且不在 web/src 扫描范围。
+#     4) PACKAGE_INITIAL_VERSION / PACKAGE_EMPTY_VERSION 的常量声明只提供配置包元数据默认值。
 #
 # 退出码：发现违规且未加 -ReportOnly 时 exit 1（供批次 3 CI 接入 WEB-006 收口门禁）；
 #         -ReportOnly 只报告不失败（恒 exit 0）；无违规 exit 0。
@@ -44,6 +45,7 @@ if (-not (Test-Path -LiteralPath $WebSrc)) {
 $versionRegex = '(?<![A-Za-z0-9_.])v?[0-9]{1,2}\.[0-9]{1,2}\.[0-9]{1,2}(?![A-Za-z0-9_.])'
 # 依赖/协议版本语境关键词（这些行里的 x.y.z 属依赖版本，不是产品版本）
 $depContextRegex = '(?i)scrcpy|(?<![a-z])adb(?![a-z])|ffmpeg'
+$packageVersionRegex = '^\s*const PACKAGE_(INITIAL|EMPTY)_VERSION\s*=\s*[''"][0-9]+\.[0-9]+\.[0-9]+[''"]\s*;?\s*$'
 # 测试夹具文件（fixture 版本数据允许，仅 INFO）
 $isTestFixture = {
     param([string]$Path)
@@ -82,7 +84,9 @@ foreach ($f in $files) {
         if ($matchesFound.Count -eq 0) { continue }
         $tokens = @($matchesFound | ForEach-Object { $_.Value })
         $text = "$rel`:$($i + 1): " + $line.Trim()
-        if ($line -match $depContextRegex) {
+        if ($line -match $packageVersionRegex) {
+            $whitelisted.Add("[package-metadata] $text")
+        } elseif ($line -match $depContextRegex) {
             $whitelisted.Add("[dep-context] $text")
         } elseif ($fixture) {
             foreach ($t in $tokens) {

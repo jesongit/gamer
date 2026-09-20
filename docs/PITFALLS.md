@@ -385,3 +385,5 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - **VitePress 文档站**：主题配置中的函数会序列化到客户端，不能引用配置文件外层变量，否则 SSR 报 ReferenceError；函数保持自包含。重新构建后重启 preview，避免旧路由映射引用已替换的资源。
 - **发布工作流缩进**：Bash heredoc 结束标记仍须保留 YAML run 块的缩进，解析 YAML 后才由 Bash 识别；删除整段发布逻辑后同时做 YAML 解析，不能只检查脚本文本关键词。
 - **Git 遗留锁**：长时间不变的空 index.lock 会阻止暂存；先核对 Git 进程与文件时间并确认可独占打开，再仅删除已确认失效的锁，不能直接清理活跃锁。
+- **Linux Rust 测试模块路径**：内联模块中的 path 属性经不存在的目录再使用 ../ 回退，在 Windows 可解析而 Linux 会 ENOENT；将子测试放到实际的 service/tests/ 目录并使用普通 mod 声明。
+- **前端版本检查**：配置包默认版本不等于产品版本；仅允许具名 PACKAGE_INITIAL_VERSION/PACKAGE_EMPTY_VERSION 常量声明，其他同文件产品版本字面量仍须拒绝。

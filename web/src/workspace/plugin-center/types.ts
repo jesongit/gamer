@@ -6,7 +6,7 @@ export type PluginSource = 'official' | 'local' | 'url' | 'unknown'
  */
 export interface PluginExecution {
   kind: 'wasm' | 'builtin'
-  /** 宿主版本要求（如 ">=1.3.0"）；缺失表示无额外要求，UI 不展示。 */
+  /** 宿主版本要求（SemVer 范围）；缺失表示无额外要求，UI 不展示。 */
   host_version?: string
 }
 
