@@ -22,7 +22,7 @@
 | 签名 | 当前插件体系取消强制签名及必需的 Registry proof；默认构建不生成密钥、不签名。保留必要的完整性、权限和运行时安全检查。 |
 | 插件类型 | Extension 不等于 WASM。保留受控 WASM 扩展和宿主预置实现；宿主内置、独立分发、源码仓库位置是不同概念。 |
 | Native 边界 | 普通第三方插件不能通过免签名机制加载任意 DLL、动态库或本机可执行文件；宿主预置实现只能通过服务端明确注册的能力启用。 |
-| 视频定位 | Core 提供媒体、录制、帧、视觉等通用机制；`gamer.video` 拥有制作业务；`gamer.yaml` 拥有模板、脚本语义及 Runner。暂不为了形式上的插件化强制把 FFmpeg 等底层机制搬进 WASM。 |
+| 视频定位 | Core 提供媒体、录制、帧、视觉等通用机制；`gamer-video` 拥有制作业务；`gamer-yaml` 拥有模板、脚本语义及 Runner。暂不为了形式上的插件化强制把 FFmpeg 等底层机制搬进 WASM。 |
 | 原计划目标 | 恢复完整制作闭环：录制/导入、精确逐帧、项目与标记、校准、模板制作和离线匹配、YAML 草稿保存/编辑、Package 分发、E2E。 |
 | 旧机制 | 开发阶段允许清理旧签名流程、无效 manifest 假入口和不必要的宿主业务耦合；现有数据若需要迁移，提供明确、可检查的手动迁移方案。 |
 
@@ -40,7 +40,7 @@
 
 1. `AGENTS.md` 明确区分 Android App、Package、Plugin、Task；PackageStore 使用 `(package_id, plugin_id, path)` 三元组，插件数据目录语义归插件，未安装插件的数据保留。YAML v3 是唯一脚本方案。
 2. 当前扩展 manifest、生命周期、归档校验、权限、WASM 运行时和 UI contribution 已有实现；UI 支持 `core`、`declarative`、`iframe`，不需要从零创建插件框架。
-3. 当前 `gamer.video` 是无 guest、无 Runner 的宿主 Native 实现，启动仅表示 Running；面板 `VideoWorkbench` 由前端预置组件注册表解析。它不是一个携带完整视频业务代码的独立 WASM 插件。
+3. 当前 `gamer-video` 是无 guest、无 Runner 的宿主 Native 实现，启动仅表示 Running；面板 `VideoWorkbench` 由前端预置组件注册表解析。它不是一个携带完整视频业务代码的独立 WASM 插件。
 4. 当前视频 manifest 仍声明 `entry = "plugin.wasm"`，而归档校验要求 entry 是实际存在的 WASM 文件。现有视频生命周期测试使用了最小 WASM 字节作为测试包。应修正模型，不应把这种占位文件变成正式发布约定。
 5. `tools/build-plugins.ps1` 当前只构建/打包 Keymap 与 YAML，并强制生成签名和 Registry proof；公开 `registry.json` 只列出这两个插件，尚未包含视频插件。
 6. 当前本地安装路径已有无签名状态；官方安装路径在 `ExtensionService::inspect_with_context` 中要求有效签名与 proof。因此无需推倒安装器，应收口和简化现有策略。
@@ -67,14 +67,14 @@
 | 扩展模型/解析 | `server/src/extensions/manifest.rs`、`model.rs` | 明确执行类型、兼容性及 manifest 契约。 |
 | 安装与生命周期 | `service.rs`、`store.rs`、`archive.rs` | 免签名安装、版本管理、宿主注册、归档安全。 |
 | 签名与发布 | `signature.rs`、`tools/plugin-signer/`、`tools/build-plugins.ps1` | 删除不再需要的强制链路，建立普通 pack/build 工具。 |
-| 官方包声明 | `tools/plugins/gamer.yaml/`、`gamer.keymap/`、`gamer.video/` | 统一构建清单及发布描述。 |
+| 官方包声明 | `plugins/gamer-yaml/`、`gamer-keymap/`、`gamer-video/` | 统一构建清单及发布描述。 |
 | 市场 | `web/public/registry.json`、`web/public/plugins/`、`web/src/workspace/MarketView.vue` | 官方来源、安装/更新、状态展示、错误处理。 |
 | UI Bridge | `server/src/extensions/ui.rs`、`host_api.rs`、前端插件面板与组件注册表 | 受控 UI、命令调用、权限和上下文。 |
-| YAML/Keymap | `server/src/extensions/gamer_yaml/`、`keymap/`、`server/guests/yaml-guest/`、`server/tests/keymap-guest/` | 梳理业务归属、正式 guest 和可复用 SDK。 |
-| 视频扩展 | `server/src/extensions/video/`、`web/src/components/video/` | 插件生命周期、面板、制作业务。 |
+| YAML/Keymap | `plugins/gamer-yaml/host/`、`keymap/`、`plugins/gamer-yaml/guest/`、`server/tests/keymap-guest/` | 梳理业务归属、正式 guest 和可复用 SDK。 |
+| 视频扩展 | `plugins/gamer-video/host/`、`web/src/components/video/` | 插件生命周期、面板、制作业务。 |
 | 媒体/录制 | `server/src/media/`、`recording/`、`api/media.rs`、`api/recording.rs` | 核验并补齐媒体和录制基础能力。 |
 | 通用画面/视觉 | `device/`、`capabilities/frame.rs`、`vision.rs`、`api/vision.rs`、`ConsoleVideoStage.vue` | 精确帧、来源切换、坐标及输入门禁。 |
-| Package | `resources.rs`、`package_archive.rs`、`server/src/extensions/gamer_yaml/resources.rs` | 项目存储、媒体引用、模板/脚本保存、归档。 |
+| Package | `resources.rs`、`package_archive.rs`、`plugins/gamer-yaml/host/resources.rs` | 项目存储、媒体引用、模板/脚本保存、归档。 |
 | 测试 | `architecture_guard_tests.rs`、`web/src/core-shell-boundary.test.js`、相关集成测试 | 锁定新边界、安装/更新/E2E。 |
 
 ---
@@ -92,7 +92,7 @@
 | 形态 | 代码交付 | 适用场景 | 安装与安全约束 |
 | --- | --- | --- | --- |
 | 独立 WASM 插件 | `.gplugin` 携带真实 WASM Component；可携带 declarative/iframe UI | 第三方插件、可独立更新的官方业务插件 | 本地或官方来源安装；Host API 权限；资源、时间和并发限制。 |
-| 宿主预置插件 | 执行代码已编译进 Gamer；可通过 manifest/安装记录启用 | `gamer.video` 当前过渡形态、确有宿主依赖的官方能力 | 服务端注册表明确允许的 ID、实现和版本；不得从包内动态装载任意原生代码。 |
+| 宿主预置插件 | 执行代码已编译进 Gamer；可通过 manifest/安装记录启用 | `gamer-video` 当前过渡形态、确有宿主依赖的官方能力 | 服务端注册表明确允许的 ID、实现和版本；不得从包内动态装载任意原生代码。 |
 | 宿主机制 Extension | 随 Core 装配，不一定需要 `.gplugin` | cron 等通用机制 provider | 明确的内部注册和生命周期；不为了市场展示伪造插件包。 |
 | 纯 UI/声明扩展 | 如实际需要，只有配置或 UI，无后端执行器 | 简单工具、面板、只读展示 | 必须声明真实执行形态，不能借用空 WASM 冒充。是否增加该类型由实际样例决定。 |
 
@@ -107,9 +107,9 @@ Gamer Core
   ├─ Extension 生命周期 / Runtime / 权限 / 安装 / 市场来源
   └─ 通用 Stage、UI Bridge、跨插件能力注册与调度
           │
-          ├─ gamer.yaml：YAML v3 / 模板 / 函数 / 自动化 / Runner
-          ├─ gamer.keymap：映射规则 / 映射执行 / 配置界面
-          ├─ gamer.video：素材制作 / 项目 / 时间轴 / 标记 / 草稿选择
+          ├─ gamer-yaml：YAML v3 / 模板 / 函数 / 自动化 / Runner
+          ├─ gamer-keymap：映射规则 / 映射执行 / 配置界面
+          ├─ gamer-video：素材制作 / 项目 / 时间轴 / 标记 / 草稿选择
           └─ 用户插件：自己的 WASM + UI + Package 数据
 ```
 
@@ -117,9 +117,9 @@ Core 不解析 YAML 业务语义、不理解视频项目 JSON、不直接管理 
 
 ### 2.4 视频插件的明确定位
 
-当前 `gamer.video` 保留为**官方宿主预置插件**，先修复发布和生命周期，使用户能正常安装使用；但要把这一事实如实展示为“需要 Gamer 宿主支持”的插件，而不是宣传成可独立替换全部媒体实现的 WASM 插件。
+当前 `gamer-video` 保留为**官方宿主预置插件**，先修复发布和生命周期，使用户能正常安装使用；但要把这一事实如实展示为“需要 Gamer 宿主支持”的插件，而不是宣传成可独立替换全部媒体实现的 WASM 插件。
 
-长期目标是让视频制作业务和 UI 尽量成为可独立分发的插件资产。底层 Media/Recording/Frame/Vision 继续属于 Core；时间轴、项目、标记、制作流程属于 `gamer.video`。本轮先完成通用 Host API、独立 UI 和命令机制，再基于实际复杂度迁移业务。**不以“全部搬进 WASM”为验收条件，也不允许因为当前宿主实现方便，就继续把新增视频业务写入 Core。**
+长期目标是让视频制作业务和 UI 尽量成为可独立分发的插件资产。底层 Media/Recording/Frame/Vision 继续属于 Core；时间轴、项目、标记、制作流程属于 `gamer-video`。本轮先完成通用 Host API、独立 UI 和命令机制，再基于实际复杂度迁移业务。**不以“全部搬进 WASM”为验收条件，也不允许因为当前宿主实现方便，就继续把新增视频业务写入 Core。**
 
 ---
 
@@ -133,7 +133,7 @@ Core 不解析 YAML 业务语义、不理解视频项目 JSON、不直接管理 
 - [ ] 对照本文件第 1 节逐项确认代码是否仍存在、是否已被新提交替换；不要直接照搬旧路径和接口。
 - [ ] 检查当前插件安装、inspect、update、enable、start、disable、uninstall、activate_version 的调用链和测试。
 - [ ] 绘制官方 registry → 下载 → 校验 → 安装 → 启用 → 面板/Runner 的真实调用链。
-- [ ] 检查 `gamer.video` 的 manifest、Native 注册、UI 注册、媒体 API 和构建清单，形成最小修复清单。
+- [ ] 检查 `gamer-video` 的 manifest、Native 注册、UI 注册、媒体 API 和构建清单，形成最小修复清单。
 - [ ] 核对当前媒体、录制、输入事件、离线视觉、StageSource、草稿、Package 引用的真实实现，标记“完成/部分完成/未完成/待验证”。
 - [ ] 区分插件签名与 launcher 更新签名涉及的代码和配置，不扩大删除范围。
 - [ ] 建立新计划进度表及证据目录。只记录实际执行结果，不把旧报告当作本轮测试通过。
@@ -189,7 +189,7 @@ Core 不解析 YAML 业务语义、不理解视频项目 JSON、不直接管理 
 
 ### 4.4 立即验证视频入口
 
-先完成第 5 节的最小宿主插件契约修正，再将 `gamer.video` 纳入正式打包与市场。完整验收必须通过：市场出现视频插件 → 下载 → inspect → 安装 → enable/start → 插件菜单出现视频工作台 → 打开基础素材库 → stop/disable 后 UI 消失 → 重启后状态恢复 → 卸载后数据按既定策略保留。
+先完成第 5 节的最小宿主插件契约修正，再将 `gamer-video` 纳入正式打包与市场。完整验收必须通过：市场出现视频插件 → 下载 → inspect → 安装 → enable/start → 插件菜单出现视频工作台 → 打开基础素材库 → stop/disable 后 UI 消失 → 重启后状态恢复 → 卸载后数据按既定策略保留。
 
 **Phase 1 验收：** 一条无私钥的构建命令能够产生全部官方包和可用 registry；本地无签名 WASM 示例可安装；视频插件正式包不含伪造 WASM；官方市场下载的字节与 SHA-256 一致。保留插件运行时安全测试，不因免签名放行任意原生执行。
 
@@ -205,13 +205,13 @@ Core 不解析 YAML 业务语义、不理解视频项目 JSON、不直接管理 
 
 ```toml
 manifest_version = 2
-id = "gamer.video"
+id = "gamer-video"
 version = "1.0.0"
 name = "视频工作台"
 
 [execution]
 kind = "builtin"
-builtin_id = "gamer.video"
+builtin_id = "gamer-video"
 # host_version = ">=..."  # 使用项目实际版本体系确定
 
 [[ui.contributions]]
@@ -296,8 +296,8 @@ component = "VideoWorkbench"
 ### 7.2 视频业务归属
 
 - [ ] 保留 `server/src/media/`、`recording/`、Frame/Vision、设备编码流与资源生命周期等通用服务在 Core。
-- [ ] 新增的视频项目、时间轴、标记、校准、草稿选择、制作工作流数据与业务命令归 `gamer.video`。
-- [ ] `gamer.yaml` 独占模板格式、YAML v3 生成/保存/校验、编辑器与 Runner；视频插件不复制这些实现。
+- [ ] 新增的视频项目、时间轴、标记、校准、草稿选择、制作工作流数据与业务命令归 `gamer-video`。
+- [ ] `gamer-yaml` 独占模板格式、YAML v3 生成/保存/校验、编辑器与 Runner；视频插件不复制这些实现。
 - [ ] 优先通过独立 UI 资产和公开命令让视频制作逻辑脱离宿主私有组件。如果某部分仍必须是宿主实现，记录原因、对应宿主版本和替代方案。
 - [ ] 不为视频插件引入直接 FFmpeg/process/filesystem 权限；需要的媒体功能应通过通用 Media Host API 暴露。
 - [ ] 本轮交付可以保留明确标识的官方宿主视频插件，但第三方插件必须已经能使用同一套公开媒体/视觉能力。不能以视频仍是宿主插件为理由限制其他开发者使用媒体机制。
@@ -350,8 +350,8 @@ component = "VideoWorkbench"
 
 ### 9.1 Video Project
 
-- [ ] 建立 `gamer.video` 自己的版本化项目数据结构，关联当前 Package、一个或多个 Media Asset、可选 Recording Session、校准、标记、注释、事件选择和制作进度。
-- [ ] 项目数据保存于当前 Package 的 `plugins/gamer.video/` 私有目录；具体内部格式由视频插件定义，Core 只负责三元组寻址和通用资源操作。
+- [ ] 建立 `gamer-video` 自己的版本化项目数据结构，关联当前 Package、一个或多个 Media Asset、可选 Recording Session、校准、标记、注释、事件选择和制作进度。
+- [ ] 项目数据保存于当前 Package 的 `plugins/gamer-video/` 私有目录；具体内部格式由视频插件定义，Core 只负责三元组寻址和通用资源操作。
 - [ ] 原视频保留于全局媒体库，项目只保存逻辑引用；不默认把每个大视频复制到 Package。
 - [ ] 支持项目创建、打开、重命名、保存、恢复、删除及素材缺失提示；保存应具备原子性或明确的失败恢复策略。
 - [ ] 同一素材可被多个项目使用；删除项目不自动删除原始视频，媒体删除遵守引用/租约规则。
@@ -385,7 +385,7 @@ component = "VideoWorkbench"
 
 ### 10.1 跨插件能力契约
 
-通过 Phase 2 的通用能力/命令注册机制，由 `gamer.yaml` 提供版本化公开能力。下列名称为拟定语义，最终以现有可复用接口为准：
+通过 Phase 2 的通用能力/命令注册机制，由 `gamer-yaml` 提供版本化公开能力。下列名称为拟定语义，最终以现有可复用接口为准：
 
 ```text
 template.create_from_frame
@@ -394,7 +394,7 @@ automation.create_draft
 automation.save_draft / automation.open_editor
 ```
 
-调用必须携带当前 Package Context、确定帧引用/来源代次、校准/坐标元数据和必要的事件引用。目标插件负责校验、命名冲突、资源保存及返回结构化诊断。视频插件不得直接解析 YAML v3 或修改 `gamer.yaml` 私有目录。缺少 YAML 插件时，视频导入、录制、播放、标记仍可工作，只禁用相关制作操作并提示依赖。
+调用必须携带当前 Package Context、确定帧引用/来源代次、校准/坐标元数据和必要的事件引用。目标插件负责校验、命名冲突、资源保存及返回结构化诊断。视频插件不得直接解析 YAML v3 或修改 `gamer-yaml` 私有目录。缺少 YAML 插件时，视频导入、录制、播放、标记仍可工作，只禁用相关制作操作并提示依赖。
 
 ### 10.2 模板制作与测试
 
@@ -431,7 +431,7 @@ automation.save_draft / automation.open_editor
 - [ ] 默认 Package 导出不包含原始大视频；增加用户显式选择的“包含媒体素材”模式，列出大小和隐私提示。
 - [ ] 导入含媒体的 Package 时校验归档路径、大小、哈希、逻辑 ID 和引用映射；文件先安全落盘，再原子提交元数据/项目引用，失败不得留下可被正常使用的半成品。
 - [ ] 不含素材导入时保留引用和缺失状态，允许用户重新关联已有媒体，不要求重新制作整个项目。
-- [ ] 未安装 `gamer.video`、`gamer.yaml` 等插件时保留 dormant plugin data，不能由 Core 清理或解释其私有内容。
+- [ ] 未安装 `gamer-video`、`gamer-yaml` 等插件时保留 dormant plugin data，不能由 Core 清理或解释其私有内容。
 - [ ] Package 覆盖/复制按现有 V3 语义处理，不引入复杂 Merge 或旧格式兼容层。
 
 ### 11.2 插件版本与更新
@@ -565,8 +565,8 @@ Phase 0  基线核对
 - [归档校验 archive.rs](https://github.com/jesongit/gamer/blob/main/server/src/extensions/archive.rs)
 - [插件签名 signature.rs](https://github.com/jesongit/gamer/blob/main/server/src/extensions/signature.rs)
 - [官方插件构建脚本](https://github.com/jesongit/gamer/blob/main/tools/build-plugins.ps1)
-- [视频插件 manifest](https://github.com/jesongit/gamer/blob/main/tools/plugins/gamer.video/manifest.toml)
-- [视频宿主扩展](https://github.com/jesongit/gamer/blob/main/server/src/extensions/video/mod.rs)
+- [视频插件 manifest](https://github.com/jesongit/gamer/blob/main/plugins/gamer-video/manifest.toml)
+- [视频宿主扩展](https://github.com/jesongit/gamer/blob/main/plugins/gamer-video/host/mod.rs)
 - [当前 registry.json](https://github.com/jesongit/gamer/blob/main/web/public/registry.json)
 - [视频工作台组件](https://github.com/jesongit/gamer/blob/main/web/src/components/video/VideoWorkbench.vue)
 - [视频时间轴组件](https://github.com/jesongit/gamer/blob/main/web/src/components/video/VideoTimeline.vue)
@@ -588,7 +588,7 @@ Phase 0  基线核对
 | 1 免签名 + 市场修复 | DONE | `a925251`（服务端：signature.rs 全删 + `x-expected-sha256`）、`3dac760`（构建链去签 + registry v2 + video 首入市）、`9b6ea9c`（前端免签安装与执行形态展示）、`eae786c`（dev keypair 残留删除） |
 | 2 执行类型/注册表/Bridge | DONE | `a925251`（manifest v2 `[execution]` + `extensions/builtin.rs` 注册表 + UI 贡献仅 Running + host_api 第 9 域 media） |
 | 3 第三方 SDK | DONE | `fdffc75`（sdk/ 三示例 + plugin-dev.md + PLUGIN_API.md）、`6dbc5f1`（缺口1 修复：通用插件带 import 的 async 运行时 trap + 崩溃循环） |
-| 4 官方插件归属收口 | DONE | `4a7439c`（keymap guest 转正 `server/guests/keymap-guest` + 机制层 id 特判收敛边界谓词 + 归属审计）、`92cf82c`（缺口2 修复：录事件来源标注 task-local scope） |
+| 4 官方插件归属收口 | DONE | `4a7439c`（keymap guest 转正 `plugins/gamer-keymap/guest` + 机制层 id 特判收敛边界谓词 + 归属审计）、`92cf82c`（缺口2 修复：录事件来源标注 task-local scope） |
 | 5 媒体/录制收口 | DONE | `7b85745`（展示序帧表 PTS/索引映射 + `/api/media/:id/frames*` + 录制 base_pts_us 时间轴映射 + 前端消灭 33ms 步进）；媒体库/录制本体 V1 在计划前已入库（`f859a7e`/`a1b04c7`） |
 | 6 Video Project/时间轴 | DONE | `d44a959`（projects/*.json 资源 + 标记帧身份 + 校准四级坐标变换 + 工作台三分区重组） |
 | 7 模板/离线测试/草稿闭环 | DONE | `db4d481`（`gamer_yaml/actions.rs` 动作清单唯一声明 + TemplateStudio 定帧建模板 + 草稿可编辑工作流 + `tools/e2e_phase7_offline.sh`） |
@@ -599,10 +599,10 @@ Phase 0  基线核对
 
 1. **前端是第二道签名门禁**（Phase 0 偏差1）：计划只点名服务端；实际 `installPolicy`/`canInstallMarket` 在浏览器侧也阻断，Phase 1 前后端同步拆除。
 2. **签名元数据在版本目录文件（signature.sig）而非已安装记录**（偏差2）：state.json 无签名字段，删 verifier 后旧文件死数据静默忽略，零迁移。
-3. **`native_call_action` 特判的是 gamer.yaml 而非 gamer.video**（偏差3）：通用跨插件 RPC 注册表未做，Phase 7 以 `actions.rs` 公开动作清单（版本化唯一声明 + 清单↔分发双向锁测试）代替，覆盖 `template.create_from_frame`/`vision.test_template`/`automation.create_draft`/`automation.save_draft`/`automation.open_editor` 五动作。
+3. **`native_call_action` 特判的是 gamer-yaml 而非 gamer-video**（偏差3）：通用跨插件 RPC 注册表未做，Phase 7 以 `actions.rs` 公开动作清单（版本化唯一声明 + 清单↔分发双向锁测试）代替，覆盖 `template.create_from_frame`/`vision.test_template`/`automation.create_draft`/`automation.save_draft`/`automation.open_editor` 五动作。
 4. **registry 元数据单源化**（偏差4）：build-plugins.ps1 硬编码条目元数据 → signer `inspect --meta-out` 以 manifest.toml 为唯一权威源。
 5. **UI 贡献语义裁决**（偏差6）：Enabled|Running 可见 → **仅 Running**（stop 即撤面板，Enabled 不再出现半启用面板）。
-6. **keymap guest 迁移**：`server/tests/keymap-guest` → `server/guests/keymap-guest`（Phase 4，wasm 代码段逐字节等价、仅符号改名）。
+6. **keymap guest 迁移**：`server/tests/keymap-guest` → `plugins/gamer-keymap/guest`（Phase 4，wasm 代码段逐字节等价、仅符号改名）。
 7. **TemplateStudio 视频域自实现**（Phase 7 偏差1）：TemplateCropModal 与 useConsoleTemplates 裁切子系统深耦合，不直接复用；语义等价（定帧冻结 + generation 校验 + 绝不保存时重抓）。
 8. **host_api 第 9 域 media 补声明入口**（偏差5）：`[host_api] media` 键随 manifest v2 落地。
 9. **视频包发布链重建**（偏差7）：plugin-signer pack 与签名解耦（`--key` 非必填、builtin 包零占位 WASM、`inspect --meta-out`、`verify` 自检），archive/store 的 entry=WASM 假设按执行类型分支。

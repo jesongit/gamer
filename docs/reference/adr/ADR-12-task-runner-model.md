@@ -26,7 +26,7 @@ Task
 ```
 
 - `schedule = { provider_id, config }`：调度语义由 ScheduleProvider 解释。例如 `gamer.cron` + `expression`；未来可接 `gamer.interval` / `gamer.manual` / `thirdparty.calendar`。
-- `runner = { runner_id, entrypoint, payload }`：执行语义由 Runner 解释。例如 `gamer.yaml` + `daily/login` + args；未来可接 `gamer.macro` 等。
+- `runner = { runner_id, entrypoint, payload }`：执行语义由 Runner 解释。例如 `gamer-yaml` + `daily/login` + args；未来可接 `gamer.macro` 等。
 - `state` 含 `DEPENDENCY_MISSING` 等运行依赖状态；`metadata` 为通用键值，不承载调度/执行语义。
 
 Task 与 `script_id`、`cron` 顶层字段彻底无关——`script_id` / `cron` / `script_args` / `script_path` 等旧字段整体删除，YAML 参数改存于 `runner.payload`、cron 表达式改存于 `schedule.config`。

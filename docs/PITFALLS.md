@@ -1,6 +1,6 @@
 # 已知坑
 
-GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知限制）；由 AGENTS.md 规则约束维护，
+Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限制）；由 AGENTS.md 规则约束维护，
 每条保持**精简准确**：一句话现象 + 原因 + 解决/规避，不写流水账、不夸大。新条目追加到本文件末尾。
 
 - scrcpy 视频 socket 必须保留整个 `TcpStream`（`into_split()` 写半 drop 会发 FIN 导致断流）
@@ -71,7 +71,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **`api::tests::sec_tests::expired_cookie_is_rejected_by_protected_route` 也属计时敏感偶发红**（2026-08-29）：登录后立即请求预期 200，但 `session_abs_secs: 1` 的绝对 TTL 下，并行测试负载只要把 login→before 间隔拖过 1s 就先收到 401（断言在 before 处失败，与测试名暗示的"过期后拒绝"不是同一处）；单独重跑即过，勿当成回归（与既有 `session_lifecycle_absolute_and_sliding` 偶发红同类）。
 - **Docker bridge 部署 WebRTC 黑屏的完整根因链有三层，逐层排查别停在第一层**（2026-08-29）：① 容器内网 172.x 候选浏览器不可达——`rtc_external_ip/rtc_udp_port/rtc_external_port` 宣告宿主可达地址（webrtc-ice muxed 候选地址/端口取自 mux conn 的 `local_addr()`，自定义 `Conn` 包装汇报具体 `external_ip:port`，返回 0.0.0.0 会得到 0 个本地候选）；② 前端把 `createOffer()` 原始 SDP 直接发给服务端——里面**没有任何 a=candidate**（候选在 setLocalDescription 后的 `localDescription` 上），服务端零远端候选、ICE 零 pair，连接全靠浏览器对 answer 候选的 prflx 回路（已修：等 gathering complete 发 `pc.localDescription`）；③ 启动日志里 `pingAllCandidates called with no candidate pairs` 若只出现 1-2 次且紧邻 `connected` 属正常瞬态（prflx 注册前的单个检查周期），持续刷屏才是真故障。ICE 日志经 tracing-log 桥进容器日志（tracing-subscriber 默认 feature + `fmt().init()`），`RUST_LOG=webrtc_ice=debug` 有效；viewer 协商完成时会打一条 `ICE candidates: local=[...] offer_remote=N` 供容器排障。
 - **`adb -a -P 5037 nodaemon server`（共享宿主 adb server，供 Docker 容器复用）不是常驻服务**（2026-08-29）：它只是以监听 0.0.0.0 的方式拉起一次 server，`gamer.ps1` 的 rebuild/restart（Reset-AdbServer）、服务端 adb 超时自愈（`Adb::reset_server`——共享部署下**任一实例**触发都会杀共享 server）、重启机器都会把 server 变回只听 127.0.0.1 的标准模式，需重跑 `tools/adb-share-start.ps1`；kill-server 期间 USB 设备断连几秒、运行中实例自动重连恢复属预期。容器经 `host.docker.internal:5037` 访问宿主 server 实测未触发 Windows 防火墙弹窗。
-- **共享宿主 adb server 下，容器内 GameBot 的 scrcpy 会话必死（`accept video socket timeout`），纯配置无解**（2026-08-29 实证）：GameBot 在容器内 bind 127.0.0.1 随机端口 accept，而 `adb reverse` 的回连方是 **adb server**（共享后位于宿主）——它收到设备侧 localabstract 连接后硬编码连宿主自己的 127.0.0.1:<随机端口>（adb `network_loopback_client`，reverse 的 local 端不支持指定 host），宿主上无人监听 → 设备侧 scrcpy server 已正常启动（容器日志可见 `New display: …`）但 socket 连不上自退。解锁需改 `scrcpy.rs`（bind 地址可配 + 隧道方向反转为 `adb forward`），当前容器实例只承担 adb 层操作（scan/shell/设备管理），实时会话由宿主实例承担，详见 docs/reference/DEVICE_ACCESS.md。
+- **共享宿主 adb server 下，容器内 Gamer 的 scrcpy 会话必死（`accept video socket timeout`），纯配置无解**（2026-08-29 实证）：Gamer 在容器内 bind 127.0.0.1 随机端口 accept，而 `adb reverse` 的回连方是 **adb server**（共享后位于宿主）——它收到设备侧 localabstract 连接后硬编码连宿主自己的 127.0.0.1:<随机端口>（adb `network_loopback_client`，reverse 的 local 端不支持指定 host），宿主上无人监听 → 设备侧 scrcpy server 已正常启动（容器日志可见 `New display: …`）但 socket 连不上自退。解锁需改 `scrcpy.rs`（bind 地址可配 + 隧道方向反转为 `adb forward`），当前容器实例只承担 adb 层操作（scan/shell/设备管理），实时会话由宿主实例承担，详见 docs/reference/DEVICE_ACCESS.md。
 - **Git Bash 里 `docker exec <容器> grep … /app/config.toml` 报 `D:/Scoop/.../app/config.toml: No such file`**：MSYS 自动把容器内绝对路径转换成 Windows 路径；容器内路径参数写成双斜杠开头（`//app/config.toml`）或加 `MSYS_NO_PATHCONV=1` 绕过。
 - **js-yaml `load()` 解析 color 候选映射时纯数字色键会丢顺序**（2026-08-29，脚本编辑器重构阶段 0 实测）：`'123456'` 被解析成整数 123456，plain object 的整数形键按数值排在字符串键之前，`Object.keys` 顺序 ≠ YAML 书写顺序，颜色候选按序匹配语义被静默破坏。解决：脚本 v2 契约把 color `expect` 冻结为有序列表（每项单键映射，与 match 候选同构），前端 codec 解析有序映射一律走事件/Map 形态，不能用 `load()` 出来的 plain object 直接取键序。
 
@@ -95,7 +95,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 
 ## 2026-09-09（函数体系与插件依赖简化）
 
-- **Package 函数库从 `functions/<分类>.yaml` 迁到 `automations/_function*.yaml`（破坏性，无兼容层）**：保存钩子对 functions/ 路径直接报 `yaml.functions.dir.removed`；存量开发数据手动迁移——把旧 `plugins/gamer.yaml/functions/*.yaml` 内容（`functions:` 包装）并入 `automations/_function.yaml`（同名函数合并会冲突报错，先改名）；调用名 = 函数名与文件无关，模板引用改写不受影响。
+- **Package 函数库从 `functions/<分类>.yaml` 迁到 `automations/_function*.yaml`（破坏性，无兼容层）**：保存钩子对 functions/ 路径直接报 `yaml.functions.dir.removed`；存量开发数据手动迁移——把旧 `plugins/gamer-yaml/functions/*.yaml` 内容（`functions:` 包装）并入 `automations/_function.yaml`（同名函数合并会冲突报错，先改名）；调用名 = 函数名与文件无关，模板引用改写不受影响。
 - **函数运行寻址从 `<pkg>/<文件短路径>.yaml#<函数名>` 收敛为 `<pkg>#<函数名>`**：RunTarget::Function 删 file 段、ManualPayload 删 function 字段；前端 `runYamlFunction` 第一参传 Package id；带路径段的函数 entrypoint 一律 400 invalid_payload。
 - **`find` 不再承担轮询语义**（timeout/interval 已从 Schema 删除，传了报「未知参数 timeout」）：等待轮询用 wait_find；find/wait_find/tap_template 共用 `match_once` 单一匹配实现，不会分叉出两套匹配逻辑。
 
@@ -194,7 +194,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 ## 2026-09-05
 
 - **新建/同步 worktree 后，`.gitattributes` 已钉 `text eol=lf` 的夹具仍可能是 CRLF**：attribute 变更（或 merge/rebase 同步）不会对已检出文件重 smudge，phase0 夹具逐一报"SHA-256 漂移"而主工作区全绿；解法：`rm <文件> && git checkout -- <文件>` 强制重 smudge（单 `git checkout --` 不重算），逐个修到全 LF。新 worktree 先跑一遍哈希锁测试再开工。
-- **gamer.yaml 扩展的 `start` 不启动任何 WASM 实例，这是刻意的过渡缝而非遗漏**：其 guest 实现的是 `yaml-extension-host` world（按调用惰性实例化，`run_yaml_vnext`/`LazyYamlWasmtimeRuntime`），拿去走通用 `extension-host` 实例 world 的 `LazyWasmtimeRuntime::start` 必然链接失败进 `Failed` 态；P11.2 起 `ExtensionService::start` 对该 id 只做状态迁移 + `TimerRunnerRegistrar` 注册（`stop`/`disable` 相应跳过实例停止），Wave3 把 runner 移进扩展边界后一并消除。
+- **gamer-yaml 扩展的 `start` 不启动任何 WASM 实例，这是刻意的过渡缝而非遗漏**：其 guest 实现的是 `yaml-extension-host` world（按调用惰性实例化，`run_yaml_vnext`/`LazyYamlWasmtimeRuntime`），拿去走通用 `extension-host` 实例 world 的 `LazyWasmtimeRuntime::start` 必然链接失败进 `Failed` 态；P11.2 起 `ExtensionService::start` 对该 id 只做状态迁移 + `TimerRunnerRegistrar` 注册（`stop`/`disable` 相应跳过实例停止），Wave3 把 runner 移进扩展边界后一并消除。
 - **恢复缺依赖任务必须精确匹配 `suspend_reason == missing_dependency=<runner_id>`，不能按状态批量恢复**：`dependency_missing` 还会被 schedule provider 缺失（reason 记 provider id）触发，用户手动 suspend/disable 是 `suspended`+`enabled=0`；`resume_timer_task_from_dependency_missing_async` 用「状态+原因」双守卫 WHERE 保证只回 Active 那批真正因该 runner 缺席挂起的任务，且恢复时经 ScheduleRegistry 重算 `next_wakeup`（沿用挂起前的陈旧游标会立即补触发一次）。
 - **happy-dom 环境下 `import.meta.url` 不是 `file://` scheme**（location 指向 http），`new URL(rel, import.meta.url)` 读 fixture 文件直接抛 "URL must be of scheme file"；组件测试（`// @vitest-environment happy-dom`）里读源码/夹具用 `join(process.cwd(), 'src', ...)`，只有 node 环境测试能走 import.meta.url 方案（console-components.test.js 即此）。
 - **@vue/test-utils 的 DOMWrapper 不透传原生属性访问器**：`wrapper.title` 返回 undefined（不是空串），`find(b => b.title.includes(...))` 会在谓词里自己炸 "reading 'includes' of undefined"；一律 `b.attributes('title')?.includes(...)`。
@@ -232,7 +232,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **wasmtime epoch_interruption(true) 后 store 缺省 deadline=0 即「已过期」**：任何 wasm 执行（含组件 instantiate）都会立即 trap，store 必须在 instantiate 前 `set_epoch_deadline` + 配好 `epoch_deadline_callback`，否则报「epoch deadline reached」而非业务错误。
 - **epoch deadline 回调的错误类型是 `wasmtime::Error` 不是 `anyhow::Error`**：wasmtime 48 把 anyhow fork 成自有 Error，回调签名写 `anyhow::Result<UpdateDeadline>` 编译报 E0271，用 `wasmtime::Error::msg` 构造。
 - **epoch 取消会抢先 capability 边界的 kind=cancelled**：stop 置位后若 capability 调用跨过 tick 边界（~10ms），guest 恢复执行的首个 epoch 检查点直接 trap，guest 内已就绪的 kind=cancelled 错误不再冒出——取消判定别只匹配 `kind=cancelled`，要接受 `CANCELLED`（两形态都是合法取消，ADR-YAML-04）。
-- **wasmtime Component 的 WIT import 签名变更 = 旧 guest 全灭**：`programs.resolve` 去掉 depth 参数后，旧版 gamer.yaml plugin.wasm（含 web/public/plugins 的官方 .gplugin）在新宿主上 instantiate 直接失败，升级后必须重打/重装插件（`tools/build-plugins.ps1`）。
+- **wasmtime Component 的 WIT import 签名变更 = 旧 guest 全灭**：`programs.resolve` 去掉 depth 参数后，旧版 gamer-yaml plugin.wasm（含 web/public/plugins 的官方 .gplugin）在新宿主上 instantiate 直接失败，升级后必须重打/重装插件（`tools/build-plugins.ps1`）。
 
 ## 2026-09-05（Phase 12 P12.5/P12.7：v3 defaults 与 find/match 收口）
 
@@ -260,7 +260,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **刚结束的 run 瞬时 GET 404（run_not_found）**：`RunManager::finalize` 先摘活动注册表再入档案（两次独立短锁，中间还夹一条 info! 日志），`get_run` 顺序查两处——202 派发后立刻 GET 无设备快败的 run 恰落在间隙会 404（测试负载下偶发，P12.11 基线实测复现）；测试侧对 run 查询一律轮询容忍 404/非终态（见 isolation 守卫测试），生产侧若要消除需把 finalize 的档案入列与注册表摘除收进同一临界区。
 - **全量 `cargo test` 偶现 tokio `is_entered` 线程 panic 打印**：P12 基线起偶见两条 `c.runtime.get().is_entered()` panic 输出（api/tests 大并发区段，线程内无 runtime 上下文调用了 Handle 依赖代码）；panic 被独立线程兜住，测试恒 0 failed / exit 0，属测试进程噪音非产品缺陷——判定回归以 `0 failed` 与退出码为准，排查以单模块复跑定位。
 - **v3 宿主曾丢失模板 `#区域` 后缀语义（v2 迁移回归）**：v2 引擎按模板实际文件名 `#` 后缀（`xx#u/d/l/r…` 半区、`xx#0_0_500_500` 千分比矩形、`#1` 彩色标记）限定搜索区域；v3 NativeYamlHost 只透传步骤显式 region，短名解析到带后缀文件后全屏搜索 → 误匹配/点错位。修复：VisionAdapter 在步骤未给 region 时用 `matcher::template_region_from_name(解析后文件名)` 兜底（与匹配预览端点同源）；显式 region 优先。
-- **安装即用改变了扩展安装响应状态**：REST 安装现在自动 enable→start（失败降级 Enabled+last_error，不回 201 Failed）。断言安装后 `state=="installed"` 的测试/脚本需改为 `running`（或降级 `enabled`）；test 装配未接 timer registrar 时 gamer.yaml 的 start 会走通用实例路径失败降级——生产 main.rs 已接线，不受影响。
+- **安装即用改变了扩展安装响应状态**：REST 安装现在自动 enable→start（失败降级 Enabled+last_error，不回 201 Failed）。断言安装后 `state=="installed"` 的测试/脚本需改为 `running`（或降级 `enabled`）；test 装配未接 timer registrar 时 gamer-yaml 的 start 会走通用实例路径失败降级——生产 main.rs 已接线，不受影响。
 - **v3 宿主坐标系曾硬编码 1000×1000（迁移回归 #2）**：NativeYamlHost 的 `screen` 初始化后从不刷新，center/tap/region 全按 1000×1000 换算，而模板测试端点用真实 `session.video_size()`——非 1000×1000 设备上脚本运行与测试预览位置必然不一致。修复：每次 `capture` 后经 `FrameService::size` 刷新 `screen`（RwLock），匹配/回显/触摸全跟随真实帧分辨率。
 
 ## 2026-09-06（Package 一级作用域切换：后端根基重构）
@@ -272,8 +272,8 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 ## 2026-09-06（Package 模型 + 前端架构全链收口）
 
 - **旧分区迁移到 packages 布局时 package-id 必须小写化**：`validate_scope_id` 只收 `[a-z0-9][a-z0-9._-]*`（拒大写），Android 原名含大写（如 `com.miHoYo.hkrpg`）不能直接当目录名——Package id 落成 `com.mihoyo.hkrpg`，Android 原名写进 package.toml 的 `[targets.android].packages` 做兼容声明；两命名空间严格分离、不互相推导（权威注释 `core/models.rs` AppContext 上方）。
-- **模板上传与归档导入的内容校验口径不同**：资源 PUT 经 gamer.yaml 字节钩子强制灰度归一化（解码+重编码，非法 PNG 直接 400），而 .gamerpkg 导入只做布局/manifest/路径安全校验、**不经过插件内容校验**——包内模板以导出侧字节为准，别假设导入后与上传管线同源。
-- **脚本资源 id 首段现在是 Package id**：可为纯自定 id（如 `official.hsr.daily`）与 Android 包名完全不同名，按 Android 包名拼脚本 id / entrypoint 会 404（结构化 not_found）；id 形态 `<package-id>/<automations 内相对路径>.yaml`（`automations/` 前缀由 gamer.yaml 内部映射，id 中不写）。
+- **模板上传与归档导入的内容校验口径不同**：资源 PUT 经 gamer-yaml 字节钩子强制灰度归一化（解码+重编码，非法 PNG 直接 400），而 .gamerpkg 导入只做布局/manifest/路径安全校验、**不经过插件内容校验**——包内模板以导出侧字节为准，别假设导入后与上传管线同源。
+- **脚本资源 id 首段现在是 Package id**：可为纯自定 id（如 `official.hsr.daily`）与 Android 包名完全不同名，按 Android 包名拼脚本 id / entrypoint 会 404（结构化 not_found）；id 形态 `<package-id>/<automations 内相对路径>.yaml`（`automations/` 前缀由 gamer-yaml 内部映射，id 中不写）。
 - **并行 agent 共享工作区开发时 git add 必须按文件所有权清单**：各自只 stage 自己地盘的文件，禁改文件被他人改坏时等对方自愈、不要抢修（多双手同改一个文件会产生叠加损坏；本波真实发生过 usePackageContext.js 语法错误由属主 agent 自愈、旁路 agent 抢修反而冲突）。
 
 ## 2026-09-07（界面术语 Package→配置 + 本机构建环境）
@@ -307,7 +307,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 
 ## 2026-09-07（Phase 7：模板制作/离线测试/草稿闭环）
 
-- **native call 动作响应无 `data` 信封**（`POST /api/extensions/gamer.yaml/call` 的 native 分支顶层即结果 JSON）：前端按有无 `data` 两形态兜底（videoApi），E2E/脚本断言别假设 `{data:{...}}`。
+- **native call 动作响应无 `data` 信封**（`POST /api/extensions/gamer-yaml/call` 的 native 分支顶层即结果 JSON）：前端按有无 `data` 两形态兜底（videoApi），E2E/脚本断言别假设 `{data:{...}}`。
 - **NCC 拒绝纯色模板且搜索区需 ≥ 模板+1px**：`template is uniform color`、`template larger than screen`——E2E/测试造模板必须带结构纹理，且别让模板文件名 `#区域` 恰等于模板大小（至少留 1px 余量或显式传全帧 region）。
 - **Windows Python 打不开 Git Bash 的 `/tmp/...` 路径**：混用 bash 工具与 python 处理临时文件时，目录用 `cygpath -m "$(mktemp -d)"`（C:/ 风格两边通吃）。
 - **heredoc 写入含转义字节的脚本文件**：外层 python 的字符串字面量会把 `\xNN` 形态解释成真实字节落盘，bash 再喂给 python 就成非法源码——生成脚本里的控制字节用 `bytes([...])`/`chr()` 构造，别用反斜杠转义。
@@ -371,3 +371,17 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - 配置工具栏的 `.pkg-menu .btn` 比公共主按钮规则优先级更高：统一透明背景会让黄色按钮丢失底色而保留深色字；管理工具栏为 primary 显式设置底色、边线和文字，并检查实际计算颜色。
 - 日志轮询、筛选和清空会产生交错响应：请求序号只允许最新响应回填，清空成功及组件卸载时使旧请求失效。滚动事件只记录是否贴近底部，不能在用户上翻时直接调用滚底。
 - 原生 confirm 换自定义框后会返回 Promise：遗漏 await 会直接越过草稿/权限确认；调用链统一异步等待，配置选择在确认前恢复原值，组件销毁取消未决请求，确认后复核目标未变化。beforeunload 属于浏览器管理，不能用异步自定义框替代。
+- 录制历史列表返回空体 HTTP 404：前端已热更新但日常后端仍运行旧二进制；核对 `/api/system/info` 与进程构建时间，无活动脚本/录制时重建并重启后端。列表 404 显示更新指引，不能按单会话 `recording_not_found` 静默当作空列表。
+- Windows `cargo rustc -- -o <name>.exe` 在多种输出类型下可能生成带哈希后缀的文件名；替换前先核验实际产物路径，PowerShell 设置 `ErrorActionPreference=Stop`，复制后核对哈希，避免复制失败后再次启动旧服务。
+
+- 模板列表底部的“更多”菜单被截断：绝对定位菜单仍受列表 `overflow:auto` 裁切，提高 z-index 无效；菜单 Teleport 到 body 后用视口坐标定位，底部不足时向上展开，滚动/缩放时关闭。
+
+- 添加步骤列表首次滚动突然变矮：定位函数直接清空 Vue 管理的 `style.maxHeight`，同值更新不会回写，导致高度从视口可用值回落到 CSS 480px；高度统一由响应式 style 限制到 480px/可用空间，菜单内部 scroll 不重新定位，禁止手动清空受控样式。
+
+- **2026-09-20 ADB 统一（覆盖早期按型号猜 serial 的记录）**：设备地址必须为完整 ADB serial 或明确 host:port；切换传输方式后重新扫描或显式更新地址，不再按型号、名称、子串兜底，也不再保存 kind。虚拟显示能力独立验证，失败不自动改镜像模式。
+- **2026-09-20 插件拆分**：WIT 路径相对各 guest crate，移到 plugins/<id>/guest 后应指向 ../../../server/wit/...；修改后同时验证 guest 构建和宿主测试。ui.host 模块与宿主共享执行环境，不能当沙盒 iframe 使用；更新插件 UI 需先保存再刷新页面。
+- **2026-09-20 旧插件 ID 转换**：仅在服务停机后应用 tools/convert-plugin-ids.py，先演练并保留整目录备份；Windows 下 SQLite backup 连接必须显式关闭，否则原子目录移动会因文件占用失败。不要对用户 YAML 或业务 payload 做全文字符串替换。
+- **目录清理**：release/dist 和被忽略目录也可能含实际脚本、模板与数据库，不能直接按 ignored 全删；先核对内容和运行进程。保留运行中的服务文件后可清理旧构建及增量缓存，下次编译会重建；构建产物存在硬链接时，文件长度合计不等于实际释放磁盘空间。
+- **VitePress 文档站**：主题配置中的函数会序列化到客户端，不能引用配置文件外层变量，否则 SSR 报 ReferenceError；函数保持自包含。重新构建后重启 preview，避免旧路由映射引用已替换的资源。
+- **发布工作流缩进**：Bash heredoc 结束标记仍须保留 YAML run 块的缩进，解析 YAML 后才由 Bash 识别；删除整段发布逻辑后同时做 YAML 解析，不能只检查脚本文本关键词。
+- **Git 遗留锁**：长时间不变的空 index.lock 会阻止暂存；先核对 Git 进程与文件时间并确认可独占打开，再仅删除已确认失效的锁，不能直接清理活跃锁。

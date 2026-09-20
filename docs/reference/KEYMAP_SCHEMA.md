@@ -1,6 +1,6 @@
 # 按键映射 YAML
 
-按键映射独立于脚本 YAML，按应用包名存储在 `data/<package>/keymap/`。文件名是方案名加 `.yaml`，方案 ID 是 `<package>/<name>.yaml`。
+按键映射独立于自动化 YAML，按配置包存储在 `data/packages/<package-id>/plugins/gamer-keymap/mappings/`。文件名是方案名加 `.yaml`；配置包 ID 与 Android 应用包名独立，资源通过配置包、插件 ID 和相对路径寻址。
 
 ```yaml
 version: 1

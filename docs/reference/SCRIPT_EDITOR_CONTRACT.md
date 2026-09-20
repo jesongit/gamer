@@ -21,7 +21,7 @@
 
 任何一条语法规则都必须在五方同时成立，五方互为镜像：
 
-1. **Rust AST** — `server/src/extensions/gamer_yaml/script_v2/` 的严格装载与校验目标，禁止在执行循环里按 `serde_yaml::Value` 猜动作；
+1. **Rust AST** — `plugins/gamer-yaml/host/script_v2/` 的严格装载与校验目标，禁止在执行循环里按 `serde_yaml::Value` 猜动作；
 2. **前端 Model** — 可视化编辑器唯一编辑源，golden JSON 即用该字段名书写；
 3. **规范 YAML** — 服务端持久化与导入导出格式，由 codec 统一序列化产出；
 4. **API JSON** — 保存/校验/运行/任务接口中模型与参数的 JSON 形态（与前端 Model 同构，见 §6）；
@@ -31,7 +31,7 @@
 
 **结论：采用 `saphyr-parser 0.0.12`（crates.io，YAML 1.2 事件级解析器），由服务端严格 loader 使用。**
 
-- 需求背景：params 每项必须是「整条单引号」标量（§3.3），而 `serde_yaml 0.9` 反序列化成 `Value` 后**书写样式彻底丢失**——`'bool:enable:x:true'`（单引号）与 `bool:enable:x:true`（无引号）得到完全相同的 `Value::String`，无法校验引号契约。这一点已用测试固化：`server/src/extensions/gamer_yaml/script_v2/fixtures_tests.rs::serde_yaml_loses_scalar_style`。
+- 需求背景：params 每项必须是「整条单引号」标量（§3.3），而 `serde_yaml 0.9` 反序列化成 `Value` 后**书写样式彻底丢失**——`'bool:enable:x:true'`（单引号）与 `bool:enable:x:true`（无引号）得到完全相同的 `Value::String`，无法校验引号契约。这一点已用测试固化：`plugins/gamer-yaml/host/script_v2/fixtures_tests.rs::serde_yaml_loses_scalar_style`。
 - 选 `saphyr-parser` 的理由：
 - 事件级 API：`Parser` 是 `Iterator<Item = Result<(Event, Span), ScanError>>`，`Event::Scalar(Cow<str>, ScalarStyle, anchor, tag)` 直接携带 `ScalarStyle::{Plain, SingleQuoted, DoubleQuoted, Literal, Folded}`，测试已验证单引号/无引号可区分；
   - 每个事件带 `Span`（行列区间），是错误定位到 `step_path`/`field` 乃至源码行列的基础；
@@ -39,7 +39,7 @@
   - 对 match 紧凑缩进（indentless sequence，§4.1）解析正确，golden 样例 v07/v11 已回归。
 - 备选 `yaml-rust2 0.12`：同为 YAML 1.2 且可取样式，但其高层 `YamlLoader` 同样丢样式、事件 API 无 Span、生态位是旧 yaml-rust 的延续维护，故不选。
 - 排除「serde_yaml + 源码正则预扫描」方案：对多行标量、注释、引号转义、嵌套结构的样式推断不可靠，且等于把解析做两遍；仅在“只需粗判、不要 span”的场景才值得。
-- 当前落点：`server/src/extensions/gamer_yaml/script_v2/` 提供 `parse_script_file()/parse_function_file()`，
+- 当前落点：`plugins/gamer-yaml/host/script_v2/` 提供 `parse_script_file()/parse_function_file()`，
   服务端 fixture、仓库示例数据和 API 保存/导入/运行均通过这条严格装载路径。
 
 ## 3. 五方字段对照表
@@ -238,7 +238,7 @@ YAML 形态（规范） ↔ Model 字段（`kind` 判别 + 以下字段）。所
 
 ### 4.4 RunTarget
 
-运行入口统一走 `POST /api/runs`（gamer.yaml runner；REST 层只有
+运行入口统一走 `POST /api/runs`（gamer-yaml runner；REST 层只有
 `{runner_id, entrypoint, payload, device_id}` 一个形态），runner 内部 lowering 为二选一：
 
 ```jsonc
@@ -388,7 +388,7 @@ canonical_default（required=1 时为空串）：
 
 - 逻辑 ID 体系、样例索引、golden/expected JSON 结构：见 `server/tests/fixtures/script_v2/README.md`。
 - 前端副本映射：`server/tests/fixtures/script_v2/<file>` ↔ `web/src/script-editor/__fixtures__/yaml|json/<file>`，逐字节一致由 `fixtures.test.js` 的漂移测试强制。
-- 服务端断言位于 `server/src/extensions/gamer_yaml/script_v2/fixtures_tests.rs`，直接调用严格 loader，并覆盖仓库
+- 服务端断言位于 `plugins/gamer-yaml/host/script_v2/fixtures_tests.rs`，直接调用严格 loader，并覆盖仓库
   `server/data/<pkg>/{scripts,functions,templates}` 示例；前端断言位于
   `web/src/script-editor/__fixtures__/fixtures.test.js`。
 - 修改任何契约必须同步本文档、`docs/reference/YAML.md`、双方 fixture 和双方测试；保存、导入、运行、

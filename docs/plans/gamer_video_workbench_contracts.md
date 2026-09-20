@@ -13,7 +13,7 @@
 | A 媒体服务 | `server/src/media/**`、`api/media.rs`、`api/vision.rs`、`capabilities/frame.rs`、`capabilities/vision.rs`、`capabilities/adapters/{vision,frame,mod}.rs`、`extensions/host_api.rs`、`extensions/permissions.rs` | 其余全部 |
 | B 录制服务 | `server/src/recording/**`、`api/recording.rs`、`device/{scrcpy,mod,frames}.rs`、`api/devices.rs`、`capabilities/{input,touch}.rs`、`capabilities/adapters/{input,touch,run}.rs`（`adapters/mod.rs` 归 A；B 若必须改 → 不改，报告集成者） | 其余全部 |
 | C 舞台前端 | `web/src/components/console/{ConsoleVideoStage,TemplateCropModal,TemplateCapture}.vue`、`web/src/components/console/useConsoleTemplates.js`、Console 舞台相关新组合式 `web/src/components/console/useConsoleStage*.js`、`web/src/views/Console.vue`、`web/src/api.js` | 其余全部 |
-| D1 视频扩展+YAML 草稿 | `server/src/extensions/video/**`、`extensions/mod.rs`、`extensions/service.rs`、`extensions/gamer_yaml/**`、`tools/plugins/gamer.video/manifest.toml` | 其余全部 |
+| D1 视频扩展+YAML 草稿 | `plugins/gamer-video/host/**`、`extensions/mod.rs`、`extensions/service.rs`、`extensions/gamer_yaml/**`、`plugins/gamer-video/manifest.toml` | 其余全部 |
 | D2 视频面板前端 | `web/src/components/video/**`、`web/src/workspace/core-component-registry.ts`、相关新测试 | 其余全部 |
 | 集成者 | `api/mod.rs`、`main.rs`、`api/common.rs`（已定稿）、guard/boundary 测试、AGENTS.md、PITFALLS、跨模块修复 | - |
 
@@ -102,17 +102,17 @@ data/media/<media-id>/
 - C 舞台消费 §1/§2 REST；TemplateCropModal 接收**指定帧**（离线=媒体帧 PNG URL，
   在线=现有截图路径），保存裁切仍走现有模板 PUT 管线。
 
-## 5. gamer.video 扩展（D1）
+## 5. gamer-video 扩展（D1）
 
 - Native 扩展：`extensions/video/mod.rs`（manifest 常量 `runtime="core"`、
   `component="VideoWorkbench"`、permissions：`media.read`/`media.import`/`media.record`/
   `media.write`/`media.events.read`）、`extensions/service.rs` 注册（启动即 Running，
   无 Runner）、`extensions/mod.rs` 模块声明。
-- `tools/plugins/gamer.video/manifest.toml` 与 server 侧常量**逐字同步**。
-- gamer.yaml 侧 call 动作（经现有 `POST /api/extensions/:id/call` 通路，
+- `plugins/gamer-video/manifest.toml` 与 server 侧常量**逐字同步**。
+- gamer-yaml 侧 call 动作（经现有 `POST /api/extensions/:id/call` 通路，
   不新增 REST 路由）。Phase 7（最终化计划 §10.1）起收敛为 `gamer_yaml/actions.rs`
-  的**版本化公开动作清单**（清单 ↔ 实现测试双向锁死；gamer.video 只经此缝调用，
-  禁止直写 gamer.yaml 私有目录/解析 YAML）：
+  的**版本化公开动作清单**（清单 ↔ 实现测试双向锁死；gamer-video 只经此缝调用，
+  禁止直写 gamer-yaml 私有目录/解析 YAML）：
   - `automation.create_draft` v1：`values={"recording_id","event_ids"?,"comments"?:{event_id:注释}}`
     → `{"yaml","diagnostics":[{event_id,reason}],"source":{recording_id,events:[…]}}`。
     tap/swipe/key/wait→对应 v3 步骤（注释渲染为步骤上方注释行），间隔→建议 wait；
@@ -123,10 +123,10 @@ data/media/<media-id>/
   - `template.create_from_frame` v1（Phase 7 §10.2）：`values={"package_id","name","png_base64",
     "region":[x1,y1,x2,y2 相对],"frame":{media_id,frame_index?,pts_us},"calibration":{version,…}}`
     → `{name,short_name,path,size,region,frame,calibration}`；命名规则/灰度归一化/短名冲突
-    检测全在 gamer.yaml 服务端（资源字节钩子同路径）。
+    检测全在 gamer-yaml 服务端（资源字节钩子同路径）。
   - `vision.test_template` v1：**复用 Core REST** `POST /api/capabilities/vision/test`
     （media_id+pts_us/frame_index 离线寻址，不重复实现）。
-  - `automation.open_editor` v1：纯前端契约（保存成功后切 `gamer.yaml:automation`
+  - `automation.open_editor` v1：纯前端契约（保存成功后切 `gamer-yaml:automation`
     面板并载入编辑器，经 automationEditorBridge），无服务端往返。
 
 ## 6. 前端合同（C 舞台 / D2 面板）
@@ -136,7 +136,7 @@ data/media/<media-id>/
   `mediaFileUrl(id)`、`mediaFrameUrl(id,{ptsUs,index,maxWidth})`、
   `recordingStart(deviceId)`、`recordingStop(id)`、`recordingCancel(id)`、
   `recordingStatus(id)`、`activeRecording(deviceId)`、`recordingEvents(id)`、
-  `createVideoDraft(recordingId,eventIds,comments?)`（→ POST `/api/extensions/gamer.yaml/call`
+  `createVideoDraft(recordingId,eventIds,comments?)`（→ POST `/api/extensions/gamer-yaml/call`
   action=`automation.create_draft`）。Phase 7 起新增 `saveDraft/createTemplateFromFrame/
   visionTestTemplate/setMediaRefs`（components/video/videoApi.js，动作清单缝与媒体引用同步）。
 - `StageSource`（C 实现，计划 §4.2 原样）：`kind:'live'|'media'`、`sourceId`、
@@ -145,7 +145,7 @@ data/media/<media-id>/
 - C 落点：来源切换 UI 在舞台顶部（实时/视频）、媒体控制条（播放/暂停/逐帧/倍速/
   时间显示/返回实时）、框选与裁切改为对指定帧工作。
 - D2 落点：`web/src/components/video/{VideoWorkbench,MediaLibrary,VideoTimeline}.vue`；
-  `core-component-registry.ts` 注册宿主组件名 `VideoWorkbench`（安装 gamer.video 即出现，
+  `core-component-registry.ts` 注册宿主组件名 `VideoWorkbench`（安装 gamer-video 即出现，
   卸载即消失，数据在 Package 内保留）。面板三区：素材库（列表/导入/录制入口/删除）、
   时间轴（打开素材→`mediaFileUrl` 预览 + `mediaFrameUrl` 精确帧）、草稿（选事件 →
   `createVideoDraft` → 展示 YAML 文本与诊断，提供"复制"）。

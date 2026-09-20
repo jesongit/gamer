@@ -19,7 +19,7 @@
 | 素材存储 | 原视频放全局媒体库，Package 保存项目数据和素材引用；导出时可显式包含素材 |
 | V1 范围 | 完成录制、导入、播放、逐帧、标记、操作事件、创建和测试模板、生成操作草稿；不做 AI 自动识别及复杂剪辑 |
 
-最终职责：**Core 管理媒体与画面，`gamer.video` 管理录像制作工作流，`gamer.yaml` 负责模板与脚本语义。**
+最终职责：**Core 管理媒体与画面，`gamer-video` 管理录像制作工作流，`gamer-yaml` 负责模板与脚本语义。**
 
 ### 1.1 预期用户流程
 
@@ -47,7 +47,7 @@
 
 本计划基于 2026-09-07 可访问的 `main` 源码、README、`AGENTS.md` 和 V3 架构计划编制。实施前应以工作树最新代码为准核对接口，不将下文提出的新文件、新 API 当作已存在的实现。
 
-当前已经具备：Rust + axum + webrtc-rs 服务端、Vue3/Vite 前端、scrcpy H.264 帧及 PTS、WebRTC 推流、GOP 缓存与 FFmpeg 按需解码、NCC 视觉引擎、`FrameHandle` / `FrameService` / `VisionService`、扩展权限与 Host API、PackageStore、官方 `gamer.yaml` 和 `gamer.keymap` 扩展。
+当前已经具备：Rust + axum + webrtc-rs 服务端、Vue3/Vite 前端、scrcpy H.264 帧及 PTS、WebRTC 推流、GOP 缓存与 FFmpeg 按需解码、NCC 视觉引擎、`FrameHandle` / `FrameService` / `VisionService`、扩展权限与 Host API、PackageStore、官方 `gamer-yaml` 和 `gamer-keymap` 扩展。
 
 需要重点检查和修改的现有位置：
 
@@ -59,8 +59,8 @@
 | `server/src/capabilities/registry.rs` | 注册媒体能力 adapter，保持 trait 与 backend 分离 |
 | `server/src/extensions/host_api.rs`、`permissions.rs` | 扩展媒体 Host API、版本、权限和授权检查 |
 | `server/src/resources.rs`、`package_archive.rs` | 保持 Package 三元组寻址，增加插件项目引用和可选媒体导出支持 |
-| `server/src/extensions/gamer_yaml/` | 接入离线模板制作、匹配测试、脚本草稿生成 |
-| `server/src/extensions/keymap/` | 接入统一输入事件观察，避免与原始触控重复记录 |
+| `plugins/gamer-yaml/host/` | 接入离线模板制作、匹配测试、脚本草稿生成 |
+| `plugins/gamer-keymap/host/` | 接入统一输入事件观察，避免与原始触控重复记录 |
 | `web/src/components/console/ConsoleVideoStage.vue` | 抽离画面来源、展示、输入、框选与叠加层职责 |
 | `web/src/components/console/TemplateCropModal.vue` | 让裁切可接收明确的离线帧，不再隐式依赖最新设备截图 |
 | `web/src/core-shell-boundary.test.js`、`server/src/architecture_guard_tests.rs` | 更新边界测试，防止视频业务回流 Core |
@@ -80,7 +80,7 @@
                  ┌────────────────────┴────────────────────┐
                  │                                         │
        ┌─────────▼──────────┐                    ┌─────────▼──────────┐
-       │ gamer.video 插件    │                    │ gamer.yaml 插件     │
+       │ gamer-video 插件    │                    │ gamer-yaml 插件     │
        │ 素材 / 时间轴 / 标记│──类型化贡献调用──▶│ 模板 / 匹配 / YAML   │
        │ 会话 / 操作草稿选择 │                    │ 编辑器 / Runner     │
        └─────────┬──────────┘                    └─────────┬──────────┘
@@ -113,9 +113,9 @@ Core 不应出现 `create_yaml_script`、`save_game_template`、`video_project` 
 
 ### 3.2 插件划分
 
-`gamer.video` 是独立可安装、可卸载的官方插件。建议采用现有 `.gplugin` 扩展机制，Native/WASM 运行时由真实能力需求决定，不为了“插件化”强制把 FFmpeg、文件操作、视频封装放进 WASM guest。媒体处理由 Core 的受控 Host 能力执行，插件只持有逻辑句柄。
+`gamer-video` 是独立可安装、可卸载的官方插件。建议采用现有 `.gplugin` 扩展机制，Native/WASM 运行时由真实能力需求决定，不为了“插件化”强制把 FFmpeg、文件操作、视频封装放进 WASM guest。媒体处理由 Core 的受控 Host 能力执行，插件只持有逻辑句柄。
 
-`gamer.yaml` 继续拥有 YAML v3 语法、模板数据格式、模板引用、脚本编辑及执行能力。视频插件不得复制 YAML parser、模板存储器或脚本 Runner。跨插件通信必须经过受控的贡献/命令注册接口，不直接 import 对方前端私有模块，也不直接写对方资源目录。
+`gamer-yaml` 继续拥有 YAML v3 语法、模板数据格式、模板引用、脚本编辑及执行能力。视频插件不得复制 YAML parser、模板存储器或脚本 Runner。跨插件通信必须经过受控的贡献/命令注册接口，不直接 import 对方前端私有模块，也不直接写对方资源目录。
 
 ## 4. 画面来源与前端设计
 
@@ -123,7 +123,7 @@ Core 不应出现 `create_yaml_script`、`save_game_template`、`video_project` 
 
 左侧保持现有投屏布局，在投屏顶部附近提供“实时 / 视频”来源切换和轻量媒体控制。实时模式沿用设备连接、启动应用、输入控制和 WebRTC 状态。视频模式展示名称、时间、播放/暂停、逐帧、倍速、返回实时等功能，允许框选和视觉叠加，但不允许向设备发送输入。
 
-右侧仍保持现有主导航（任务、日志、设置、市场、插件）和插件二级页签。安装 `gamer.video` 后，才在插件菜单中出现视频工作台；其内部提供素材库、时间轴/会话等页面。插件可以贡献舞台工具和右侧面板，但不能拥有整个 Core 投屏区域，也不能替换现有设备连接机制。
+右侧仍保持现有主导航（任务、日志、设置、市场、插件）和插件二级页签。安装 `gamer-video` 后，才在插件菜单中出现视频工作台；其内部提供素材库、时间轴/会话等页面。插件可以贡献舞台工具和右侧面板，但不能拥有整个 Core 投屏区域，也不能替换现有设备连接机制。
 
 ### 4.2 StageSource 契约（拟新增）
 
@@ -211,7 +211,7 @@ scrcpy H.264 + PTS
 
 ### 5.4 操作草稿不是自动回放
 
-视频工作台允许选择、删除、重新排序、添加注释或标记操作事件，再交给 `gamer.yaml` 生成 YAML v3 草稿。等待时间可以由事件间隔推导，但必须明确为建议值。无法映射的多指、复杂键盘、文本或未知输入应产生待人工处理的注释/诊断，不得默默丢弃或猜测。
+视频工作台允许选择、删除、重新排序、添加注释或标记操作事件，再交给 `gamer-yaml` 生成 YAML v3 草稿。等待时间可以由事件间隔推导，但必须明确为建议值。无法映射的多指、复杂键盘、文本或未知输入应产生待人工处理的注释/诊断，不得默默丢弃或猜测。
 
 最终脚本需要用户补充模板判断、状态等待、分支和异常恢复。录制数据绝不自动创建定时任务、自动启动 Runner 或在切回实时设备时执行。涉及购买、领取、消耗资源等一次性行为，运行前应由现有任务/脚本机制执行明确的用户确认和验证策略；本插件不提供绕过游戏限制的能力。
 
@@ -274,15 +274,15 @@ data/
         ├── package.toml
         ├── shared/
         └── plugins/
-            ├── gamer.video/
+            ├── gamer-video/
             │   └── projects/...
-            └── gamer.yaml/
+            └── gamer-yaml/
                 ├── automations/
                 ├── functions/
                 └── templates/
 ```
 
-`media/` 的目录名和具体内部格式属于本计划拟定的新机制；`projects/` 属于 `gamer.video`，Core 不解释其内容。媒体库元数据可使用现有 SQLite 迁移体系管理，二进制文件仍放文件系统。建议使用不可猜测的 media ID、SHA-256、大小、时长、容器/codec、尺寸、创建时间、状态、引用数量及来源类型。文件导入采用临时文件、校验后原子提交；更新元数据和文件时考虑崩溃恢复，防止半导入资源被正常使用。
+`media/` 的目录名和具体内部格式属于本计划拟定的新机制；`projects/` 属于 `gamer-video`，Core 不解释其内容。媒体库元数据可使用现有 SQLite 迁移体系管理，二进制文件仍放文件系统。建议使用不可猜测的 media ID、SHA-256、大小、时长、容器/codec、尺寸、创建时间、状态、引用数量及来源类型。文件导入采用临时文件、校验后原子提交；更新元数据和文件时考虑崩溃恢复，防止半导入资源被正常使用。
 
 ### 7.2 录制会话与制作项目
 
@@ -324,9 +324,9 @@ Core HTTP API 可以提供媒体上传、Range 播放、元数据、精确帧、
 
 ### 8.2 跨插件能力
 
-建议补充通用的类型化命令/贡献调用机制（已有等价机制则复用），而不是为视频插件写死 `gamer.yaml` 依赖。视频插件可查找 `template.create_from_frame`、`vision.test_template`、`automation.create_draft` 等由目标插件声明的能力，并通过通用 Bridge 发送帧句柄、Package Context、建议名称、坐标/时间元数据和选中事件。
+建议补充通用的类型化命令/贡献调用机制（已有等价机制则复用），而不是为视频插件写死 `gamer-yaml` 依赖。视频插件可查找 `template.create_from_frame`、`vision.test_template`、`automation.create_draft` 等由目标插件声明的能力，并通过通用 Bridge 发送帧句柄、Package Context、建议名称、坐标/时间元数据和选中事件。
 
-调用方必须检查能力是否安装、可用、版本匹配及权限是否授予。返回结构化结果或诊断，不直接修改其他插件内部状态。`gamer.yaml` 负责实际模板校验、资源保存、名称冲突处理、YAML v3 生成与编辑器打开；视频插件只负责发起请求和展示结果。若 YAML 插件未安装，视频录制、导入、播放、标记仍可正常工作，相应制作按钮显示缺少能力的提示。
+调用方必须检查能力是否安装、可用、版本匹配及权限是否授予。返回结构化结果或诊断，不直接修改其他插件内部状态。`gamer-yaml` 负责实际模板校验、资源保存、名称冲突处理、YAML v3 生成与编辑器打开；视频插件只负责发起请求和展示结果。若 YAML 插件未安装，视频录制、导入、播放、标记仍可正常工作，相应制作按钮显示缺少能力的提示。
 
 ## 9. 分阶段实施计划
 
@@ -387,7 +387,7 @@ Core HTTP API 可以提供媒体上传、Range 播放、元数据、精确帧、
 
 - [ ] 抽离 `StageSource`、实时/媒体 adapter、坐标换算和通用叠加层。
 - [ ] 增加来源切换、媒体基本控制和服务端输入安全门禁。
-- [ ] 实现 `gamer.video` 插件 manifest、权限、生命周期与面板贡献。
+- [ ] 实现 `gamer-video` 插件 manifest、权限、生命周期与面板贡献。
 - [ ] 实现素材库（导入、录制、打开、重命名、删除、元数据、状态）。
 - [ ] 实现时间轴（播放、暂停、seek、逐帧、倍速、事件跳转、片段标记、注释）。
 - [ ] 实现有效画面校准、参考分辨率选择和工作副本预览。
@@ -403,13 +403,13 @@ Core HTTP API 可以提供媒体上传、Range 播放、元数据、精确帧、
 任务：
 
 - [ ] 将模板裁切改为基于确定帧的通用工作流，移除“保存时重新抓最新设备截图”的隐式依赖。
-- [ ] 通过通用插件贡献接口调用 `gamer.yaml` 的模板创建与资源保存能力。
+- [ ] 通过通用插件贡献接口调用 `gamer-yaml` 的模板创建与资源保存能力。
 - [ ] 支持在视频中选择帧、框选区域、创建模板并写入当前 Package 的 YAML 插件资源。
 - [ ] 支持同一离线帧上的模板匹配测试、阈值/搜索区域调整与命中叠加。
 - [ ] 实现操作事件选择和 YAML v3 草稿生成，支持 tap、swipe、key、wait 等可映射动作。
 - [ ] 对不支持的输入生成明确诊断；保留事件来源和时间信息供人工参考。
 - [ ] 支持从视频跳转到对应 YAML 编辑器位置，以及从草稿备注回到视频时间点（至少实现正向链接，双向为可选增强）。
-- [ ] 验证缺少 `gamer.yaml` 时视频插件仍可独立运行。
+- [ ] 验证缺少 `gamer-yaml` 时视频插件仍可独立运行。
 
 **验收：** 使用导入的视频成功创建模板并保存到当前 Package；离线匹配结果可重现；用自录会话生成合法 YAML v3 草稿；不会自动执行草稿或修改真实设备。
 
@@ -477,7 +477,7 @@ Core HTTP API 可以提供媒体上传、Range 播放、元数据、精确帧、
 7. **开发阶段不做旧架构兼容。** 必要时允许破坏性调整，删除过时实现；不为旧 Workspace、旧 YAML 或旧资源布局保留双轨。
 8. **每阶段留下证据。** 代码、测试、文档与验收结果同步更新；遇到与当前代码不符的设计，应调整具体实现，但不得改变已确认的职责边界。
 
-建议最终交付物包括：Core 媒体服务与离线帧 API、`gamer.video` 可安装插件、`gamer.yaml` 集成、录制事件格式与坐标规范、媒体/Package 导入导出支持、架构和 E2E 测试、用户使用说明、实际兼容矩阵与阶段完成报告。
+建议最终交付物包括：Core 媒体服务与离线帧 API、`gamer-video` 可安装插件、`gamer-yaml` 集成、录制事件格式与坐标规范、媒体/Package 导入导出支持、架构和 E2E 测试、用户使用说明、实际兼容矩阵与阶段完成报告。
 
 ## 12. 参考资料
 
@@ -507,8 +507,8 @@ Core HTTP API 可以提供媒体上传、Range 播放、元数据、精确帧、
 | Phase 0 基线核对与契约设计 | 完成 | 实施合同 `docs/plans/gamer_video_workbench_contracts.md`（2d99821，钉死所有权矩阵/REST/TS 形态）；所有权偏离（api.js 的 exportPackageArchive 传输缝）在 Phase 8 报告记录。范围调整：未新增独立 ADR，职责边界由既有 ADR-11~14 + 架构守卫测试承载 |
 | Phase 1 Core 媒体库与离线帧 | 完成 | f859a7e + 7b85745。范围调整：元数据 = `data/media/<id>/metadata.json` 为源、**不落 SQLite**；「按需工作副本任务/帧租约」未做——原始素材不可变，校准/标记走项目元数据（零转码）；导入失败无半成品（临时目录→探测→原子提交，测试锁定） |
 | Phase 2 Core 录制与操作事件 | 完成（机制）；真机链路 NOT_VERIFIED | a1b04c7 + 92cf82c。按需订阅/等 IDR/分段（断连·编码变化·磁盘压力）/设备独占/重复停止幂等/浏览器断开不中断均有单测；InputObserver 在 `inject_*` 收敛点，operation_id 去重、text 脱敏、来源标注 manual/keymap/runner/plugin；`SegmentMeta.base_pts_us` 实现事件时间轴↔媒体 PTS 整数映射。**真实设备上的录制全流程未实测** |
-| Phase 3 统一舞台与工作台插件 | 完成 | fcdb395 + 0d4e8c4 + dcbfc37 + db4d481。StageSource live/media 双来源、generation 过期防护、媒体模式舞台输入路由统一拒绝、切回实时不恢复旧输入状态（测试锁定）；素材库/时间轴（服务端帧表逐帧，无固定步进假设）/草稿三区+项目区。gamer.video 以 **builtin 执行类型**发布（a925251/58f5f27），免签名安装、卸载后面板消失（UI 贡献仅 Running）、Package 数据保留（dormant 锁定）。范围调整：「工作副本预览」未做；「多浏览器来源独立」未逐项人工验证（NOT_VERIFIED） |
-| Phase 4 模板制作与 YAML 草稿集成 | 完成 | db4d481。模板裁切全面改指定帧工作（媒体=服务端确定帧 + generation 校验，绝不保存时重抓）；`gamer.yaml` 公开动作清单（`gamer_yaml/actions.rs` 版本化唯一声明）：定帧建模板（帧身份+校准元数据上行）/离线测试（复用 vision/test，media_id+pts_us/frame_index）/草稿生成/保存/打开编辑器。范围调整：TemplateStudio 为视频域自实现组件（TemplateCropModal 与裁切子系统深耦合，语义等价不直接复用）；「草稿备注→视频时间点」反向链接未做（正向链接已实现） |
+| Phase 3 统一舞台与工作台插件 | 完成 | fcdb395 + 0d4e8c4 + dcbfc37 + db4d481。StageSource live/media 双来源、generation 过期防护、媒体模式舞台输入路由统一拒绝、切回实时不恢复旧输入状态（测试锁定）；素材库/时间轴（服务端帧表逐帧，无固定步进假设）/草稿三区+项目区。gamer-video 以 **builtin 执行类型**发布（a925251/58f5f27），免签名安装、卸载后面板消失（UI 贡献仅 Running）、Package 数据保留（dormant 锁定）。范围调整：「工作副本预览」未做；「多浏览器来源独立」未逐项人工验证（NOT_VERIFIED） |
+| Phase 4 模板制作与 YAML 草稿集成 | 完成 | db4d481。模板裁切全面改指定帧工作（媒体=服务端确定帧 + generation 校验，绝不保存时重抓）；`gamer-yaml` 公开动作清单（`gamer_yaml/actions.rs` 版本化唯一声明）：定帧建模板（帧身份+校准元数据上行）/离线测试（复用 vision/test，media_id+pts_us/frame_index）/草稿生成/保存/打开编辑器。范围调整：TemplateStudio 为视频域自实现组件（TemplateCropModal 与裁切子系统深耦合，语义等价不直接复用）；「草稿备注→视频时间点」反向链接未做（正向链接已实现） |
 | Phase 5 Package 分发、可靠性与平台兼容 | 完成（分发）；兼容矩阵/性能基线 NOT_VERIFIED | 58f5f27。默认导出仅媒体引用登记、`?include_media=true` 附素材（90MiB/条 100MiB 预算，逐字节可复现）；媒体引用闭环（登记/解除/包删除 release/duplicate 登记/409 保护/覆盖导入重挂/含素材导入三态 Imported·Reused·Collided）；dormant/覆盖/复制/卸载重装有 REST 测试。**H.264 兼容样本矩阵（720p~4K/竖屏/黑边/旋转实测样本）、FFmpeg 平台发现矩阵、资源占用与长录性能基线未建立**（机制层：VFR/B 帧归一、2M 帧上界、解码并发去重有单测） |
 | Phase 6 端到端验收与收尾 | 完成（无设备 E2E）；真实设备完整流程 NOT_VERIFIED | 无设备 E2E（`tools/e2e_phase7_offline.sh`）GREEN：造视频→导入→帧身份→建模板→离线匹配命中→草稿生成/保存→yaml stop 后动作 409、vision 不受影响；统一验收与文档收口由收尾计划 Phase 9 完成（`docs/evidence/phase9_final_acceptance.md`）。**「模拟操作夹具 + 真实设备录制样本」的完整人工制作流程由集成者在真机环境另行执行** |
 

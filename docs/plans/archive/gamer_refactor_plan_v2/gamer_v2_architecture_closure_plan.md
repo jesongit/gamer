@@ -26,7 +26,7 @@
 |---|---|
 | Cron 未迁移至 WASM | 保持 Native，并正式收口 |
 | WASM 缺少 `Available / Starting / Stopping` | 不补，作为明确架构决策 |
-| 当前只有 `gamer.yaml` Runner | 暂不增加第二 Runner |
+| 当前只有 `gamer-yaml` Runner | 暂不增加第二 Runner |
 | Keymap 缺真实设备 E2E 延迟测试 | 本阶段补齐 |
 | Scheduler 存在对 Cron 的直接依赖 | 本阶段修复 |
 
@@ -386,7 +386,7 @@ RuntimeState::Stopping
 当前只有：
 
 ```text
-gamer.yaml
+gamer-yaml
 ```
 
 Runner。
@@ -722,7 +722,7 @@ Available 属于 Plugin Catalog。
 ```text
 Decision: DEFERRED
 
-V2 当前只提供 gamer.yaml Runner。
+V2 当前只提供 gamer-yaml Runner。
 
 不为了证明抽象而创建虚构 Runner。
 第一个真实第二 Runner 出现时再补完整动态生命周期。
@@ -871,7 +871,7 @@ Starting / Stopping -> Operation
 
 ## Runner
 
-- [x] `gamer.yaml` 继续作为当前唯一 Runner
+- [x] `gamer-yaml` 继续作为当前唯一 Runner
 - [x] TimerCore 保持 Runner 无关
 - [x] 第二 Runner 明确 Deferred（ADR-03）
 - [x] 文档记录未来需要补的 dynamic lifecycle（计划 7.3/7.4 保留为届时清单）

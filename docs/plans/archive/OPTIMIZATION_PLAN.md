@@ -1,4 +1,4 @@
-# GameBot 优化实施计划
+# Gamer 优化实施计划
 
 > 状态：**阶段 0/1/2/3/4/6/7 全部收口；阶段 5 仅剩 5 项 NCC 条件性候选（2026-08-29 release 基准评估停止条件触发，正式搁置关闭，不计为未完成债务）**。全部门禁绿色：fmt / clippy -D warnings / cargo test（200 passed）/ pnpm test:run（152 passed）/ pnpm build，Windows 与 Linux 容器双侧验证。真机 E2E、超限输入压力内存观测、生产副本迁移回滚演练、Docker 镜像重建、跨平台基准与 NCC 停止条件评估均于 2026-08-29 完成。checklist 233/238（2026-08-29）
 > 编制日期：2026-08-27  

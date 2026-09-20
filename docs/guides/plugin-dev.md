@@ -1,5 +1,17 @@
 # Gamer 插件开发指南（从零到安装运行）
 
+## 当前官方插件开发入口（2026-09-20）
+
+官方插件源码统一在 `plugins/gamer-yaml`、`plugins/gamer-keymap`、`plugins/gamer-video`，每个目录都有 README 与 `build.ps1`。新增插件使用 `gamer-` 前缀；旧官方 `gamer.*` ID 通过仓库的一次性离线转换工具改名，运行时没有别名。
+
+从仓库根运行 `plugins/<id>/build.ps1` 只构建该插件的 WASM（如果有）与 UI 并生成 `.gplugin`，不会编译主程序，也不会删除其他插件的市场条目。UI 是独立 Vite 工程，`pnpm --dir plugins/<id>/ui test` 运行插件测试，`node sdk/ui/build-modules.mjs <id>` 构建并同步开发静态资源。工作台的面板实现来自插件模块，不再直接导入插件源码。
+
+`ui/entry.js` 导出 `sdkVersion = 1`、`panels`（按 component 键索引的 Vue 组件描述）及需要的 Console 接入函数。构建器使用 `sdk/ui/host-modules.json` 中的 SDK 清单共享 Vue、工作区状态及通用 UI，避免重复 Vue 实例和互不相通的 store。宿主 UI 的 `runtime="core"` 可声明 `entry="ui/plugin.js"`；此模式必须同时声明 `permissions=["ui.host", ...]` 与 `[host_api] ui="^1.0"`，安装确认明确说明它与主页面同源运行、可访问当前会话。组件解析同时绑定插件 ID，不能仅凭同名组件键借用另一插件的面板。
+
+这是受信任宿主 UI 入口，适用于需要深度工作区集成的插件。需要隔离的插件继续使用下文的 iframe 或 declarative UI：原 sandbox/CSP 与消息桥不变，未授予 `ui.host` 的插件不会被模块加载器执行。更新 UI 后先保存编辑内容，再刷新页面生效；页面内不热替换已有编辑状态。
+
+`host/` 是随服务端编译的 Rust 适配层，`guest/` 与 `ui/` 才是独立交付的执行/UI 产物。现有 SDK 契约内的解释器、映射和 UI 可独立更新；新增原生能力、变更 WIT 或宿主资源校验仍需主程序更新。视频使用 builtin 宿主能力，没有占位 guest。此边界也适用于下面的通用示例。
+
 插件界面请同时阅读 [界面设计规范](../design/gamer-ui-spec.md) 与 [可选 iframe UI 接入包](../../sdk/ui/README.md)：28px 控件、必填字段直接展示、可选字段折叠、当前操作轻反馈。后者包含可直接打包的严格 CSP 沙盒示例及构建命令。
 
 > 适用基线：2026-09-09（当前工作树；免签名安装 + manifest v2）。
@@ -20,7 +32,7 @@
 一个插件 = 一个 `.gplugin`（zip）。`kind="wasm"` 时包含
 `manifest.toml` + `entry` 指向的 WASM Component（真实 guest 字节）+ 可选 UI
 资产；`kind="builtin"` 时由宿主静态注册的 `builtin_id` 提供实现，不携带
-guest 字节。当前官方 `gamer.video` 是 builtin；第三方插件使用 WASM 执行类型。
+guest 字节。当前官方 `gamer-video` 是 builtin；第三方插件使用 WASM 执行类型。
 
 ## 2. 五分钟走通最小插件
 
@@ -128,9 +140,9 @@ export!(MyPlugin);
 | `description` | string | — | 可选说明 |
 | `entry` | string | wasm ✅ | 包内 `.wasm` 路径（惯例 `plugin.wasm`）；安装时校验存在 + `\0asm` magic。**builtin 执行类型必须缺省** |
 | `permissions` | [string] | — | 权限闭集 19 项（见 §5）；缺省 = 无权限。写 `filesystem.*`/`network`/`shell`/`process`/`device.shell` 直接拒绝 |
-| `[host_api]` | table | — | 声明用到的 Host API 域版本要求：`device`/`vision`/`input`/`touch`/`resource`/`run`/`runtime`/`log`/`media`，值是 SemVer range（如 `"^1.0"`）；宿主当前全域 `1.0.0`，不满足 → 安装期结构化报错。`media` 是 Core Media/Recording 保留域，当前不在公开 third-party `extension-host` world 中；`gamer.video` 由 builtin 宿主实现 |
+| `[host_api]` | table | — | 声明用到的 Host API 域版本要求：`device`/`vision`/`input`/`touch`/`resource`/`run`/`runtime`/`log`/`media`，值是 SemVer range（如 `"^1.0"`）；宿主当前全域 `1.0.0`，不满足 → 安装期结构化报错。`media` 是 Core Media/Recording 保留域，当前不在公开 third-party `extension-host` world 中；`gamer-video` 由 builtin 宿主实现 |
 | `[targets.android].packages` | [string] | — | 支持的 Android 应用包名列表；`*` = 通用（全部应用），**缺省/空声明等价 `*`**。仅作运行目标声明，宿主不做硬门禁：Console 壳按当前设备应用过滤插件入口（`*` 恒显示，具体包名需命中）。与 package.toml 的 `[targets.android]` 同形 |
-| `[[dependencies]]` | array | — | 插件依赖声明（简化计划 Phase 3）：`id`（目标插件 id，禁自引用/重复）+ `version`（SemVer range，缺省 `*`）+ `required`（缺省 `true`，可选依赖必须显式 `false`）。**必需依赖 = 启动门禁**（缺失/版本不兼容/未启用 → enable 拒绝启动并保留错误；必需依赖循环拒绝启动）；**可选依赖 = 能力降级提示**（缺失不阻止启动，你的基础功能必须可独立工作）。不自动下载/自动启用；依赖声明不授予任何权限。与 package.toml `[plugins]`（Package 依赖）是两个概念。调用其他插件能力走 `GET /api/extensions/:id/capabilities` 能力发现 + `POST /api/extensions/:id/call`（参考 gamer.video 对 gamer.yaml 的可选依赖：缺 YAML 时视频基础功能不受影响，仅模板创建/草稿生成入口降级） |
+| `[[dependencies]]` | array | — | 插件依赖声明（简化计划 Phase 3）：`id`（目标插件 id，禁自引用/重复）+ `version`（SemVer range，缺省 `*`）+ `required`（缺省 `true`，可选依赖必须显式 `false`）。**必需依赖 = 启动门禁**（缺失/版本不兼容/未启用 → enable 拒绝启动并保留错误；必需依赖循环拒绝启动）；**可选依赖 = 能力降级提示**（缺失不阻止启动，你的基础功能必须可独立工作）。不自动下载/自动启用；依赖声明不授予任何权限。与 package.toml `[plugins]`（Package 依赖）是两个概念。调用其他插件能力走 `GET /api/extensions/:id/capabilities` 能力发现 + `POST /api/extensions/:id/call`（参考 gamer-video 对 gamer-yaml 的可选依赖：缺 YAML 时视频基础功能不受影响，仅模板创建/草稿生成入口降级） |
 | `[[ui.contributions]]` | array | — | 面板贡献，见下 |
 
 `[execution]`（执行类型 = 后端形态；**与 `ui.contributions.runtime` 界面渲染类型是两回事**）：
@@ -149,9 +161,9 @@ export!(MyPlugin);
 | `title` | 全部 | 面板标题（非空 ≤256B） |
 | `icon` / `order` / `preferred_width` | 全部 | 图标文本 / 排序 i32 / 面板宽度 200..=800 |
 | `requires_device` | 全部 | 布尔 |
-| `runtime` | — | `declarative` \| `iframe` \| `core`。**core = 宿主预置 Vue 组件**（component 键由前端 core-component-registry 解释），第三方没有可挂载的宿主组件，勿用 |
-| `entry` | iframe | 必须 `ui/` 下（如 `ui/index.html`），文件随包携带 |
-| `component` | core | 宿主组件键；declarative/iframe 带 component 视为拼写错误 |
+| `runtime` | — | `declarative` \| `iframe` \| `core`。core = 宿主 Vue 面板；下载模块必须显式声明 ui.host 与 host_api.ui，见本文开头 |
+| `entry` | iframe / core 模块 | 必须 `ui/` 下；iframe 使用 HTML，core 模块使用 `.js`，文件随包携带 |
+| `component` | core | 当前插件模块的面板组件键；declarative/iframe 带 component 视为拼写错误 |
 
 declarative 表单 schema（宿主原生渲染，按钮值经 `plugin.call` 发给你的 guest）：
 

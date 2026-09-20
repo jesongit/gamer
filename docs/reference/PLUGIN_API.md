@@ -33,11 +33,11 @@ world extension-host {
 命名注意：资源域 WIT 接口名为 `resources`（`resource` 是 WIT 保留字），
 manifest `[host_api]` 键与权限名仍叫 `resource` / `resource.read`。
 
-另有三个独立契约不归第三方使用：`world yaml-extension-host`（gamer.yaml
-专用，request/response 形态）、`server/wit/keymap/keymap.wit`（gamer.keymap
+另有三个独立契约不归第三方使用：`world yaml-extension-host`（gamer-yaml
+专用，request/response 形态）、`server/wit/keymap/keymap.wit`（gamer-keymap
 专用 world）、`interface media`。其中 `media` 是 Core Media/Recording 机制
 的内部契约，**未挂进 public `world extension-host`**，普通 WASM guest 当前不
-可直接消费；`gamer.video` 是无 guest 的 builtin，由宿主侧工作台使用 Core
+可直接消费；`gamer-video` 是无 guest 的 builtin，由宿主侧工作台使用 Core
 的 MediaDomain/Recording 服务。
 
 ### 1.1 共享类型
@@ -106,7 +106,7 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
 - `entry`：仅 `kind="wasm"` 使用；`.wasm` 后缀、不得指向 `manifest.toml`；zip
   内必须存在且 ≥4 字节、`\0asm` magic。builtin（`[execution] kind="builtin"` + `builtin_id`）必须
   **没有** `entry`，且包内不得携带 `plugin.wasm`（防伪装执行类型）。
-- 当前服务端静态注册的 builtin id 为 `gamer.video`；下载的 `.gplugin` 不能新增
+- 当前服务端静态注册的 builtin id 为 `gamer-video`；下载的 `.gplugin` 不能新增
   builtin 实现。它是无 guest 的宿主扩展，Media/Recording 机制由 Core 提供。
 - `[host_api]` 九域：`device/vision/input/touch/resource/run/runtime/log/media`，
   值为 SemVer range；宿主当前全域 1.0.0；不满足在安装期返回
@@ -132,7 +132,7 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
 - `GET /api/extensions/:id/capabilities` → `{id, state, running,
   actions:[{action, version, surface, summary}]}`：目标插件对外公开的动作
   集合 = declarative 按钮集合（surface `declarative`）∪ 原生公开动作清单
-  （gamer.yaml 的 `template.create_from_frame` 等，surface `native/rest/
+  （gamer-yaml 的 `template.create_from_frame` 等，surface `native/rest/
   frontend`）。其他插件/前端在调用前据此查询——**动作存在 ≠ 可调用**，
   分发时仍须目标 Running + 公开集合门禁 + 权限/上下文校验。
 - 浏览器/管理员调用 `POST /api/extensions/:id/call` 时，调用方是已认证的
@@ -153,7 +153,7 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
   `input.tap` `input.swipe` `input.key` `input.text` `touch` `resource.read`
   `run.submit` `run.control` `runtime.sleep` `log.write`；
 - 5 项 `media.*` 是 Core Media/Recording 机制域的保留权限目录，由 builtin
-  `gamer.video` manifest 声明；public `extension-host` 不导入 `media`，普通
+  `gamer-video` manifest 声明；public `extension-host` 不导入 `media`，普通
   third-party WASM guest 当前不能直接消费：`media.read` `media.import`
   `media.record` `media.write` `media.events.read`；
 - 显式禁区（声明即拒，不可授予）：`filesystem*` `network*` `shell*`

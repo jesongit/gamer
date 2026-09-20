@@ -8,7 +8,7 @@
 
 ## 背景
 
-当前 YAML v2（`server/src/extensions/gamer_yaml/script_v2/` + `engine/`）与 v3（`yaml_vnext.rs` surface DSL + `yaml_extension.rs` + WASM guest）并存，前端 Script Editor 仍是纯 v2 Model / Codec，形成 `Runtime = v3 / Editor = v2` 的割裂。此前工作以 "v2/v3 parity" 为目标，容易把旧 Engine 特有结构当作"缺失能力"原样搬回 v3。收口前必须先冻结语义：哪些 v2 能力保留并按 v3 架构重设计、哪些直接废弃，避免开发过程中继续以 parity 名义回流 v2 结构。
+当前 YAML v2（`plugins/gamer-yaml/host/script_v2/` + `engine/`）与 v3（`yaml_vnext.rs` surface DSL + `yaml_extension.rs` + WASM guest）并存，前端 Script Editor 仍是纯 v2 Model / Codec，形成 `Runtime = v3 / Editor = v2` 的割裂。此前工作以 "v2/v3 parity" 为目标，容易把旧 Engine 特有结构当作"缺失能力"原样搬回 v3。收口前必须先冻结语义：哪些 v2 能力保留并按 v3 架构重设计、哪些直接废弃，避免开发过程中继续以 parity 名义回流 v2 结构。
 
 ## 决策
 
@@ -60,7 +60,7 @@
 ```text
 Task / Manual Run
         ↓
-gamer.yaml Runner
+gamer-yaml Runner
         ↓
 YAML v3 Program
         ↓

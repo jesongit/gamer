@@ -78,7 +78,7 @@ legacy hidden config behavior
 ```text
 Task / Manual Run
         ↓
-gamer.yaml Runner
+gamer-yaml Runner
         ↓
 YAML v3 Program
         ↓
@@ -565,7 +565,7 @@ TaskBoard
     ↓
 Runner Entrypoint Descriptor
     ↓
-gamer.yaml
+gamer-yaml
     ↓
 Program.params
 ```
@@ -587,7 +587,7 @@ struct EntrypointDescriptor {
 
 ### 8.4 YAML Runner
 
-`gamer.yaml` 提供：
+`gamer-yaml` 提供：
 
 ```text
 list_entrypoints()
@@ -1090,7 +1090,7 @@ build guest
 ↓
 wasm componentize
 ↓
-package into gamer.yaml
+package into gamer-yaml
 ```
 
 测试：
@@ -1106,7 +1106,7 @@ package into gamer.yaml
 增加：
 
 ```text
-build gamer.yaml guest
+build gamer-yaml guest
 validate component
 run runtime tests
 ```
@@ -1115,7 +1115,7 @@ run runtime tests
 
 - [ ] 正式 Guest 不在 tests 目录
 - [ ] 产品与测试使用同一份 Guest 源码
-- [ ] CI 可独立构建 gamer.yaml
+- [ ] CI 可独立构建 gamer-yaml
 - [ ] Server test 不承担产品源码存放职责
 
 ---
@@ -1240,7 +1240,7 @@ version == 2
 
 ### 15.1 当前状态
 
-虽然 `gamer.yaml` 已经控制“自动化 / 函数 / 模板” Panel Contribution 生命周期，但部分 Panel 实现仍可能是：
+虽然 `gamer-yaml` 已经控制“自动化 / 函数 / 模板” Panel Contribution 生命周期，但部分 Panel 实现仍可能是：
 
 ```text
 runtime = core
@@ -1251,14 +1251,14 @@ component = console.xxx
 
 ### 15.2 最终目标
 
-真正做到卸载 `gamer.yaml` 后，不仅 Panel 消失，YAML Editor / YAML-specific UI Assets 也不属于裸 Core。
+真正做到卸载 `gamer-yaml` 后，不仅 Panel 消失，YAML Editor / YAML-specific UI Assets 也不属于裸 Core。
 
 ### 15.3 推荐方式
 
 如果 Extension UI 支持 iframe / remote asset：
 
 ```text
-gamer.yaml
+gamer-yaml
 ├── manifest
 ├── wasm
 └── ui/
@@ -1275,7 +1275,7 @@ runtime = extension
 如果当前 Extension UI bundle 基础设施还不成熟，本阶段至少做到 Web Core Workspace 不含任何：
 
 ```text
-if plugin == gamer.yaml
+if plugin == gamer-yaml
 ```
 
 特殊判断。
@@ -1286,8 +1286,8 @@ if plugin == gamer.yaml
 
 - [ ] Core Workspace 无 YAML 特判
 - [ ] YAML UI 生命周期完全由 manifest 控制
-- [ ] 禁用 gamer.yaml 后所有 YAML UI 消失
-- [ ] 最终可独立发布 gamer.yaml UI bundle
+- [ ] 禁用 gamer-yaml 后所有 YAML UI 消失
+- [ ] 最终可独立发布 gamer-yaml UI bundle
 
 ---
 
@@ -1414,7 +1414,7 @@ RunFailed
 ### 16.10 Plugin Lifecycle
 
 ```text
-install gamer.yaml
+install gamer-yaml
 ↓
 UI + Runner available
 
@@ -1613,9 +1613,9 @@ test(architecture): add yaml v3 only guards
 ### Plugin
 
 - [ ] YAML UI 无 Core 特判
-- [ ] Runner 生命周期归 gamer.yaml
-- [ ] UI 生命周期归 gamer.yaml
-- [ ] Guest 生命周期归 gamer.yaml
+- [ ] Runner 生命周期归 gamer-yaml
+- [ ] UI 生命周期归 gamer-yaml
+- [ ] Guest 生命周期归 gamer-yaml
 
 ---
 
@@ -1700,7 +1700,7 @@ Step override 正常生效。
 
 正常执行。
 
-### 场景 G：禁用 gamer.yaml
+### 场景 G：禁用 gamer-yaml
 
 “自动化 / 函数 / 模板” Panel 全部消失，Runner 注销，YAML Task 进入：
 
@@ -1798,7 +1798,7 @@ Compatibility Branch = 0
 
 ### Plugin Boundary
 
-`gamer.yaml` 拥有：
+`gamer-yaml` 拥有：
 
 ```text
 Parser
@@ -1862,7 +1862,7 @@ Runtime = v3
 完成后 Gamer YAML 架构：
 
 ```text
-gamer.yaml
+gamer-yaml
 │
 ├── YAML v3 Surface DSL
 ├── Parser

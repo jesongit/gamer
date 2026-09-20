@@ -74,7 +74,7 @@ cd server; cargo test --release -- --ignored --nocapture phase0_android_keymap_e
 
 - **链路**：进程内 webrtc-rs DataChannel 客户端（浏览器替身）→ 真实 SCTP/DTLS
   DataChannel → 生产同构 control worker（单消费者串行）→ `handle_control_msg`
-  → keymap（native 直通 / WASM `gamer.keymap` 组件）→ DeviceAction → scrcpy
+  → keymap（native 直通 / WASM `gamer-keymap` 组件）→ DeviceAction → scrcpy
   control socket 写。ICE/DTLS/SRTP/SCTP 全真实；**浏览器 JS 开销不在测量
   范围**（计划 8.3 允许 Browser RTT 与 Server 内部阶段分开统计）。
 - **两轮同环境**：同一 scrcpy 会话 + 同一 DataChannel。Native 轮无 keymap

@@ -1,4 +1,4 @@
-# GameBot 无兼容基线并行开发计划
+# Gamer 无兼容基线并行开发计划
 
 > 状态：基线清理完成；本机/Docker/真机/浏览器（WebRTC、DataChannel、viewer 接管、重连、watchdog/idle）验收完成（2026-09-01）；发布链路验收在 docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md 单独跟踪；未完成项与阻塞原因统一见 [docs/REMAINING_BLOCKERS.md](../../REMAINING_BLOCKERS.md)
 >
@@ -417,7 +417,7 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 ## 9. 可复制的 Agent 总提示词
 
 ```text
-你正在执行 GameBot“无兼容基线”计划中的【支线 X】。项目仍在开发期，不需要兼容旧 API、旧响应、旧数据库、旧凭据、旧 YAML 或旧文件布局；请删除旧分支，不要保留双轨。注意：DataChannel→REST、WebRTC 恢复、设备命令/截图的模式安全降级属于运行可靠性，不得当作旧兼容删除。
+你正在执行 Gamer“无兼容基线”计划中的【支线 X】。项目仍在开发期，不需要兼容旧 API、旧响应、旧数据库、旧凭据、旧 YAML 或旧文件布局；请删除旧分支，不要保留双轨。注意：DataChannel→REST、WebRTC 恢复、设备命令/截图的模式安全降级属于运行可靠性，不得当作旧兼容删除。
 
 只修改计划为本支线分配的文件。公共热点由集成负责人处理；发现跨支线需求时输出精确变更清单，不越界编辑。先阅读 AGENTS.md 和 docs/plans/archive/CLEAN_BASELINE_PARALLEL_PLAN.md 对应章节，再检查真实调用与测试。实现后运行本支线测试；不要为了旧测试恢复兼容逻辑，应改成当前契约或“旧输入被拒绝”测试。
 

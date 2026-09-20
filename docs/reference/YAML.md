@@ -2,11 +2,11 @@
 
 2026-09-19 编辑/诊断补齐：所有 `_function*.yaml` 使用同一画布编辑并按所属文件的 `expected_version` 保存。保存函数库时拒绝原生/包内同名函数；删除或改名仍被引用的函数返回 `yaml.functions.referenced`（列出调用资源），其他文件无法解析且无法确认引用时返回 `yaml.functions.references_unknown`。这不是跨文件自动重构；修复引用后再提交。删除最后一个函数可保存 `functions: {}`。
 
-gamer.yaml 3.1.2 的运行事件可携带 `trace`：`run_id`、`frame_id`、`parent_frame_id`、`source{package_id,plugin_id,path,version,function?}`。定义来源来自执行冻结资源；递归调用有独立帧 ID，`path` 为该调用中的步骤路径。Core 仅转发可选数据，YAML 插件解释语义。不含完整历史源码，当前文件版本已变时 UI 显示身份/差异而不错误高亮。此字段属于运行事件，不是 YAML 新关键字。
+gamer-yaml 3.1.2 的运行事件可携带 `trace`：`run_id`、`frame_id`、`parent_frame_id`、`source{package_id,plugin_id,path,version,function?}`。定义来源来自执行冻结资源；递归调用有独立帧 ID，`path` 为该调用中的步骤路径。Core 仅转发可选数据，YAML 插件解释语义。不含完整历史源码，当前文件版本已变时 UI 显示身份/差异而不错误高亮。此字段属于运行事件，不是 YAML 新关键字。
 
 从界面建脚本、找图点击、参数到函数复用和定时运行，见 [YAML 自动化教程](../guides/yaml-tutorial.md)（2026-09-14 核对）。
 
-GameBot 自动化脚本只支持 **YAML V1**（Gamer V1 简化计划 Phase 1；无 `version`
+Gamer 自动化脚本只支持 **YAML V1**（Gamer V1 简化计划 Phase 1；无 `version`
 字段——出现 `version:` 直接报 `yaml.version.removed` 拒绝诊断，旧 v3/v2 脚本
 **无兼容分支、无 fallback、无迁移工具**）。
 
@@ -14,9 +14,9 @@ GameBot 自动化脚本只支持 **YAML V1**（Gamer V1 简化计划 Phase 1；�
 函数调用 / `if` / `repeat` / `return` 四类步骤；`tap`、`find`、`sleep` 等
 都不是语法关键字，而是函数。
 
-- 权威实现：`server/guests/yaml-interp/`（唯一解释器，WASM guest 与宿主测试
-  同源）+ `server/src/extensions/gamer_yaml/syntax.rs`（解析/校验/降线）+
-  `native_funcs.rs`（原生函数注册表）；前端可视化编辑器（`web/src/script-editor/`）
+- 权威实现：`plugins/gamer-yaml/interpreter/`（唯一解释器，WASM guest 与宿主测试
+  同源）+ `plugins/gamer-yaml/host/syntax.rs`（解析/校验/降线）+
+  `native_funcs.rs`（原生函数注册表）；前端可视化编辑器（`plugins/gamer-yaml/ui/src/script-editor/`）
   与 Runtime 共用同一 V1 surface DSL；
 - 旧 v3 语法文档（docs/yaml-v3/）已删除，历史实现见 git 历史。
 
@@ -27,9 +27,9 @@ GameBot 自动化脚本只支持 **YAML V1**（Gamer V1 简化计划 Phase 1；�
 ```
 data/packages/<package-id>/
 ├── package.toml                      # manifest（id/name/version/author/targets/plugins 依赖）
-├── shared/                           # 跨插件保留区（gamer.yaml 不写）
+├── shared/                           # 跨插件保留区（gamer-yaml 不写）
 └── plugins/
-    ├── gamer.yaml/
+    ├── gamer-yaml/
     │   ├── automations/              # 自动化脚本 + 函数库（按文件名前缀识别，见 §4）
     │   │   ├── daily.yaml            # 自动化（普通 .yaml）
     │   │   └── _function.yaml        # Package 默认函数库（functions: 包装）
@@ -50,7 +50,7 @@ automations/ 内其他 .yaml                            → 自动化脚本
 
 **函数只有两种来源**：
 
-1. **插件函数**：`gamer.yaml` 原生注册表（`native_funcs.rs`，Schema 唯一声明点），
+1. **插件函数**：`gamer-yaml` 原生注册表（`native_funcs.rs`，Schema 唯一声明点），
    随插件安装/启用变化；受插件权限约束；其中 `tap / swipe / key / input_text /
    launch / stop_app / sleep / log / find` 是 Core 能力的基础包装，
    `wait_find / tap_template / wait_disappear` 是插件便利函数（复用 find/sleep
@@ -72,9 +72,9 @@ automations/ 内其他 .yaml                            → 自动化脚本
 比较：eq / ne / gt / ge / lt / le
 ```
 
-`GET /api/runners/gamer.yaml/functions` 返回原生函数目录（Schema 唯一前端来源）。
-前端「函数」页面只编辑默认 `_function.yaml`；额外拆分文件正常加载但不提供
-专门编辑入口。
+`GET /api/runners/gamer-yaml/functions` 返回原生函数目录（Schema 唯一前端来源）。
+前端「函数」页面按函数展示，默认在 `_function.yaml` 新建；额外拆分的
+`_function*.yaml` 同样可在画布中编辑，并按实际定义文件保存。
 
 ## 2. 脚本格式
 

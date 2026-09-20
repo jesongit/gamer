@@ -10,7 +10,7 @@
 > 缺口共 **5 项语法/语义缺口（G1-G5）+ 5 项运行时策略差异（R1-R5）**（§3/§4），guest 与 surface 均需改动，
 > 不满足 (b) 的「缺口 ≤ 3 项且 guest 改动小」门槛。
 > 本波（B3）已把双格式分叉收进 `extensions/gamer_yaml` 单一入口
-> （`validate_compatible_script`，`server/src/extensions/gamer_yaml/resources.rs:219`），
+> （`validate_compatible_script`，`plugins/gamer-yaml/host/resources.rs:219`），
 > Core 侧已无任何 YAML parser/AST/格式判别（ADR-11 验收全过），因此 v2 暂留的成本只剩扩展内部维护，无架构债。
 
 对照基准：v2 = `script_v2` 严格 loader + `engine/exec` 原生执行；
@@ -106,5 +106,5 @@ v3 派发解析：`yaml_vnext.rs:524-766`；guest 解释器：`tests/yaml-guest/
 
 - 前端可视化编辑器 codec（`web/src/script-editor/`）仅建模 v2；v3 无编辑器形态。
 - 存量 v2 脚本无迁移工具（ADR-14 零兼容；G3 落地前 v2 是函数库的唯一承载格式，不可删）。
-- `ExtensionService::start/stop` 对 gamer.yaml 的「无常驻实例」特判保留为扩展 id 字符串字面量
+- `ExtensionService::start/stop` 对 gamer-yaml 的「无常驻实例」特判保留为扩展 id 字符串字面量
   （`extensions/service.rs:29-31`），P11.9 源码扫描守卫如需覆盖 id 字面量需另行定策略。

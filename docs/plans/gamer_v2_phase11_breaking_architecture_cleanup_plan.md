@@ -34,7 +34,7 @@
 1. Core 仍直接持有 YAML / Script / Keymap 等业务语义。
 2. 前端仍存在“挂着插件名、实际由 Core Vue Component 实现”的 Panel。
 3. TaskBoard 仍然围绕 `script_id` 和 YAML Script 设计。
-4. `gamer.yaml` Runner 生命周期没有真正与插件生命周期绑定。
+4. `gamer-yaml` Runner 生命周期没有真正与插件生命周期绑定。
 5. Core Router 暴露 `/scripts`、`/functions`、`/keymaps` 等业务型 API。
 6. 新旧 Task API、Preset API、资源路径、旧数据迁移逻辑仍并存。
 7. Keymap 仍存在 Native fallback。
@@ -90,7 +90,7 @@ Gamer Core
 业务功能全部由 Extension 提供：
 
 ```text
-gamer.yaml
+gamer-yaml
 ├── YAML Parser
 ├── YAML Validator
 ├── YAML Runtime / Lowering
@@ -100,7 +100,7 @@ gamer.yaml
 ├── 函数 Panel
 └── 模板 Panel
 
-gamer.keymap
+gamer-keymap
 ├── Keymap Parser
 ├── Mapping Rules
 ├── WASM Runtime
@@ -155,9 +155,9 @@ P11.1 Task Model 泛化
         ↓
 P11.2 TimerRunnerRegistry
         ↓
-P11.3 gamer.yaml 真正插件化
+P11.3 gamer-yaml 真正插件化
         ↓
-P11.4 gamer.keymap 真正插件化
+P11.4 gamer-keymap 真正插件化
         ↓
 P11.5 前端 Core Panel 清理
         ↓
@@ -348,7 +348,7 @@ YAML 示例：
 
 ```json
 {
-  "runner_id": "gamer.yaml",
+  "runner_id": "gamer-yaml",
   "entrypoint": "daily/login",
   "payload": {
     "account": 1
@@ -489,10 +489,10 @@ interface RunnerEditorContribution {
 
 V1 不需要做过度抽象。
 
-`gamer.yaml` 只需能够提供：
+`gamer-yaml` 只需能够提供：
 
 ```text
-runner_id = gamer.yaml
+runner_id = gamer-yaml
 entrypoint selector
 payload editor
 ```
@@ -516,7 +516,7 @@ payload editor
 
 ## 7.1 当前问题
 
-目前已经存在 Runner 抽象，但 `gamer.yaml` Runner 仍由 Native Server 代码构造。
+目前已经存在 Runner 抽象，但 `gamer-yaml` Runner 仍由 Native Server 代码构造。
 
 这种结构：
 
@@ -528,9 +528,9 @@ Core
 会导致：
 
 ```text
-卸载 gamer.yaml
+卸载 gamer-yaml
 ↓
-Core 仍然知道 gamer.yaml 怎么执行
+Core 仍然知道 gamer-yaml 怎么执行
 ```
 
 违反插件生命周期。
@@ -581,17 +581,17 @@ list_runners()
 Extension 启动：
 
 ```text
-load gamer.yaml
+load gamer-yaml
 ↓
 initialize
 ↓
-register gamer.yaml runner
+register gamer-yaml runner
 ```
 
 Extension 禁用：
 
 ```text
-disable gamer.yaml
+disable gamer-yaml
 ↓
 unregister all owned runners
 ```
@@ -599,7 +599,7 @@ unregister all owned runners
 Extension 卸载：
 
 ```text
-uninstall gamer.yaml
+uninstall gamer-yaml
 ↓
 unregister runner
 ↓
@@ -625,7 +625,7 @@ TaskState = DEPENDENCY_MISSING
 建议保留：
 
 ```text
-missing_dependency = gamer.yaml
+missing_dependency = gamer-yaml
 ```
 
 Task 不删除。
@@ -635,7 +635,7 @@ Task 不删除。
 重新安装 / 启用 Extension：
 
 ```text
-runner gamer.yaml registered
+runner gamer-yaml registered
 ```
 
 Task 应自动恢复为：
@@ -667,7 +667,7 @@ Extension Runtime
 
 ## 7.8 验收标准
 
-- [ ] TimerCore 不 import gamer.yaml
+- [ ] TimerCore 不 import gamer-yaml
 - [ ] TimerCore 不构造 YamlTimerRunner
 - [ ] RunnerRegistry 支持 register / unregister
 - [ ] Runner 有 owner_extension_id
@@ -678,7 +678,7 @@ Extension Runtime
 
 ---
 
-# 8. P11.3 — gamer.yaml 真正移出 Core
+# 8. P11.3 — gamer-yaml 真正移出 Core
 
 这是本阶段最重要的代码移动之一。
 
@@ -732,7 +732,7 @@ server/src/yaml_extension.*
 
 YAML 语义
     ↓
-搬到 gamer.yaml Extension
+搬到 gamer-yaml Extension
 ```
 
 ## 8.3 YAML Parser
@@ -740,7 +740,7 @@ YAML 语义
 最终：
 
 ```text
-gamer.yaml
+gamer-yaml
 ├── parser
 ├── validation
 ├── AST / IR
@@ -828,7 +828,7 @@ ResourceKind::Functions
 具体解释和执行由：
 
 ```text
-gamer.yaml
+gamer-yaml
 ```
 
 负责。
@@ -846,7 +846,7 @@ frame
 region
 ```
 
-### gamer.yaml / Extension UI 负责
+### gamer-yaml / Extension UI 负责
 
 ```text
 模板管理 Panel
@@ -879,7 +879,7 @@ TimerCore
 ↓
 RunnerRegistry
 ↓
-gamer.yaml Runner
+gamer-yaml Runner
 ↓
 Extension Runtime
 ↓
@@ -896,14 +896,14 @@ Core
 - [ ] Core 不存在 ScriptStore
 - [ ] Core 不存在 Function DSL 类型
 - [ ] Core 不存在 YAML version fallback
-- [ ] gamer.yaml 可以独立解析资源
-- [ ] gamer.yaml 可以独立执行
-- [ ] gamer.yaml disable 后 YAML Task 进入 dependency missing
-- [ ] Core 正常启动且不要求 gamer.yaml 存在
+- [ ] gamer-yaml 可以独立解析资源
+- [ ] gamer-yaml 可以独立执行
+- [ ] gamer-yaml disable 后 YAML Task 进入 dependency missing
+- [ ] Core 正常启动且不要求 gamer-yaml 存在
 
 ---
 
-# 9. P11.4 — gamer.keymap 真正插件化
+# 9. P11.4 — gamer-keymap 真正插件化
 
 ## 9.1 当前问题
 
@@ -929,7 +929,7 @@ DeviceAction
 Android key passthrough
 ```
 
-## 9.3 gamer.keymap 负责
+## 9.3 gamer-keymap 负责
 
 ```text
 keymap.yaml
@@ -944,7 +944,7 @@ UI Panel
 
 ## 9.4 无 Keymap 插件行为
 
-没有 `gamer.keymap` 时：
+没有 `gamer-keymap` 时：
 
 ```text
 Keyboard Input
@@ -1009,7 +1009,7 @@ runtime: core
 component: VueComponent
 ```
 
-由 `gamer.keymap` manifest 自己贡献 UI。
+由 `gamer-keymap` manifest 自己贡献 UI。
 
 ## 9.7 删除 Native Mapping Fallback
 
@@ -1023,7 +1023,7 @@ if wasm keymap unavailable
 替换成：
 
 ```text
-if gamer.keymap unavailable
+if gamer-keymap unavailable
     passthrough
 ```
 
@@ -1033,9 +1033,9 @@ if gamer.keymap unavailable
 - [ ] Core 无 mapping rule parser
 - [ ] Core 无 native mapping engine
 - [ ] Core 无 Keymap Panel
-- [ ] gamer.keymap 安装后映射 Panel 出现
-- [ ] gamer.keymap 禁用后 Panel 消失
-- [ ] gamer.keymap 禁用后 mapping runtime 消失
+- [ ] gamer-keymap 安装后映射 Panel 出现
+- [ ] gamer-keymap 禁用后 Panel 消失
+- [ ] gamer-keymap 禁用后 mapping runtime 消失
 - [ ] 无插件时基础 Keyboard passthrough 正常
 
 ---
@@ -1069,7 +1069,7 @@ if gamer.keymap unavailable
 
 这些均属于 Extension Contribution。
 
-## 10.3 gamer.yaml Panels
+## 10.3 gamer-yaml Panels
 
 建议：
 
@@ -1098,7 +1098,7 @@ if gamer.keymap unavailable
 
 内部管理 scripts。
 
-## 10.4 gamer.keymap Panel
+## 10.4 gamer-keymap Panel
 
 ```text
 映射
@@ -1131,7 +1131,7 @@ Panel 完全移除
 Core 不应有：
 
 ```text
-if plugin == gamer.yaml
+if plugin == gamer-yaml
     add panel...
 ```
 
@@ -1140,8 +1140,8 @@ if plugin == gamer.yaml
 搜索前端：
 
 ```text
-gamer.yaml
-gamer.keymap
+gamer-yaml
+gamer-keymap
 templates
 scripts
 functions
@@ -1164,13 +1164,13 @@ PanelContribution
 任务 | 日志 | 设置 | +
 ```
 
-安装 gamer.yaml：
+安装 gamer-yaml：
 
 ```text
 任务 | 日志 | 设置 | 自动化 | 函数 | 模板 | +
 ```
 
-安装 gamer.keymap：
+安装 gamer-keymap：
 
 ```text
 任务 | 日志 | 设置 | 自动化 | 函数 | 模板 | 映射 | +
@@ -1255,7 +1255,7 @@ Payload：
 
 ```json
 {
-  "runner_id": "gamer.yaml",
+  "runner_id": "gamer-yaml",
   "entrypoint": "daily/login",
   "payload": {}
 }
@@ -1514,7 +1514,7 @@ ScriptStore
 script_id
 KeymapStore
 MappingRule
-gamer.yaml specific type
+gamer-yaml specific type
 ```
 
 允许字符串例外需要白名单。
@@ -1586,15 +1586,15 @@ start gamer with zero extensions
 不能要求：
 
 ```text
-gamer.yaml
-gamer.keymap
+gamer-yaml
+gamer-keymap
 ```
 
 存在。
 
 ## 14.5 YAML Isolation Test
 
-没有 `gamer.yaml`：
+没有 `gamer-yaml`：
 
 ```text
 YAML Task
@@ -1609,7 +1609,7 @@ YAML Task
 
 ## 14.6 Keymap Isolation Test
 
-没有 `gamer.keymap`：
+没有 `gamer-keymap`：
 
 ```text
 keyboard
@@ -1814,15 +1814,15 @@ docs(v2): finalize phase 11 architecture
 - [x] 删除 ScriptStore（`server/src/scripts.rs` 已删；`resources.rs` 头注"ScriptStore / KeymapStore 消解后的内容无关资源层"）
 - [x] functions 使用 ResourceResolver（`ResourceStore` 六目录寻址，`get_text(Functions,…)`；函数测试经统一 `/api/runs`）
 - [x] scripts 使用 ResourceResolver（同上；`/api/apps/:app/resources/scripts`）
-- [x] gamer.yaml 注册 Runner（`extensions/gamer_yaml/timer_yaml.rs` YamlTimerRunner + YamlTimerRunnerRegistrar）
+- [x] gamer-yaml 注册 Runner（`extensions/gamer_yaml/timer_yaml.rs` YamlTimerRunner + YamlTimerRunnerRegistrar）
 
 ## Keymap
 
 - [x] 删除 KeymapStore（`server/src/keymaps.rs` 已删；keymaps kind 经 ResourceStore composite，包内方案只读）
 - [x] 删除 Native Mapping Engine（提交 f126641：删除 KeymapRunner/InputGateway）
 - [x] 删除 Native Mapping fallback（`extensions/keymap/mod.rs` 头注"the native mapping engine has been removed"；无扩展运行时 → 直通 scrcpy）
-- [x] 删除 Host Keymap Panel（壳内零硬编码注册：提交 5e5e973；面板改由 gamer.keymap manifest `runtime="core"` + `component="console.keymaps"` 贡献，组件名解析表 `core-component-registry.ts` 为前端唯一知识）
-- [x] gamer.keymap 自己贡献 UI（`tools/plugins/gamer.keymap/manifest.toml` `[[ui.contributions]]`）
+- [x] 删除 Host Keymap Panel（壳内零硬编码注册：提交 5e5e973；面板改由 gamer-keymap manifest `runtime="core"` + `component="console.keymaps"` 贡献，组件名解析表 `core-component-registry.ts` 为前端唯一知识）
+- [x] gamer-keymap 自己贡献 UI（`plugins/gamer-keymap/manifest.toml` `[[ui.contributions]]`）
 - [x] 无插件 passthrough 正常（守卫 `architecture_guard_isolation_keymap_missing_extension_passes_input_through`）
 
 ## UI
@@ -1831,10 +1831,10 @@ docs(v2): finalize phase 11 architecture
 - [x] Core 只保留日志（gamer.core:logs）
 - [x] Core 只保留设置（gamer.core:settings）
 - [x] 插件 Panel 来自 Contribution（manifest ui.contributions 驱动，提交 1d33f3d；`GET /api/extensions` ui_contributions）
-- [x] gamer.yaml 自动化（manifest panel_id=automation → console.scripts）
-- [x] gamer.yaml 函数（panel_id=functions → console.functions）
-- [x] gamer.yaml 模板（panel_id=templates → console.templates）
-- [x] gamer.keymap 映射（panel_id=keymaps → console.keymaps）
+- [x] gamer-yaml 自动化（manifest panel_id=automation → console.scripts）
+- [x] gamer-yaml 函数（panel_id=functions → console.functions）
+- [x] gamer-yaml 模板（panel_id=templates → console.templates）
+- [x] gamer-keymap 映射（panel_id=keymaps → console.keymaps）
 - [x] 删除特殊 plugin id 判断（`core-shell-boundary.test.js`："useConsoleWorkspacePanels 不做本地面板回退注册"、"runner 注册 id 唯一配置点在 gamer-yaml-runner.js"）
 
 ## API
@@ -1859,12 +1859,12 @@ docs(v2): finalize phase 11 architecture
 ## E2E
 
 - [x] Bare Core（守卫 `architecture_guard_bare_core_serves_full_base_api_with_zero_extensions`：零扩展启动全基线 REST）
-- [x] Install gamer.yaml（守卫 lifecycle 全链 install 步：只落盘、无 UI、无 runner）
-- [x] Disable gamer.yaml（lifecycle 全链：disable 运行中=自动 stop，runner/UI 一并摘除）
-- [x] Re-enable gamer.yaml（lifecycle 全链 start 再启：runner 重注册、任务自动恢复 Active；+ 隔离测试恢复分支）
-- [x] Install gamer.keymap（`extensions/keymap/mod.rs` `real_keymap_gplugin_invokes_wit_and_native_capabilities`、`real_keymap_guest_consumes_user_profile_yaml`）
-- [x] Disable gamer.keymap（直通分支由隔离测试覆盖（无运行时 → passthrough 不吞键）；disable 走同一 ExtensionService 状态机，无 keymap 专属 E2E）
-- [x] Task dependency missing（守卫 lifecycle：stop → 任务转 dependency_missing 且保留，日志 missing_dependency=gamer.yaml）
+- [x] Install gamer-yaml（守卫 lifecycle 全链 install 步：只落盘、无 UI、无 runner）
+- [x] Disable gamer-yaml（lifecycle 全链：disable 运行中=自动 stop，runner/UI 一并摘除）
+- [x] Re-enable gamer-yaml（lifecycle 全链 start 再启：runner 重注册、任务自动恢复 Active；+ 隔离测试恢复分支）
+- [x] Install gamer-keymap（`extensions/keymap/mod.rs` `real_keymap_gplugin_invokes_wit_and_native_capabilities`、`real_keymap_guest_consumes_user_profile_yaml`）
+- [x] Disable gamer-keymap（直通分支由隔离测试覆盖（无运行时 → passthrough 不吞键）；disable 走同一 ExtensionService 状态机，无 keymap 专属 E2E）
+- [x] Task dependency missing（守卫 lifecycle：stop → 任务转 dependency_missing 且保留，日志 missing_dependency=gamer-yaml）
 - [x] Task dependency recovery（守卫 lifecycle：start 再启 → 任务自动恢复 Active）
 - [x] Package export（`app_package_full_lifecycle_workspace_export_install_edit_rerelease` 十四步主链，`api/tests/app_packages_lifecycle.rs:514`）
 - [x] Package install（同上；含同 id+version overwrite 重装分支）
@@ -1909,12 +1909,12 @@ docs(v2): finalize phase 11 architecture
 模板
 ```
 
-## 场景 B：安装 gamer.yaml
+## 场景 B：安装 gamer-yaml
 
 安装：
 
 ```text
-gamer.yaml
+gamer-yaml
 ```
 
 自动出现：
@@ -1928,19 +1928,19 @@ gamer.yaml
 RunnerRegistry：
 
 ```text
-gamer.yaml = available
+gamer-yaml = available
 ```
 
 创建 Task：
 
 ```text
-runner = gamer.yaml
+runner = gamer-yaml
 entrypoint = daily/login
 ```
 
 可以正常运行。
 
-## 场景 C：禁用 gamer.yaml
+## 场景 C：禁用 gamer-yaml
 
 UI：
 
@@ -1955,7 +1955,7 @@ UI：
 Runner：
 
 ```text
-gamer.yaml
+gamer-yaml
 ```
 
 注销。
@@ -1968,7 +1968,7 @@ DEPENDENCY_MISSING
 
 但 Task 数据仍存在。
 
-## 场景 D：重新启用 gamer.yaml
+## 场景 D：重新启用 gamer-yaml
 
 Runner 自动重新注册。
 
@@ -1980,7 +1980,7 @@ READY
 
 不需要重新创建。
 
-## 场景 E：安装 gamer.keymap
+## 场景 E：安装 gamer-keymap
 
 出现：
 
@@ -1998,7 +1998,7 @@ Keymap WASM
 DeviceAction
 ```
 
-## 场景 F：禁用 gamer.keymap
+## 场景 F：禁用 gamer-keymap
 
 映射 Panel 消失。
 
@@ -2027,14 +2027,14 @@ Core 不认识 YAML
 Core 不认识 Script DSL
 Core 不认识 Function DSL
 Core 不认识 Keymap Rule
-Core 不认识 gamer.yaml Runner 实现
+Core 不认识 gamer-yaml Runner 实现
 ```
 
 ## Extension 边界
 
 ```text
-gamer.yaml 可独立启用 / 禁用
-gamer.keymap 可独立启用 / 禁用
+gamer-yaml 可独立启用 / 禁用
+gamer-keymap 可独立启用 / 禁用
 UI 随 Extension 生命周期变化
 Runner 随 Extension 生命周期变化
 ```
@@ -2173,14 +2173,14 @@ Game-specific Tools
 | Core 不认识 YAML | ✅ | `server/src` 顶层无 YAML parser/AST/格式判别；script_v2/yaml_vnext/engine 仅存在于 `extensions/gamer_yaml/`；守卫 `architecture_guard_source_boundary_core_free_of_yaml_keymap_semantics`（67 条白名单双向校验，`assert_whitelist_alive` 防白名单腐化） |
 | Core 不认识 Script DSL / Function DSL | ✅ | `scripts.rs`、`api/{scripts,functions,templates,keymaps}.rs` 文件已删；脚本/函数内容校验经 `YamlScriptValidator` / `YamlFunctionValidator`（ResourceKindHandler 回调） |
 | Core 不认识 Keymap Rule | ✅ | keymap DSL 迁至 `extensions/keymap/dsl.rs`；依赖方向守卫 `architecture_guard_dependency_direction_core_never_paths_into_extension_internals` |
-| Core 不认识 gamer.yaml Runner 实现 | ✅ | `Scheduler::new(db)` 裸核不预置 Runner；执行经 `TimerRunnerRegistry` 抽象（main.rs 组合根接线 registrar，属装配点而非 Core 模块） |
+| Core 不认识 gamer-yaml Runner 实现 | ✅ | `Scheduler::new(db)` 裸核不预置 Runner；执行经 `TimerRunnerRegistry` 抽象（main.rs 组合根接线 registrar，属装配点而非 Core 模块） |
 
 ### Extension 边界
 
 | DoD 条目 | 结论 | 证据 |
 |---|---|---|
-| gamer.yaml 可独立启用 / 禁用 | ✅ | 守卫 `architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_tasks`：install→enable→start→stop→disable→uninstall 全链 HTTP 层走通 |
-| gamer.keymap 可独立启用 / 禁用 | ✅ | `real_keymap_gplugin_invokes_wit_and_native_capabilities`（安装 .gplugin → WIT 派发 → capability 动作）；禁用/缺失运行时 → `dispatch_keymap_input` 直通 |
+| gamer-yaml 可独立启用 / 禁用 | ✅ | 守卫 `architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_tasks`：install→enable→start→stop→disable→uninstall 全链 HTTP 层走通 |
+| gamer-keymap 可独立启用 / 禁用 | ✅ | `real_keymap_gplugin_invokes_wit_and_native_capabilities`（安装 .gplugin → WIT 派发 → capability 动作）；禁用/缺失运行时 → `dispatch_keymap_input` 直通 |
 | UI 随 Extension 生命周期变化 | ✅ | UI 贡献随 enable 发布、disable/uninstall 摘除（lifecycle 守卫断言 `ui_contributions` 数量）；前端面板全 registry 驱动 |
 | Runner 随 Extension 生命周期变化 | ✅ | TimerRunnerRegistrar 钩子：start 注册 / stop 注销 / disable=自动 stop；lifecycle 守卫显式断言 "enable 不注册 runner（enable ≠ start）" |
 
@@ -2214,7 +2214,7 @@ Game-specific Tools
 | DoD 条目 | 结论 | 证据 |
 |---|---|---|
 | 裸 Core = 任务\|日志\|设置\|+ | ✅ | `core-contributions.ts` 仅注册 `gamer.core:tasks/logs/settings`，`DEFAULT_PANEL_KEY='gamer.core:tasks'`；守卫 bare_core 测试 + `web/src/core-shell-boundary.test.js`（api.js 无业务 runner id、壳不做本地面板回退注册等断言） |
-| 其它功能全部由插件贡献 | ✅ | gamer.yaml：自动化/函数/模板；gamer.keymap：映射——manifest `runtime="core"` 宿主组件（组件键为扩展知识，`core-component-registry.ts` 为前端唯一解析表）；declarative/iframe 两档照常可用 |
+| 其它功能全部由插件贡献 | ✅ | gamer-yaml：自动化/函数/模板；gamer-keymap：映射——manifest `runtime="core"` 宿主组件（组件键为扩展知识，`core-component-registry.ts` 为前端唯一解析表）；declarative/iframe 两档照常可用 |
 
 ## 23.2 偏差清单（与计划原文的有意偏离）
 
@@ -2227,10 +2227,10 @@ Game-specific Tools
 
 - **a. v2/v3 单格式化**：v3 缺 G1-G5/R1-R5（见 [phase11_v2_v3_parity_report.md](phase11_v2_v3_parity_report.md)），补齐 guest 后删 v2 引擎。
 - **b. `RunRecord.script_id` 字段命名**：schema v1 日志列名的历史命名，现为展示字段（run_manager.rs："retained as the legacy display field for the existing HTTP contract"），守卫白名单锁定；更名属数据迁移另案。
-- **c. manifest 无 world/execution 声明字段**：gamer.yaml 的执行模型声明在 registrar（`timer_yaml.rs`）；加字段需同步 include_str! 锁与官方包重签。
+- **c. manifest 无 world/execution 声明字段**：gamer-yaml 的执行模型声明在 registrar（`timer_yaml.rs`）；加字段需同步 include_str! 锁与官方包重签。
 - **d. `/api/runs` 前置存在性校验只读本地编辑区**：`ResourceStore::get_text` 非 keymap kind 不走 composite，纯包内脚本经统一入口返回结构化 not_found（真实运行走运行快照 composite 链路，E2E 已如实断言）。
 - **e. resources 字节 kind（templates）上传共用 PNG 重编码管线**：任意原样字节需走 App Package 通道。
 - **f. 前端分区候选读 store 资源形状**（`/api/apps/-/resources/...` 全量过滤）：宜加通用分区发现端点。
 - **g. yaml 面板 composable 由壳无条件实例化**（`useConsoleScriptRunner` 等）：严格懒实例化待面板注册事件驱动。
 - **h. data_schema fixture 批次按 release 节奏同步**（schema-policy 契约 §3 v3 行已补：提交 8289c5d）。
-- **i. 升级注意**：升级后 Enabled-未-start 的 gamer.yaml 不自动注册 Runner（对账只恢复遗留 Running 记录），存量定时任务需手动 start 一次 gamer.yaml。
+- **i. 升级注意**：升级后 Enabled-未-start 的 gamer-yaml 不自动注册 Runner（对账只恢复遗留 Running 记录），存量定时任务需手动 start 一次 gamer-yaml。

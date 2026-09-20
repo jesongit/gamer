@@ -114,7 +114,7 @@ remote
 
 ```text
 plugins/
-└── gamer.yaml/
+└── gamer-yaml/
     ├── 3.0.0/
     └── 3.1.0/
 ```
@@ -214,8 +214,8 @@ App Package manifest 可声明：
 
 ```text
 requires:
-  gamer.yaml@3
-  gamer.keymap@1
+  gamer-yaml@3
+  gamer-keymap@1
   vision.template-match@1
 ```
 

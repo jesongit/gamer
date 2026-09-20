@@ -130,7 +130,7 @@ AI Plugin
 建议：
 
 ```text
-/console?panel=gamer.yaml:scripts
+/console?panel=gamer-yaml:scripts
 ```
 
 优点：

@@ -172,7 +172,7 @@ Phase 0 基线
 - 核心生命周期修改集中在 `server/src/extensions/service.rs`，没有引入第二套状态机、迁移层或兼容语法。
 - 原生动作的 catalog lookup 已与有副作用的 dispatcher 分离；停用/卸载拿 per-extension write lease，调用拿 read lease。
 - `call_extension_from_plugin` 是最小宿主内受控互调入口：caller 不从 JSON 推导，目标动作必须声明 caller，Package 写入必须与 `content_package` 一致；当前没有无契约 declarative 跨插件互调。
-- 前端能力探测状态已改为失败关闭（fail closed），保留视频基础功能不依赖 gamer.yaml 的既有降级结构。
+- 前端能力探测状态已改为失败关闭（fail closed），保留视频基础功能不依赖 gamer-yaml 的既有降级结构。
 - 未新增数据迁移；Package 数据、旧版本归档和 dormant 插件目录均按现有 V1 语义保留。
 
 ### 5.2 验证记录与 NOT_VERIFIED
@@ -205,4 +205,4 @@ Phase 0 基线
 - `docs/plans/gamer_v3_package_frontend_architecture_plan.md`
 - `docs/plans/gamer_video_workbench_contracts.md`
 - `server/src/extensions/service.rs`
-- `server/src/extensions/gamer_yaml/actions.rs`
+- `plugins/gamer-yaml/host/actions.rs`

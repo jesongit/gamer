@@ -15,7 +15,7 @@
 
 | 事实 | 证据 | 结论 |
 | --- | --- | --- |
-| YAML 仍是 v3 解析模型 | `server/src/extensions/gamer_yaml/yaml_vnext.rs` 仍要求 `version: 3`，并包含 `SurfaceStep`、`find/check/match_first/wait/throw/set/call` 等旧特殊语义 | Phase 1/2 是真实迁移，不是文档收尾 |
+| YAML 仍是 v3 解析模型 | `plugins/gamer-yaml/host/yaml_vnext.rs` 仍要求 `version: 3`，并包含 `SurfaceStep`、`find/check/match_first/wait/throw/set/call` 等旧特殊语义 | Phase 1/2 是真实迁移，不是文档收尾 |
 | 宿主仍保留独立解释路径 | `yaml_extension.rs`、`wasm_host.rs`、`runner_adapter.rs` 同时承担解析、lowering、执行适配和 WASM 调用边界 | 必须先冻结 Guest/Host 的唯一权威边界，再删除另一套语义 |
 | 前端仍有 v3 资产 | `web/src/script-editor/__fixtures__/yaml/`、`console-stage.test.js`、编辑器测试包含 `version: 3` 样例 | 编辑器、视频草稿、API fixture 和服务端测试必须同批切换 |
 | Package、Task、Video、插件市场等基础能力已存在 | 现有 Package 资源 API、统一 Run/Task、视频工作台和插件生命周期代码 | 这些是适配面，不应再开新平台层 |
@@ -41,12 +41,12 @@
 | ID | 任务包 | 主写集 | 前置 | 交付/门禁 |
 | --- | --- | --- | --- | --- |
 | P0 | 合同与范围冻结 | 本计划、README、AGENTS、架构说明 | 无 | 合同测试清单、保留/删除清单；文档一致性检查 |
-| P1 | V1 语法前端 | `server/src/extensions/gamer_yaml/yaml_vnext.rs`（或替代模块）、`error.rs` 及其单测 | P0 | 新 AST/诊断/变量绑定；旧 v3 入口拒绝；parser 单测通过 |
+| P1 | V1 语法前端 | `plugins/gamer-yaml/host/yaml_vnext.rs`（或替代模块）、`error.rs` 及其单测 | P0 | 新 AST/诊断/变量绑定；旧 v3 入口拒绝；parser 单测通过 |
 | P2 | 函数注册表与 Schema | `resources.rs` 内容钩子、`entrypoint_descriptor.rs`、`task_params.rs`、新增/独立的 callable resolver 模块、函数元数据测试 | P0；接口依赖 P1 | 插件函数 + Package 函数合并、冲突/缺失诊断；参数 Schema API 稳定；嵌套调用与入口调用同一绑定结果 |
-| P3 | 唯一运行时与 wire | `server/guests/yaml-guest/`、`server/wit/gamer/host.wit`、`run_target.rs`、`wasm_host.rs`、`yaml_extension.rs`、`runner_adapter.rs` | P1/P2 的协议合同 | 生产执行仅有一份解释语义；取消/预算/事件保持；删除 native Interpreter；wire 带版本、scope、来源与稳定错误码 |
+| P3 | 唯一运行时与 wire | `plugins/gamer-yaml/guest/`、`server/wit/gamer/host.wit`、`run_target.rs`、`wasm_host.rs`、`yaml_extension.rs`、`runner_adapter.rs` | P1/P2 的协议合同 | 生产执行仅有一份解释语义；取消/预算/事件保持；删除 native Interpreter；wire 带版本、scope、来源与稳定错误码 |
 | P4 | Task/Video/动作适配 | `timer_yaml.rs`、`video_draft.rs`、`actions.rs` 及对应服务端测试 | P1/P2 | 手动运行、函数测试、Cron、视频草稿均生成/执行 V1 |
 | P5 | 前端编辑器与表单 | `web/src/script-editor/`、`web/src/components/task/`、`gamer-yaml-runner.js`、视频草稿 UI/fixtures | P2/P4 API 合同 | 编辑器、参数表单、函数面板和草稿不再生成 v3 |
-| P6 | 插件生命周期收敛 | `server/src/extensions/{model,service,store,wasm}.rs`、`server/src/extensions/gamer_yaml/timer_yaml.rs`、`server/src/main.rs`、`server/src/api/extensions*.rs`、插件中心前端及测试 | P0；与 P1-P5 可并行 | 安装自动启用启动、禁用清理 Runner/UI、重启恢复、失败可重试 |
+| P6 | 插件生命周期收敛 | `server/src/extensions/{model,service,store,wasm}.rs`、`plugins/gamer-yaml/host/timer_yaml.rs`、`server/src/main.rs`、`server/src/api/extensions*.rs`、插件中心前端及测试 | P0；与 P1-P5 可并行 | 安装自动启用启动、禁用清理 Runner/UI、重启恢复、失败可重试 |
 | P7 | 文档/SDK/发行清理 | `docs/reference/YAML.md`、`docs/yaml-v3/`、SDK 示例、插件 manifest/guest 构建脚本 | P1-P6 完成 | 旧 v3 唯一权威入口消失；官方包与文档一致 |
 | P8 | 集成与验收 | 架构守卫、API/集成/E2E/CI 配置和验收记录 | 各包阶段门禁 | Rust、前端、Guest、无 WASM、插件打包、真实设备项逐项记录 |
 
@@ -97,7 +97,7 @@ P1 与 P6 可以并行；P2 只能在 P1 的 AST/绑定合同冻结后进入实�
 
 必须补进 P8 的验证项：
 
-* 显式构建并校验 `gamer.yaml` 和 `gamer.keymap` Guest；不能只依赖测试现场编译。
+* 显式构建并校验 `gamer-yaml` 和 `gamer-keymap` Guest；不能只依赖测试现场编译。
 * 对 `--no-default-features` 至少执行 `cargo check`；若测试装配允许，再执行 `cargo test --no-default-features`，并记录确切结果。
 * 前端测试收集使用 `src/**/*.test.js`，或显式补跑当前默认 glob 漏掉的 `web/src/console/device-summary.test.js`。
 * 用临时输出目录执行 `tools/build-plugins.ps1`，检查 manifest、`.gplugin`、registry v2、sha256、builtin 无 `plugin.wasm`；不得把当前含 `generated_at` 的产物宣称为字节级可复现。
@@ -118,10 +118,10 @@ P1 与 P6 可以并行；P2 只能在 P1 的 AST/绑定合同冻结后进入实�
 
 为避免各任务包各自猜测，V1 采用以下破坏性迁移策略：
 
-* **旧 YAML 资源**：PackageStore/归档仍按内容无关原则保存和导出原字节，导入不因 dormant 插件数据而解析失败；但 `gamer.yaml` 的资源保存、entrypoint Schema、运行入口遇到 v3 文档统一返回 `yaml.v1.unsupported_legacy`，不转换、不 fallback、不执行。用户通过编辑器显式保存新 V1 后才恢复可运行。
-* **旧 Task**：不删除记录、不自动转换 payload；发现 gamer.yaml 旧 entrypoint 或旧参数时保留任务和启用意图，置为不可调度的暂停状态并写入结构化 `last_result`，UI 提示用户重新选择 V1 脚本/函数。不能伪装成 `DependencyMissing`，因为插件并未缺失。
+* **旧 YAML 资源**：PackageStore/归档仍按内容无关原则保存和导出原字节，导入不因 dormant 插件数据而解析失败；但 `gamer-yaml` 的资源保存、entrypoint Schema、运行入口遇到 v3 文档统一返回 `yaml.v1.unsupported_legacy`，不转换、不 fallback、不执行。用户通过编辑器显式保存新 V1 后才恢复可运行。
+* **旧 Task**：不删除记录、不自动转换 payload；发现 gamer-yaml 旧 entrypoint 或旧参数时保留任务和启用意图，置为不可调度的暂停状态并写入结构化 `last_result`，UI 提示用户重新选择 V1 脚本/函数。不能伪装成 `DependencyMissing`，因为插件并未缺失。
 * **Run/Log 旧字段**：`runner_id + entrypoint` 是唯一解析身份，`script_id` 不再进入新 API 语义或被 Runner 使用。P0/P8 必须完成存储迁移设计：要么在 schema v4 将其改为通用 `label/entrypoint`，要么明确作为仅历史展示的内部列；不得继续保留“兼容白名单”却没有测试边界。
-* **归档校验**：归档层继续只做布局、字节、manifest 和原子安装校验；插件内容校验只发生在 `gamer.yaml` 资源 PUT/rename/save/run 边界。新内容校验失败时 overwrite 必须整包回滚，不能部分替换。
+* **归档校验**：归档层继续只做布局、字节、manifest 和原子安装校验；插件内容校验只发生在 `gamer-yaml` 资源 PUT/rename/save/run 边界。新内容校验失败时 overwrite 必须整包回滚，不能部分替换。
 * **插件函数**：扩展进入 `Running` 时通过 owner registrar 注册函数描述和实现；stop/disable/uninstall 与 Runner/UI 一起注销。权限绑定注册函数的扩展身份，自动化调用不能扩大权限。
 * **Package 函数**：不进入全局长期注册表；运行开始时按 `content_package` 和 Package revision 读取 `functions/`，校验后与当前可用插件函数合并并生成不可变快照。资源修改、包切换或扩展状态变化不得污染已开始的 Run。
 * **函数冲突**：插件函数与 Package 函数、多个插件函数、Package 内同名函数均直接结构化报错，不设覆盖优先级；跨 Package 不隐式查找。
@@ -155,17 +155,17 @@ Gamer Core
 ├── 插件安装、权限、生命周期、运行时
 └── 日志、取消、设备独占等通用机制
           │
-          ├── gamer.yaml
+          ├── gamer-yaml
           │   ├── YAML 解释器
           │   ├── 插件函数库
           │   ├── 当前 Package 函数库
           │   ├── 自动化、函数、模板编辑
           │   └── Task Runner
           │
-          ├── gamer.keymap
+          ├── gamer-keymap
           │   └── 键盘映射业务
           │
-          └── gamer.video
+          └── gamer-video
               └── 视频工作台与自动化草稿制作
 ```
 
@@ -210,7 +210,7 @@ Core 不认识 YAML 语法、脚本步骤、函数库格式或具体业务流程
 
 ## 改动
 
-1. 更新 `README.md` 的架构说明，明确 Core 只提供通用原语，YAML 由 `gamer.yaml` 插件实现。
+1. 更新 `README.md` 的架构说明，明确 Core 只提供通用原语，YAML 由 `gamer-yaml` 插件实现。
 2. 更新 `AGENTS.md`，明确 V1 简化原则和本次新 YAML 设计。
 3. 新建本计划，并将旧 YAML v3 计划、旧兼容要求和不再适用的开发计划标记为历史资料。
 4. 检查最新代码与文档是否一致，尤其是函数面板、默认 Package、Android Targets、插件免签名安装和视频工作台。
@@ -452,7 +452,7 @@ YAML macro / 自定义运算符
 
 ## 改动
 
-1. 保留 `gamer.yaml` 作为官方自动化插件 ID，不为了重构而重新命名。
+1. 保留 `gamer-yaml` 作为官方自动化插件 ID，不为了重构而重新命名。
 2. 将新语法解析、校验、函数解析、执行和错误处理统一归自动化插件所有。
 3. 以插件内 WASM Guest 作为唯一权威执行实现；宿主侧可以保留必要的解析、校验和运行适配代码，但不得再维护另一套独立解释器。
 4. 测试默认通过 Guest Component 验证；NativeYamlHost 只保留 capability/测试装配，不保留可执行完整 DSL 的原生 `Interpreter`。`--no-default-features` 路径只验证“能力不可用/错误可预测”，不能偷偷恢复第二套解释器。
@@ -463,8 +463,8 @@ YAML macro / 自定义运算符
 ### 重点检查目录
 
 ```text
-server/src/extensions/gamer_yaml/
-server/guests/yaml-guest/
+plugins/gamer-yaml/host/
+plugins/gamer-yaml/guest/
 server/wit/gamer/
 server/src/capabilities/
 server/src/run_manager.rs
@@ -502,7 +502,7 @@ V1 只存在：
 
 由当前处于 `Running` 的插件提供，随插件启动、停止、更新和禁用变化；仅安装或仅持久化 `enabled` 不足以把函数放入本次运行环境。
 
-首版主要由 `gamer.yaml` 提供自动化函数。其他插件以后确实需要对自动化开放能力时，复用现有插件调用机制接入，不提前建设新的函数市场或全局函数平台。
+首版主要由 `gamer-yaml` 提供自动化函数。其他插件以后确实需要对自动化开放能力时，复用现有插件调用机制接入，不提前建设新的函数市场或全局函数平台。
 
 函数统一包含：
 
@@ -524,7 +524,7 @@ implementation
 
 ```text
 packages/<package-id>/
-└── plugins/gamer.yaml/
+└── plugins/gamer-yaml/
     ├── automations/
     ├── functions/
     └── templates/
@@ -757,7 +757,7 @@ Task 用户界面首版只提供 Cron：
 
 不新增 Workspace、Installed/Editable 双层、全局函数目录或新的 Package 类型。
 
-新 YAML 的内容校验由 `gamer.yaml` 资源处理器负责。导入包含未安装插件数据的 Package 时仍保留原始数据，不要求 Core 理解其内容。
+新 YAML 的内容校验由 `gamer-yaml` 资源处理器负责。导入包含未安装插件数据的 Package 时仍保留原始数据，不要求 Core 理解其内容。
 
 ## 验收
 
@@ -833,7 +833,7 @@ P6 的后端权威流程必须满足：
 server/src/extensions/model.rs
 server/src/extensions/service.rs
 server/src/extensions/wasm.rs
-server/src/extensions/keymap/
+plugins/gamer-keymap/host/
 server/src/extensions/builtin.rs
 server/src/extensions/manifest.rs
 server/src/api/extensions.rs
@@ -880,7 +880,7 @@ server/src/api/extensions.rs
 2. 删除旧 YAML 参数、函数查找、模板引用等无消费者的兼容适配。
 3. 更新 `docs/reference/YAML.md`、相关语法文档和编辑器说明，使新 V1 成为唯一权威语法。
    同步复核 `docs/yaml-v3/{overview,runtime,call,timing,steps,params}.md` 与邻接文档中的旧 `script_v2` 路径、旧 v2 runtime/parser 描述；历史资料可以保留，但必须显式标注为历史输入，不能继续给实现者作现行契约。
-4. 更新 `gamer.yaml`、`gamer.video` 的公开动作与草稿生成契约。
+4. 更新 `gamer-yaml`、`gamer-video` 的公开动作与草稿生成契约。
 5. 更新官方插件 manifest、SDK 示例和插件开发文档。
 6. 更新构建脚本、registry 和插件包，确保实际打包的 Guest 与新代码一致。
 7. 清理旧版签名相关的文档描述，但不删除 Windows launcher 自身必要的发行完整性和更新验证机制。
@@ -1006,16 +1006,16 @@ Gamer V1 达到以下状态即可认为本轮收敛完成：
 | 阶段 | 状态 | 关键改动（实际文件） | 提交 |
 | --- | --- | --- | --- |
 | Phase 0 | DONE | 本计划落盘 docs/plans/；README/AGENTS 架构说明对齐 V1 | 随本次提交 |
-| Phase 1+2 | DONE | 新增 `server/guests/yaml-interp/`（V1 唯一权威解释器：run=函数调用/if/repeat/return、`$name.field`、函数表运行期冻结、步预算 100k/深度 32、13 项单测）；`yaml-guest` 瘦身为 WIT 胶水并去掉 `programs` 接口；宿主 `syntax.rs`（解析/校验/降线/模板引用改写/确定性序列化）替代 `yaml_vnext.rs`（已删）；旧 v3 原生参考解释器（Interpreter/小 AST/nonce/splitmix64）全删 | `4e08d56` |
+| Phase 1+2 | DONE | 新增 `plugins/gamer-yaml/interpreter/`（V1 唯一权威解释器：run=函数调用/if/repeat/return、`$name.field`、函数表运行期冻结、步预算 100k/深度 32、13 项单测）；`yaml-guest` 瘦身为 WIT 胶水并去掉 `programs` 接口；宿主 `syntax.rs`（解析/校验/降线/模板引用改写/确定性序列化）替代 `yaml_vnext.rs`（已删）；旧 v3 原生参考解释器（Interpreter/小 AST/nonce/splitmix64）全删 | `4e08d56` |
 | Phase 3 | DONE | `native_funcs.rs` 原生函数注册表（17 函数，Schema+权限唯一声明点）；`runner_adapter.rs::compose_function_library` 组合 原生+当前 Package 全部 functions/*.yaml（同名冲突 `yaml.fn.conflict` 拒绝、不跨包）；`GET /api/runners/:id/functions` 原生函数目录 API | `4e08d56` + 本次 |
 | Phase 4 | DONE | 前端 `web/src/script-editor/` 全量重写 V1（model 4 类步骤/Cell/CallArgs、codec 与服务端语义对齐、validation、factories、commands（`run` 寻址 + set_vars）、StepCard/StepCanvas/AddStepPanel/BranchContainer/ParamEditor/ParamsForm、entrypointParams 适配声明数组、函数面板接原生函数目录、function-list 伪模型 `run`）；`video_draft.rs` 产出 V1 草稿；`run_target.rs` args 收敛为原始 JSON 覆盖（任务宽松重绑/手动严格绑定，202 保留 resolved_args） | `4e08d56` + 本次 |
 | Phase 5 | DONE | `POST /api/extensions/:id/enable` = 启用意图 + 直接启动（幂等，可选 keymap profile/AppContext body）；删除 /start /stop /activate 三个细粒度端点（内部保留 start/stop 原语供 reconcile/测试）；前端 PluginCenter 收敛为 启用/停用/更新/卸载，历史版本仅展示；守卫 §14.3 全链改写 | 本次提交 |
-| Phase 6 | DONE | docs/reference/YAML.md 重写为 V1 唯一权威；docs/yaml-v3/ 删除；SCRIPT_EDITOR_CONTRACT.md 标记历史并指向 V1；README/AGENTS 对齐；SDK 三示例 wit 快照与 server/wit 同步（programs 删除）；官方插件重打包（gamer.yaml@3.1.1 V1 guest，registry.json/sha256sums 同步） | 本次提交 |
+| Phase 6 | DONE | docs/reference/YAML.md 重写为 V1 唯一权威；docs/yaml-v3/ 删除；SCRIPT_EDITOR_CONTRACT.md 标记历史并指向 V1；README/AGENTS 对齐；SDK 三示例 wit 快照与 server/wit 同步（programs 删除）；官方插件重打包（gamer-yaml@3.1.1 V1 guest，registry.json/sha256sums 同步） | 本次提交 |
 | Phase 7 | DONE | 后端 607 测试全绿（含真实 WASM guest e2e）；cargo fmt/clippy -D warnings/check --no-default-features 通过；前端 709 测试全绿（65 文件）+ pnpm build 通过 | 门禁记录 |
 
 ## 9.2 已删除（真实收敛，非并存）
 
-- `server/src/extensions/gamer_yaml/yaml_vnext.rs`（v3 纯数据前端/小 AST/splitmix64/nonce）、`params.rs`（标量助手）、原生参考解释器（yaml_extension.rs Interpreter/CapabilityInvoker/YamlProgramResolver）——生产与测试共用 yaml-interp，无第二份解释器
+- `plugins/gamer-yaml/host/yaml_vnext.rs`（v3 纯数据前端/小 AST/splitmix64/nonce）、`params.rs`（标量助手）、原生参考解释器（yaml_extension.rs Interpreter/CapabilityInvoker/YamlProgramResolver）——生产与测试共用 yaml-interp，无第二份解释器
 - psig1 参数签名门禁（task_params 重写为按当前 Schema 绑定）；`TimerRunnerError::ParamStale`；七类 TypedValue/`BoundEntryArgs` wire（args = 原始 JSON）
 - WIT `programs` 接口（函数表改为运行期冻结嵌入）；前端 DefaultsEditor、`version: 3` 编解码、19 类步骤模型、`script:`/`function:` call 命名空间
 - REST `/api/extensions/:id/start|stop|activate`；前端 启动/停止/切换版本 按钮

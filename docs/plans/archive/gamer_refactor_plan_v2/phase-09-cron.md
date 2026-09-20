@@ -61,7 +61,7 @@ schedule
 例如：
 
 ```text
-runner_id = gamer.yaml
+runner_id = gamer-yaml
 entrypoint = daily
 ```
 

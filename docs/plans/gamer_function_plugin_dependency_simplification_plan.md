@@ -118,7 +118,7 @@ battle.yaml
 packages/
 └── <package-id>/
     └── plugins/
-        └── gamer.yaml/
+        └── gamer-yaml/
             ├── scripts/
             │   ├── daily.yaml
             │   ├── login.yaml
@@ -226,7 +226,7 @@ Core 不负责解释 YAML 函数库，也不提供 `wait_find`、`tap_template`�
 
 ### 4.2 基础函数
 
-`gamer.yaml` 对 Core 能力提供面向脚本的基础函数包装，例如：
+`gamer-yaml` 对 Core 能力提供面向脚本的基础函数包装，例如：
 
 ```text
 tap
@@ -294,8 +294,8 @@ tap_template
 
 ```text
 插件函数
-    ├── gamer.yaml 基础函数
-    ├── gamer.yaml 便利函数
+    ├── gamer-yaml 基础函数
+    ├── gamer-yaml 便利函数
     └── 其他插件公开函数（如适用）
 
 Package 函数
@@ -332,7 +332,7 @@ Core 原语是插件使用的底层能力，不作为第三种用户函数来源
 
 ```toml
 [[dependencies]]
-id = "gamer.yaml"
+id = "gamer-yaml"
 version = ">=1.0.0"
 required = false
 ```
@@ -378,12 +378,12 @@ B 未安装 / 未启用 / 版本不兼容
 例如：
 
 ```text
-gamer.video
+gamer-video
     ├── 录制 / 导入 / 播放 / 逐帧 / 标记
-    │      → 不依赖 gamer.yaml
+    │      → 不依赖 gamer-yaml
     │
     └── 创建模板 / 生成 YAML 草稿 / 打开 YAML 编辑器
-           → 可选依赖 gamer.yaml
+           → 可选依赖 gamer-yaml
 ```
 
 缺少 YAML 插件时，视频工作台仍可正常使用媒体功能，只禁用 YAML 相关制作入口。
@@ -451,7 +451,7 @@ Package 依赖
 插件可以声明对外提供的能力，例如：
 
 ```text
-gamer.yaml
+gamer-yaml
     template.create_from_frame
     vision.test_template
     automation.create_draft
@@ -470,8 +470,8 @@ gamer.yaml
 例如：
 
 ```text
-gamer.video
-    → 查询 gamer.yaml 是否提供 template.create_from_frame
+gamer-video
+    → 查询 gamer-yaml 是否提供 template.create_from_frame
     → 可用：显示创建模板入口
     → 不可用：禁用入口并说明原因
 ```
@@ -517,7 +517,7 @@ YAML 插件继续使用自己的工作区，不新增系统级全局函数库页
 
 ```text
 当前 Package
-    → gamer.yaml
+    → gamer-yaml
     → _function.yaml
 ```
 
@@ -721,19 +721,19 @@ Phase 3 和 Phase 4 可以结合实际代码一起实施，但不要为了依赖
 
 **已完成、直接复用（不重建）**：
 
-- 唯一解释器 `server/guests/yaml-interp`（run=函数调用/if/repeat/return，两来源函数表运行期冻结）+ 宿主降线 `gamer_yaml/syntax.rs`（V1 无 version 字段，旧源报 `yaml.version.removed`）。
-- 原生函数注册表 `native_funcs.rs`：17 个函数（tap/swipe/key/input_text/launch/stop_app/sleep/log/find/wait_find/tap_template/wait_disappear/eq..le），Schema+权限唯一声明点；执行宿主 `yaml_extension.rs` NativeYamlHost（`__fn` 通道 = Schema 校验+权限+capability 组合）。全部函数已归插件（gamer.yaml），Core 无业务函数——Phase 2 只需收口 `find` 双语义。
+- 唯一解释器 `plugins/gamer-yaml/interpreter`（run=函数调用/if/repeat/return，两来源函数表运行期冻结）+ 宿主降线 `gamer_yaml/syntax.rs`（V1 无 version 字段，旧源报 `yaml.version.removed`）。
+- 原生函数注册表 `native_funcs.rs`：17 个函数（tap/swipe/key/input_text/launch/stop_app/sleep/log/find/wait_find/tap_template/wait_disappear/eq..le），Schema+权限唯一声明点；执行宿主 `yaml_extension.rs` NativeYamlHost（`__fn` 通道 = Schema 校验+权限+capability 组合）。全部函数已归插件（gamer-yaml），Core 无业务函数——Phase 2 只需收口 `find` 双语义。
 - 函数注册表组合：`runner_adapter.rs::compose_function_library`（原生 ∪ 当前 Package，同名冲突拒绝、不跨包）；运行预算/取消/递归深度内建于解释器。
 - Package 资源：`resources.rs`（PackageStore 三元组 + ResourceHandler 钩子：automations=V1 校验、functions=functions: 包装校验、templates=灰度归一化+重命名引用改写）。
 - 插件生命周期：`extensions/service.rs`（enable=启用意图+直接启动、幂等；安装/启用/禁用/更新/卸载；reconcile_startup）。manifest v2 schema 在 `manifest.rs`（deny_unknown_fields，加 [[dependencies]] 需同步 RawManifest）。
 - 跨插件动作缝：`extensions/mod.rs::native_call_action` + `gamer_yaml/actions.rs` 版本化公开动作清单（5 动作，清单↔分发双向锁测试）；`service.rs::call_extension` 统一分发（目标必须 Running、declarative 按钮集合门禁、结构化拒绝）。Phase 4 只补「能力发现」读端。
-- 前端：script-editor V1（4 类步骤模型/c codec/validation）、函数面板逐函数平铺（useConsoleScriptRunner + useFunctionLibrary + function-list.js）、call 候选=原生目录（GET /api/runners/gamer.yaml/functions）+Package 函数。
+- 前端：script-editor V1（4 类步骤模型/c codec/validation）、函数面板逐函数平铺（useConsoleScriptRunner + useFunctionLibrary + function-list.js）、call 候选=原生目录（GET /api/runners/gamer-yaml/functions）+Package 函数。
 
 **需要修改**：
 
 - 函数存储：`functions/<分类>.yaml` → `automations/_function*.yaml` 前缀识别（resources.rs 钩子/注记/模板改写、compose_function_library、RunTarget::Function 去掉 file 段改为 `<pkg>#<函数名>` 名寻址、timer_yaml submit_manual、entrypoint_descriptor）。前端 api.js listFunctions/listScripts 过滤、useFunctionLibrary、函数面板（分类概念删除，只编辑默认 `_function.yaml`）。
 - `find` 双语义收口：`yaml_extension.rs` find=单次匹配（去 timeout/interval 参数）；wait_find/tap_template/wait_disappear 保留轮询。
-- manifest `[[dependencies]]`（id/version/required）+ 启动期必需依赖检查 + 循环拒绝 + 停用被依赖方守卫 + 快照透传；gamer.video manifest 声明对 gamer.yaml 可选依赖。
+- manifest `[[dependencies]]`（id/version/required）+ 启动期必需依赖检查 + 循环拒绝 + 停用被依赖方守卫 + 快照透传；gamer-video manifest 声明对 gamer-yaml 可选依赖。
 - 能力发现读端：`GET /api/extensions/:id/capabilities`（declarative 按钮 ∪ native 公开动作清单）。
 - video 工作台按能力可用性降级；PluginCenter 依赖提示。
 
@@ -770,19 +770,19 @@ Phase 3 和 Phase 4 可以结合实际代码一起实施，但不要为了依赖
   Enabled + last_error，区别于运行时错误的 Failed；循环拒绝）；`disable`/
   `uninstall` 守卫（被运行中插件必需依赖引用 → 拒绝并提示先停依赖方，
   不级联停用）；快照透传 `dependencies[{id,version_req,required,installed,
-  version,state,satisfied,note}]`；gamer.video 官方 manifest 声明对
-  gamer.yaml 的**可选**依赖（version `*`、required=false）并重打包
+  version,state,satisfied,note}]`；gamer-video 官方 manifest 声明对
+  gamer-yaml 的**可选**依赖（version `*`、required=false）并重打包
   （`.gplugin` + registry v2，build-plugins.ps1 自检通过）。无自动下载/
   自动启用/lockfile。
 - **Phase 4（跨插件能力发现）**：新增 `GET /api/extensions/:id/capabilities`
   → `{id, state, running, actions:[{action, version, surface, summary}]}`，
-  actions = declarative 按钮集合（surface `declarative`）∪ gamer.yaml 版本化
+  actions = declarative 按钮集合（surface `declarative`）∪ gamer-yaml 版本化
   公开动作清单（`native/rest/frontend`，actions.rs 单源）；分发仍统一走
   `POST /api/extensions/:id/call`（Running + 公开集合 + 权限/上下文门禁），
   无新增专用 ID 分支。
 - **Phase 5（前端体验收口）**：`yamlCapability.js` 升级为能力发现端点驱动
   （ready = Running，`hasAction(action)` 按公开清单判定；视频导入/录制/播放/
-  逐帧/标记不受 gamer.yaml 缺失影响，模板创建/草稿入口按能力降级——沿用
+  逐帧/标记不受 gamer-yaml 缺失影响，模板创建/草稿入口按能力降级——沿用
   既有 `yaml-ready` 门禁链路）；PluginCenter 依赖提示区分必需（缺失/未启用
   报错 + 处置指引）与可选（缺失 → 「相关功能入口已降级」提示），依赖实时
   状态来自服务端快照。

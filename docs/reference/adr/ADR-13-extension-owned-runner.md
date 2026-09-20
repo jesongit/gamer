@@ -6,7 +6,7 @@
 
 ## 背景
 
-当前 Runner 抽象已存在，但 `gamer.yaml` Runner 仍由 Native Server 代码构造——卸载 gamer.yaml 后 Core 依然知道它怎么执行，违反插件生命周期（ADR-11 问题 3）。Runner 必须与 Extension 生命周期绑定。
+当前 Runner 抽象已存在，但 `gamer-yaml` Runner 仍由 Native Server 代码构造——卸载 gamer-yaml 后 Core 依然知道它怎么执行，违反插件生命周期（ADR-11 问题 3）。Runner 必须与 Extension 生命周期绑定。
 
 ## 决策
 
@@ -24,7 +24,7 @@ Runner 生命周期与 Extension 生命周期严格绑定：
 
 Runner 缺失时（TimerCore 执行 Task 查不到 `runner_id`）：
 
-- Task 进入 `DEPENDENCY_MISSING` 状态，记录 `missing_dependency`（如 `gamer.yaml`）；
+- Task 进入 `DEPENDENCY_MISSING` 状态，记录 `missing_dependency`（如 `gamer-yaml`）；
 - **Task 不删除**——用户配置是资产，不因插件暂时离位而丢。
 
 Extension 重新启用 / 重装并重新注册 Runner 后，依赖该 Runner 的 Task 自动恢复 `READY`（或等待下一个 schedule 触发）。
@@ -32,5 +32,5 @@ Extension 重新启用 / 重装并重新注册 Runner 后，依赖该 Runner 的
 ## 后果
 
 - 完成后删除 Native 的 `YamlTimerRunner` / `timer_yaml.rs`；其中通用逻辑先搬入 TimerCore / RunManager / Extension Runtime，再删除 YAML-specific 部分。
-- "卸载 gamer.yaml" 从此具备完整语义：其 Runner、UI、解析能力同时消失，悬挂 Task 明确挂起而非静默失败。
-- P11.9 的 Extension Lifecycle Test / Bare Core Test 依此验收：无 gamer.yaml 时裸 Core 可启动，Task 呈 DEPENDENCY_MISSING；装回即恢复。
+- "卸载 gamer-yaml" 从此具备完整语义：其 Runner、UI、解析能力同时消失，悬挂 Task 明确挂起而非静默失败。
+- P11.9 的 Extension Lifecycle Test / Bare Core Test 依此验收：无 gamer-yaml 时裸 Core 可启动，Task 呈 DEPENDENCY_MISSING；装回即恢复。

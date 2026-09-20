@@ -197,12 +197,12 @@ packages/
    ├─ package.toml
    │
    └─ plugins/
-       ├─ gamer.yaml/
+       ├─ gamer-yaml/
        │   ├─ automations/
        │   ├─ functions/
        │   └─ templates/
        │
-       └─ gamer.keymap/
+       └─ gamer-keymap/
            └─ mappings/
 ```
 
@@ -274,10 +274,10 @@ Package 可以声明 Plugin Dependency。
 例如：
 
 ```toml
-[plugins."gamer.yaml"]
+[plugins."gamer-yaml"]
 required = true
 
-[plugins."gamer.keymap"]
+[plugins."gamer-keymap"]
 required = false
 ```
 
@@ -301,7 +301,7 @@ Package 仍允许导入。
 并提示缺少：
 
 ```text
-gamer.yaml
+gamer-yaml
 ```
 
 允许后续安装。
@@ -315,10 +315,10 @@ Package 正常导入。
 例如：
 
 ```text
-plugins/gamer.keymap/
+plugins/gamer-keymap/
 ```
 
-即使当前没有安装 `gamer.keymap`，也不删除。
+即使当前没有安装 `gamer-keymap`，也不删除。
 
 后续安装插件后自动恢复对应能力。
 
@@ -339,23 +339,23 @@ Package 包含 Plugin Data
 
 ```text
 Package
-├─ plugins/gamer.yaml/
-└─ plugins/gamer.keymap/
+├─ plugins/gamer-yaml/
+└─ plugins/gamer-keymap/
 ```
 
 当前仅安装：
 
 ```text
-gamer.yaml
+gamer-yaml
 ```
 
 那么：
 
 ```text
-gamer.yaml 数据
+gamer-yaml 数据
     → 正常加载
 
-gamer.keymap 数据
+gamer-keymap 数据
     → 保留
     → 不解释
     → 不修改
@@ -364,7 +364,7 @@ gamer.keymap 数据
 后续：
 
 ```text
-安装 gamer.keymap
+安装 gamer-keymap
 ```
 
 即可直接使用已有数据。
@@ -598,7 +598,7 @@ Plugin Resource Path
 ```text
 official.hsr.daily
 +
-gamer.yaml
+gamer-yaml
 +
 automations/daily.yaml
 ```
@@ -1130,7 +1130,7 @@ Panel
 packages/
 official.hsr.daily/
 plugins/
-gamer.yaml/
+gamer-yaml/
 ...
 ```
 
@@ -1389,7 +1389,7 @@ Navigation Architecture
        │                     │                     │
        │             ┌───────┴────────┐            │
        │             │                │            │
-       │       gamer.yaml data    keymap data      │
+       │       gamer-yaml data    keymap data      │
        │                                           │
        └──────────────── Runtime Context ──────────┘
                               │
