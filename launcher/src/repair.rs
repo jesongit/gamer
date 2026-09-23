@@ -418,14 +418,7 @@ fn repair_one(
             id: spec.id.clone(),
             version: spec.version.clone(),
             outcome: ComponentOutcome::Failed {
-                reason: format!(
-                    "新组件目录 rename 到位失败: {e}（{}）",
-                    if moved_back {
-                        "旧目录已恢复原位"
-                    } else {
-                        "旧目录在 quarantine，需人工恢复"
-                    }
-                ),
+                reason: install_move_error("组件", &dir, &e, quarantined.is_some(), moved_back),
             },
         };
     }
@@ -550,13 +543,12 @@ fn repair_app(layout: &InstallLayout, app: &AppInstallSpec, opts: &RepairOptions
             );
         }
         cleanup_dir(&staging);
-        return failed(format!(
-            "新版本目录 rename 到位失败: {e}（{}）",
-            if moved_back {
-                "旧目录已恢复原位"
-            } else {
-                "旧目录在 quarantine，需人工恢复"
-            }
+        return failed(install_move_error(
+            "软件",
+            &dir,
+            &e,
+            quarantined.is_some(),
+            moved_back,
         ));
     }
 
@@ -657,6 +649,26 @@ fn broken_summary(finding: &ComponentFinding) -> String {
     }
 }
 
+fn install_move_error(
+    kind: &str,
+    target: &Path,
+    error: &std::io::Error,
+    had_previous: bool,
+    restored: bool,
+) -> String {
+    let recovery = if !had_previous {
+        "本次安装未完成，可以重试"
+    } else if restored {
+        "旧目录已恢复原位"
+    } else {
+        "旧目录保留在 quarantine，需人工恢复"
+    };
+    format!(
+        "{kind}目录切换失败：{error}。请关闭占用安装目录的程序（如开发预览或文件监听器），并确认目录可写后重试。目标：{}（{recovery}）",
+        target.display()
+    )
+}
+
 fn cleanup_dir(path: &PathBuf) {
     if path.exists() {
         let _ = fs::remove_dir_all(path);
@@ -666,4 +678,20 @@ fn cleanup_dir(path: &PathBuf) {
 /// 取产物来源标签暴露给测试（seed/cache/remote）。
 pub fn obtained_source(obtained: &Obtained) -> &'static str {
     obtained.source_label()
+}
+
+#[cfg(test)]
+mod move_error_tests {
+    use super::*;
+
+    #[test]
+    fn first_install_does_not_claim_a_previous_directory_was_restored() {
+        let error = std::io::Error::from_raw_os_error(5);
+        let target = Path::new("versions/0.2.0");
+        let fresh = install_move_error("软件", target, &error, false, true);
+        assert!(fresh.contains("本次安装未完成"));
+        assert!(!fresh.contains("旧目录"));
+        assert!(install_move_error("软件", target, &error, true, true).contains("已恢复原位"));
+        assert!(install_move_error("软件", target, &error, true, false).contains("需人工恢复"));
+    }
 }

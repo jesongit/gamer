@@ -4,7 +4,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -106,20 +106,23 @@ fn temp_path(path: &Path) -> PathBuf {
 /// rename 有界重试：仅针对 ERROR_ACCESS_DENIED(5) / ERROR_SHARING_VIOLATION(32) /
 /// ERROR_LOCK_VIOLATION(33) 的短暂占用；重试耗尽返回最后一个错误。
 pub fn rename_with_retry(from: &Path, to: &Path) -> io::Result<()> {
-    let mut last_err: Option<io::Error> = None;
-    for attempt in 0..10u32 {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut delay = Duration::from_millis(25);
+    loop {
         match fs::rename(from, to) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 let retryable = matches!(e.raw_os_error(), Some(5 | 32 | 33))
                     || e.kind() == io::ErrorKind::PermissionDenied;
-                if !retryable || attempt == 9 {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if !retryable || remaining.is_zero() {
+                    tracing::warn!(source = %from.display(), target = %to.display(), error = %e,
+                        "文件或目录切换失败；请检查权限及占用该目录的程序");
                     return Err(e);
                 }
-                last_err = Some(e);
-                std::thread::sleep(Duration::from_millis(25));
+                std::thread::sleep(delay.min(remaining));
+                delay = (delay * 2).min(Duration::from_millis(500));
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| io::Error::other("rename 重试耗尽")))
 }
