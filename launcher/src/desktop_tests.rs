@@ -1,6 +1,38 @@
 use super::*;
 use std::time::Instant;
 
+#[test]
+fn cancelling_busy_install_preserves_progress_and_queues_exit_once() {
+    let (jobs, receiver) = mpsc::channel();
+    let (_, updates) = mpsc::channel();
+    let mut desktop = Desktop {
+        layout: InstallLayout {
+            root: PathBuf::new(),
+        },
+        jobs,
+        updates,
+        control: TransferControl::default(),
+        snapshot: Snapshot {
+            stage: Stage::Working,
+            ..Default::default()
+        },
+        tray: None,
+        exit: false,
+        cancelling: false,
+        quiet_start: true,
+    };
+    desktop.cancel();
+    desktop.cancel();
+    assert!(desktop.control.is_paused());
+    assert!(desktop.cancelling);
+    assert!(matches!(receiver.try_recv(), Ok(Job::Exit)));
+    assert!(receiver.try_recv().is_err());
+    assert!(
+        !desktop.exit,
+        "GUI must await worker safe-exit acknowledgement"
+    );
+}
+
 struct Harness {
     jobs: mpsc::Sender<Job>,
     updates: mpsc::Receiver<Event>,

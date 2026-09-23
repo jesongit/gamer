@@ -38,7 +38,6 @@ struct Snapshot {
     message: String,
     current: Option<String>,
     target: Option<String>,
-    components: Vec<(String, String, u64)>,
     plugins: Vec<crate::official_plugins::Choice>,
     busy: bool,
 }
@@ -49,7 +48,6 @@ impl Default for Snapshot {
             message: "正在检查本地文件与可用更新…".into(),
             current: None,
             target: None,
-            components: Vec::new(),
             plugins: Vec::new(),
             busy: true,
         }
@@ -109,8 +107,10 @@ pub fn run(layout: InstallLayout) -> i32 {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Gamer 启动器")
-            .with_inner_size([780.0, 580.0])
-            .with_min_inner_size([650.0, 480.0]),
+            .with_inner_size([440.0, 250.0])
+            .with_resizable(false)
+            .with_maximize_button(false)
+            .with_visible(false),
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -131,6 +131,9 @@ pub fn run(layout: InstallLayout) -> i32 {
                     Worker::run(worker_layout, worker_control, receiver, events, ctx);
                 })?;
             let tray = make_tray(&cc.egui_ctx).ok();
+            let quiet_start = tray.is_some();
+            cc.egui_ctx
+                .send_viewport_cmd(ViewportCommand::Visible(!quiet_start));
             jobs.send(Job::Inspect(true))?;
             Ok(Box::new(Desktop {
                 layout,
@@ -140,6 +143,8 @@ pub fn run(layout: InstallLayout) -> i32 {
                 snapshot: Snapshot::default(),
                 tray,
                 exit: false,
+                cancelling: false,
+                quiet_start,
             }))
         }),
     );
@@ -177,8 +182,8 @@ fn configure(ctx: &egui::Context) {
     style.visuals.override_text_color = Some(Color32::from_rgb(237, 240, 238));
     style.visuals.selection.bg_fill = Color32::from_rgb(90, 80, 30);
     style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(40, 43, 45);
-    style.spacing.item_spacing = egui::vec2(12.0, 12.0);
-    style.spacing.button_padding = egui::vec2(18.0, 10.0);
+    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+    style.spacing.button_padding = egui::vec2(14.0, 7.0);
     ctx.set_style_of(egui::Theme::Dark, style);
 }
 fn make_tray(ctx: &egui::Context) -> Result<TrayIcon, Box<dyn std::error::Error>> {
@@ -248,19 +253,31 @@ struct Desktop {
     snapshot: Snapshot,
     tray: Option<TrayIcon>,
     exit: bool,
+    cancelling: bool,
+    quiet_start: bool,
 }
 impl Desktop {
-    fn send(&self, job: Job) {
-        let _ = self.jobs.send(job);
+    fn send(&mut self, job: Job) {
+        if self.jobs.send(job).is_ok() {
+            self.snapshot.busy = true;
+        }
     }
-    fn show(ctx: &egui::Context) {
+    fn show(&mut self, ctx: &egui::Context) {
+        self.quiet_start = false;
         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(ViewportCommand::Focus);
     }
-    fn action(&self, action: &str, ctx: &egui::Context) {
+    fn cancel(&mut self) {
+        if !self.cancelling {
+            self.cancelling = true;
+            self.control.pause();
+            self.send(Job::Exit);
+        }
+    }
+    fn action(&mut self, action: &str, ctx: &egui::Context) {
         match action {
-            "show" => Self::show(ctx),
+            "show" => self.show(ctx),
             "pause" => self.control.pause(),
             "open" if self.snapshot.stage == Stage::Running => crate::commands::open_browser(
                 crate::supervisor::read_configured_port(&self.layout.config_file()),
@@ -270,21 +287,26 @@ impl Desktop {
                 self.send(Job::Install);
             }
             "check" if !self.snapshot.busy => {
-                Self::show(ctx);
+                self.show(ctx);
                 self.send(Job::Inspect(false));
             }
             "repair" if !self.snapshot.busy => {
-                Self::show(ctx);
+                self.show(ctx);
                 self.send(Job::Repair);
             }
             "stop" if !self.snapshot.busy => self.send(Job::Stop),
-            "exit" if !self.snapshot.busy => self.send(Job::Exit),
+            "exit" => self.cancel(),
             _ => {}
         }
     }
 }
 impl eframe::App for Desktop {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        // eframe may show its first rendered frame regardless of the initial builder flag.
+        // Keep startup hidden until an explicit interaction or actionable state reveals it.
+        if self.quiet_start {
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        }
         if GUI_EVENTS.get().is_none() {
             let (tx, rx) = mpsc::channel();
             let _ = GUI_EVENTS.set(tx);
@@ -300,9 +322,28 @@ impl eframe::App for Desktop {
         while let Ok(event) = self.updates.try_recv() {
             match event {
                 Event::State(state) => {
-                    if matches!(state.stage, Stage::Error | Stage::Update) {
-                        Self::show(ctx);
+                    if self.cancelling && state.stage == Stage::Error {
+                        self.cancelling = false;
+                        self.control.resume();
                     }
+                    if !self.cancelling
+                        && matches!(
+                            state.stage,
+                            Stage::Install
+                                | Stage::Update
+                                | Stage::Plugins
+                                | Stage::Paused
+                                | Stage::Error
+                        )
+                    {
+                        self.show(ctx);
+                    }
+                    let height = match state.stage {
+                        Stage::Plugins => 320.0,
+                        Stage::Error => 300.0,
+                        _ => 250.0,
+                    };
+                    ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(440.0, height)));
                     self.snapshot = state;
                 }
                 Event::Hide if self.tray.is_some() => {
@@ -318,14 +359,14 @@ impl eframe::App for Desktop {
         let show = self.layout.state_dir().join("show-launcher");
         if show.exists() {
             let _ = fs::remove_file(show);
-            Self::show(ctx);
+            self.show(ctx);
         }
         if !self.exit && ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             if self.tray.is_some() {
                 ctx.send_viewport_cmd(ViewportCommand::Visible(false));
-            } else if !self.snapshot.busy {
-                self.send(Job::Exit);
+            } else {
+                self.cancel();
             }
         }
         if ctx.input(|i| i.viewport().minimized == Some(true)) && self.tray.is_some() {
@@ -334,184 +375,211 @@ impl eframe::App for Desktop {
         ctx.request_repaint_after(Duration::from_millis(500));
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().id_salt("launcher-page").show(ui, |ui| {
-            ui.add_space(15.0);
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("GAMER")
-                        .size(30.0)
-                        .strong()
-                        .color(Color32::from_rgb(228, 201, 86)),
-                );
-                ui.label("游戏自动化助手");
-            });
-            ui.add_space(8.0);
-            let title = match self.snapshot.stage {
-                Stage::Checking => "检查安装",
-                Stage::Install => "准备安装",
-                Stage::Ready | Stage::Stopped => "准备就绪",
-                Stage::Update => "发现新版本",
-                Stage::Working => "正在处理",
-                Stage::Paused => "下载已暂停",
-                Stage::Plugins => "选择官方插件",
-                Stage::Running => "Gamer 正在运行",
-                Stage::Error => "需要处理",
-            };
-            ui.heading(title);
-            ui.label(&self.snapshot.message);
-            ui.label(
-                RichText::new(format!("安装位置  {}", self.layout.root.display().to_string().trim_start_matches(r"\\?\")))
-                    .small()
-                    .color(Color32::from_rgb(164, 173, 170)),
-            );
-            ui.horizontal(|ui| {
-                if let Some(v) = &self.snapshot.current {
-                    ui.label(format!("已安装 {v}"));
-                }
-                if let Some(v) = &self.snapshot.target {
-                    ui.label(format!("发行版本 {v}"));
-                }
-            });
-            ui.separator();
-            if self.snapshot.stage != Stage::Plugins {
-            egui::ScrollArea::vertical()
-                .max_height(230.0)
-                .show(ui, |ui| {
-                    egui::Grid::new("components")
-                        .num_columns(3)
-                        .spacing([30.0, 12.0])
-                        .show(ui, |ui| {
-                            ui.strong("安装内容");
-                            ui.strong("版本");
-                            ui.strong("下载大小");
-                            ui.end_row();
-                            for (name, version, size) in &self.snapshot.components {
-                                ui.label(name);
-                                ui.label(version);
-                                ui.label(format!("{:.1} MB", *size as f64 / 1048576.0));
-                                ui.end_row();
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(23, 25, 26))
+                    .inner_margin(20),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("GAMER")
+                            .size(22.0)
+                            .strong()
+                            .color(Color32::from_rgb(228, 201, 86)),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let version = match (&self.snapshot.current, &self.snapshot.target) {
+                            (Some(current), Some(target))
+                                if self.snapshot.stage == Stage::Update =>
+                            {
+                                format!("{current} → {target}")
                             }
-                        });
+                            (_, Some(target)) => format!("v{target}"),
+                            (Some(current), _) => format!("v{current}"),
+                            _ => String::new(),
+                        };
+                        ui.label(RichText::new(version).small().weak());
+                    });
                 });
-            }
-            if self.snapshot.stage == Stage::Plugins {
-                ui.label("选择要启用的插件；点击安装即同意下面列出的权限，也可以全部取消后继续。");
+                ui.add_space(6.0);
+                // Keep the two actions visible even when permissions or errors need scrolling.
+                let body_height = (ui.available_height() - 48.0).max(40.0);
                 egui::ScrollArea::vertical()
-                    .max_height(190.0)
-                    .id_salt("plugin-permissions")
+                    .id_salt("launcher-body")
+                    .max_height(body_height)
+                    .min_scrolled_height(body_height)
+                    .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        for plugin in &mut self.snapshot.plugins {
-                            ui.checkbox(
-                                &mut plugin.selected,
-                                format!("{}  {}", plugin.name, plugin.version),
-                            );
-                            ui.label(
-                                RichText::new(format!(
-                                    "所需权限：{}",
-                                    plugin.permissions.iter().map(|p| permission_label(p)).collect::<Vec<_>>().join("、")
-                                ))
-                                .small()
-                                .weak(),
-                            ).on_hover_text(plugin.permissions.join("、"));
+                        let title = if self.cancelling {
+                            "正在安全取消…"
+                        } else {
+                            match self.snapshot.stage {
+                                Stage::Checking => "正在启动…",
+                                Stage::Install => "安装 Gamer",
+                                Stage::Update => "有新版本可用",
+                                Stage::Plugins => "选择需要的功能",
+                                Stage::Working => "正在准备…",
+                                Stage::Paused => "已暂停",
+                                Stage::Error => "暂时无法继续",
+                                Stage::Running => "Gamer 正在运行",
+                                Stage::Ready | Stage::Stopped => "准备就绪",
+                            }
+                        };
+                        ui.label(RichText::new(title).size(17.0).strong());
+                        if self.cancelling {
+                            ui.label("保留已下载内容，安全结束后退出。");
+                        } else {
+                            match self.snapshot.stage {
+                                Stage::Install => {
+                                    ui.label("自动准备软件和所需组件。");
+                                    let root = self.layout.root.display().to_string();
+                                    let root = root.trim_start_matches(r"\\?\");
+                                    ui.add(
+                                        egui::Label::new(RichText::new(root).small().weak())
+                                            .truncate(),
+                                    )
+                                    .on_hover_text(root);
+                                }
+                                Stage::Update => {
+                                    ui.label("更新完成后自动打开工作台。");
+                                }
+                                Stage::Plugins => {
+                                    ui.label(
+                                        RichText::new("可选，之后也能在工作台安装。")
+                                            .small()
+                                            .weak(),
+                                    );
+                                    for plugin in &mut self.snapshot.plugins {
+                                        egui::collapsing_header::CollapsingState::load_with_default_open(
+                                            ui.ctx(), ui.make_persistent_id(&plugin.id), false,
+                                        )
+                                            .show_header(ui, |ui| {
+                                                ui.checkbox(&mut plugin.selected, &plugin.name);
+                                                ui.label(RichText::new("权限").small().weak());
+                                            })
+                                            .body(|ui| {
+                                                ui.label(
+                                                    RichText::new(
+                                                        plugin
+                                                            .permissions
+                                                            .iter()
+                                                            .map(|p| permission_label(p))
+                                                            .collect::<Vec<_>>()
+                                                            .join("、"),
+                                                    )
+                                                    .small()
+                                                    .weak(),
+                                                )
+                                                .on_hover_text(plugin.permissions.join("、"));
+                                            });
+                                    }
+                                    ui.label(
+                                        RichText::new("继续即同意所选插件的权限。").small().weak(),
+                                    );
+                                }
+                                Stage::Running => {
+                                    ui.label("关闭窗口后继续在托盘运行。");
+                                }
+                                Stage::Ready | Stage::Stopped => {
+                                    ui.label("点击启动即可打开工作台。");
+                                }
+                                _ => {
+                                    ui.label(&self.snapshot.message);
+                                }
+                            }
+                        }
+                        let (done, total) = self.control.progress();
+                        if self.snapshot.busy && !self.cancelling {
+                            ui.add_space(6.0);
+                            if total > 0 {
+                                ui.add(egui::ProgressBar::new(done as f32 / total as f32).text(
+                                    format!(
+                                        "{:.1} / {:.1} MB",
+                                        done as f64 / 1048576.0,
+                                        total as f64 / 1048576.0
+                                    ),
+                                ));
+                            } else {
+                                ui.spinner();
+                            }
                         }
                     });
-            }
-            let (done, total) = self.control.progress();
-            if self.snapshot.busy && total > 0 {
-                ui.add(
-                    egui::ProgressBar::new(done as f32 / total as f32).text(format!(
-                        "{:.1} / {:.1} MB",
-                        done as f64 / 1048576.0,
-                        total as f64 / 1048576.0
-                    )),
-                );
-            }
-            ui.add_space(10.0);
-            ui.horizontal_wrapped(|ui| {
-                if self.snapshot.busy {
-                    ui.spinner();
-                    if ui
-                        .button(if self.control.is_paused() {
-                            "继续下载"
-                        } else {
-                            "暂停下载"
-                        })
-                        .clicked()
-                    {
-                        if self.control.is_paused() {
-                            self.control.resume();
-                        } else {
-                            self.control.pause();
+                ui.add_space(12.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let primary = if self.snapshot.busy {
+                        "暂停"
+                    } else {
+                        match self.snapshot.stage {
+                            Stage::Install => "安装",
+                            Stage::Update => "更新",
+                            Stage::Plugins | Stage::Paused => "继续",
+                            Stage::Running => "打开网页",
+                            Stage::Error => "重试",
+                            _ => "启动",
                         }
-                    }
-                } else {
-                    let primary = match self.snapshot.stage {
-                        Stage::Install => "安装 Gamer",
-                        Stage::Update => "立即更新",
-                        Stage::Paused => "继续安装",
-                        Stage::Plugins => "安装所选插件并启动",
-                        Stage::Running => "打开工作台",
-                        Stage::Error => "重试",
-                        _ => "启动 Gamer",
                     };
+                    let can_pause = self.snapshot.busy && self.snapshot.stage == Stage::Working;
                     if ui
-                        .add(
+                        .add_enabled(
+                            !self.cancelling && (!self.snapshot.busy || can_pause),
                             egui::Button::new(
                                 RichText::new(primary).color(Color32::from_rgb(23, 25, 26)),
                             )
+                            .min_size(egui::vec2(88.0, 32.0))
                             .fill(Color32::from_rgb(228, 201, 86)),
                         )
                         .clicked()
                     {
-                        self.control.resume();
-                        match self.snapshot.stage {
-                            Stage::Install | Stage::Update | Stage::Paused => {
-                                self.send(Job::Install)
+                        if self.snapshot.busy {
+                            self.control.pause();
+                        } else {
+                            self.control.resume();
+                            match self.snapshot.stage {
+                                Stage::Install | Stage::Update | Stage::Paused => {
+                                    self.send(Job::Install)
+                                }
+                                Stage::Plugins => self.send(Job::Plugins(
+                                    self.snapshot
+                                        .plugins
+                                        .iter()
+                                        .filter(|p| p.selected)
+                                        .map(|p| p.id.clone())
+                                        .collect(),
+                                )),
+                                Stage::Running => self.action("open", ui.ctx()),
+                                Stage::Error => self.send(Job::Inspect(false)),
+                                _ => self.send(Job::Start),
                             }
-                            Stage::Plugins => self.send(Job::Plugins(
-                                self.snapshot
-                                    .plugins
-                                    .iter()
-                                    .filter(|p| p.selected)
-                                    .map(|p| p.id.clone())
-                                    .collect(),
-                            )),
-                            Stage::Running => self.action("open", ui.ctx()),
-                            Stage::Error => self.send(Job::Inspect(false)),
-                            _ => self.send(Job::Start),
                         }
                     }
-                    if self.snapshot.stage == Stage::Update
-                        && self.snapshot.current.is_some()
-                        && ui.button("暂不更新，启动现有版本").clicked()
+                    let secondary = match self.snapshot.stage {
+                        Stage::Plugins => "跳过",
+                        Stage::Running => "收起",
+                        _ => "取消",
+                    };
+                    if ui
+                        .add_enabled(
+                            !self.cancelling,
+                            egui::Button::new(secondary).min_size(egui::vec2(88.0, 32.0)),
+                        )
+                        .clicked()
                     {
-                        self.send(Job::Start);
+                        match self.snapshot.stage {
+                            Stage::Plugins if !self.snapshot.busy => {
+                                self.send(Job::Plugins(vec![]))
+                            }
+                            Stage::Running | Stage::Update
+                                if self.tray.is_some() && !self.snapshot.busy =>
+                            {
+                                ui.ctx().send_viewport_cmd(ViewportCommand::Visible(false));
+                            }
+                            _ => self.cancel(),
+                        }
                     }
-                    if ui.button("检查更新").clicked() {
-                        self.send(Job::Inspect(false));
-                    }
-                    if self.snapshot.current.is_some() && ui.button("校验并修复").clicked() {
-                        self.send(Job::Repair);
-                    }
-                }
+                });
             });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("关闭窗口后保留托盘，可从托盘退出 Gamer")
-                        .small()
-                        .weak(),
-                );
-                if ui
-                    .add_enabled(!self.snapshot.busy, egui::Button::new("退出 Gamer"))
-                    .clicked()
-                {
-                    self.send(Job::Exit);
-                }
-            });
-            });
-        });
     }
 }
 
@@ -728,28 +796,6 @@ impl Worker {
             .platforms
             .get(dist::PLATFORM)
             .ok_or("发行平台不匹配")?;
-        self.state.components = vec![(
-            "Gamer 软件本体".into(),
-            model.release.version.clone(),
-            platform.app.artifact.size as u64,
-        )];
-        self.state
-            .components
-            .extend(platform.components.iter().map(|c| {
-                (
-                    match c.id.as_str() {
-                        "adb" => "ADB 设备连接",
-                        "ffmpeg" => "FFmpeg / FFprobe",
-                        "scrcpy-server" => "scrcpy 投屏服务",
-                        "launcher" => "Gamer 启动器",
-                        "official-plugins" => "官方插件安装包",
-                        other => other,
-                    }
-                    .to_string(),
-                    c.version.clone(),
-                    c.artifact.size as u64,
-                )
-            }));
         if self.state.current.is_none() {
             self.state.stage = Stage::Install;
             self.state.message = "软件与所需组件将安装到启动器所在目录".into();
@@ -985,6 +1031,9 @@ impl Worker {
         self.first_plugins(&model)
     }
     fn first_plugins(&mut self, model: &Manifest) -> Result<(), String> {
+        if self.control.is_paused() {
+            return Err("操作已暂停，已完成的内容会保留".into());
+        }
         if !self.layout.state_dir().join("plugins-choice.json").exists() {
             self.state.plugins = crate::official_plugins::choices(&self.layout, model)?;
             if !self.state.plugins.is_empty() {

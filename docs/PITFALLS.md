@@ -431,3 +431,5 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 
 - 开发脚本按进程名或端口兜底会误认领发行版 Gamer/其他项目 Vite；按本仓库 EXE 与 Vite 完整入口路径识别，发送停机请求前核对端口归属，其他 Gamer 仍运行时跳过共享 ADB 重置。
 - 临时 Vite 预览以整个仓库为 root 会监听 release/dist 内新建的安装 staging，Windows 目录句柄导致本体切换报 os error 5；预览完成即退出，监听范围排除发行目录，持续占用需关闭来源，短暂占用由启动器有界重试（首次失败不得误报“旧目录已恢复”）。
+- eframe 首帧可能强制显示窗口，单设 ViewportBuilder.visible=false 仍会在启动检查时弹窗；托盘就绪后在 quiet_start 阶段持续发隐藏命令，进入安装/更新/错误或用户主动唤回时才解除。
+- Windows Get-Process.MainWindowHandle 在主窗口隐藏后可能指向托盘的 1×1 辅助窗口，导致“窗口可见”误判；验收按进程 ID 和 Gamer 主窗口标题匹配句柄，再检查 IsWindowVisible。
