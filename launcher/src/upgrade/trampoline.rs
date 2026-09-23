@@ -28,6 +28,7 @@ const DEFAULT_PARENT_WAIT: Duration = Duration::from_secs(30);
 /// current launcher 的父目录，保证 staging 与目标位于同一卷。
 #[derive(Debug, Clone)]
 pub struct LauncherUpdateRequest {
+    pub restart: bool,
     pub current: PathBuf,
     pub candidate: PathBuf,
     pub temp_parent: Option<PathBuf>,
@@ -37,6 +38,7 @@ pub struct LauncherUpdateRequest {
 impl LauncherUpdateRequest {
     pub fn new(current: impl Into<PathBuf>, candidate: impl Into<PathBuf>) -> Self {
         Self {
+            restart: false,
             current: current.into(),
             candidate: candidate.into(),
             temp_parent: None,
@@ -150,7 +152,10 @@ fn stage_candidate(request: &LauncherUpdateRequest) -> Result<StagedLauncher, Tr
 /// 文件替换；helper 失败不会删除 current。
 pub fn schedule(request: &LauncherUpdateRequest) -> Result<Child, TrampolineError> {
     let mut staged = stage_candidate(request)?;
-    let env = trampoline_environment(request, &staged);
+    let mut env = trampoline_environment(request, &staged);
+    if request.restart {
+        env.insert("GAMER_LAUNCHER_RESTART_AFTER_UPDATE".into(), "1".into());
+    }
     let child = supervisor::spawn_trampoline(&request.current, &env)?;
     staged.cleanup = false;
     Ok(child)
@@ -220,7 +225,20 @@ pub fn run_from_environment() -> Result<(), TrampolineError> {
             "等待旧 launcher 退出超时；旧 launcher 未被替换".to_string(),
         ));
     }
-    apply_staged(&staged, &temp_dir, &current)
+    apply_staged(&staged, &temp_dir, &current)?;
+    if std::env::var("GAMER_LAUNCHER_RESTART_AFTER_UPDATE")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new(&current)
+            .env_remove(TRAMPOLINE_MODE_ENV)
+            .env_remove("GAMER_LAUNCHER_RESTART_AFTER_UPDATE")
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+            .spawn()?;
+    }
+    Ok(())
 }
 
 /// 使用生产替换实现提交 staged launcher。失败时 current 保持不变（原子替换

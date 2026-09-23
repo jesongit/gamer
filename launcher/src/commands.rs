@@ -16,7 +16,7 @@ use crate::repair::{self, RepairGate, RepairOptions};
 use crate::state::atomic::LoadOutcome;
 use crate::state::lock::InstanceLock;
 use crate::state::StateStore;
-use crate::supervisor::{self, LaunchExtras, LaunchPlan, ReadyProbe};
+use crate::supervisor::{self, LaunchExtras, ReadyProbe};
 use crate::upgrade::engine::{Engine, ManifestSource, UpgradeOptions, UpgradeOutcome};
 use crate::upgrade::recovery::{self, RecoveryOutcome};
 use crate::upgrade::trampoline;
@@ -79,7 +79,7 @@ pub fn normalize_cli_paths(cli: &mut Cli) {
                 *manifest = normalized;
             }
         }
-        Command::Start | Command::Status => {}
+        Command::Gui | Command::Start | Command::Status => {}
     }
 }
 
@@ -96,6 +96,7 @@ pub fn dispatch(cli: &Cli, layout: &InstallLayout) -> i32 {
         };
     }
     match &cli.command {
+        Command::Gui => crate::desktop::run(layout.clone()),
         Command::Start => cmd_start(layout, cli),
         Command::Status => cmd_status(layout),
         Command::Doctor {
@@ -360,7 +361,17 @@ pub fn doctor_inventory_report(
         match crate::repair::AppInstallSpec::from_model(platform, &bundle.model.release.version) {
             Ok(app_spec) => match current_version {
                 Some(v) if v == app_spec.version => {
-                    match crate::repair::verify_app_dir(&app_spec.install_dir(layout), &app_spec) {
+                    let result = if deep {
+                        crate::app_inventory::verify(
+                            layout,
+                            &app_spec,
+                            &app_spec.install_dir(layout),
+                            true,
+                        )
+                    } else {
+                        crate::repair::verify_app_dir(&app_spec.install_dir(layout), &app_spec)
+                    };
+                    match result {
                         Ok(()) => lines.push(format!(
                             "[PASS] app {}: 版本目录完好（entrypoint + scrcpy-server hash）",
                             app_spec.version
@@ -651,15 +662,6 @@ fn cmd_start(layout: &InstallLayout, cli: &Cli) -> i32 {
         }
     };
     let version = current.current.clone();
-    let app_dir = layout.versions_dir().join(&version);
-    let exe = match supervisor::resolve_entrypoint(layout, &version) {
-        Ok(p) => p,
-        Err(msg) => {
-            eprintln!("错误: {msg}");
-            return 1;
-        }
-    };
-
     // 批次 3：installation-id + 本次会话令牌（IPC 寻址注入）
     let installation_id = installation::load_or_create(&store).unwrap_or_else(|e| {
         tracing::warn!("installation-id 生成失败（{e}），IPC 不启用");
@@ -686,30 +688,26 @@ fn cmd_start(layout: &InstallLayout, cli: &Cli) -> i32 {
         LaunchExtras::default().with_admin_token(admin_token)
     };
 
-    let adb = supervisor::latest_component_exe(layout, "adb", "adb.exe");
-    let ffmpeg = supervisor::latest_component_exe(layout, "ffmpeg", "ffmpeg.exe");
-    if adb.is_none() {
-        tracing::warn!(
-            "runtime/adb 未安装，GAMER_ADB_PATH 不注入（server readiness 将报 adb not_ready）"
-        );
-    }
-    if ffmpeg.is_none() {
-        tracing::warn!("runtime/ffmpeg 未安装，GAMER_FFMPEG_PATH 不注入（server readiness 将报 ffmpeg not_ready）");
-    }
+    let bundle = match load_manifest_model(layout, cli, None) {
+        Ok(bundle) if bundle.model.release.version == version => bundle,
+        Ok(_) => {
+            eprintln!("当前安装版本缺少对应的签名发行清单");
+            return 1;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let plan = match crate::distribution::plan(layout, &bundle.model) {
+        Ok(plan) => plan,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
     let _ = fs::create_dir_all(layout.logs_dir());
     let _ = fs::create_dir_all(layout.data_dir());
-
-    let plan = LaunchPlan {
-        exe: exe.clone(),
-        cwd: app_dir.clone(),
-        app_dir: app_dir.clone(),
-        data_dir: layout.data_dir(),
-        adb_path: adb,
-        ffmpeg_path: ffmpeg,
-        scrcpy_server: app_dir.join("assets").join("scrcpy-server.jar"),
-        config_path: layout.config_file(),
-        log_path: layout.logs_dir().join("gamer-server.log"),
-    };
     let port = supervisor::read_configured_port(&plan.config_path);
     println!("当前版本: {version}");
     println!("入口程序: {}", plan.exe.display());
@@ -779,10 +777,13 @@ fn cmd_start(layout: &InstallLayout, cli: &Cli) -> i32 {
 }
 
 /// 双击入口在服务就绪后打开本机控制台；显式 `start` 保持纯 CLI 行为，便于脚本监管。
-fn open_browser(port: u16) {
+pub(crate) fn open_browser(port: u16) {
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
     let url = format!("http://127.0.0.1:{port}/");
     #[cfg(windows)]
     let result = std::process::Command::new("cmd")
+        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
         .args(["/C", "start", "", &url])
         .spawn();
     #[cfg(not(windows))]
@@ -794,7 +795,7 @@ fn open_browser(port: u16) {
 }
 
 /// 拉起 IPC named pipe 服务端（独立线程 + 独立 tokio runtime）。
-fn spawn_ipc_server(
+pub(crate) fn spawn_ipc_server(
     layout: InstallLayout,
     installation_id: String,
     token: String,
@@ -947,14 +948,14 @@ fn cmd_upgrade(layout: &InstallLayout, cli: &Cli, manifest: &str) -> i32 {
 
 // -- manifest 装载（doctor 深检 / repair 共用） -------------------------------
 
-struct ManifestBundle {
-    path: PathBuf,
-    model: Manifest,
+pub(crate) struct ManifestBundle {
+    pub path: PathBuf,
+    pub model: Manifest,
 }
 
 /// 装载并完整校验（验签）release manifest：显式 --manifest 优先；否则扫描
 /// manifests/ 缓存（匹配当前版本的优先，其余按 SemVer 降序），取第一份通过者。
-fn load_manifest_model(
+pub(crate) fn load_manifest_model(
     layout: &InstallLayout,
     cli: &Cli,
     explicit: Option<&Path>,
@@ -997,7 +998,7 @@ fn load_manifest_model(
 }
 
 /// manifests/ 缓存候选：匹配 state/current.json 当前版本的排前，各组内 SemVer 降序。
-fn cached_manifest_candidates(layout: &InstallLayout) -> Vec<PathBuf> {
+pub(crate) fn cached_manifest_candidates(layout: &InstallLayout) -> Vec<PathBuf> {
     let dir = layout.manifests_dir();
     let mut files: Vec<PathBuf> = fs::read_dir(&dir)
         .into_iter()

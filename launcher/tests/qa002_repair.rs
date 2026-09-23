@@ -258,6 +258,32 @@ fn repair_app_failure_preserves_existing_dir() {
 }
 
 #[test]
+fn repair_restores_changed_web_resources_and_missing_executable() {
+    let layout = setup("repair-all-app-files");
+    let (app, zip) = app_fixture("0.2.0");
+    put_seed(&layout, &zip, &app.artifact_name);
+    repair_with_lock(&layout, &[], Some(&app), &Default::default()).unwrap();
+    let html = app.install_dir(&layout).join("web-dist/index.html");
+    fs::write(&html, b"<html>broken!</html>").unwrap();
+    let report = repair_with_lock(&layout, &[], Some(&app), &Default::default()).unwrap();
+    assert_eq!(report.failed_count(), 0);
+    assert!(matches!(
+        report.app.unwrap().outcome,
+        AppOutcome::Installed { .. }
+    ));
+    assert_eq!(fs::read(&html).unwrap(), b"<html></html>");
+    fs::remove_file(app.install_dir(&layout).join("gamer-server.exe")).unwrap();
+    let report = repair_with_lock(&layout, &[], Some(&app), &Default::default()).unwrap();
+    assert_eq!(report.failed_count(), 0);
+    assert_eq!(
+        fs::read(app.install_dir(&layout).join("gamer-server.exe")).unwrap(),
+        APP_EXE
+    );
+    cleanup(&layout.root);
+    cleanup(zip.parent().unwrap());
+}
+
+#[test]
 fn offline_repair_restores_missing_dll_from_seed() {
     let layout = setup("repair-missing");
     let (spec, zip_path) = component_fixture("adb", "1.0.0");

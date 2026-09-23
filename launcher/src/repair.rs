@@ -232,7 +232,21 @@ pub fn repair_components(
     for spec in specs {
         out.push(repair_one(layout, spec, opts));
     }
-    let app_repair = app.map(|a| repair_app(layout, a, opts));
+    let failed = out
+        .iter()
+        .any(|c| matches!(c.outcome, ComponentOutcome::Failed { .. }));
+    let app_repair = app.map(|a| {
+        if failed {
+            AppRepair {
+                version: a.version.clone(),
+                outcome: AppOutcome::Failed {
+                    reason: "依赖安装未完成，尚未切换应用版本".into(),
+                },
+            }
+        } else {
+            repair_app(layout, a, opts)
+        }
+    });
     RepairReport {
         components: out,
         app: app_repair,
@@ -253,7 +267,28 @@ fn repair_one(
     spec: &ComponentSpec,
     opts: &RepairOptions,
 ) -> ComponentRepair {
+    if opts.fetch.control.is_paused() {
+        return ComponentRepair {
+            id: spec.id.clone(),
+            version: spec.version.clone(),
+            outcome: ComponentOutcome::Failed {
+                reason: "安装已暂停".into(),
+            },
+        };
+    }
     let dir = spec.install_dir(layout);
+    if !opts.probe
+        && !spec.files.is_empty()
+        && spec.files.iter().all(|f| {
+            crate::verification::verify(layout, &dir.join(&f.path), &f.sha256, f.size).is_ok()
+        })
+    {
+        return ComponentRepair {
+            id: spec.id.clone(),
+            version: spec.version.clone(),
+            outcome: ComponentOutcome::Healthy,
+        };
+    }
     let finding = inventory::check_component(
         &dir,
         spec,
@@ -435,9 +470,12 @@ fn repair_app(layout: &InstallLayout, app: &AppInstallSpec, opts: &RepairOptions
         version: app.version.clone(),
         outcome: AppOutcome::Failed { reason },
     };
+    if opts.fetch.control.is_paused() {
+        return failed("安装已暂停".into());
+    }
     let dir = app.install_dir(layout);
     if dir.is_dir() {
-        if verify_app_dir(&dir, app).is_ok() {
+        if crate::app_inventory::verify(layout, app, &dir, opts.probe).is_ok() {
             tracing::info!(version = %app.version, "app 版本目录已安装且校验通过");
             if let Err(e) = ensure_current_pointer(layout, &app.version) {
                 return failed(e);
@@ -472,6 +510,8 @@ fn repair_app(layout: &InstallLayout, app: &AppInstallSpec, opts: &RepairOptions
     let staged = (|| -> Result<(), String> {
         archive::extract_app_zip(artifact.path(), &staging, &ExtractOptions::default())
             .map_err(|e| e.to_string())?;
+        crate::app_inventory::record(layout, app, artifact.path())?;
+        crate::app_inventory::verify(layout, app, &staging, false)?;
         verify_app_dir(&staging, app)
     })();
     if let Err(reason) = staged {

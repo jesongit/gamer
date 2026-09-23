@@ -60,6 +60,13 @@ pub fn backup_to_corrupt(path: &Path) -> io::Result<PathBuf> {
 /// 原子写：临时文件写全 + sync_all + 同目录 rename 覆盖。
 /// Windows 上 rename 走 MOVEFILE_REPLACE_EXISTING；被杀毒等短暂占用时有界重试（契约 §5.2）。
 pub fn write_json_atomic<T: Serialize + ?Sized>(path: &Path, value: &T) -> io::Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    write_bytes_atomic(path, &bytes)
+}
+
+/// 原始字节原子写入；签名文件不能经过 JSON 再序列化。
+pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
@@ -67,10 +74,8 @@ pub fn write_json_atomic<T: Serialize + ?Sized>(path: &Path, value: &T) -> io::R
     }
     let tmp = temp_path(path);
     let result = (|| -> io::Result<()> {
-        let mut bytes = serde_json::to_vec_pretty(value)?;
-        bytes.push(b'\n');
         let mut file = fs::File::create(&tmp)?;
-        file.write_all(&bytes)?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         Ok(())
     })();

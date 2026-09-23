@@ -311,6 +311,14 @@ fn extract_zip_checked(
         });
     }
 
+    let available = crate::winutil::free_disk_bytes(staging_dir).map_err(ArchiveError::Io)?;
+    let needed = declared_total.saturating_add(16 * 1024 * 1024);
+    if available < needed {
+        return Err(ArchiveError::Io(std::io::Error::other(format!(
+            "磁盘空间不足：解压需要约 {needed} 字节，可用 {available} 字节"
+        ))));
+    }
+
     // ---- pass 2：解压（实际写入字节数守门，防谎报 header） ----
     let mut actual_total: u64 = 0;
     for i in 0..archive.len() {

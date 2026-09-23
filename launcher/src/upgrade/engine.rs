@@ -142,6 +142,7 @@ pub struct Engine {
     pub layout: InstallLayout,
     pub opts: UpgradeOptions,
     pub progress: Arc<Progress>,
+    managed_child: std::sync::Mutex<Option<Child>>,
     pid_ops: Arc<dyn PidOps>,
     available_space: Arc<dyn AvailableSpaceProvider>,
 }
@@ -186,6 +187,7 @@ impl Engine {
             layout,
             opts,
             progress: Arc::new(Progress::default()),
+            managed_child: Default::default(),
             pid_ops: Arc::new(NativePidOps),
             available_space: Arc::new(NativeAvailableSpaceProvider),
         }
@@ -197,6 +199,7 @@ impl Engine {
             layout,
             opts,
             progress: Arc::new(Progress::default()),
+            managed_child: Default::default(),
             pid_ops,
             available_space: Arc::new(NativeAvailableSpaceProvider),
         }
@@ -212,6 +215,7 @@ impl Engine {
             layout,
             opts,
             progress: Arc::new(Progress::default()),
+            managed_child: Default::default(),
             pid_ops: Arc::new(NativePidOps),
             available_space,
         }
@@ -219,6 +223,14 @@ impl Engine {
 
     fn store(&self) -> StateStore {
         StateStore::new(&self.layout.root)
+    }
+
+    /// 常驻桌面启动器接管升级后的子进程句柄；CLI 保持既有提交后退出行为。
+    pub fn take_managed_child(&self) -> Option<Child> {
+        self.managed_child
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
     fn load_journal(&self) -> Result<UpdateJournal, BusinessError> {
@@ -481,9 +493,14 @@ impl Engine {
                 format!("创建 manifests/ 失败: {e}"),
             )
         })?;
-        crate::state::atomic::write_json_atomic(&cached, &value).map_err(|e| {
-            BusinessError::new(codes::SIGNATURE_INVALID, format!("缓存 manifest 失败: {e}"))
+        let signature = fs::read(crate::manifest::default_sig_path(&path)).map_err(|e| {
+            BusinessError::new(codes::SIGNATURE_INVALID, format!("读取签名失败: {e}"))
         })?;
+        crate::state::atomic::write_bytes_atomic(&cached.with_extension("sig"), &signature)
+            .and_then(|_| crate::state::atomic::write_bytes_atomic(&cached, &raw))
+            .map_err(|e| {
+                BusinessError::new(codes::SIGNATURE_INVALID, format!("缓存 manifest 失败: {e}"))
+            })?;
         if temporary {
             let _ = fs::remove_file(&path);
         }
@@ -497,48 +514,12 @@ impl Engine {
                 format!("manifest URL 非法: {url:?}"),
             ));
         }
-        let staging = self.layout.staging_dir().join("remote-manifest");
-        fs::create_dir_all(&staging).map_err(|e| {
-            BusinessError::new(codes::ARTIFACT_INVALID, format!("创建 staging 失败: {e}"))
-        })?;
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(self.opts.fetch.connect_timeout)
-            .timeout_read(self.opts.fetch.read_timeout)
-            .user_agent(concat!("gamer-launcher/", env!("CARGO_PKG_VERSION")))
-            .build();
-        let dest = staging.join("manifest.json");
-        let response = agent.get(url).call().map_err(|e| match e {
-            ureq::Error::Status(code, _) => BusinessError::new(
-                codes::UPDATE_NOT_AVAILABLE,
-                format!("远端 manifest 获取失败（HTTP {code}）"),
-            ),
-            other => BusinessError::new(
-                codes::UPDATE_NOT_AVAILABLE,
-                format!("远端 manifest 获取失败: {other}"),
-            ),
-        })?;
-        let mut file = fs::File::create(&dest).map_err(|e| {
-            BusinessError::new(
-                codes::ARTIFACT_INVALID,
-                format!("写远端 manifest 失败: {e}"),
-            )
-        })?;
-        std::io::copy(&mut response.into_reader(), &mut file).map_err(|e| {
-            BusinessError::new(
-                codes::ARTIFACT_INVALID,
-                format!("下载远端 manifest 失败: {e}"),
-            )
-        })?;
-        drop(file);
-        // 分离签名：约定 URL + ".sig"
-        let sig_dest = staging.join("manifest.sig");
-        let sig_url = format!("{url}.sig");
-        if let Ok(sig_resp) = agent.get(&sig_url).call() {
-            if let Ok(mut f) = fs::File::create(&sig_dest) {
-                let _ = std::io::copy(&mut sig_resp.into_reader(), &mut f);
-            }
-        }
-        Ok(dest)
+        crate::distribution::download_manifest(
+            &self.layout,
+            url,
+            self.opts.fetch.connect_timeout + self.opts.fetch.read_timeout,
+        )
+        .map_err(|e| BusinessError::new(codes::UPDATE_NOT_AVAILABLE, e))
     }
 
     /// 旧 exe 对现网数据 inspect（尽力而为，不可用 = None）。
@@ -651,6 +632,9 @@ impl Engine {
                     format!("app staging 复验失败: {e}"),
                 )
             })?;
+            crate::app_inventory::record(&self.layout, &app, artifact.path())
+                .and_then(|_| crate::app_inventory::verify(&self.layout, &app, &app_staging, false))
+                .map_err(|e| BusinessError::new(codes::ARTIFACT_INVALID, e))?;
             Ok(())
         };
         if let Err(err) = run() {
@@ -1008,6 +992,7 @@ impl Engine {
             return UpgradeOutcome::ManualRecovery { error: err };
         }
         tracing::info!(%from, %to, "升级 committed 并清理完成");
+        *self.managed_child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
         UpgradeOutcome::Committed { from, to }
     }
 
@@ -1167,7 +1152,9 @@ impl Engine {
             return false;
         };
         let app_dir = self.layout.versions_dir().join(&current.current);
-        let plan = self.launch_plan_for(&current.current, exe, app_dir);
+        let Ok(plan) = self.launch_plan_for(&current.current, exe, app_dir) else {
+            return false;
+        };
         // 重启的旧版本同样注入回环管理令牌，保证后续 drain/再次升级可用
         let extras = LaunchExtras::default()
             .with_admin_token(self.opts.admin_token.clone())
@@ -1182,18 +1169,12 @@ impl Engine {
                 match supervisor::wait_for_ready(port, &probe) {
                     Ok(()) => {
                         tracing::info!(pid = child.id(), "旧版本已重启且就绪");
-                        std::thread::spawn(move || {
-                            let mut child = child;
-                            let _ = child.wait();
-                        });
+                        *self.managed_child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
                         true
                     }
                     Err(reason) => {
                         tracing::error!(%reason, "旧版本重启后就绪探测未通过（保留进程，状态以 journal 为准）");
-                        std::thread::spawn(move || {
-                            let mut child = child;
-                            let _ = child.wait();
-                        });
+                        *self.managed_child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
                         false
                     }
                 }
@@ -1205,23 +1186,15 @@ impl Engine {
         }
     }
 
-    fn launch_plan_for(&self, version: &str, exe: PathBuf, app_dir: PathBuf) -> LaunchPlan {
-        LaunchPlan {
-            exe,
-            cwd: app_dir.clone(),
-            app_dir,
-            data_dir: self.layout.data_dir(),
-            adb_path: supervisor::latest_component_exe(&self.layout, "adb", "adb.exe"),
-            ffmpeg_path: supervisor::latest_component_exe(&self.layout, "ffmpeg", "ffmpeg.exe"),
-            scrcpy_server: self
-                .layout
-                .versions_dir()
-                .join(version)
-                .join("assets")
-                .join("scrcpy-server.jar"),
-            config_path: self.layout.config_file(),
-            log_path: self.layout.logs_dir().join("gamer-server.log"),
-        }
+    fn launch_plan_for(
+        &self,
+        version: &str,
+        _exe: PathBuf,
+        _app_dir: PathBuf,
+    ) -> Result<LaunchPlan, BusinessError> {
+        let manifest = self.load_cached_manifest(version)?;
+        crate::distribution::plan(&self.layout, &manifest)
+            .map_err(|e| BusinessError::new(codes::ARTIFACT_INVALID, e))
     }
 
     // -- 候选启动 / 探测 / activate -----------------------------------------------------
@@ -1271,7 +1244,7 @@ impl Engine {
         let exe = resolve_entrypoint(&self.layout, version)
             .map_err(|e| BusinessError::new(codes::ARTIFACT_INVALID, e))?;
         let app_dir = self.layout.versions_dir().join(version);
-        let plan = self.launch_plan_for(version, exe, app_dir);
+        let plan = self.launch_plan_for(version, exe, app_dir)?;
         let extras = match &self.opts.ipc {
             Some((pipe, token)) => LaunchExtras::candidate(pipe.clone(), token.clone()),
             None => LaunchExtras {

@@ -257,12 +257,14 @@ pub fn spawn_child_with_extras(
     stdout: Stdio,
     stderr: Stdio,
 ) -> std::io::Result<Child> {
+    use std::os::windows::process::CommandExt;
     let env = build_child_env_with_extras(plan, extras, |key| std::env::var(key).ok());
     // cwd 受 DOS 当前目录 ~260 上限（verbatim 超限同样 ERROR_DIRECTORY）：
     // 超长时回退同树短祖先；业务路径全部经 env 绝对注入，server 不依赖 cwd。
     let cwd = crate::winutil::fallback_current_dir(&plan.cwd, 240);
     tracing::info!(exe = %plan.exe.display(), cwd = %cwd.display(), env_keys = env.keys().count(), "启动受管子进程");
     Command::new(&plan.exe)
+        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
         .args(args)
         .current_dir(cwd)
         .env_clear()

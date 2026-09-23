@@ -34,8 +34,20 @@ struct CachedReply {
 
 #[derive(Default)]
 struct Inner {
+    desktop_active: bool,
     active: Option<ActiveOp>,
     cache: HashMap<String, CachedReply>,
+}
+
+pub struct DesktopOperation(Arc<Dispatcher>);
+impl Drop for DesktopOperation {
+    fn drop(&mut self) {
+        self.0
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .desktop_active = false;
+    }
 }
 
 /// IPC 分派器（server 持一个；handle 由 tokio 客户端任务调用）。
@@ -60,6 +72,14 @@ pub struct Reply {
 }
 
 impl Dispatcher {
+    pub fn begin_desktop(self: &Arc<Self>) -> Result<DesktopOperation, String> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.active.is_some() || inner.desktop_active {
+            return Err("另一项安装或更新正在执行，请稍后再试".into());
+        }
+        inner.desktop_active = true;
+        Ok(DesktopOperation(self.clone()))
+    }
     pub fn new(
         layout: InstallLayout,
         installation_id: String,
@@ -130,6 +150,12 @@ impl Dispatcher {
             Err(poisoned) => poisoned.into_inner(),
         };
         let now = Instant::now();
+        if inner.desktop_active {
+            return Reply {
+                frame: error_frame(request_id, codes::UPDATE_BUSY, "启动器正在处理安装或更新"),
+                disconnect: false,
+            };
+        }
         inner.cache.retain(|_, c| c.expires > now);
         if let Some(cached) = inner.cache.get(request_id) {
             return Reply {

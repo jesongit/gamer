@@ -33,6 +33,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// 打开图形启动器（无参数双击时默认进入）
+    Gui,
     /// 启动并监管 gamer-server 子进程（LCH-008/OPS-003：env 注入 + 句柄等待 + 就绪探测）
     Start,
     /// 查看当前安装状态（只读，不获取单实例锁）

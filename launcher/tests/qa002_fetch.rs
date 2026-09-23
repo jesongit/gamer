@@ -26,6 +26,8 @@ fn opts(overall_ms: u64) -> FetchOptions {
         read_timeout: Duration::from_secs(2),
         overall_timeout: Duration::from_millis(overall_ms),
         progress_interval_bytes: 1,
+        resumable: false,
+        control: Default::default(),
     }
 }
 

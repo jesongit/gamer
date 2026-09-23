@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use crate::digest::{to_hex, verify_file};
+use crate::digest::to_hex;
 use crate::layout::InstallLayout;
 use crate::manifest::pathsafe;
 use crate::state::atomic::rename_with_retry;
@@ -27,6 +27,8 @@ pub struct FetchOptions {
     pub read_timeout: Duration,
     pub overall_timeout: Duration,
     pub progress_interval_bytes: u64,
+    pub resumable: bool,
+    pub control: crate::transfer::TransferControl,
 }
 
 impl Default for FetchOptions {
@@ -36,6 +38,8 @@ impl Default for FetchOptions {
             read_timeout: Duration::from_secs(30),
             overall_timeout: Duration::from_secs(600),
             progress_interval_bytes: 8 * 1024 * 1024,
+            resumable: true,
+            control: Default::default(),
         }
     }
 }
@@ -92,6 +96,8 @@ impl std::fmt::Display for FetchError {
 
 #[derive(Debug)]
 pub enum DownloadError {
+    Paused,
+    InvalidRange,
     InvalidUrl(String),
     HttpStatus(u16),
     /// 响应 content-length 超过声明 size（下载前即可判定，不读 body）。
@@ -119,6 +125,8 @@ pub enum DownloadError {
 impl std::fmt::Display for DownloadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            DownloadError::Paused => write!(f, "下载已暂停，可继续"),
+            DownloadError::InvalidRange => write!(f, "服务器返回的续传范围不匹配"),
             DownloadError::InvalidUrl(url) => write!(f, "URL 非法: {url:?}"),
             DownloadError::HttpStatus(code) => write!(f, "HTTP 状态 {code}"),
             DownloadError::OversizedContentLength { declared, expected } => {
@@ -167,8 +175,8 @@ pub fn obtain_artifact(
     // 1) seeds/（full 包内置，只读；命中同样过 hash 校验）
     let seed = layout.seeds_dir().join(name);
     if seed.is_file() {
-        match verify_file(&seed, &expected_sha256, expected_size) {
-            Ok(()) => {
+        match crate::verification::verify(layout, &seed, &expected_sha256, expected_size) {
+            Ok(_) => {
                 tracing::info!(seed = %seed.display(), "seed 命中且校验通过");
                 return Ok(Obtained::Seed { path: seed });
             }
@@ -184,8 +192,8 @@ pub fn obtain_artifact(
     // 2) cache/artifacts/（可清理重建区；损坏即删除，避免反复命中坏文件）
     let cache_path = layout.artifacts_dir().join(name);
     if cache_path.is_file() {
-        match verify_file(&cache_path, &expected_sha256, expected_size) {
-            Ok(()) => {
+        match crate::verification::verify(layout, &cache_path, &expected_sha256, expected_size) {
+            Ok(_) => {
                 tracing::info!(cache = %cache_path.display(), "cache 命中且校验通过");
                 return Ok(Obtained::Cache { path: cache_path });
             }
@@ -209,7 +217,12 @@ pub fn obtain_artifact(
     let mut part_name = name.to_string();
     part_name.push_str(PART_SUFFIX);
     let part_path = layout.artifacts_dir().join(&part_name);
-    match download_bounded(url, &part_path, &expected_sha256, expected_size, opts) {
+    let download = if opts.resumable {
+        crate::transfer::download(url, &part_path, &expected_sha256, expected_size, opts)
+    } else {
+        download_bounded(url, &part_path, &expected_sha256, expected_size, opts)
+    };
+    match download {
         Ok(bytes) => {
             rename_with_retry(&part_path, &cache_path)
                 .map_err(|e| FetchError::Download(DownloadError::Io(e)))?;
@@ -356,10 +369,11 @@ fn classify_read_error(e: std::io::Error) -> DownloadError {
     }
 }
 
-fn build_agent(url: &str, opts: &FetchOptions) -> ureq::Agent {
+pub(crate) fn build_agent(url: &str, opts: &FetchOptions) -> ureq::Agent {
     let mut builder = ureq::AgentBuilder::new()
         .timeout_connect(opts.connect_timeout)
         .timeout_read(opts.read_timeout)
+        .timeout(opts.overall_timeout)
         .user_agent(concat!("gamer-launcher/", env!("CARGO_PKG_VERSION")));
     if let Some(proxy_url) = resolve_proxy(url, &|key| std::env::var(key).ok()) {
         match ureq::Proxy::new(&proxy_url) {
