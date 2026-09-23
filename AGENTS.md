@@ -35,7 +35,7 @@ Enabled + last_error；必需依赖循环拒绝启动）；可选依赖 = 降级
 - `server/data/gamer.db` — SQLite（设备/任务/预设/运行/日志）；业务数据一级作用域 = **Package ID**，文件存储 `server/data/packages/<package-id>/`：`package.toml`（manifest）+ `shared/`（跨插件保留区）+ `plugins/<plugin-id>/`（插件数据，**目录语义归插件**——gamer-yaml：`automations/`（自动化脚本 + `_function*.yaml` 函数库：文件名以 `_function` 开头且 `.yaml` 结尾 = 函数库（functions: 包装），其余 = 自动化；默认库 `_function.yaml`，旧 `functions/` 专属目录已删除、保存钩子报 `yaml.functions.dir.removed`）/`templates/`（模板）[/`presets/`（任务预设）]，gamer-keymap：`mappings/`，gamer-video：`projects/`（视频项目 JSON，Core 存储不解释内容）；Core 不解释插件目录内部结构）；资源寻址三元组 **(package_id, plugin_id, path)**（实现在 `server/src/resources.rs` 的 PackageStore）。package-id / plugin-id 语法 `[a-z0-9][a-z0-9._-]*`（`validate_scope_id`，**禁大写**——Android 包名原样不能当 Package id，原名可写进 manifest 的 `[targets.android].packages`）
 - package.toml：`id`/`name`/`version`/`author` + `[targets.android].packages`（0..n；`*` 或 0 个 = 通用 Package，匹配语义统一在 `resources::android_targets_match`；仅做兼容性提示不阻断）+ `[plugins."<plugin-id>"] required`（插件依赖声明，允许声明当前未安装的插件）。**默认配置包**：包存储为空时服务端启动播种 `default`（`resources::DEFAULT_PACKAGE_ID`，Android Targets = `*`、零插件依赖；`ensure_default_package` 在组合根调用，播种失败只 warn 不阻断；存储再度清空后下次启动重新播种）
 - 认证：配置只接受 Argon2id PHC `[auth].password_hash`；开发登录密码只用 `GAMER_ADMIN_PASSWORD`，无默认账号/密码。WebRTC 不内置 STUN/TURN，默认 host candidate 直连；NAT 需配置 `rtc_external_ip/rtc_udp_port/rtc_external_port` 并发布 UDP。
-- 数据基线：SQLite schema v4（表：timer_tasks/task_presets/scheduled_runs/logs/devices；schedule JSON 为 `{provider_id,config}` 形态；v1→v2 Timer Core 泛化、v2→v3 Task 模型收口（legacy `tasks` 表 DROP）逐级静态迁移，注册表在 `server/src/migrations.rs`）；`user_version=0`/无版本号数据库不自动迁移，高于目标的库拒绝启动。
+- 数据基线：SQLite schema v5（表：run_records/run_events/timer_tasks/task_presets/scheduled_runs/logs/devices；schedule JSON 为 `{provider_id,config}` 形态；v1→v2 Timer Core 泛化、v2→v3 Task 模型收口（legacy `tasks` 表 DROP）逐级静态迁移，注册表在 `server/src/migrations.rs`）；`user_version=0`/无版本号数据库不自动迁移，高于目标的库拒绝启动。
 - 资源发行：**默认发行零业务资源**——`server/data/packages/` 不进 git。Package 经导入分发：`POST /api/packages/import`（zip/.gamerpkg，可选 `X-Expected-Sha256` 校验头；目标已存在 409 附 manifest 摘要，`?overwrite=true` 校验后原子替换）与 `POST /api/packages/:pkg/export`（可复现打包）。**dormant 插件数据保留**（plan §5-§6）：包内未安装插件的数据目录原样保留、不解释不修改，后续安装该插件即恢复对应能力。**Installed/Editable 双层模型、`data/app-packages/`、`/api/workspace`、`/api/apps/:app/resources`、六目录 kind 已全部删除，不做兼容，旧数据手动迁移**（迁移示例见 `server/data/_migration_backup` 与本仓库 2026-09 迁移提交）。
 
 ## 架构分层（ADR-11~14，`docs/reference/adr/`）
@@ -139,6 +139,10 @@ cd web && pnpm dev                      # 单起前端
 清单整体移至 **[docs/PITFALLS.md](docs/PITFALLS.md)**（踩坑记录唯一维护处，每条一句话现象 + 原因 + 解决/规避；新条目追加到该文件末尾），本文件不再内嵌具体条目。
 
 ## 2026-09-20 ADB 与插件目录收口（覆盖旧路径说明）
+
+**2026-09-22 循环中断**：gamer-yaml 3.3.0 新增 `break: {}`（也接受无值 `break:`），仅退出当前脚本/函数内最近一层 `repeat`，经 if/模板分支传播，不跨函数调用边界。循环外报 `yaml.break.outside_loop`，带参数或子步骤报 `yaml.break.shape`；前端添加步骤提供「跳出循环」，前后端作用域校验同步。V1 现有六类步骤：函数调用/if/repeat/return/match_templates/break。
+
+**2026-09-22 模板分支扩展**：YAML V1 新增插件内置复合步骤 `match_templates`（与函数调用/if/repeat/return 并列），内容为 `cases: [{template, as?, do}]`、可选 `threshold`（0.8）和 `else`。同轮共用一帧，按顺序仅执行首个命中分支，不自动点击或循环；case `as` 仅在该分支有效，动作由权威解释器执行，return/取消/预算不变。底层原生 `find_any` 返回首个命中对象附 index/template 或 null，原生函数共 19 个。surface 子模块在 `plugins/gamer-yaml/host/syntax/match_templates.rs`，解释器同步支持同名 wire 节点；编辑器提供模板分支卡片，路径为 `run[n].cases[i].do[j]`，分支增删排序通过保留子步骤身份的专用命令支持撤销重做。官方 gamer-yaml 版本更新为 3.2.0。
 
 设备没有 kind：使用完整 ADB serial 或 host:port，扫描严格按 serial 去重；虚拟屏是 screen_mode/vd_res/vd_dpi 独立设置。Docker 构建、部署模式和发布链已删除，保留通用 NAT 设置与既有用户数据。SQLite schema v4 删除 devices.kind。
 
