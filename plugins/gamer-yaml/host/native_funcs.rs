@@ -22,6 +22,7 @@ pub struct ParamSchema {
     pub required: bool,
     pub default: Option<Value>,
     pub desc: &'static str,
+    pub item_type: Option<ParamType>,
 }
 
 /// 原生函数声明。
@@ -43,6 +44,7 @@ fn p(
     desc: &'static str,
 ) -> ParamSchema {
     ParamSchema {
+        item_type: None,
         name,
         ty,
         required,
@@ -199,11 +201,55 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
                 permissions: &[Permission::VisionMatch, Permission::ResourceRead],
             },
             NativeFunction {
+                name: "find_any",
+                display_name: "查找首个模板",
+                description:
+                    "共用一帧按顺序匹配，返回首个命中及 index，不点击；全部未命中返回 null",
+                params: vec![
+                    ParamSchema {
+                        item_type: Some(ParamType::Template),
+                        ..p(
+                            "templates",
+                            ParamType::List,
+                            true,
+                            None,
+                            "按优先级排序的模板列表（1..64 项）",
+                        )
+                    },
+                    p(
+                        "threshold",
+                        ParamType::Number,
+                        false,
+                        Some(json!(0.8)),
+                        "匹配阈值 0..1",
+                    ),
+                ],
+                returns: RETURN_MATCH,
+                permissions: &[Permission::VisionMatch, Permission::ResourceRead],
+            },
+            NativeFunction {
                 name: "wait_find",
                 display_name: "等待模板出现",
-                description: "等待模板出现；超时返回 null",
+                description: "等待模板出现，默认点击命中中心（click: false 仅等待）；超时返回 null",
                 params: vec![
                     p("template", ParamType::Template, true, None, "模板短名"),
+                    ParamSchema {
+                        item_type: Some(ParamType::Template),
+                        ..p(
+                            "obstacles",
+                            ParamType::List,
+                            false,
+                            Some(json!([])),
+                            "障碍模板：按顺序命中首个就点击，下轮重新检查；计入总超时",
+                        )
+                    },
+                    p(
+                        "click",
+                        ParamType::Boolean,
+                        false,
+                        Some(json!(true)),
+                        "命中后是否点击模板中心（前后延迟使用自动化设置）",
+                    ),
                     p(
                         "threshold",
                         ParamType::Number,
@@ -215,7 +261,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
                         "timeout",
                         ParamType::Duration,
                         false,
-                        Some(json!("3s")),
+                        Some(json!(format!("{}s", super::settings::DEFAULT_TIMEOUT_SECS))),
                         "等待上限",
                     ),
                     p(
@@ -253,7 +299,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
                         "timeout",
                         ParamType::Duration,
                         false,
-                        Some(json!("3s")),
+                        Some(json!(format!("{}s", super::settings::DEFAULT_TIMEOUT_SECS))),
                         "轮询上限；0 = 只试一次",
                     ),
                     p(
@@ -295,7 +341,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
                         "timeout",
                         ParamType::Duration,
                         false,
-                        Some(json!("3s")),
+                        Some(json!(format!("{}s", super::settings::DEFAULT_TIMEOUT_SECS))),
                         "等待上限",
                     ),
                     p(
@@ -417,13 +463,19 @@ pub fn native_schema_json(func: &NativeFunction) -> Value {
         "name": func.name,
         "description": func.description,
         "source": "plugin",
-        "params": func.params.iter().map(|param| json!({
+        "params": func.params.iter().map(|param| {
+            let mut schema = json!({
             "name": param.name,
             "type": param.ty.canonical(),
             "required": param.required,
             "default": param.default,
             "desc": param.desc,
-        })).collect::<Vec<_>>(),
+            });
+            if let Some(item_type) = &param.item_type {
+                schema["items"] = json!({"type": item_type.canonical()});
+            }
+            schema
+        }).collect::<Vec<_>>(),
         "returns": func.returns,
     })
 }
@@ -433,7 +485,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_functions_have_display_names_and_three_second_timeouts() {
+    fn all_functions_have_display_names_and_ten_second_timeouts() {
         let mut timeouts = 0;
         for function in native_functions() {
             let names: Vec<_> = function
@@ -447,7 +499,7 @@ mod tests {
             assert!(!names[0].required);
             assert_ne!(function.params[0].name, "name", "位置简写不能变");
             for param in function.params.iter().filter(|p| p.name == "timeout") {
-                assert_eq!(param.default, Some(json!("3s")), "{}", function.name);
+                assert_eq!(param.default, Some(json!("10s")), "{}", function.name);
                 timeouts += 1;
             }
         }

@@ -32,7 +32,9 @@ mod package_archive;
 mod recording;
 mod resources;
 mod run_manager;
+mod run_journal;
 mod scheduler;
+mod settings;
 mod shutdown;
 mod store;
 mod timer_core;
@@ -95,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
     // 此形态，轮转与保留交给容器日志驱动；其余值视作基准路径，按天滚动写出
     // <路径>.YYYY-MM-DD 并统一经非阻塞 worker 落盘——guard 绑定在 main 栈帧上，
     // 进程退出时 drop 冲刷残余日志。旧"单文件无限追加"模式已移除。
-    let (log_target, _log_guard) = logging::init(cfg.log_retain_days)?;
+    let (log_target, _log_guard) = logging::init(cfg.clone())?;
     if let logging::LogTarget::RollingFile { dir, .. } = &log_target {
         info!(dir = %dir.display(), "file logging with daily rotation enabled");
     }
@@ -142,13 +144,17 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .is_some_and(|password| !password.trim().is_empty());
     let admin_token = api::auth::resolve_admin_token(loaded.profile);
-    let auth = Arc::new(api::auth::AuthState::new_with_setup(
-        credential,
-        cfg.auth.clone(),
-        loaded.profile == config::Profile::Prod,
-        admin_token,
-        setup_required,
-    ));
+    let auth = Arc::new(
+        api::auth::AuthState::new_with_setup(
+            credential,
+            cfg.auth.clone(),
+            loaded.profile == config::Profile::Prod,
+            admin_token,
+            setup_required,
+        )
+        .with_live_settings(cfg.live_settings.clone())
+        .with_session_store(&cfg.data_dir)?,
+    );
     info!(
         source = %auth.credential_source(),
         secure_cookies = auth.secure_cookies(),
@@ -200,12 +206,12 @@ async fn main() -> anyhow::Result<()> {
                 Ok(ctx) => {
                     let update = spawn_update_stack(&init_cfg, init_db.clone(), &ctx);
                     // 运行日志保留（DATA-004）随完整初始化启动
-                    if init_cfg.log_retain_days > 0 {
+                    {
                         let retention_db = init_db.clone();
-                        let retain_days = init_cfg.log_retain_days;
+                        let retention_cfg = init_cfg.clone();
                         tokio::spawn(run_log_retention(
                             retention_db,
-                            retain_days,
+                            retention_cfg,
                             init_shutdown.subscribe(),
                         ));
                     }
@@ -234,12 +240,12 @@ async fn main() -> anyhow::Result<()> {
 
     // 运行日志保留策略（DATA-004）：启动时已做一次清理，这个低频任务负责长期
     // 运行实例。SQLite 调用放入 blocking 池，不占用 Tokio 核心线程；每次只删除小批量。
-    if cfg.log_retain_days > 0 {
+    {
         let retention_db = db.clone();
-        let retain_days = cfg.log_retain_days;
+        let retention_cfg = cfg.clone();
         tokio::spawn(run_log_retention(
             retention_db,
-            retain_days,
+            retention_cfg,
             shutdown.subscribe(),
         ));
     }
@@ -338,7 +344,8 @@ impl RuntimeServices {
             devices.clone(),
             db.clone(),
         ));
-        let runs = Arc::new(run_manager::RunManager::new(executor.clone()));
+        db.recover_run_history()?;
+        let runs = Arc::new(run_manager::RunManager::new(executor.clone()).with_journal(db.clone()));
         // ADR-13：裸 Core 组合——Scheduler 不再预置任何 runner；gamer-yaml 的
         // 定时 runner 由扩展 start 生命周期经 registrar 钩子注册。
         let scheduler = Arc::new(scheduler::Scheduler::new(db.clone()));
@@ -372,11 +379,11 @@ impl RuntimeServices {
         // activation 后初始化窗口收到 SIGTERM 时漏掉已创建的运行依赖。
         install_drain(&drain_slot, &ctx);
         // P12.6：v3 运行可视化事件走同一 viewer DataChannel（复用 ViewerEventSink）；
-        // 无 viewer 时事件自然丢弃。
+        // 事件先持久化，viewer 只承担实时投屏标记。
         executor.attach_yaml_runner(
             ctx.packages.clone(),
             ctx.extensions.clone(),
-            Some(Arc::new(webrtc::ViewerEventSink::new(ctx.viewers.clone()))),
+            Some(Arc::new(run_journal::JournalEventSink { db: db.clone(), runs: ctx.runs.clone(), viewer: Arc::new(webrtc::ViewerEventSink::new(ctx.viewers.clone())) })),
         );
         // 后台生命周期统一在组合根启动：视频静默看门狗（devices/viewers/metrics
         // 三依赖）+ 会话过期清扫（小时级）。路由组装（api::build_router_*）只注册路由。
@@ -492,13 +499,15 @@ const LOG_RETENTION_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// 挂在 main 的 watch 停机信号上——服务关闭时任务随之结束，不阻塞优雅退出。
 async fn run_log_retention(
     db: Arc<store::Store>,
-    retain_days: u32,
+    cfg: config::Config,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut tick = tokio::time::interval(LOG_RETENTION_INTERVAL);
     loop {
         tokio::select! {
             _ = tick.tick() => {
+                let retain_days = cfg.current_settings().log_retain_days;
+                if retain_days == 0 { continue; }
                 match db.prune_logs_async(retain_days).await {
                     Ok(deleted) if deleted > 0 => {
                         info!(deleted, retain_days, "periodic run log cleanup removed expired rows");
@@ -536,7 +545,7 @@ mod tests {
         };
         let db = Arc::new(store::Store::open(&cfg).unwrap());
         let (tx, rx) = tokio::sync::watch::channel(false);
-        let task = tokio::spawn(run_log_retention(db, 14, rx));
+        let task = tokio::spawn(run_log_retention(db, config::Config::default(), rx));
 
         tx.send(true).unwrap();
         let result = tokio::time::timeout(Duration::from_secs(5), task).await;

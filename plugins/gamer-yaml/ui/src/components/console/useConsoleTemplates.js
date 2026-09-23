@@ -60,7 +60,7 @@ export function useConsoleTemplates({
   const renameVal = ref('')    // 重命名输入框内容
   let renameInputEl = null     // 重命名输入框元素（自动聚焦/全选）
   // 二次裁切（右侧面板）
-  const crop = reactive({ active: false, imgW: 0, imgH: 0, baseW: 0, baseH: 0, originX: 0, originY: 0, rect: { x: 0, y: 0, w: 0, h: 0 }, preview: '', name: '', zoom: 1, preserveColor: false, conflict: null, sourceLabel: '' })
+  const crop = reactive({ active: false, imgW: 0, imgH: 0, baseW: 0, baseH: 0, originX: 0, originY: 0, rect: { x: 0, y: 0, w: 0, h: 0 }, preview: '', name: '', zoom: 1, preserveColor: false, conflict: null, sourceLabel: '', error: '' })
   const cropCanvas = ref(null)
   const cropSec = ref(null)
   // 二次裁切底图：框选时冻结的初始画面，拖动时只动遮罩框
@@ -181,6 +181,7 @@ export function useConsoleTemplates({
   /** 冻结裁切底图（指定帧）：二次裁切时底图不动，只动遮罩框；保存管线
    *  （PUT 模板资源）只消费这份冻结底图，绝不重抓任何画面源 */
   function freezeCropBase(source, imgW, imgH, label, rect) {
+    crop.error = ''
     crop.imgW = imgW
     crop.imgH = imgH
     crop.sourceLabel = label || ''
@@ -235,6 +236,8 @@ export function useConsoleTemplates({
   }
 
   function cancelCrop() {
+    if (saving.value) return
+    crop.error = ''
     crop.active = false
     crop.conflict = null
     cropBaseCanvas = null
@@ -483,10 +486,12 @@ export function useConsoleTemplates({
   }
 
   function showCropConflict(shortName, existing) {
+    crop.error = ''
     crop.conflict = { name: existing.name, shortName, version: existing.version || null }
   }
 
   function backToCrop() {
+    crop.error = ''
     crop.conflict = null
     nextTick(() => {
       renderCropFrame()
@@ -528,6 +533,7 @@ export function useConsoleTemplates({
   async function saveTemplate() {
     const toast = beginReport()
     if (saving.value) return
+    crop.error = ''
     const payload = cropUploadPayload()
     if (!payload) return
     const existing = findCropConflict(payload.shortName)
@@ -549,7 +555,8 @@ export function useConsoleTemplates({
           if (current) { showCropConflict(payload.shortName, current); return }
         } catch { /* 刷新失败时保留原错误提示 */ }
       }
-      toast('保存失败：' + e.message, 'error')
+      crop.error = '保存失败：' + e.message
+      toast(crop.error, 'error')
     } finally {
       saving.value = false
     }
@@ -558,6 +565,7 @@ export function useConsoleTemplates({
   async function overwriteTemplate() {
     const toast = beginReport()
     if (saving.value || !crop.conflict) return
+    crop.error = ''
     const payload = cropUploadPayload()
     if (!payload) return
     saving.value = true
@@ -574,16 +582,10 @@ export function useConsoleTemplates({
         return
       }
       const targetName = composeTemplateName(payload.shortName, payload.region, payload.preserveColor)
-      if (targetName !== existing.name) {
-        // 文件名承载搜索区域/颜色标记；直接写到旧路径会让新选区与资源元数据
-        // 分离。此场景必须先返回修改，或走明确的新建/重命名流程，不能静默覆盖。
-        toast('框选区域或颜色标记已变化，请返回修改后以新模板名保存', 'warn')
-        return
-      }
       const expectedVersion = await resolveTemplateVersion(existing.name, payload.pkg, existing.version)
-      // 覆盖是对同一资源路径的单次条件 PUT。这样模板名、区域和颜色标记
-      // 等关联元数据保持不变；需要改变元数据时先走明确的重命名/新建流程。
-      const rep = await putTemplateBytes(existing.name, payload.dataB64, payload.pkg, expectedVersion)
+      // One conditional request replaces the pixels and, when needed, the
+      // region/color suffix. The server stages bytes before moving the old file.
+      const rep = await putTemplateBytes(existing.name, payload.dataB64, payload.pkg, expectedVersion, targetName)
       await finishCropSave(rep, payload.shortName, toast)
     } catch (e) {
       if (e?.status === 409) {
@@ -594,7 +596,8 @@ export function useConsoleTemplates({
         if (current) showCropConflict(payload.shortName, current)
         else if (refreshed) crop.conflict = null
       }
-      toast('覆盖失败：' + e.message, 'error')
+      crop.error = '覆盖失败：' + e.message
+      toast(crop.error, 'error')
     } finally {
       saving.value = false
     }
@@ -798,7 +801,7 @@ export function useConsoleTemplates({
     pickCoord: () => beginCellPick('coord'),
     pickColor: () => beginCellPick('color'),
     /** 按步骤实际规则匹配当前模板：服务端按短名消歧并解析文件名区域，不发送任何点击。 */
-    matchTemplate: name => testMatch(name, { stepSemantics: true }),
+    matchTemplate: (name, matchOptions = {}) => testMatch(name, { stepSemantics: true, matchOptions }),
     /** 框选生成新模板：不切页签（裁切弹窗挂面板层级，任何页签下可见），用户走既有
      *  二次裁切→保存流程；保存成功后以模板短名 resolve，CellEditor 自动回填该字段 */
     captureTemplate: () => {
@@ -1088,19 +1091,46 @@ export function useConsoleTemplates({
 
   let matchRequestSeq = 0
   watch([packageId, () => store.deviceId], () => { matchRequestSeq++; showHit.value = false })
-  async function testMatch(name, { stepSemantics = false } = {}) {
+  watch(() => stage?.generation?.(), () => { matchRequestSeq++; showHit.value = false })
+  watch(() => stage?.frameAt?.(), () => { showHit.value = false })
+  async function testMatch(name, { stepSemantics = false, matchOptions = {} } = {}) {
     const requestSeq = ++matchRequestSeq
     const toast = beginReport()
-    if (!connected.value) return toast('请先连接设备', 'error')
+    if (stepSemantics && matchOptions.error) return toast(matchOptions.error, 'error')
+    const mediaMode = stage?.kind?.() === 'media'
+    if (mediaMode ? !stage.ready() : !connected.value) {
+      return toast(mediaMode ? '请先选择并加载视频素材' : '请先连接设备', 'error')
+    }
+    const sourceGeneration = stage?.generation?.()
+    let frame = null
+    const isCurrent = () => {
+      if (requestSeq !== matchRequestSeq || sourceGeneration !== stage?.generation?.()) return false
+      if (!mediaMode) return stage?.kind?.() !== 'media'
+      return !frame || frame.isCurrent() === true
+    }
     if (hitTimer) { clearTimeout(hitTimer); hitTimer = null }
     showHit.value = false
     try {
+      if (mediaMode) {
+        const captured = await stage.capturePreviewFrame()
+        if (requestSeq !== matchRequestSeq || sourceGeneration !== stage.generation()) return
+        if (!captured) return toast('当前视频画面尚未就绪，请等待跳转完成后重试', 'error')
+        frame = captured
+        if (!isCurrent()) return
+      }
       // 模板列表测试允许用户用测试区覆盖；步骤预览不覆盖，交给服务端按引擎规则
       // 从实际模板文件名解析 #区域（短名也由服务端统一消歧）。
-      const region = stepSemantics ? undefined : templateRegionPixels(name)
-      const threshold = stepSemantics ? editorMatchThreshold() : (Number(testThreshold.value) || 0.8)
-      const r = await api.testTemplate(name, store.deviceId, threshold, region, packageId.value)
-      if (requestSeq !== matchRequestSeq) return
+      const el = surface()
+      const width = el?.videoWidth || current.value?.width || 1920
+      const height = el?.videoHeight || current.value?.height || 1080
+      const region = stepSemantics
+        ? matchOptions.region?.map((v, i) => Math.round(v * (i % 2 ? height : width)))
+        : templateRegionPixels(name)
+      const threshold = stepSemantics ? (matchOptions.threshold ?? editorMatchThreshold()) : (Number(testThreshold.value) || 0.8)
+      const r = mediaMode
+        ? await api.testTemplate(name, null, threshold, region, packageId.value, frame)
+        : await api.testTemplate(name, store.deviceId, threshold, region, packageId.value)
+      if (!isCurrent()) return
       if (r.hit) {
         hit.x = r.x; hit.y = r.y; hit.w = r.width; hit.h = r.height
         hitLabel.value = `${name} ${r.score.toFixed(2)}`
@@ -1123,7 +1153,7 @@ export function useConsoleTemplates({
         toast(`未找到：${name}`, 'warn')
       }
     } catch (e) {
-      toast('匹配失败：' + e.message, 'error')
+      if (isCurrent()) toast('匹配失败：' + e.message, 'error')
     }
   }
 

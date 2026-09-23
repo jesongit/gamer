@@ -32,6 +32,11 @@ export function clonePath(path: Path): Path {
 
 /** 步骤子列表键 → 对应数组；不存在的键返回 undefined。 */
 function stepChildList(step: Step, key: string): Step[] | undefined {
+  if (step.kind === 'match_templates') {
+    if (key === 'else') return step.else
+    const match = /^cases\[(\d+)\]\.do$/.exec(key)
+    return match ? step.cases[Number(match[1])]?.body : undefined
+  }
   switch (key) {
     case 'then':
       return step.kind === 'if' ? step.then : undefined
@@ -131,6 +136,8 @@ function unwrap<T>(value: T): T {
 }
 
 export type Command =
+  | { type: 'set_template_cases'; path: Path; cases: Extract<Step, {kind: 'match_templates'}>['cases'] }
+  | { type: 'update_template_case'; path: Path; index: number; fields: Record<string, unknown> }
   | { type: 'insert_step'; path: Path; index: number; step: Step }
   | { type: 'remove_step'; path: Path; index: number }
   | { type: 'move_step'; from: { path: Path; index: number }; to: { path: Path; index: number } }
@@ -390,6 +397,26 @@ export class CommandStack {
             l.splice(position.index, 1)
           },
         }
+      }
+      case 'set_template_cases': {
+        const step = resolveStep(this.model, command.path)
+        if (step.kind !== 'match_templates') throw new Error('需要模板分支步骤')
+        // 保留分支/子步骤对象身份，确保此前子步骤命令在撤销排序后仍指向原对象。
+        const before = step.cases
+        const after = [...command.cases]
+        return { name, redo: () => { step.cases = after }, undo: () => { step.cases = before } }
+      }
+      case 'update_template_case': {
+        const step = resolveStep(this.model, command.path)
+        if (step.kind !== 'match_templates' || !step.cases[command.index]) throw new Error('模板分支不存在')
+        const target = step.cases[command.index] as unknown as Record<string, unknown>
+        const before: Record<string, unknown> = {}
+        for (const key of Object.keys(command.fields)) {
+          if (!['template', 'as'].includes(key)) throw new Error('无效的分支字段')
+          before[key] = structuredClone(unwrap(target[key]))
+        }
+        const after = structuredClone(unwrap(command.fields))
+        return { name, redo: () => Object.assign(target, after), undo: () => Object.assign(target, before) }
       }
       case 'update_step': {
         const step = resolveStep(this.model, command.path)

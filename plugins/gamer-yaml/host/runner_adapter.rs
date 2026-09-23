@@ -307,6 +307,7 @@ impl YamlRunAdapter {
         spec: &RunSpec,
         stop: Arc<AtomicBool>,
     ) -> anyhow::Result<Vec<(String, String)>> {
+        let defaults = super::settings::load(self.scripts.data_root())?;
         let scripts = self.scripts.clone();
         let target = spec.target.clone();
         let (entry, library, sources) =
@@ -439,6 +440,7 @@ impl YamlRunAdapter {
             Entry::Script { source, .. } => source.clone(),
             Entry::Function { name, .. } => sources.get(name).cloned().unwrap_or(Value::Null),
         };
+        program["_native_settings"] = serde_json::to_value(&defaults)?;
         program["trace"] = json!({ "run_id": spec.context.run_id.as_str(), "entry": source, "functions": sources });
         run_yaml_program(
             &extensions,

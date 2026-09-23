@@ -8,6 +8,7 @@ import { useOperationStatus } from './components/ui/useOperationStatus'
 import { pushRunEvent, useRunEvents } from '../../plugins/gamer-yaml/ui/src/components/console/useRunEvents'
 import { useConsoleScriptRunner } from '../../plugins/gamer-yaml/ui/src/components/console/useConsoleScriptRunner'
 import RunErrorLocation from '../../plugins/gamer-yaml/ui/src/components/console/RunErrorLocation.vue'
+import ScriptRunner from '../../plugins/gamer-yaml/ui/src/components/console/ScriptRunner.vue'
 import { api } from './api'
 import { connectGamer, applyGamerTheme } from '../../sdk/ui/gamer-ui.js'
 
@@ -82,7 +83,7 @@ it('调用退栈保留最内层失败，旧运行事件不会混进新运行', (
 })
 
 it('拆分库的函数打开共享画布，保存使用所属文件和读取版本', async () => {
-  const file = { id: 'qa/_function_extra.yaml', pkg: 'qa', file: '_function_extra.yaml', version: 'file-v1', functions: ['helper'], content: 'functions:\n  helper:\n    run: []\n' }
+  const file = { id: 'qa/_function_extra.yaml', pkg: 'qa', file: '_function_extra.yaml', version: 'file-v1', functions: ['other', 'helper'], content: 'functions:\n  other:\n    run: []\n  helper:\n    run: []\n' }
   vi.spyOn(api, 'listFunctions').mockResolvedValue([file])
   vi.spyOn(api, 'getFunction').mockResolvedValue(file)
   vi.spyOn(api, 'listScripts').mockResolvedValue([])
@@ -91,14 +92,31 @@ it('拆分库的函数打开共享画布，保存使用所属文件和读取版�
   let runner
   wrapper = mount(defineComponent({ setup() {
     runner = useConsoleScriptRunner({ packageId: ref('qa'), toast: vi.fn(), consoleRuntime: {}, templateNames: ref([]), tplShortName: value => value, loadData: vi.fn() })
-    return () => h('div')
+    return () => h(ScriptRunner, { context: runner.functionsPanel })
   } }))
   await runner.fnLib.refresh('qa')
   await runner.functionsPanel.editFunction({ fileId: file.id, name: 'helper', category: '_function_extra' })
   expect(runner.scriptShell.resourceId).toBe(file.id)
   expect(runner.functionsPanel.editFocusFn.value).toBe('helper')
-  runner.functionsPanel.renameEditingFunction('helper', 'renamed')
-  await runner.functionsPanel.saveEditScript({ keepOpen: true })
+  await flushPromises()
+  const nameInput = wrapper.get('.editor-toolbar input[aria-label="函数名称"]')
+  expect(nameInput.element.value).toBe('helper')
+  await nameInput.setValue('renamed')
+  await nameInput.trigger('keydown', { key: 'Enter' })
+  expect(runner.functionsPanel.editFocusFn.value).toBe('renamed')
+  runner.scriptShell.undo()
+  await flushPromises()
+  expect(nameInput.element.value).toBe('helper')
+  runner.scriptShell.redo()
+  await flushPromises()
+  expect(nameInput.element.value).toBe('renamed')
+  await nameInput.setValue('other')
+  await nameInput.trigger('blur')
+  expect(nameInput.attributes('aria-invalid')).toBe('true')
+  expect(runner.functionsPanel.editFocusFn.value).toBe('renamed')
+  await nameInput.trigger('keydown', { key: 'Escape' })
+  await wrapper.findAll('.resource-action').find(button => button.text() === '保存').trigger('click')
+  await flushPromises()
   expect(save).toHaveBeenCalledWith(file.id, expect.objectContaining({ expected_version: 'file-v1', content: expect.stringContaining('renamed') }))
 })
 

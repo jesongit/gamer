@@ -7,7 +7,7 @@
  * - 本模块负责 Model 层可判定的约束：引用路径语法、参数默认值类型、
  *   repeat 次数形态、as/函数名合法性、模板存在性（resolver 提供时）、
  *   函数存在性与调用面（knownFunctions 提供时）。
- *   V1 无 loop/break/defaults/call 命名空间等概念，相应校验随旧语法删除。
+ *   V1 无 loop/defaults/call 命名空间等概念，相应校验随旧语法删除。
  */
 
 import {
@@ -60,6 +60,13 @@ export function validateScript(model: Program, ctx: ValidationContext = {}): Dia
 function collectAsNames(step: Step, out: Set<string>): void {
   if (step.kind === 'call') {
     if (step.as) out.add(step.as)
+  } else if (step.kind === 'match_templates') {
+    for (const c of step.cases) {
+      const local = new Set<string>()
+      for (const child of c.body) collectAsNames(child, local)
+      for (const name of local) if (name !== c.as) out.add(name)
+    }
+    for (const child of step.else) collectAsNames(child, out)
   } else if (step.kind === 'if') {
     for (const child of step.then) collectAsNames(child, out)
     for (const child of step.else) collectAsNames(child, out)
@@ -138,17 +145,22 @@ function validateStepList(
   ctx: ValidationContext,
   diags: Diagnostic[],
   depth: number,
+  inLoop = false,
 ): void {
   const maxDepth = ctx.maxDepth ?? 32
   steps.forEach((step, i) => {
     const path = `${basePath}[${i}]`
     validateStep(step, path, declaredVars, ctx, diags)
+    if (step.kind === 'break' && !inLoop) diags.push(diag('yaml.break.outside_loop', path, 'break', 'break 只能在当前脚本或函数的 repeat 循环内使用'))
     if (depth >= maxDepth) {
       diags.push(diag('yaml.flow.nesting_depth', path, '', `步骤嵌套超过 ${maxDepth} 层`))
       return
     }
-    for (const child of childStepLists(step)) {
-      validateStepList(child.list, `${path}.${child.key}`, declaredVars, ctx, diags, depth + 1)
+    if (step.kind === 'match_templates') {
+      step.cases.forEach((c, n) => validateStepList(c.body, `${path}.cases[${n}].do`, new Set([...declaredVars, ...(c.as ? [c.as] : [])]), ctx, diags, depth + 1, inLoop))
+      validateStepList(step.else, `${path}.else`, declaredVars, ctx, diags, depth + 1, inLoop)
+    } else for (const child of childStepLists(step)) {
+      validateStepList(child.list, `${path}.${child.key}`, declaredVars, ctx, diags, depth + 1, inLoop || step.kind === 'repeat')
     }
   })
 }
@@ -174,6 +186,23 @@ function validateStep(
         diags.push(diag('yaml.args.type', path, 'name', 'name 必须是字符串或变量引用'))
       }
       const schema = ctx.resolveParams?.(step.fn)
+      const templateLists = schema?.filter(p => p.type === 'list' && p.items?.type === 'template').map(p => p.name)
+        ?? (step.fn === 'wait_find' ? ['obstacles'] : [])
+      for (const name of templateLists) {
+        const cell = step.args.kind === 'map' ? step.args.entries[name] : null
+        if (!cell || isRefCell(cell)) continue
+        if (!Array.isArray(cell.lit)) {
+          diags.push(diag('yaml.args.type', path, name, `${name} 必须是模板列表`))
+          continue
+        }
+        cell.lit.forEach((value, index) => {
+          if (typeof value !== 'string' || !value.trim()) {
+            diags.push(diag('yaml.args.type', path, name, `${name}[${index}] 必须是非空模板名`))
+          } else if (!value.startsWith('$') && ctx.resolveTemplate && !ctx.resolveTemplate(value)) {
+            diags.push(diag('yaml.resource.tmpl_not_found', path, name, `模板 ${value} 在当前 Package 不存在`))
+          }
+        })
+      }
       const templateParams = schema?.filter(p => p.type === 'template').map(p => p.name)
         ?? (['find', 'wait_find', 'tap_template', 'wait_disappear'].includes(step.fn) ? ['template'] : [])
       for (const name of templateParams) {
@@ -187,6 +216,23 @@ function validateStep(
       if (step.as !== null && !isIdentifierSafe(step.as)) {
         diags.push(diag(CODES.asInvalid, path, 'as', `as 变量名 ${JSON.stringify(step.as)} 非法——只允许小写字母、数字、下划线`))
       }
+      break
+    }
+    case 'match_templates': {
+      if (!step.cases.length || step.cases.length > 64) diags.push(diag('yaml.match_templates.cases', path, 'cases', '必须有 1..64 个模板分支'))
+      validateCell(step.threshold, path, 'threshold', declaredVars, ctx, diags)
+      if (!isRefCell(step.threshold) && (typeof step.threshold.lit !== 'number' || !Number.isFinite(step.threshold.lit) || step.threshold.lit < 0 || step.threshold.lit > 1)) {
+        diags.push(diag('yaml.match_templates.threshold', path, 'threshold', '匹配阈值必须为 0..1 数字或引用'))
+      }
+      step.cases.forEach((c, i) => {
+        const field = `cases[${i}].template`
+        validateCell(c.template, path, field, declaredVars, ctx, diags)
+        if (!isRefCell(c.template)) {
+          if (typeof c.template.lit !== 'string' || !c.template.lit.trim()) diags.push(diag('yaml.match_templates.template', path, field, '请选择模板'))
+          else if (ctx.resolveTemplate && !ctx.resolveTemplate(c.template.lit)) diags.push(diag('yaml.resource.tmpl_not_found', path, field, `模板 ${c.template.lit} 在当前 Package 不存在`))
+        }
+        if (c.as !== null && !isIdentifierSafe(c.as)) diags.push(diag(CODES.asInvalid, path, `cases[${i}].as`, '匹配结果变量名无效'))
+      })
       break
     }
     case 'if': {

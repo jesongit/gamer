@@ -12,8 +12,8 @@
       >
         <span class="idx mono">{{ i + 1 }}</span>
         <span class="icon" :title="row.meta.hint">{{ row.meta.icon }}</span>
-        <span class="label">{{ row.meta.label }}</span>
-        <span class="summary mono">{{ row.summary }}</span>
+        <span class="label" :title="row.caption.title">{{ row.caption.title }}</span>
+        <span class="summary mono" :title="row.summary">{{ row.caption.detail }}</span>
         <span v-if="i === activeTop" class="run-dot mono" title="当前运行步骤">▶ 运行中</span>
         <span v-else-if="i === errorTop" class="run-dot mono fail" title="运行失败的步骤">✗ 失败</span>
         <span v-if="row.target && !readonly" class="row-ops">
@@ -35,7 +35,7 @@
  * - call/func 卡片提供「打开子脚本/打开函数定义」结构化跳转入口（emit open-target）。
  */
 import { computed, inject } from 'vue'
-import { KIND_META, stepSummary } from '../../script-editor/components/kinds'
+import { KIND_META, stepCaption, stepSummary } from '../../script-editor/components/kinds'
 import { SE_TARGET_OPTIONS } from '../../script-editor/targets'
 
 const targetOptions = inject(SE_TARGET_OPTIONS, null)
@@ -62,6 +62,7 @@ const topSteps = computed(() => {
     kind: step.kind,
     meta: KIND_META[step.kind] || { icon: '?', label: step.kind, hint: '' },
     summary: stepSummary(step, targetOptions?.resolveParamsSync?.(step.fn)?.find(p => p.name === 'name')?.default),
+    caption: stepCaption(step, targetOptions?.resolveParamsSync?.(step.fn)?.find(p => p.name === 'name')?.default),
     target: step.kind === 'call' ? step.fn : '',
   }))
 })

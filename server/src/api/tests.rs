@@ -192,7 +192,7 @@ mod sec_tests {
         auth_cfg: crate::config::AuthConfig,
         executor: Arc<dyn crate::run_manager::RunExecutor>,
     ) -> TestApp {
-        let runs = Arc::new(crate::run_manager::RunManager::new(executor));
+        let runs = Arc::new(crate::run_manager::RunManager::new(executor).with_journal(db.clone()));
         let scheduler = Arc::new(Scheduler::new(db.clone()));
         // 与生产等价：gamer-yaml 扩展 Running 时注册其 timer runner（POST
         // /api/runs 手动分发与任务路径共用同一注册表）。测试装配直接同步注册。
@@ -216,14 +216,14 @@ mod sec_tests {
         scheduler.register_functions_describer(
             "gamer-yaml",
             "gamer-yaml",
-            crate::extensions::gamer_yaml::timer_yaml::YamlTimerRunner::functions_describer(),
+            yaml_runner.functions_describer(),
         );
-        let auth = Arc::new(auth::AuthState::new(
-            credential,
-            auth_cfg,
-            false,
-            Some("test-token".into()),
-        ));
+        let auth = Arc::new(
+            auth::AuthState::new(credential, auth_cfg, false, Some("test-token".into()))
+                .with_live_settings(cfg.live_settings.clone())
+                .with_session_store(&cfg.data_dir)
+                .unwrap(),
+        );
         // 测试用协调器：无会话可拆，drain 为空操作（行为断言在 shutdown.rs 单测）
         let shutdown = Arc::new(crate::shutdown::ShutdownCoordinator::new(Arc::new(|| {
             Box::pin(async {})
@@ -472,6 +472,9 @@ mod sec_tests {
     }
     mod packages_tests {
         include!("tests/packages.rs");
+    }
+    mod vision_preview_tests {
+        include!("tests/vision_preview.rs");
     }
     mod packages_dormant_tests {
         include!("tests/packages_dormant.rs");

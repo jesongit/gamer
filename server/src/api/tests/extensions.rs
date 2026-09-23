@@ -100,11 +100,21 @@ entry = "ui/index.html"
     )
     .await;
     // V1 生命周期收敛：enable = 启用意图 + 直接启动。桩 wasm 无法真正实例化
-    // → 启动失败降级 Failed + last_error（保留启用意图可重试），HTTP 层映射 500。
-    assert_eq!(enabled.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    // → 启动失败降级 Failed；未编译 WASM 则保留 Enabled 并返回 503。
+    assert_eq!(
+        enabled.status(),
+        if cfg!(feature = "wasm-runtime") {
+            StatusCode::INTERNAL_SERVER_ERROR
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+    );
     let list = get_json(&test_app, &session, "/api/extensions").await;
     let list_json = json_body(list).await;
-    assert_eq!(list_json["extensions"][0]["state"], "failed");
+    assert_eq!(
+        list_json["extensions"][0]["state"],
+        if cfg!(feature = "wasm-runtime") { "failed" } else { "enabled" }
+    );
     assert!(
         list_json["extensions"][0]["last_error"]
             .as_str()
@@ -242,8 +252,15 @@ component = "console.scripts"
         serde_json::json!({}),
     )
     .await;
-    // V1：enable = 启用 + 直接启动；桩 wasm 启动失败 → 500 + Failed（可重试）。
-    assert_eq!(enabled.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    // V1：桩 wasm 启动失败为 500；未编译 WASM 则返回运行时不可用 503。
+    assert_eq!(
+        enabled.status(),
+        if cfg!(feature = "wasm-runtime") {
+            StatusCode::INTERNAL_SERVER_ERROR
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+    );
 
     // Failed 不发布面板
     let contributions = get_json(&test_app, &session, "/api/extensions/ui").await;

@@ -28,6 +28,7 @@ mod packages;
 mod packages_rename;
 mod recording;
 mod runs;
+mod settings;
 pub(crate) mod system;
 mod tasks;
 #[cfg(test)]
@@ -181,6 +182,10 @@ pub(crate) fn build_router_with_extensions(
     //      （devices::api_control）、运行分发、资源删除。
     let protected_json: Router<()> = Router::new()
         .route(
+            "/api/system/settings",
+            get(settings::get_settings).put(settings::save_settings),
+        )
+        .route(
             "/api/devices",
             get(devices::api_list_devices).post(devices::api_create_device),
         )
@@ -239,14 +244,10 @@ pub(crate) fn build_router_with_extensions(
             "/api/packages/:pkg/plugins/:plugin/rename",
             post(packages_rename::api_rename_plugin_resource),
         )
-        // Vision 能力位（模板匹配测试 = vision 语义，Core 合法）
-        .route(
-            "/api/capabilities/vision/test",
-            post(vision::api_vision_test_template),
-        )
         // 统一执行入口（P11.6 / §11.3）：原 /api/scripts/:id/run 与
         // /api/functions/:id/run 删除，经 Runner 注册表分发。
-        .route("/api/runs", post(runs::api_dispatch_run))
+        .route("/api/runs", post(runs::api_dispatch_run).get(runs::api_run_history))
+        .route("/api/runs/:run_id/events", get(runs::api_run_events))
         .route("/api/devices/:id/run", get(runs::api_device_run))
         .route("/api/runs/:run_id", get(runs::api_get_run))
         .route("/api/runs/:run_id/cancel", post(runs::api_cancel_run))
@@ -341,6 +342,11 @@ pub(crate) fn build_router_with_extensions(
     //      统一注册在本组以获得上传体限额；文本内容另有 1MiB 校验兜底。
     //      GET/DELETE 在 protected_json 组（小响应、无 body）。
     let protected_upload: Router<()> = Router::new()
+        // 当前画面匹配可上传 PNG base64；10MiB 图片在 16MiB 请求限额内。
+        .route(
+            "/api/capabilities/vision/test",
+            post(vision::api_vision_test_template),
+        )
         .route(
             "/api/packages/:pkg/plugins/:plugin/resources/*path",
             put(packages::api_put_plugin_resource),

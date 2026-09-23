@@ -6,13 +6,13 @@
       <div class="modal-head">
         <span class="title">{{ ctx.crop.conflict ? '⚠️ 模板短名冲突' : '✂️ 二次裁切' }}</span>
         <span v-if="!ctx.crop.conflict" class="mono crop-meta">{{ ctx.crop.sourceLabel ? ctx.crop.sourceLabel + ' · ' : '' }}{{ ctx.cropSize }} · {{ ctx.cropZoomPct }}</span>
-        <button class="btn btn-ghost btn-sm" @click="ctx.cancelCrop">✕</button>
+        <button class="btn btn-ghost btn-sm" :disabled="ctx.saving" @click="ctx.cancelCrop">✕</button>
       </div>
       <div v-if="ctx.crop.conflict" class="modal-body crop-conflict-body">
         <div class="crop-conflict-message">
           模板短名 <span class="mono">{{ ctx.crop.conflict.shortName }}</span> 已存在，是否覆盖模板 <span class="mono">{{ ctx.crop.conflict.name }}</span>？
         </div>
-        <div class="crop-conflict-hint">两张图片都支持滚轮放大/缩小，方便查看小模板。</div>
+        <div class="crop-conflict-hint">覆盖后使用当前裁切图片、搜索区域和颜色设置。两张图片都支持滚轮缩放。</div>
         <div class="crop-compare">
           <div class="crop-compare-card">
             <div class="crop-compare-label">当前裁切模板 <span class="mono">{{ Math.round(compareZoom.current * 100) }}%</span></div>
@@ -30,6 +30,7 @@
         <input v-model="ctx.crop.name" class="input mono" placeholder="模板名称（默认自动生成，支持中文）" @keydown.enter="ctx.saveTemplate" />
         <label class="crop-color-option"><input v-model="ctx.crop.preserveColor" type="checkbox" /> 保留颜色（文件名自动加 <span class="mono">#1</span>）</label>
       </div>
+      <p v-if="ctx.crop.error" class="crop-error" role="alert">{{ ctx.crop.error }}</p>
       <div class="modal-foot">
         <template v-if="ctx.crop.conflict">
           <button class="btn btn-sm" :disabled="ctx.saving" @click="ctx.backToCrop">返回修改</button>
@@ -73,6 +74,7 @@ watch(() => !!ctx.crop.conflict, value => { if (value) resetCompareZoom(); else 
 .crop-conflict-body{gap:12px}
 .crop-conflict-message{padding:8px 10px;border:1px solid rgba(250,204,21,.4);border-radius:var(--radius-sm);background:rgba(250,204,21,.08);color:var(--text-0);font-size:12px}
 .crop-conflict-hint{font-size: 12px;color:var(--text-2)}
+.crop-error{margin:8px 16px;color:var(--danger);font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
 .crop-compare{flex:1;min-height:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .crop-compare-card{min-width:0;min-height:0;display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-1)}
 .crop-compare-label{font-size: 12px;color:var(--text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.crop-compare-label .mono{float:right;color:var(--text-2)}

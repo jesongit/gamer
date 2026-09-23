@@ -41,17 +41,19 @@
           @click.stop="beginRename"
         >重命名</button>
       </template>
-      <!-- 非根视图（专注/面包屑导航后）：返回上一个专注视图，而不是固定跳回根流程 -->
-      <button
-        v-if="!atRoot" type="button" class="fn-btn back-btn"
-        :title="focusHistory.length ? '返回上一个专注视图' : `返回${rootLabel}步骤列表`"
-        @click.stop="goBack"
-      >← 返回上一级</button>
+      <slot v-if="!hideFunctionToolbar" name="before-add-step" />
       <button
         v-if="!hideFunctionToolbar" ref="addButtonEl" type="button" class="add-btn"
         :class="{ active: panelOpen }" title="添加步骤（选择后插入到当前锚点）"
         @click.stop="openAdd($event.currentTarget)"
       >+ 步骤</button>
+      <slot v-if="!hideFunctionToolbar" name="after-add-step" />
+      <!-- 非根视图：返回上一个专注视图。 -->
+      <button
+        v-if="!atRoot" type="button" class="fn-btn back-btn"
+        :title="focusHistory.length ? '返回上一个专注视图' : `返回${rootLabel}步骤列表`"
+        @click.stop="goBack"
+      >← 返回上一级</button>
       <template v-if="isFunction && !hideFunctionToolbar && !compactToolbar">
         <button
           type="button"
@@ -151,7 +153,7 @@ const confirmDialog = useConfirmDialog()
 import { useConfirmDialog } from '../../../../../../web/src/components/ui/useConfirmDialog'
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch, type PropType } from 'vue'
 import type { EditorModel, Path } from '../commands'
-import { resolveStepList } from '../commands'
+import { resolveStep, resolveStepList } from '../commands'
 import { breadcrumb, defaultAnchor, rootContainerPath } from '../selection'
 import type { BreadcrumbNode } from '../selection'
 import type { Diagnostic } from '../diagnostics'
@@ -432,14 +434,14 @@ function updateAddMenuPosition(): void {
   const target = addAnchorEl.value ?? addButtonEl.value
   if (!target) return
   const rect = target.getBoundingClientRect()
-  const width = Math.min(320, window.innerWidth - 16)
+  const width = Math.min(660, window.innerWidth - 16)
   const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8))
   const panel = addMenuEl.value?.querySelector('.add-step-panel') as HTMLElement | null
   const list = panel?.querySelector('.step-menu') as HTMLElement | null
   // 用内容高度估算理想尺寸，不直接清空 Vue 管理的 style。
   // 否则下一次相同值的 patch 不会重写 maxHeight，滚动时会突然回落到 CSS 上限。
   const overflow = list ? Math.max(0, list.scrollHeight - list.clientHeight) : 0
-  const panelHeight = Math.min(480, (panel?.getBoundingClientRect().height ?? 0) + overflow)
+  const panelHeight = Math.min(560, (panel?.getBoundingClientRect().height ?? 0) + overflow)
   const viewportHeight = window.innerHeight || document.documentElement.clientHeight
   const margin = 8
   const gap = 4
@@ -456,7 +458,7 @@ function updateAddMenuPosition(): void {
     width: `${width}px`,
     left: `${left}px`,
     top: `${top}px`,
-    maxHeight: `${Math.min(480, available)}px`,
+    maxHeight: `${Math.min(560, available)}px`,
   }
 }
 
@@ -671,13 +673,23 @@ onBeforeUnmount(() => {
 // ---------- 参数列表（CellEditor 引用下拉） ----------
 
 const cellParams = computed<ParamDecl[]>(() => {
-  if (props.params && props.params.length) return props.params
-  if (isFunction.value) {
+  let params: ParamDecl[]
+  if (props.params?.length) params = [...props.params]
+  else if (isFunction.value) {
     const fns = (props.model as { functions: { name: string; params: ParamDecl[] }[] }).functions
-    const fn = fns.find((f) => f.name === activeFnName.value)
-    return fn ? fn.params : []
+    params = [...(fns.find(f => f.name === activeFnName.value)?.params ?? [])]
+  } else params = [...(props.model as Program).params]
+  const path = activeContainer.value
+  const root = path[0] === 'functions' ? 3 : 1
+  for (let i = root; i + 1 < path.length; i += 2) {
+    try {
+      const step = resolveStep(props.model, path.slice(0, i + 1))
+      const match = /^cases\[(\d+)\]\.do$/.exec(String(path[i + 1]))
+      const name = step.kind === 'match_templates' && match ? step.cases[Number(match[1])]?.as : null
+      if (name) params = [...params.filter(p => p.name !== name), { name, type: 'object', required: false, default: null, desc: '本分支匹配结果' }]
+    } catch { break }
   }
-  return (props.model as Program).params
+  return params
 })
 
 const rootEl = ref<HTMLElement | null>(null)
@@ -687,7 +699,7 @@ const rootEl = ref<HTMLElement | null>(null)
  * - locate：错误面板独立挂载在画布外（全屏外壳右侧常驻）时由宿主转发定位；
  * - activeFnName：函数库当前编辑的函数名（全屏外壳按它把 ParamEditor 指到函数级 params）。
  */
-defineExpose({ locate, activeFnName, openAdd })
+defineExpose({ locate, activeFnName, openAdd, closeAdd, panelOpen })
 </script>
 
 <style scoped>

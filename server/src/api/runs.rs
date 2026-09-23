@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -204,7 +204,50 @@ pub(super) async fn api_get_run(
     match st.runs.get_run(&run_id) {
         Some(rec) => Json(serde_json::to_value(&rec).unwrap_or_else(|_| serde_json::json!({})))
             .into_response(),
-        None => err_response(StatusCode::NOT_FOUND, "run_not_found"),
+        None => match st.db.stored_run(run_id).await {
+            Ok(Some(record)) => Json(record).into_response(),
+            Ok(None) => err_response(StatusCode::NOT_FOUND, "run_not_found"),
+            Err(error) => ApiError::internal(error.to_string()).into_response(),
+        },
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct HistoryQuery {
+    device_id: String,
+    entrypoint: Option<String>,
+    before: Option<String>,
+}
+pub(super) async fn api_run_history(
+    State(st): State<AppState>,
+    Query(q): Query<HistoryQuery>,
+) -> Response {
+    match st.db.run_history(q.device_id, q.entrypoint, q.before).await {
+        Ok(mut records) => {
+            for record in &mut records {
+                if let Some(live) = record["run_id"].as_str().and_then(|id| st.runs.get_run(id)) {
+                    *record = serde_json::to_value(live).unwrap();
+                }
+            }
+            Json(records).into_response()
+        }
+        Err(error) => ApiError::internal(error.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct EventsQuery {
+    #[serde(default)]
+    after: i64,
+}
+pub(super) async fn api_run_events(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<EventsQuery>,
+) -> Response {
+    match st.db.run_event_page(id, q.after).await {
+        Ok(page) => Json(page).into_response(),
+        Err(error) => ApiError::internal(error.to_string()).into_response(),
     }
 }
 

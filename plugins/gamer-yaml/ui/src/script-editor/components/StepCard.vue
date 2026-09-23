@@ -14,34 +14,33 @@
     @drop.prevent.stop="onDrop"
   >
     <!-- 卡头：拖动手柄 + 图标 + 中文名 + 序号 + 摘要 + 动作按钮 -->
-    <div class="card-head">
+    <div class="card-head" @click.stop="onToggleExpand">
       <span
         class="drag-handle" title="拖动排序" draggable="true" role="button" aria-label="拖动排序"
         @dragstart.stop="onDragStart" @dragend.stop="onDragEnd" @click.stop
       >⋮⋮</span>
+      <button type="button" class="expand-btn" :title="expanded ? '收起' : '展开编辑'"
+        :aria-expanded="expanded" @click.stop="onToggleExpand">
       <span class="kind-icon" :title="meta.hint">{{ meta.icon }}</span>
-      <span class="kind-name">{{ meta.label }}</span>
+      <span class="kind-name" :title="caption.title">{{ caption.title }}</span>
       <span class="step-no">{{ String(index + 1).padStart(2, '0') }}</span>
-      <span class="summary" :title="summary">{{ summary }}</span>
+      <span class="summary" :title="summary">{{ caption.detail }}</span>
       <span v-if="ownErrors.length" class="err-badge" :title="ownErrors.map((d) => d.message).join('\n')">
         {{ ownErrors.length }}
       </span>
+      </button>
       <span class="head-actions">
-        <!-- 函数测试入口：仅宿主开启 testFrom 时显示（函数库页签的函数体顶层卡片） -->
+        <button v-if="canJumpToFunction" type="button" class="mini-btn jump-function"
+          :disabled="functionNavigation?.busy" title="保存当前编辑并跳转到函数定义" aria-label="跳转到函数定义"
+          @click.stop="jumpToFunction">跳转</button>
+        <!-- 脚本/函数顶层运行入口；编辑时保留，继续沿用宿主运行校验。 -->
         <button
           v-if="testFrom" type="button" class="mini-btn test-from"
           title="从此步骤运行"
           @click.stop="emit('test-from', step.uuid)"
-         aria-label="从此步骤运行"><UiIcon name="play" /></button>
-        <button
-          type="button" class="mini-btn expand-btn"
-          :title="expanded ? '收起' : '展开编辑'"
-          @click.stop="onToggleExpand"
-        >{{ expanded ? '▾' : '▸' }}</button>
-        <button type="button" class="mini-btn" title="上移" :disabled="index === 0" @click.stop="moveBy(-1)" aria-label="上移步骤"><UiIcon name="up" /></button>
-        <button type="button" class="mini-btn" title="下移" :disabled="index >= listLength - 1" @click.stop="moveBy(1)" aria-label="下移步骤"><UiIcon name="down" /></button>
-        <button type="button" class="mini-btn" title="复制步骤" @click.stop="duplicate" aria-label="复制步骤"><UiIcon name="copy" /></button>
-        <button type="button" class="mini-btn danger" title="删除步骤" aria-label="删除步骤" @click.stop="remove"><UiIcon name="trash" /></button>
+         aria-label="从此步骤运行"><UiIcon name="play" /><span>运行</span></button>
+        <button type="button" class="mini-btn" title="复制步骤" @click.stop="duplicate" aria-label="复制步骤"><UiIcon name="copy" /><span>复制</span></button>
+        <button type="button" class="mini-btn danger" title="删除步骤" aria-label="删除步骤" @click.stop="remove"><UiIcon name="trash" /><span>删除</span></button>
       </span>
     </div>
 
@@ -49,7 +48,7 @@
     <div v-if="expanded" class="card-body" @click.stop>
       <!-- 函数调用 -->
       <template v-if="step.kind === 'call'">
-        <div class="field-row">
+        <div class="field-row call-signature">
           <span class="field-label">函数</span>
           <template v-if="targetOptions">
             <select
@@ -70,8 +69,17 @@
             aria-label="函数名"
             @change="applyFn(($event.target as HTMLInputElement).value)"
           />
+          <div class="return-value-field">
+            <label class="return-value-label">
+              <span>返回值</span>
+              <input class="cell-input mono" :value="step.as ?? ''" placeholder="留空不接收"
+                title="接收返回值的变量名，如 hit；留空不接收" aria-label="返回值变量名"
+                :aria-invalid="!!fieldError('as')" @change="setAs(($event.target as HTMLInputElement).value)" />
+            </label>
+            <button v-if="step.as !== null" type="button" class="mini-btn" title="清除返回值变量" aria-label="清除返回值变量" @click="setAs('')"><UiIcon name="close" /></button>
+          </div>
           <span v-if="fieldError('fn')" class="cell-err-msg">{{ fieldError('fn') }}</span>
-
+          <span v-if="fieldError('as')" class="cell-err-msg">{{ fieldError('as') }}</span>
         </div>
         <div class="field-row col">
 
@@ -79,7 +87,7 @@
           <template v-if="paramSchema">
             <div v-for="name in requiredArgNames" :key="name" class="arg-row" :data-arg-name="name">
               <span class="arg-name mono" :title="paramSchema.find(p => p.name === name)?.desc">{{ name }} <span class="required-dot" aria-label="必填"></span></span>
-              <CellEditor :cell="schemaArgCell(name)" :type="argType(name)" :params="params" :templates="templates" :label="`参数 ${name}`" @change="(c) => updateSchemaArg(name, c)" />
+              <CellEditor :cell="schemaArgCell(name)" :argument-name="name" :type="argType(name)" :item-type="paramSchema?.find(p => p.name === name)?.items?.type" :params="params" :templates="templates" :label="`参数 ${name}`" @change="(c) => updateSchemaArg(name, c)" />
               <button v-if="canRemoveSchemaArg(name)" type="button" class="mini-btn" :title="hasDefaultFor(name) ? '恢复默认值' : '删除实参'" :aria-label="hasDefaultFor(name) ? `恢复 ${name} 默认值` : `删除参数 ${name}`" @click.stop="removeArg(name)">✕</button>
             </div>
             <span v-if="!requiredArgNames.length" class="field-hint">无必填参数</span>
@@ -90,7 +98,7 @@
               </div>
               <div v-for="name in optionalArgNames" :key="name" class="arg-row" :data-arg-name="name">
                 <span class="arg-name mono">{{ name }}</span>
-                <CellEditor :cell="schemaArgCell(name)" :type="argType(name)" :params="params" :templates="templates" :label="`参数 ${name}`" :optional="isUnfilledOptional(name)" @change="(c) => updateSchemaArg(name, c)" /><span v-if="isUnfilledOptional(name)" class="field-hint">可选，留空不传</span>
+                <CellEditor :cell="schemaArgCell(name)" :argument-name="name" :type="argType(name)" :item-type="paramSchema?.find(p => p.name === name)?.items?.type" :params="params" :templates="templates" :label="`参数 ${name}`" :optional="isUnfilledOptional(name)" @change="(c) => updateSchemaArg(name, c)" /><span v-if="isUnfilledOptional(name)" class="field-hint">可选，留空不传</span>
                 <button v-if="canRemoveSchemaArg(name)" type="button" class="mini-btn" :title="hasDefaultFor(name) ? '恢复默认值' : '删除实参'" :aria-label="hasDefaultFor(name) ? `恢复 ${name} 默认值` : `删除参数 ${name}`" @click.stop="removeArg(name)">✕</button>
               </div>
             </details>
@@ -114,7 +122,7 @@
                 @change="renameArg(name, ($event.target as HTMLInputElement).value)"
               />
               <CellEditor
-                :cell="step.args.entries[name]" :type="argType(name)" :params="params"
+                :cell="step.args.entries[name]" :argument-name="name" :type="argType(name)" :item-type="paramSchema?.find(p => p.name === name)?.items?.type" :params="params"
                 :templates="templates"
                 :label="`参数 ${name}`" @change="(c) => updateArgValue(name, c)"
               />
@@ -135,16 +143,43 @@
           </template>
           <span v-if="conversionNotice" class="field-hint args-conversion-notice" role="status">{{ conversionNotice }}</span>
         </div>
-        <details class="optional-params return-value-options">
-          <summary>接收返回值 · {{ step.as === null ? '未设置' : step.as || '待填写' }}</summary>
-          <div class="arg-row">
-            <span class="field-label">变量名</span>
-            <input class="cell-input" :value="step.as ?? ''" placeholder="留空不接收，如 hit"
-              aria-label="返回值变量名" :aria-invalid="!!fieldError('as')" @change="setAs(($event.target as HTMLInputElement).value)" />
-            <button v-if="step.as !== null" type="button" class="mini-btn" title="清除返回值变量" aria-label="清除返回值变量" @click="setAs('')"><UiIcon name="close" /></button>
+      </template>
+
+      <template v-else-if="step.kind === 'match_templates'">
+        <p class="field-hint">从上到下匹配同一帧，只执行首个命中的分支；模板不会自动点击。</p>
+        <div class="field-row">
+          <span class="field-label">匹配阈值</span>
+          <CellEditor :cell="step.threshold" type="number" :params="params" label="匹配阈值" :error="fieldError('threshold')" @change="c => updateCell('threshold', c)" />
+        </div>
+        <section v-for="(branch, n) in step.cases" :key="n" class="template-case" :data-template-case="n">
+          <div class="template-case-head">
+            <strong>分支 {{ n + 1 }}</strong>
+            <button type="button" class="mini-btn" :disabled="n === 0" :aria-label="`上移模板分支 ${n + 1}`" @click="moveTemplateCase(n, -1)">↑ 上移</button>
+            <button type="button" class="mini-btn" :disabled="n === step.cases.length - 1" :aria-label="`下移模板分支 ${n + 1}`" @click="moveTemplateCase(n, 1)">↓ 下移</button>
+            <button type="button" class="mini-btn danger" :disabled="step.cases.length <= 1" :aria-label="`删除模板分支 ${n + 1}`" @click="removeTemplateCase(n)">删除分支</button>
           </div>
-          <span v-if="fieldError('as')" class="cell-err-msg">{{ fieldError('as') }}</span>
-        </details>
+          <div class="field-row">
+            <span class="field-label">模板</span>
+            <CellEditor :cell="branch.template" type="template" :params="params" :templates="templates" :label="`分支 ${n + 1} 模板`" :error="fieldError(`cases[${n}].template`)" @change="c => updateTemplateCase(n, { template: c })" />
+          </div>
+          <div class="field-row">
+            <label class="field-label" :for="`${step.uuid}-case-${n}`">匹配结果</label>
+            <input :id="`${step.uuid}-case-${n}`" class="cell-input mono" :value="branch.as ?? ''" placeholder="留空不接收，如 hit" :aria-label="`分支 ${n + 1} 匹配结果`" @change="updateTemplateCase(n, { as: ($event.target as HTMLInputElement).value.trim() || null })" />
+            <span class="field-hint">变量仅在本分支内有效</span>
+            <span v-if="fieldError(`cases[${n}].as`)" class="cell-err-msg">{{ fieldError(`cases[${n}].as`) }}</span>
+          </div>
+          <BranchContainer :model="model" :stack="stack" :container-path="subPath(`cases[${n}].do`)" :base-path="subBase(`cases[${n}].do`)"
+            label="命中后执行" :depth="depth + 1" :diagnostics="diagnostics" :selected-uuid="selectedUuid" :highlight-uuid="highlightUuid"
+            :expanded-uuids="expandedUuids" :params="templateCaseParams(branch.as)" :templates="templates"
+            @select="u => emit('select', u)" @toggle-expand="u => emit('toggle-expand', u)"
+            @focus="p => emit('focus', p)" @add-here="(p, el) => emit('add-here', p, el)" />
+        </section>
+        <button type="button" class="mini-btn add" :disabled="step.cases.length >= 64" aria-label="添加模板分支" @click="addTemplateCase">+ 添加模板分支</button>
+        <BranchContainer :model="model" :stack="stack" :container-path="subPath('else')" :base-path="subBase('else')"
+          label="全部未命中（可选）" :depth="depth + 1" :diagnostics="diagnostics" :selected-uuid="selectedUuid" :highlight-uuid="highlightUuid"
+          :expanded-uuids="expandedUuids" :params="params" :templates="templates"
+          @select="u => emit('select', u)" @toggle-expand="u => emit('toggle-expand', u)"
+          @focus="p => emit('focus', p)" @add-here="(p, el) => emit('add-here', p, el)" />
       </template>
 
       <!-- if -->
@@ -189,6 +224,7 @@
         />
       </template>
 
+      <p v-else-if="step.kind === 'break'">退出最近一层循环，继续执行循环后面的步骤。</p>
       <!-- return -->
       <template v-else-if="step.kind === 'return'">
         <div class="field-row">
@@ -212,7 +248,7 @@
  * 纯受控组件：所有写操作构造 Command 提交 stack，自身不改模型。
  */
 import UiIcon from '../../../../../../web/src/components/ui/UiIcon.vue'
-import { computed, inject, ref, watch, type PropType } from 'vue'
+import { computed, inject, provide, ref, watch, type PropType } from 'vue'
 import type { Path } from '../commands'
 import { resolveStepList } from '../commands'
 import type { Diagnostic } from '../diagnostics'
@@ -230,8 +266,8 @@ import {
   writeStepDragPayload,
   type StepDragPayload,
 } from '../step-dnd'
-import { SE_TARGET_OPTIONS, type SeTargetOptions } from '../targets'
-import { KIND_META, stepSummary } from './kinds'
+import { SE_FUNCTION_NAVIGATION, SE_TARGET_OPTIONS, SE_TEMPLATE_MATCH_OPTIONS, type SeTargetOptions, type TemplateMatchOptions } from '../targets'
+import { KIND_META, stepCaption } from './kinds'
 import CellEditor from './CellEditor.vue'
 import BranchContainer from './BranchContainer.vue'
 
@@ -261,8 +297,9 @@ const props = defineProps({
 const emit = defineEmits(['select', 'toggle-expand', 'focus', 'add-here', 'test-from'])
 
 const meta = computed(() => KIND_META[props.step.kind])
-const summary = computed(() => stepSummary(props.step, props.step.kind === 'call'
+const caption = computed(() => stepCaption(props.step, props.step.kind === 'call'
   ? paramSchema.value?.find(p => p.name === 'name')?.default as string | undefined : undefined))
+const summary = computed(() => `${caption.value.title}${caption.value.detail ? ' · ' + caption.value.detail : ''}`)
 const stepPath = computed(() => joinStepPath(props.basePath, props.index))
 const selected = computed(() => props.selectedUuid === props.step.uuid)
 const highlighted = computed(() => props.highlightUuid === props.step.uuid)
@@ -272,10 +309,10 @@ const expanded = computed(() =>
   managedExpand.value ? (props.expandedUuids as Set<string>).has(props.step.uuid) : localExpanded.value,
 )
 function onToggleExpand(): void {
+  emit('select', props.step.uuid)
   emit('toggle-expand', props.step.uuid)
   if (!managedExpand.value) localExpanded.value = !localExpanded.value
 }
-const listLength = computed(() => resolveStepList(props.model, props.containerPath).length)
 const ownErrors = computed(() => props.diagnostics.filter((d) => d.step_path === stepPath.value))
 
 // ---------- 步骤拖放排序 ----------
@@ -355,16 +392,37 @@ function updateStep(fields: Record<string, unknown>): boolean {
   return props.stack.apply({ type: 'update_step', path: [...props.containerPath, props.index], fields }, `编辑 ${meta.value.label}`)
 }
 
+function updateTemplateCase(index: number, fields: Record<string, unknown>): void {
+  if (props.step.kind !== 'match_templates') return
+  props.stack.apply({ type: 'update_template_case', path: [...props.containerPath, props.index], index, fields }, '编辑模板分支')
+}
+function setTemplateCases(cases: Extract<Step, {kind: 'match_templates'}>['cases']): void {
+  props.stack.apply({ type: 'set_template_cases', path: [...props.containerPath, props.index], cases }, '调整模板分支')
+}
+function addTemplateCase(): void {
+  if (props.step.kind !== 'match_templates' || props.step.cases.length >= 64) return
+  setTemplateCases([...props.step.cases, { template: { lit: '' }, as: null, body: [] }])
+}
+function removeTemplateCase(index: number): void {
+  if (props.step.kind !== 'match_templates' || props.step.cases.length <= 1) return
+  setTemplateCases(props.step.cases.filter((_, i) => i !== index))
+}
+function moveTemplateCase(index: number, offset: number): void {
+  if (props.step.kind !== 'match_templates') return
+  const cases = [...props.step.cases]
+  const to = index + offset
+  if (to < 0 || to >= cases.length) return
+  ;[cases[index], cases[to]] = [cases[to], cases[index]]
+  setTemplateCases(cases)
+}
+function templateCaseParams(name: string | null): ParamDecl[] {
+  return name ? [...props.params.filter(p => p.name !== name), { name, type: 'object', required: false, default: null, desc: '本分支匹配结果，可用 center/score/template' }] : props.params
+}
+
 function updateCell(field: string, cell: Cell): void {
   updateStep({ [field]: cell })
 }
 
-function moveBy(dir: -1 | 1): void {
-  props.stack.apply(
-    { type: 'move_step', from: { path: props.containerPath, index: props.index }, to: { path: props.containerPath, index: props.index + dir } },
-    dir < 0 ? '上移步骤' : '下移步骤',
-  )
-}
 function duplicate(): void {
   props.stack.apply({ type: 'duplicate_step', path: props.containerPath, index: props.index }, '复制步骤')
 }
@@ -387,6 +445,16 @@ function subBase(key: string): string {
 
 const targetOptions = inject<SeTargetOptions | null>(SE_TARGET_OPTIONS, null)
 const allTargets = computed(() => targetOptions?.targets ?? [])
+const functionNavigation = inject(SE_FUNCTION_NAVIGATION, null)
+const canJumpToFunction = computed(() => {
+  if (!functionNavigation || props.step.kind !== 'call') return false
+  const name = props.step.fn
+  return allTargets.value.some(o => o.target === name && o.group === 'package')
+    || ('functions' in props.model && props.model.functions.some(fn => fn.name === name))
+})
+function jumpToFunction(): void {
+  if (props.step.kind === 'call' && !functionNavigation?.busy) void functionNavigation?.open(props.step.fn, props.step.uuid)
+}
 const targetGroups = computed(() => {
   const plugin = allTargets.value.filter((o) => o.group === 'plugin')
   const pkg = allTargets.value.filter((o) => o.group !== 'plugin')
@@ -412,6 +480,20 @@ watch(expanded, async open => {
   } catch { /* 保留已有实参，等待宿主目录恢复。 */ }
 }, { immediate: true })
 const openedOptionalParams = ref(new Set<string>())
+provide(SE_TEMPLATE_MATCH_OPTIONS, (argumentName): TemplateMatchOptions => {
+  const step = props.step
+  const args = step.kind === 'call' && step.args.kind === 'map' ? step.args.entries : {}
+  const thresholdCell = step.kind === 'match_templates' ? step.threshold : args.threshold
+  // Obstacles inherit the threshold, but use their own file's search region.
+  const regionCell = argumentName === 'obstacles' ? undefined : args.region
+  if (thresholdCell?.ref || regionCell?.ref) return { error: '匹配阈值或区域引用运行时变量，请运行该步骤验证，单次测试无法确定变量值。' }
+  const threshold = thresholdCell && !thresholdCell.missing ? thresholdCell.lit
+    : paramSchema.value?.find(p => p.name === 'threshold')?.default ?? 0.8
+  if (typeof threshold !== 'number' || !Number.isFinite(threshold) || threshold < 0 || threshold > 1) return { error: '请先填写有效的匹配阈值（0～1）。' }
+  const region = regionCell && !regionCell.missing ? regionCell.lit ?? undefined : undefined
+  if (region !== undefined && (!Array.isArray(region) || region.length !== 4 || region.some(v => typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) || region[2] <= 0 || region[3] <= 0)) return { error: '请先填写有效的匹配区域 [x, y, 宽, 高]（相对坐标）。' }
+  return { threshold, region: region as number[] | undefined }
+})
 watch(() => [props.step.uuid, props.step.fn], () => { openedOptionalParams.value = new Set() })
 const schemaArgNames = computed(() => {
   const current = argsRecord()
@@ -426,7 +508,7 @@ function paramActive(param: ParamDecl): boolean {
   return (param.required && !hasParamDefault(param)) || param.name in argsRecord() || openedOptionalParams.value.has(param.name)
 }
 function paramDefaultLabel(param: ParamDecl): string {
-  return hasParamDefault(param) ? `= ${JSON.stringify(param.default)}` : (param.required ? '必填' : '可选')
+  return hasParamDefault(param) ? `${param.name in argsRecord() ? '默认' : '使用默认值：'} ${JSON.stringify(param.default)}` : (param.required ? '必填' : '可选')
 }
 function paramButtonTitle(param: ParamDecl): string {
   const action = hasParamDefault(param)
@@ -635,6 +717,9 @@ function setAs(v: string): void {
 </script>
 
 <style scoped>
+.template-case { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; display: grid; gap: 8px; min-width: 0; }
+.template-case-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.template-case-head strong { margin-right: auto; font-size: 13px; }
 .step-card {
   position: relative;
   border: 1px solid var(--border);
@@ -733,4 +818,18 @@ function setAs(v: string): void {
 .target-select option { background: var(--bg-1); color: var(--text-0); }
 .mono { font-family: var(--mono); }
 .step-card{border:1px solid var(--border);border-left:1px solid var(--border);border-radius:3px;background:var(--bg-2);overflow:visible}.step-card.expanded{background:var(--bg-3)}.card-head{background:transparent;min-height:39px;padding:5px 7px;gap:7px;align-items:center}.step-no{order:-1;display:grid;place-items:center;width:23px;height:23px;flex:0 0 23px;position:static;border:1px solid var(--control-border);border-radius:2px;font-size:12px;color:var(--text-0);align-self:center;margin:0}.kind-icon{display:none}.kind-name,.summary{font-size:13px}.head-actions{gap:2px}.head-actions .mini-btn{width:25px;height:25px;min-width:25px;padding:3px;display:inline-flex;align-items:center;justify-content:center;border-color:transparent;background:transparent}.head-actions .mini-btn:hover{border-color:var(--control-border);background:var(--bg-2)}.card-body{background:transparent;border:0;padding:4px 10px 10px 37px;gap:8px}.field-row{gap:6px}.field-label{min-width:42px}.field-row.col{align-items:stretch}.arg-row{width:100%;margin:3px 0;gap:5px}.arg-row :deep(.cell-editor){flex:1;min-width:0}.arg-name{min-width:65px;font-size:12px}.required-dot::after{content:"*";color:var(--accent)}.optional-params{width:100%;padding-top:5px;font-size:12px}.optional-params summary{color:var(--text-1);cursor:pointer;padding:4px 0}.param-buttons{gap:4px;margin:4px 0}.param-button{border-radius:3px;padding:3px 6px}.cell-input,.target-select{min-height:28px;font-size:13px;background:var(--field);border-color:var(--control-border)}.target-select{max-width:280px}.field-hint{font-size:12px}.field-row>.field-hint{flex-basis:100%;padding-left:48px}
+.expand-btn {
+  display: flex; align-items: center; gap: 7px; flex: 1; min-width: 0;
+  min-height: 29px; padding: 0; border: 0; background: transparent;
+  color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.expand-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.head-actions .mini-btn { width: auto; min-width: 48px; height: 27px; padding: 3px 5px; gap: 3px; white-space: nowrap; }
+.call-signature > .cell-input { flex: 1 1 120px; width: 120px; min-width: 0; max-width: 220px; }
+.return-value-field { display: flex; align-items: center; gap: 4px; flex: 1 1 160px; min-width: 0; max-width: 240px; }
+.return-value-label { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; font-size: 12px; color: var(--text-1); }
+.return-value-label > span { flex: none; }
+.return-value-label .cell-input { flex: 1; min-width: 0; width: 90px; }
+.call-signature > .cell-err-msg { flex-basis: 100%; }
+.kind-name { max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
 </style>

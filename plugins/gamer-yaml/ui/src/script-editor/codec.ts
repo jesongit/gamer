@@ -4,7 +4,7 @@
  * 与宿主侧 `plugins/gamer-yaml/host/syntax.rs` 语义对齐：
  * - 脚本顶层 = name? / params? / vars? / run；出现 `version` 字段报
  *   yaml.version.removed（旧 v3 源明确拒绝，无 fallback）；
- * - 步骤 = 恰好一个动作键（函数名或 if/repeat/return）+ 可选 as；
+ * - 步骤 = 恰好一个动作键（函数名或 if/repeat/return/match_templates/break）+ 可选 as；
  *   then/else/do 为 if/repeat 的结构键；
  * - 表达式：字符串 `$path` → 引用（`$$text` → 字面量 `$text`）；其余字面量；
  * - 序列化：手写确定性规范输出器（decode(encode(model)) == model）。
@@ -270,6 +270,23 @@ function emitStep(step: Step, col: number, lines: string[]): void {
       }
       return
     }
+    case 'match_templates': {
+      const pad = ' '.repeat(col)
+      lines.push(`${pad}match_templates:`)
+      lines.push(`${pad}  threshold: ${cellInline(step.threshold)}`)
+      lines.push(`${pad}  cases:${step.cases.length ? '' : ' []'}`)
+      for (const c of step.cases) {
+        lines.push(`${pad}    - template: ${cellInline(c.template)}`)
+        if (c.as !== null) lines.push(`${pad}      as: ${plainScalar(c.as)}`)
+        lines.push(`${pad}      do:${c.body.length ? '' : ' []'}`)
+        for (const child of c.body) emitStepItem(child, col + 8, lines)
+      }
+      if (step.else.length) {
+        lines.push(`${pad}  else:`)
+        for (const child of step.else) emitStepItem(child, col + 4, lines)
+      }
+      return
+    }
     case 'if': {
       lines.push(`${' '.repeat(col)}if: ${cellInline(step.cond)}`)
       lines.push(`${' '.repeat(col)}then:`)
@@ -284,6 +301,10 @@ function emitStep(step: Step, col: number, lines: string[]): void {
       lines.push(`${' '.repeat(col)}repeat: ${cellInline(step.times)}`)
       lines.push(`${' '.repeat(col)}do:`)
       for (const child of step.body) emitStepItem(child, col + 2, lines)
+      return
+    }
+    case 'break': {
+      lines.push(`${' '.repeat(col)}break: {}`)
       return
     }
     case 'return': {
@@ -400,7 +421,7 @@ function parseFunctionRoot(root: Record<string, unknown> | { __seq: true }, file
       continue
     }
     if ((RESERVED_WORDS as readonly string[]).includes(name)) {
-      diags.push(diag(CODES.fnReserved, `functions.${name}`, name, `函数名 ${name} 是保留关键字（if/repeat/return）`))
+      diags.push(diag(CODES.fnReserved, `functions.${name}`, name, `函数名 ${name} 是保留关键字（if/repeat/return/match_templates/break）`))
       continue
     }
     if (seen.has(name)) {
@@ -551,7 +572,7 @@ function parseVars(node: unknown, basePath: string, diags: Diagnostic[]): Record
 
 // ---------- 步骤解析 ----------
 
-const KEYWORDS = new Set(['if', 'repeat', 'return'])
+const KEYWORDS = new Set<string>(RESERVED_WORDS)
 const STRUCTURAL_KEYS = new Set(['then', 'else', 'do'])
 
 function parseStepsNode(node: unknown, basePath: string, diags: Diagnostic[]): Step[] {
@@ -593,7 +614,7 @@ function parseStepNode(item: unknown, path: string, diags: Diagnostic[]): Step |
   const map = item as Record<string, unknown>
   const keys = Object.keys(map)
   if (keys.length === 0) {
-    diags.push(diag(CODES.stepMissing, path, '', '步骤为空——需要一个函数调用或 if/repeat/return'))
+    diags.push(diag(CODES.stepMissing, path, '', '步骤为空——需要一个函数调用或 if/repeat/return/match_templates/break'))
     return null
   }
 
@@ -616,7 +637,7 @@ function parseStepNode(item: unknown, path: string, diags: Diagnostic[]): Step |
     }
     if (KEYWORDS.has(key)) {
       if (keyword !== null) {
-        diags.push(diag(CODES.stepMulti, path, '', '一个步骤只能有一个控制流关键字（if/repeat/return）'))
+        diags.push(diag(CODES.stepMulti, path, '', '一个步骤只能有一个控制流关键字（if/repeat/return/match_templates/break）'))
         continue
       }
       keyword = key
@@ -645,6 +666,31 @@ function parseStepNode(item: unknown, path: string, diags: Diagnostic[]): Step |
       diags.push(diag(CODES.asInvalid, path, 'as', `${keyword} 步骤不支持 as（只有函数调用有返回值）`))
     }
     switch (keyword) {
+      case 'match_templates': {
+        const problem = (code: string, message: string) => diags.push(diag(code, path, '', message))
+        const shape = (value: unknown, keys: string[]): value is Record<string, unknown> =>
+          !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(k => keys.includes(k))
+        if (!shape(keywordValue, ['cases', 'else', 'threshold']) || structural) {
+          problem('yaml.match_templates.shape', 'match_templates 仅支持 cases/else/threshold')
+          return null
+        }
+        const input = keywordValue
+        if (!Array.isArray(input.cases) || !input.cases.length || input.cases.length > 64) {
+          problem('yaml.match_templates.cases', 'cases 必须是 1..64 项的分支列表')
+          return null
+        }
+        const cases = input.cases.flatMap((c, i) => {
+          if (!shape(c, ['template', 'as', 'do'])) { problem('yaml.match_templates.shape', '分支仅支持 template/as/do'); return [] }
+          if (!('template' in c)) problem('yaml.match_templates.template', '分支缺少 template')
+          if (!('do' in c)) problem('yaml.match_templates.do', '分支缺少 do')
+          if ('as' in c && (typeof c.as !== 'string' || !isIdentifier(c.as))) problem(CODES.asInvalid, '分支 as 必须是变量名')
+          return [{ template: exprCell(c.template, path, `cases[${i}].template`, diags), as: typeof c.as === 'string' ? c.as : null,
+            body: parseStepsNode(c.do, `${path}.cases[${i}].do`, diags) }]
+        })
+        return { uuid: newStepUuid(), kind: 'match_templates', cases,
+          threshold: exprCell('threshold' in input ? input.threshold : 0.8, path, 'threshold', diags),
+          else: parseStepsNode(input.else, `${path}.else`, diags) }
+      }
       case 'if': {
         const thenNode = map.then
         if (thenNode === undefined) {
@@ -679,6 +725,11 @@ function parseStepNode(item: unknown, path: string, diags: Diagnostic[]): Step |
           body: parseStepsNode(doNode, `${path}.do`, diags),
         }
       }
+      case 'break':
+        if (structural || !(keywordValue == null || (typeof keywordValue === 'object' && !Array.isArray(keywordValue) && Object.keys(keywordValue).length === 0))) {
+          diags.push(diag('yaml.break.shape', path, 'break', 'break 不接受参数或子步骤，请使用 break: {}'))
+        }
+        return { uuid: newStepUuid(), kind: 'break' }
       case 'return':
         return { uuid: newStepUuid(), kind: 'return', value: exprCell(keywordValue, `${path}.return`, 'return', diags) }
     }
@@ -703,7 +754,7 @@ function parseStepNode(item: unknown, path: string, diags: Diagnostic[]): Step |
     }
   }
 
-  diags.push(diag(CODES.stepMissing, path, '', '步骤只有 as——需要一个函数调用或 if/repeat/return'))
+  diags.push(diag(CODES.stepMissing, path, '', '步骤只有 as——需要一个函数调用或 if/repeat/return/match_templates/break'))
   return null
 }
 

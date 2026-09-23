@@ -33,7 +33,20 @@
     <template v-else>
       <!-- tmpl：模板短名（自定义下拉，悬停行内预览缩略图；候选由页面外壳注入）
            + 框选（宿主注入 seCellTools 时可用：投屏框选生成新模板，保存后自动填入） -->
-      <template v-if="controlType === 'tmpl'">
+      <template v-if="normalizedType === 'list' && itemType === 'template' && (Array.isArray(cell.lit) || cell.missing)">
+        <div class="template-list">
+          <div v-for="(entry, index) in templateItems" :key="index" class="template-list-row">
+            <CellEditor
+              :cell="templateItemCell(entry)" type="template" :params="params" :templates="templates"
+              :allow-ref="allowRef" :label="`${label} ${index + 1}`" :argument-name="argumentName"
+              @change="setTemplateItem(index, $event)"
+            />
+            <button type="button" class="mini-btn" :aria-label="`删除${label} ${index + 1}`" @click.stop="removeTemplateItem(index)">✕</button>
+          </div>
+          <button type="button" class="mini-btn" :aria-label="`添加${label}`" @click.stop="emitLit([...templateItems, ''])">+ 模板</button>
+        </div>
+      </template>
+      <template v-else-if="controlType === 'tmpl'">
         <span class="tmpl-wrap">
           <input
             class="cell-input"
@@ -205,11 +218,14 @@ import { computed, inject, ref } from 'vue'
 import type { PropType } from 'vue'
 import { pinyin } from 'pinyin-pro'
 import { isRefCell, type Cell, type ParamDecl } from '../model'
+import { SE_TEMPLATE_MATCH_OPTIONS, type TemplateMatchOptions } from '../targets'
 import { checkLiteral, isRefPath, isCoordObject, KEY_ENUM, paramControlType, normalizeParamType, TIME_UNITS, type ParamControlType, type ParamType } from '../schema'
 
 const props = defineProps({
   cell: { type: Object as PropType<Cell>, required: true },
   type: { type: String, required: true },
+  itemType: { type: String, default: '' },
+  argumentName: { type: String, default: '' },
   /** 可引用的参数声明（引用联想；v3 不按类型过滤）。 */
   params: { type: Array as PropType<ParamDecl[]>, default: () => [] },
   /** 默认值编辑等场景禁止切引用。 */
@@ -226,6 +242,26 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['change'])
+
+// 必填占位也显示列表控件；用户添加前仍保留 missing，不自动写入空数组。
+const templateItems = computed(() => Array.isArray(props.cell.lit) ? props.cell.lit : [])
+
+// 列表内保留表达式原文；复用普通 Cell 控件时转换引用和 $ 字面量转义。
+function templateItemCell(value: unknown): Cell {
+  if (typeof value === 'string' && value.startsWith('$')) {
+    return value.startsWith('$$') ? { lit: value.slice(1) } : { ref: value.slice(1) }
+  }
+  return { lit: value }
+}
+function setTemplateItem(index: number, cell: Cell): void {
+  const items = [...templateItems.value]
+  items[index] = isRefCell(cell) ? `$${cell.ref}`
+    : typeof cell.lit === 'string' && cell.lit.startsWith('$') ? `$${cell.lit}` : cell.lit
+  emitLit(items)
+}
+function removeTemplateItem(index: number): void {
+  emitLit(templateItems.value.filter((_, i) => i !== index))
+}
 
 /** datalist id 每实例唯一，避免多实例互相覆盖联想列表。 */
 const listId = `se-params-${nextListId()}`
@@ -253,9 +289,10 @@ interface CellTools {
   pickCoord(): Promise<{ x: number; y: number } | null>
   pickColor(): Promise<{ hex: string; x: number; y: number } | null>
   captureTemplate(): Promise<string | null>
-  matchTemplate(name: string): Promise<unknown>
+  matchTemplate(name: string, options?: TemplateMatchOptions): Promise<unknown>
 }
 const tools = inject<CellTools | null>('seCellTools', null)
+const matchOptions = inject(SE_TEMPLATE_MATCH_OPTIONS, () => ({}))
 const picking = ref(false)
 const matching = ref(false)
 
@@ -287,7 +324,7 @@ async function onMatchTemplate(): Promise<void> {
   if (!tools || matching.value || isRef.value || !name) return
   matching.value = true
   try {
-    await tools.matchTemplate(name)
+    await tools.matchTemplate(name, matchOptions(props.argumentName))
   } finally {
     matching.value = false
   }
@@ -463,6 +500,9 @@ function onNum(e: Event): void {
 </script>
 
 <style scoped>
+.template-list { display: grid; gap: 6px; width: 100%; min-width: 0; }
+.template-list-row { display: flex; gap: 6px; align-items: center; }
+.template-list-row > .cell-editor { flex: 1; min-width: 0; flex-wrap: wrap; }
 .cell-editor {
   display: inline-flex;
   align-items: center;

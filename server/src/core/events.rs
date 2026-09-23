@@ -16,6 +16,11 @@ use super::DeviceId;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum RuntimeEventKind {
+    /// Producer-owned diagnostics: resolved arguments, return values, decisions and logs.
+    Detail {
+        name: String,
+        data: serde_json::Value,
+    },
     Tap {
         x: u32,
         y: u32,

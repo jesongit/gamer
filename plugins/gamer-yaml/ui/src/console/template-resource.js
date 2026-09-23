@@ -32,8 +32,9 @@ export function templateShortName(name) {
  * 模板统一写入原语：创建不 force，替换必须携带当前资源版本。
  * 服务端 PUT 会先执行 gamer-yaml 字节校验/灰度归一化，成功后再条件写入。
  */
-export function putTemplateBytes(name, dataOrB64, packageId, expectedVersion) {
+export function putTemplateBytes(name, dataOrB64, packageId, expectedVersion, newName) {
   const options = expectedVersion ? { expectedVersion } : {}
+  if (newName && newName !== name) options.newPath = `${TEMPLATE_DIR}/${newName}`
   return api.putPluginResourceBytes(
     packageId,
     GAMER_YAML_PLUGIN_ID,
@@ -44,8 +45,8 @@ export function putTemplateBytes(name, dataOrB64, packageId, expectedVersion) {
 }
 
 /**
- * 列表接口对二进制 PNG 可能没有 version；读取当前字节后计算与服务端
- * PackageStore::write_binary 相同的短 SHA-256，仍由后续 PUT 做最终条件检查。
+ * 列表接口对二进制 PNG 可能没有 version；GET 返回的 ETag 即服务端内容
+ * 版本，后续 PUT 做条件检查，不要求浏览器具备 WebCrypto 安全上下文。
  */
 export async function resolveTemplateVersion(name, packageId, knownVersion) {
   if (knownVersion) return knownVersion
@@ -54,14 +55,7 @@ export async function resolveTemplateVersion(name, packageId, knownVersion) {
     GAMER_YAML_PLUGIN_ID,
     `${TEMPLATE_DIR}/${name}`,
   )
-  if (!response || typeof response.arrayBuffer !== 'function') {
-    throw new Error('无法读取模板当前内容以确认版本')
-  }
-  if (!globalThis.crypto?.subtle) {
-    throw new Error('当前环境不支持模板版本校验')
-  }
-  const digest = await globalThis.crypto.subtle.digest('SHA-256', await response.arrayBuffer())
-  return [...new Uint8Array(digest).slice(0, 6)]
-    .map(byte => byte.toString(16).padStart(2, '0'))
-    .join('')
+  const etag = response?.headers?.get?.('ETag')?.replace(/^"|"$/g, '')
+  if (/^[0-9a-f]{12}$/.test(etag || '')) return etag
+  throw new Error('服务端未返回模板版本，请更新服务后重试')
 }

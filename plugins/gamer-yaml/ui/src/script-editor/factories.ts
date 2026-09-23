@@ -1,7 +1,7 @@
 /**
  * 步骤工厂与添加面板分组（YAML V1）。
  *
- * V1 步骤只有 4 类：函数调用 / if / repeat / return。`tap`、`wait_find`
+ * V1 步骤只有 6 类：函数调用 / if / repeat / return / match_templates / break。`tap`、`wait_find`
  * 等原生函数走 callFn 工厂（参数按函数 Schema 预填）；控制流走类型工厂。
  */
 
@@ -14,13 +14,16 @@ export function createCall(fn: string, args: CallArgs = { kind: 'none' }, as: st
   return { uuid: newStepUuid(), kind: 'call', fn, args, as }
 }
 
-/** 创建控制流步骤（if/repeat/return）。 */
-export function createControl(kind: 'if' | 'repeat' | 'return'): Step {
+/** 创建控制流步骤（if/repeat/return/match_templates/break）。 */
+export function createControl(kind: 'if' | 'repeat' | 'return' | 'match_templates' | 'break'): Step {
   switch (kind) {
+    case 'match_templates':
+      return { uuid: newStepUuid(), kind: 'match_templates', threshold: lit(0.8), cases: [{ template: lit(''), as: null, body: [] }], else: [] }
     case 'if':
       return { uuid: newStepUuid(), kind: 'if', cond: lit(true), then: [], else: [] }
     case 'repeat':
       return { uuid: newStepUuid(), kind: 'repeat', times: lit(3), body: [] }
+    case 'break': return { uuid: newStepUuid(), kind: 'break' }
     case 'return':
       return { uuid: newStepUuid(), kind: 'return', value: lit(null) }
   }
@@ -63,7 +66,7 @@ export function createCallFromSchema(
 // ---------- 添加面板分组 ----------
 
 /** 控制流面板条目（原生函数目录由面板动态拉取，不在此静态声明）。 */
-export type ControlKind = 'if' | 'repeat' | 'return'
+export type ControlKind = 'if' | 'repeat' | 'return' | 'match_templates' | 'break'
 
 export interface ControlEntry {
   kind: ControlKind
@@ -72,8 +75,10 @@ export interface ControlEntry {
 }
 
 export const CONTROL_ENTRIES: ControlEntry[] = [
+  { kind: 'match_templates', label: '模板分支', hint: '按顺序匹配，执行首个命中模板的动作' },
   { kind: 'if', label: '条件分支', hint: 'if $x → then / else' },
   { kind: 'repeat', label: '固定循环', hint: 'repeat N 次 → do' },
+  { kind: 'break', label: '跳出循环', hint: 'break → 退出最近一层 repeat 循环' },
   { kind: 'return', label: '返回值', hint: '结束并返回一个值' },
 ]
 

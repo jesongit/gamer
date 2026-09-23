@@ -66,8 +66,6 @@ const DEFAULT_SCREEN_HEIGHT: u32 = 1000;
 const MIN_POLL_INTERVAL_MS: u64 = 50;
 /// 单次 sleep 上限（与 v3 一致）。
 const MAX_SLEEP_MS: u64 = 3_600_000;
-/// tap_template 命中后的固结等待（原 v3 after_tap 兜底，内置进函数语义）。
-const AFTER_TAP_MS: u64 = 300;
 
 // ---------------------------------------------------------------------------
 // WASM runtime 契约
@@ -122,6 +120,7 @@ impl YamlWasmRuntime for NoYamlWasmRuntime {
 /// 权限：每个函数声明所需权限，派发前逐项 `HostApi::authorize`——函数调用
 /// 不能绕过插件权限（计划 Phase 3.2）。
 pub(crate) struct NativeYamlHost {
+    settings: super::settings::Settings,
     host: HostApi,
     registry: CapabilityRegistry,
     context: AppContext,
@@ -248,10 +247,12 @@ impl NativeYamlHost {
         sink: Option<Arc<dyn EventSink>>,
         name: &str,
         args_json: &str,
+        settings: super::settings::Settings,
     ) -> Result<Value> {
         let args: Value = serde_json::from_str(args_json)
             .map_err(|error| anyhow!("函数 {name} 参数不是合法 JSON: {error}"))?;
-        let host = Self::new(host, context, stop, sink).await?;
+        let mut host = Self::new(host, context, stop, sink).await?;
+        host.settings = settings;
         // 录制输入来源标注：guest 实例线程内执行点（task-local 不跨线程），
         // 在此线程内把 YAML runner 注入的输入标为 "runner"。
         crate::capabilities::adapters::with_caller_input_source("runner", async {
@@ -277,6 +278,7 @@ impl NativeYamlHost {
             .await
             .map_err(anyhow::Error::new)?;
         Ok(Self {
+            settings: super::settings::Settings::default(),
             host,
             registry,
             context,
@@ -298,6 +300,11 @@ impl NativeYamlHost {
                 .map_err(anyhow::Error::new)?;
         }
         let bound = self.bind_args(&func.params, args)?;
+        self.emit_event(RuntimeEventKind::Detail {
+            name: "effective_args".into(),
+            data: json!({"function":name,"args":bound.values}),
+        })
+        .await;
         match name {
             "tap" => self.tap(&bound).await,
             "swipe" => self.swipe(&bound).await,
@@ -308,6 +315,7 @@ impl NativeYamlHost {
             "sleep" => self.sleep(&bound).await,
             "log" => self.log(&bound).await,
             "find" => self.find(&bound).await,
+            "find_any" => self.find_any(&bound).await,
             "wait_find" => self.wait_find(&bound).await,
             "tap_template" => self.tap_template(&bound).await,
             "wait_disappear" => self.wait_disappear(&bound).await,
@@ -347,6 +355,24 @@ impl NativeYamlHost {
                 }
                 Some(value) => {
                     check_schema_type(param, value)?;
+                    if let Some(item_type) = &param.item_type {
+                        for item in value
+                            .as_array()
+                            .ok_or_else(|| anyhow!("{} 必须是列表", param.name))?
+                        {
+                            check_schema_type(
+                                &ParamSchema {
+                                    name: param.name,
+                                    ty: item_type.clone(),
+                                    required: true,
+                                    default: None,
+                                    desc: param.desc,
+                                    item_type: None,
+                                },
+                                item,
+                            )?;
+                        }
+                    }
                     values.insert(param.name.to_string(), value.clone());
                 }
             }
@@ -363,6 +389,14 @@ impl NativeYamlHost {
 
     async fn tap(&self, args: &BoundArgs) -> Result<Value> {
         let point = self.touch_point(args.point("position")?)?;
+        self.click_point(point).await?;
+        Ok(Value::Null)
+    }
+
+    /// All automation clicks pass here once; manual input keeps its existing behavior.
+    async fn click_point(&self, point: TouchPoint) -> Result<()> {
+        self.click_delay("before", self.settings.before_click_ms)
+            .await?;
         self.registry
             .input()
             .ok_or_else(|| anyhow!("input capability 未注册"))?
@@ -374,7 +408,34 @@ impl NativeYamlHost {
             y: point.y(),
         })
         .await;
-        Ok(Value::Null)
+        self.click_delay("after", self.settings.after_click_ms)
+            .await
+    }
+
+    async fn click_delay(&self, phase: &str, duration_ms: u64) -> Result<()> {
+        if self.runtime.cancelled() {
+            bail!("CANCELLED: 运行已取消");
+        }
+        if duration_ms > 0 {
+            self.emit_event(RuntimeEventKind::Detail {
+                name: "click_delay".into(),
+                data: json!({"phase":phase,"duration_ms":duration_ms}),
+            })
+            .await;
+        }
+        let mut remaining = duration_ms;
+        while remaining > 0 {
+            let slice = remaining.min(50);
+            self.runtime
+                .sleep(Duration::from_millis(slice))
+                .await
+                .map_err(anyhow::Error::new)?;
+            remaining -= slice;
+        }
+        if self.runtime.cancelled() {
+            bail!("CANCELLED: 运行已取消");
+        }
+        Ok(())
     }
 
     async fn swipe(&self, args: &BoundArgs) -> Result<Value> {
@@ -477,8 +538,9 @@ impl NativeYamlHost {
         self.registry
             .log()
             .ok_or_else(|| anyhow!("log capability 未注册"))?
-            .write(LogRecord::new(level, &message))
+            .write(LogRecord::new(level, &message).with_device(self.device.clone()))
             .map_err(anyhow::Error::new)?;
+        self.emit_event(RuntimeEventKind::Detail { name: "log".into(), data: serde_json::json!({"level": args.opt_string("level")?.unwrap_or_else(|| "info".into()), "message": message}) }).await;
         Ok(Value::Null)
     }
 
@@ -499,11 +561,27 @@ impl NativeYamlHost {
     }
 
     async fn wait_find(&self, args: &BoundArgs) -> Result<Value> {
+        let click = args.values.get("click").and_then(Value::as_bool) == Some(true);
+        if click
+            || args
+                .values
+                .get("obstacles")
+                .and_then(Value::as_array)
+                .is_some_and(|v| !v.is_empty())
+        {
+            // 仅等待不需要输入权限；自动点击在开始轮询前校验。
+            self.host
+                .authorize(Permission::InputTap)
+                .map_err(anyhow::Error::new)?;
+        }
         let timeout = args.duration_ms("timeout")?;
-        Ok(self
-            .poll_match(args, timeout, "wait_find")
-            .await?
-            .unwrap_or(Value::Null))
+        let Some(matched) = self.poll_match(args, timeout, "wait_find").await? else {
+            return Ok(Value::Null);
+        };
+        if click {
+            self.tap_match(&matched).await?;
+        }
+        Ok(matched)
     }
 
     async fn tap_template(&self, args: &BoundArgs) -> Result<Value> {
@@ -511,27 +589,15 @@ impl NativeYamlHost {
         let Some(matched) = self.poll_match(args, timeout, "tap_template").await? else {
             return Ok(Value::Null);
         };
-        let Some(center) = matched.get("center").and_then(point_components) else {
-            bail!("tap_template 匹配结果缺少 center");
-        };
-        let point = self.touch_point(center)?;
-        self.registry
-            .input()
-            .ok_or_else(|| anyhow!("input capability 未注册"))?
-            .tap(&self.device, point)
-            .await
-            .map_err(anyhow::Error::new)?;
-        self.emit_event(RuntimeEventKind::Tap {
-            x: point.x(),
-            y: point.y(),
-        })
-        .await;
-        // 命中点击后的固结等待：取消可达。
-        self.runtime
-            .sleep(Duration::from_millis(AFTER_TAP_MS))
-            .await
-            .map_err(anyhow::Error::new)?;
+        self.tap_match(&matched).await?;
         Ok(matched)
+    }
+
+    async fn tap_match(&self, matched: &Value) -> Result<()> {
+        let Some(center) = matched.get("center").and_then(point_components) else {
+            bail!("模板匹配结果缺少 center");
+        };
+        self.click_point(self.touch_point(center)?).await
     }
 
     async fn wait_disappear(&self, args: &BoundArgs) -> Result<Value> {
@@ -580,13 +646,21 @@ impl NativeYamlHost {
 
     /// 单次截图匹配（不发事件）；返回结果与本次生效的像素搜索区域。
     async fn match_once(&self, args: &BoundArgs) -> Result<(MatchOutcome, Option<[u32; 4]>)> {
+        let frame = self.capture().await?;
+        self.match_on_frame(args, frame).await
+    }
+
+    async fn match_on_frame(
+        &self,
+        args: &BoundArgs,
+        frame: crate::capabilities::FrameHandle,
+    ) -> Result<(MatchOutcome, Option<[u32; 4]>)> {
         let template_name = args.string("template")?;
         let template = self.template(&template_name).await?;
         let threshold = args.number("threshold")?;
         let explicit_px = args
             .region("region")?
             .map(|region| self.pixel_region(region));
-        let frame = self.capture().await?;
         let template_file = self.template_file_name(&template).await;
         let effective_px = crate::matcher::effective_search_region(
             explicit_px,
@@ -611,9 +685,54 @@ impl NativeYamlHost {
         Ok((outcome, effective_px))
     }
 
-    /// wait_find/tap_template 共用轮询：每次尝试经 [`Self::match_once`]
-    /// （同一套匹配逻辑，find/wait_find/tap_template 不可能分叉）并发
-    /// vision/hit/miss 事件；未命中返回 None。
+    /// 顺序匹配共用同一帧，首个命中即返回；不产生输入操作。
+    async fn find_any(&self, args: &BoundArgs) -> Result<Value> {
+        let templates = args
+            .values
+            .get("templates")
+            .and_then(Value::as_array)
+            .expect("Schema validated list");
+        if templates.is_empty() || templates.len() > 64 {
+            bail!("templates 必须包含 1..64 项");
+        }
+        if !args
+            .number("threshold")?
+            .is_some_and(|v| (0.0..=1.0).contains(&v))
+        {
+            bail!("threshold 必须为 0..1 数字");
+        }
+        let frame = self.capture().await?;
+        for (index, template) in templates.iter().enumerate() {
+            if self.runtime.cancelled() {
+                bail!("CANCELLED");
+            }
+            let mut values = args.values.clone();
+            values.insert("template".into(), template.clone());
+            let (outcome, effective_px) = self
+                .match_on_frame(&BoundArgs { values }, frame.clone())
+                .await?;
+            self.emit_vision_outcome(
+                template.as_str().expect("Schema validated template"),
+                outcome,
+                effective_px,
+            )
+            .await;
+            if matches!(outcome, MatchOutcome::Found(_)) {
+                let region = Self::relative_region_echo(
+                    effective_px,
+                    self.screen().width,
+                    self.screen().height,
+                );
+                let mut result = Self::match_value(outcome, region, self.screen());
+                result["index"] = json!(index);
+                result["template"] = template.clone();
+                return Ok(result);
+            }
+        }
+        Ok(Value::Null)
+    }
+
+    /// wait_find/tap_template 共用轮询及 match_on_frame 匹配语义。
     async fn poll_match(
         &self,
         args: &BoundArgs,
@@ -623,12 +742,60 @@ impl NativeYamlHost {
         let interval = args.duration_ms("interval")?.max(MIN_POLL_INTERVAL_MS);
         let template_name = args.string("template")?;
         let started = Instant::now();
+        let obstacles = args
+            .values
+            .get("obstacles")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         loop {
-            let (outcome, effective_px) = self.match_once(args).await?;
+            if self.runtime.cancelled() {
+                bail!("CANCELLED");
+            }
+            let frame = self.capture().await?;
+            let mut cleared = false;
+            for obstacle in &obstacles {
+                let mut values = args.values.clone();
+                values.insert("template".into(), obstacle.clone());
+                values.remove("region"); // 障碍按自己的模板区域搜索，不继承目标区域。
+                let obstacle_args = BoundArgs { values };
+                let (outcome, effective_px) =
+                    self.match_on_frame(&obstacle_args, frame.clone()).await?;
+                self.emit_vision_outcome(
+                    obstacle.as_str().expect("Schema 已校验模板列表"),
+                    outcome,
+                    effective_px,
+                )
+                .await;
+                if matches!(outcome, MatchOutcome::Found(_)) {
+                    let region = Self::relative_region_echo(
+                        effective_px,
+                        self.screen().width,
+                        self.screen().height,
+                    );
+                    self.tap_match(&Self::match_value(outcome, region, self.screen()))
+                        .await?;
+                    cleared = true;
+                    break;
+                }
+                if timeout_ms > 0 && started.elapsed().as_millis() as u64 >= timeout_ms {
+                    return Ok(None);
+                }
+                if self.runtime.cancelled() {
+                    bail!("CANCELLED");
+                }
+            }
+            let (outcome, effective_px) = if cleared {
+                (MatchOutcome::NotFound, None)
+            } else {
+                self.match_on_frame(args, frame).await?
+            };
             let region =
                 Self::relative_region_echo(effective_px, self.screen().width, self.screen().height);
-            self.emit_vision_outcome(&template_name, outcome, effective_px)
-                .await;
+            if !cleared {
+                self.emit_vision_outcome(&template_name, outcome, effective_px)
+                    .await;
+            }
             if let MatchOutcome::Found(_) = outcome {
                 return Ok(Some(Self::match_value(outcome, region, self.screen())));
             }
@@ -636,9 +803,14 @@ impl NativeYamlHost {
                 return Ok(None);
             }
             self.runtime
-                .sleep(Duration::from_millis(interval.min(MAX_SLEEP_MS)))
+                .sleep(Duration::from_millis(interval.min(MAX_SLEEP_MS).min(
+                    timeout_ms.saturating_sub(started.elapsed().as_millis() as u64),
+                )))
                 .await
                 .map_err(anyhow::Error::new)?;
+            if started.elapsed().as_millis() as u64 >= timeout_ms {
+                return Ok(None);
+            }
         }
     }
 
@@ -980,12 +1152,14 @@ pub(crate) mod tests {
 
     pub(crate) struct LogTrace {
         logs: Mutex<Vec<(String, String)>>,
+        devices: Mutex<Vec<String>>,
     }
 
     impl LogTrace {
         pub(crate) fn new() -> Arc<Self> {
             Arc::new(Self {
                 logs: Mutex::new(Vec::new()),
+                devices: Mutex::new(Vec::new()),
             })
         }
 
@@ -1001,6 +1175,12 @@ pub(crate) mod tests {
 
     impl LogService for LogTrace {
         fn write(&self, record: LogRecord) -> CapabilityResult<()> {
+            self.devices.lock().unwrap().push(
+                record
+                    .device()
+                    .map(|d| d.id().as_str().to_owned())
+                    .unwrap_or_default(),
+            );
             self.logs.lock().unwrap().push((
                 format!("{:?}", record.level()),
                 record.message().to_string(),
@@ -1014,6 +1194,8 @@ pub(crate) mod tests {
         pub(crate) size: FrameSize,
         pub(crate) outcomes: Mutex<VecDeque<MatchOutcome>>,
         pub(crate) match_calls: AtomicU64,
+        frames: Mutex<Vec<FrameHandle>>,
+        regions: Mutex<Vec<Option<SearchRegion>>>,
     }
 
     impl VisionStub {
@@ -1022,6 +1204,8 @@ pub(crate) mod tests {
                 size,
                 outcomes: Mutex::new(VecDeque::new()),
                 match_calls: AtomicU64::new(0),
+                frames: Mutex::new(Vec::new()),
+                regions: Mutex::new(Vec::new()),
             })
         }
 
@@ -1063,6 +1247,11 @@ pub(crate) mod tests {
             _template: TemplateQuery,
         ) -> CapabilityResult<MatchOutcome> {
             self.match_calls.fetch_add(1, Ordering::Relaxed);
+            self.frames.lock().unwrap().push(_frame);
+            self.regions
+                .lock()
+                .unwrap()
+                .push(_template.options().region);
             Ok(self
                 .outcomes
                 .lock()
@@ -1333,7 +1522,7 @@ log = "^1.0"
         );
         let matched = call(
             "wait_find",
-            json!({"template": "home", "timeout": "100ms", "interval": "1ms"}),
+            json!({"template": "home", "click": false, "timeout": "100ms", "interval": "1ms"}),
             &host,
         )
         .unwrap();
@@ -1350,7 +1539,7 @@ log = "^1.0"
         );
         let result = call(
             "wait_find",
-            json!({"template": "home", "timeout": "0ms", "interval": "1ms"}),
+            json!({"template": "home", "click": false, "timeout": "0ms", "interval": "1ms"}),
             &host,
         )
         .unwrap();
@@ -1363,6 +1552,178 @@ log = "^1.0"
     }
 
     #[test]
+    fn wait_find_click_defaults_true_and_false_only_waits() {
+        for click in [None, Some(true), Some(false)] {
+            let trace = Arc::new(Trace::default());
+            let stub = VisionStub::new(FrameSize::new(1000, 1000));
+            stub.push_outcome(stub_outcome());
+            let permissions = if click == Some(false) {
+                vec!["vision.match", "resource.read"]
+            } else {
+                vec!["vision.match", "resource.read", "input.tap"]
+            };
+            let host = vision_host(trace.clone(), &stub, LogTrace::new(), &permissions);
+            let mut args = json!({"template": "home", "timeout": "0ms"});
+            if let Some(click) = click {
+                args["click"] = json!(click);
+            }
+            let matched = call("wait_find", args.clone(), &host).unwrap();
+            assert_eq!(matched["center"], json!({"x": 0.11, "y": 0.07}));
+            let expected_taps = if click == Some(false) {
+                vec![]
+            } else {
+                vec![[110, 70]]
+            };
+            assert_eq!(*trace.taps.lock().unwrap(), expected_taps);
+            assert_eq!(call("wait_find", args, &host).unwrap(), Value::Null);
+            assert_eq!(*trace.taps.lock().unwrap(), expected_taps, "未命中不能点击");
+        }
+    }
+
+    #[test]
+    fn wait_find_click_requires_permission_and_boolean_argument() {
+        let trace = Arc::new(Trace::default());
+        let stub = VisionStub::new(FrameSize::new(1000, 1000));
+        let host = vision_host(
+            trace.clone(),
+            &stub,
+            LogTrace::new(),
+            &["vision.match", "resource.read"],
+        );
+        let error = call("wait_find", json!({"template": "home"}), &host).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("denied") || text.contains("权限"), "{text}");
+        let error = call(
+            "wait_find",
+            json!({"template": "home", "click": "false"}),
+            &host,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("boolean"), "{error}");
+        assert_eq!(stub.match_calls.load(Ordering::Relaxed), 0);
+        assert!(trace.taps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn find_any_stops_at_first_hit_shares_frame_and_never_taps() {
+        let trace = Arc::new(Trace::default());
+        let stub = VisionStub::new(FrameSize::new(1000, 1000));
+        stub.push_outcome(MatchOutcome::NotFound);
+        stub.push_outcome(stub_outcome());
+        stub.push_outcome(stub_outcome());
+        let host = vision_host(
+            trace.clone(),
+            &stub,
+            LogTrace::new(),
+            &["vision.match", "resource.read"],
+        );
+        let matched = call(
+            "find_any",
+            json!({"templates":["notice", "login", "home"]}),
+            &host,
+        )
+        .unwrap();
+        assert_eq!(matched["index"], 1);
+        assert_eq!(matched["template"], "login");
+        assert!(trace.taps.lock().unwrap().is_empty());
+        let frames = stub.frames.lock().unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0], frames[1]);
+        drop(frames);
+        for invalid in [json!([]), json!([""]), json!([1]), json!("home")] {
+            assert!(call("find_any", json!({"templates":invalid}), &host).is_err());
+        }
+        assert_eq!(stub.match_calls.load(Ordering::Relaxed), 2);
+        stub.outcomes.lock().unwrap().clear();
+        assert_eq!(
+            call("find_any", json!({"templates":["missing"]}), &host).unwrap(),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn wait_find_obstacles_click_first_then_refresh_and_share_next_frame() {
+        let trace = Arc::new(Trace::default());
+        let stub = VisionStub::new(FrameSize::new(1000, 1000));
+        for outcome in [
+            stub_outcome(),
+            MatchOutcome::NotFound,
+            MatchOutcome::NotFound,
+            stub_outcome(),
+        ] {
+            stub.push_outcome(outcome);
+        }
+        let host = vision_host(
+            trace.clone(),
+            &stub,
+            LogTrace::new(),
+            &["vision.match", "resource.read", "input.tap"],
+        );
+        let matched = call(
+            "wait_find",
+            json!({"template":"home", "obstacles":["close", "confirm"],
+            "click":false, "timeout":"2s", "interval":"50ms", "region":[0.5,0.5,0.5,0.5]}),
+            &host,
+        )
+        .unwrap();
+        assert_eq!(matched["center"], json!({"x":0.11,"y":0.07}));
+        assert_eq!(
+            *trace.taps.lock().unwrap(),
+            vec![[110, 70]],
+            "click=false 仍清障碍，不点击目标"
+        );
+        let frames = stub.frames.lock().unwrap();
+        assert_eq!(frames.len(), 4);
+        assert_ne!(frames[0], frames[1], "点击后必须取新帧");
+        assert_eq!(frames[1], frames[2]);
+        assert_eq!(frames[2], frames[3], "本轮障碍和目标共用同一帧");
+        let regions = stub.regions.lock().unwrap();
+        assert!(
+            regions[..3].iter().all(Option::is_none),
+            "障碍不继承目标区域"
+        );
+        assert!(regions[3].is_some());
+    }
+
+    #[test]
+    fn wait_find_obstacle_time_counts_toward_timeout_and_validates_input() {
+        let trace = Arc::new(Trace::default());
+        let stub = VisionStub::new(FrameSize::new(1000, 1000));
+        stub.push_outcome(stub_outcome());
+        let host = vision_host(
+            trace.clone(),
+            &stub,
+            LogTrace::new(),
+            &["vision.match", "resource.read", "input.tap"],
+        );
+        let result = call("wait_find", json!({"template":"home", "obstacles":["close", "confirm"], "click":false,"timeout":"100ms"}), &host).unwrap();
+        assert_eq!(result, Value::Null);
+        assert_eq!(stub.match_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(trace.taps.lock().unwrap().len(), 1);
+        for obstacles in [json!("close"), json!([1]), json!([""])] {
+            assert!(call(
+                "wait_find",
+                json!({"template":"home","obstacles":obstacles}),
+                &host
+            )
+            .is_err());
+        }
+        let no_input = vision_host(
+            trace,
+            &stub,
+            LogTrace::new(),
+            &["vision.match", "resource.read"],
+        );
+        assert!(call(
+            "wait_find",
+            json!({"template":"home","obstacles":["close"],"click":false}),
+            &no_input
+        )
+        .is_err());
+        assert_eq!(stub.match_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn log_function_writes_and_stringifies_non_text() {
         let trace = Arc::new(Trace::default());
         let stub = VisionStub::new(FrameSize::new(1000, 1000));
@@ -1370,10 +1731,222 @@ log = "^1.0"
         let host = vision_host(trace, &stub, logs.clone(), &["log.write"]);
         call("log", json!({"message": "文本"}), &host).unwrap();
         call("log", json!({"message": {"k": 1}}), &host).unwrap();
+        assert!(logs.devices.lock().unwrap().iter().all(|d| !d.is_empty()));
         assert_eq!(
             logs.messages(),
             vec!["文本".to_string(), "{\"k\":1}".to_string()]
         );
+    }
+
+    struct ClickClock {
+        trace: Arc<Trace>,
+        sleeps: Mutex<Vec<(usize, u64)>>,
+        stop: AtomicBool,
+        cancel_on_sleep: bool,
+    }
+    #[async_trait]
+    impl RuntimeService for ClickClock {
+        async fn sleep(&self, duration: Duration) -> crate::capabilities::CapabilityResult<()> {
+            self.sleeps.lock().unwrap().push((
+                self.trace.taps.lock().unwrap().len(),
+                duration.as_millis() as u64,
+            ));
+            if self.cancel_on_sleep {
+                self.stop.store(true, Ordering::SeqCst);
+                return Err(crate::capabilities::CapabilityError::Cancelled);
+            }
+            Ok(())
+        }
+        fn cancelled(&self) -> bool {
+            self.stop.load(Ordering::SeqCst)
+        }
+    }
+
+    #[tokio::test]
+    async fn click_delays_wrap_every_automation_click_exactly_once() {
+        for name in ["tap", "wait_find", "tap_template", "obstacle"] {
+            let trace = Arc::new(Trace::default());
+            let stub = VisionStub::new(FrameSize::new(1000, 1000));
+            stub.push_outcome(stub_outcome());
+            let events = EventCollect::new();
+            let host = vision_host(
+                trace.clone(),
+                &stub,
+                LogTrace::new(),
+                &["input.tap", "vision.match", "resource.read"],
+            );
+            let mut native = NativeYamlHost::new(
+                host,
+                test_context(),
+                Arc::new(AtomicBool::new(false)),
+                Some(events.clone()),
+            )
+            .await
+            .unwrap();
+            native.settings.before_click_ms = 125;
+            native.settings.after_click_ms = 225;
+            let clock = Arc::new(ClickClock {
+                trace: trace.clone(),
+                sleeps: Mutex::new(vec![]),
+                stop: AtomicBool::new(false),
+                cancel_on_sleep: false,
+            });
+            native.runtime = clock.clone();
+            let (function, args) = match name {
+                "tap" => (name, json!([0.5, 0.5])),
+                "obstacle" => (
+                    "wait_find",
+                    json!({"template":"home","obstacles":["close"],"click":false,"timeout":"0ms"}),
+                ),
+                _ => (name, json!({"template":"home","timeout":"0ms"})),
+            };
+            native.call_function(function, args).await.unwrap();
+            assert_eq!(trace.taps.lock().unwrap().len(), 1, "{name}");
+            let sleeps = clock.sleeps.lock().unwrap();
+            assert_eq!(
+                sleeps
+                    .iter()
+                    .filter(|(t, _)| *t == 0)
+                    .map(|(_, ms)| ms)
+                    .sum::<u64>(),
+                125,
+                "{name} before"
+            );
+            assert_eq!(
+                sleeps
+                    .iter()
+                    .filter(|(t, _)| *t == 1)
+                    .map(|(_, ms)| ms)
+                    .sum::<u64>(),
+                225,
+                "{name} after"
+            );
+            let delays: Vec<_> = events
+                .of("detail")
+                .into_iter()
+                .filter(|e| e["name"] == "click_delay")
+                .collect();
+            assert_eq!(delays.len(), 2);
+            assert_eq!(
+                delays[0]["data"],
+                json!({"phase":"before","duration_ms":125})
+            );
+            assert_eq!(
+                delays[1]["data"],
+                json!({"phase":"after","duration_ms":225})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn click_delays_can_be_disabled_and_cancel_before_or_after_tap() {
+        for (before, after, cancel, expected_taps) in
+            [(0, 0, false, 1), (300, 300, true, 0), (0, 300, true, 1)]
+        {
+            let trace = Arc::new(Trace::default());
+            let stub = VisionStub::new(FrameSize::new(1000, 1000));
+            let host = vision_host(trace.clone(), &stub, LogTrace::new(), &["input.tap"]);
+            let mut native =
+                NativeYamlHost::new(host, test_context(), Arc::new(AtomicBool::new(false)), None)
+                    .await
+                    .unwrap();
+            native.settings.before_click_ms = before;
+            native.settings.after_click_ms = after;
+            let clock = Arc::new(ClickClock {
+                trace: trace.clone(),
+                sleeps: Mutex::new(vec![]),
+                stop: AtomicBool::new(false),
+                cancel_on_sleep: cancel,
+            });
+            native.runtime = clock.clone();
+            assert_eq!(
+                native
+                    .call_function("tap", json!([0.5, 0.5]))
+                    .await
+                    .is_err(),
+                cancel
+            );
+            assert_eq!(trace.taps.lock().unwrap().len(), expected_taps);
+            assert_eq!(
+                clock.sleeps.lock().unwrap().len(),
+                if cancel { 1 } else { 0 }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn matching_without_click_never_uses_click_delays() {
+        let trace = Arc::new(Trace::default());
+        let stub = VisionStub::new(FrameSize::new(1000, 1000));
+        let host = vision_host(
+            trace.clone(),
+            &stub,
+            LogTrace::new(),
+            &["vision.match", "resource.read"],
+        );
+        let mut native =
+            NativeYamlHost::new(host, test_context(), Arc::new(AtomicBool::new(false)), None)
+                .await
+                .unwrap();
+        let clock = Arc::new(ClickClock {
+            trace: trace.clone(),
+            sleeps: Mutex::new(vec![]),
+            stop: AtomicBool::new(false),
+            cancel_on_sleep: false,
+        });
+        native.runtime = clock.clone();
+        for (name, args) in [
+            ("find", json!("home")),
+            ("find_any", json!({"templates":["home"]})),
+            (
+                "wait_find",
+                json!({"template":"home","click":false,"timeout":"0ms"}),
+            ),
+        ] {
+            stub.push_outcome(stub_outcome());
+            assert!(!native.call_function(name, args).await.unwrap().is_null());
+        }
+        assert!(clock.sleeps.lock().unwrap().is_empty());
+        assert!(trace.taps.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn diagnostics_include_bound_defaults_and_preserve_explicit_timeout() {
+        let stub = VisionStub::new(FrameSize::new(1000, 1000));
+        let host = vision_host(
+            Arc::new(Trace::default()),
+            &stub,
+            LogTrace::new(),
+            &[
+                "device.read",
+                "vision.match",
+                "resource.read",
+                "input.tap",
+                "runtime.sleep",
+            ],
+        );
+        let events = EventCollect::new();
+        let native = NativeYamlHost::new(
+            host,
+            test_context(),
+            Arc::new(AtomicBool::new(false)),
+            Some(events.clone()),
+        )
+        .await
+        .unwrap();
+        let _ = native
+            .call_function("wait_find", json!({"template":"home","timeout":"0ms"}))
+            .await;
+        let details = events.of("detail");
+        let args = &details
+            .iter()
+            .find(|e| e["name"] == "effective_args")
+            .unwrap()["data"]["args"];
+        assert_eq!(args["template"], "home");
+        assert_eq!(args["timeout"], "0ms");
+        assert_eq!(args["click"], true);
+        assert!(args["threshold"].is_number());
+        assert!(args.get("interval").is_some());
     }
 
     #[test]
@@ -1629,18 +2202,34 @@ runtime = "^1.0"
     async fn real_yaml_component_runs_v1_program_with_native_functions() {
         let trace = Arc::new(tests::Trace::default());
         let runtime = LazyYamlWasmtimeRuntime::new();
-        let program = wire("run:\n  - input_text: from-real-wasm\n  - return: done\n");
+        let mut program =
+            wire("run:\n  - input_text: from-real-wasm\n  - tap: [0.5, 0.5]\n  - return: done\n");
+        program["_native_settings"] =
+            json!({"default_timeout_secs":10,"before_click_ms":17,"after_click_ms":29});
+        let sink = tests::EventCollect::new();
         let result = runtime
             .run(run_request(
                 program,
-                host_with_permissions(trace.clone(), &["device.read", "input.text"]),
+                host_with_permissions(trace.clone(), &["device.read", "input.text", "input.tap"]),
                 Arc::new(AtomicBool::new(false)),
-                None,
+                Some(sink.clone()),
             ))
             .await
             .unwrap();
         assert_eq!(result.value, Value::String("done".into()));
         assert_eq!(trace.text.lock().unwrap().as_slice(), ["from-real-wasm"]);
+        let delays: Vec<_> = sink
+            .of("detail")
+            .into_iter()
+            .filter(|e| e["name"] == "click_delay")
+            .map(|e| e["data"]["duration_ms"].as_u64().unwrap())
+            .collect();
+        assert_eq!(
+            delays,
+            vec![17, 29],
+            "每次原生调用必须使用本次运行的全局快照"
+        );
+        assert_eq!(trace.taps.lock().unwrap().len(), 1);
         assert!(runtime.is_available());
     }
 

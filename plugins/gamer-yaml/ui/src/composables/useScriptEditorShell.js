@@ -11,9 +11,9 @@
 // - 选中：受控 selectedUuid；
 // - 结构化跳转：call/func 卡片打开子脚本/函数定义，jumpStack 记录返回位置（资源 + 选中）。
 import { computed, reactive, ref } from 'vue'
-import { CommandStack } from '../script-editor/commands'
+import { CommandStack, resolveStep } from '../script-editor/commands'
 import { parseFunctionLibrary, parseScript, serialize } from '../script-editor/codec'
-import { defaultAnchor, startIndexOf } from '../script-editor/selection'
+import { defaultAnchor, findStepLocation, startIndexOf } from '../script-editor/selection'
 import { validateFunctionLibrary, validateScript } from '../script-editor/validation'
 
 const YAML_EXT_RE = /\.(ya?ml)$/i
@@ -155,7 +155,7 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
     }
   }
 
-  async function loadFunctionFile(id) {
+  async function loadFunctionFile(id, expectedFunction = '') {
     const generation = ++loadGeneration
     loading.value = true
     try {
@@ -164,6 +164,9 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
       const file = f.file || String(id).split('/').slice(1).join('/')
       const short = file.replace(/\.yaml$/i, '')
       const parsed = parseFunctionLibrary(f.content ?? '', { file: short })
+      if (expectedFunction && (parsed.diagnostics.length || !parsed.model?.functions.some(fn => fn.name === expectedFunction))) {
+        throw new Error(parsed.diagnostics[0]?.message || `函数 ${expectedFunction} 已不存在，请刷新列表`)
+      }
       mountModel('function_library', parsed, {
         resourceId: f.id,
         pkg: f.pkg || String(id).split('/')[0] || '',
@@ -346,11 +349,17 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
     return loadScript(id)
   }
 
-  async function jumpToFunctionFile(id) {
-    if (hasModel.value && resourceId.value) {
-      pushJump()
+  async function jumpToFunctionFile(id, { fromFunction = '', targetFunction = '' } = {}) {
+    const previous = hasModel.value && resourceId.value
+      ? { kind: kind.value, resourceId: resourceId.value, selectedUuid: selectedUuid.value,
+          selectedPath: findStepLocation(model.value, selectedUuid.value)?.path, functionName: fromFunction }
+      : null
+    const loaded = await loadFunctionFile(id, targetFunction)
+    if (loaded && previous) {
+      jumpStack.value.push(previous)
+      if (jumpStack.value.length > 8) jumpStack.value.shift()
     }
-    return loadFunctionFile(id)
+    return loaded
   }
 
   function pushJump() {
@@ -359,15 +368,22 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
   }
 
   async function jumpBack() {
-    const prev = jumpStack.value.pop()
+    const prev = jumpStack.value.at(-1)
     if (!prev) return false
     if (!prev.resourceId) {
       reset()
       return true
     }
-    if (prev.kind === 'function_library') await loadFunctionFile(prev.resourceId)
-    else await loadScript(prev.resourceId)
+    const loaded = prev.kind === 'function_library'
+      ? await loadFunctionFile(prev.resourceId, prev.functionName)
+      : await loadScript(prev.resourceId)
+    if (!loaded) return false
+    jumpStack.value.pop()
     selectedUuid.value = prev.selectedUuid ?? null
+    if (prev.selectedPath) {
+      try { selectedUuid.value = resolveStep(model.value, prev.selectedPath)?.uuid ?? null }
+      catch { selectedUuid.value = null }
+    }
     return true
   }
 

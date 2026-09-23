@@ -31,15 +31,25 @@ fn acceptance_program(source: &str) -> Value {
 fn yaml_acceptance_function_names_match_frontend() {
     use crate::extensions::gamer_yaml::syntax::is_function_name;
     let cases: Value = serde_json::from_str(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"), "/../tools/yaml-tests/function-names.json"
-    ))).unwrap();
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tools/yaml-tests/function-names.json"
+    )))
+    .unwrap();
     for (group, expected) in [("valid", true), ("invalid", false)] {
         for name in cases[group].as_array().unwrap() {
             let name = name.as_str().unwrap();
             assert_eq!(is_function_name(name), expected, "{name:?}");
             let key = serde_json::to_string(name).unwrap();
-            assert_eq!(parse_function_library(&format!("functions:\n  {key}:\n    run: []\n")).is_ok(), expected, "definition {name:?}");
-            assert_eq!(parse_script(&format!("run:\n  - {key}: {{}}\n")).is_ok(), expected, "call {name:?}");
+            assert_eq!(
+                parse_function_library(&format!("functions:\n  {key}:\n    run: []\n")).is_ok(),
+                expected,
+                "definition {name:?}"
+            );
+            assert_eq!(
+                parse_script(&format!("run:\n  - {key}: {{}}\n")).is_ok(),
+                expected,
+                "call {name:?}"
+            );
         }
     }
     for name in ["if", "repeat", "return"] {
@@ -52,10 +62,18 @@ async fn yaml_acceptance_chinese_function_runs_real_wasm() {
     let trace = Arc::new(tests::Trace::default());
     let vision = tests::VisionStub::new(FrameSize::new(1000, 1000));
     let host = tests::vision_host(trace, &vision, tests::LogTrace::new(), &[]);
-    let program = acceptance_program("run:\n  - 每日任务跳转: {value: 已跳转}\n    as: result\n  - return: $result\n");
+    let program = acceptance_program(
+        "run:\n  - 每日任务跳转: {value: 已跳转}\n    as: result\n  - return: $result\n",
+    );
     let result = LazyYamlWasmtimeRuntime::new()
-        .run(run_request(program, host, Arc::new(AtomicBool::new(false)), None))
-        .await.unwrap();
+        .run(run_request(
+            program,
+            host,
+            Arc::new(AtomicBool::new(false)),
+            None,
+        ))
+        .await
+        .unwrap();
     assert_eq!(result.value, json!("已跳转"));
 }
 
@@ -174,7 +192,10 @@ async fn yaml_acceptance_all_native_functions_run_real_wasm() {
             "comparisons": [true, true, true, true, true, true]
         })
     );
-    assert_eq!(*trace.taps.lock().unwrap(), [[250, 750], [110, 70], [110, 70]]);
+    assert_eq!(
+        *trace.taps.lock().unwrap(),
+        [[250, 750], [110, 70], [110, 70]]
+    );
     assert_eq!(*trace.text.lock().unwrap(), ["yaml-acceptance"]);
     assert_eq!(
         *trace.apps.lock().unwrap(),
@@ -199,12 +220,113 @@ async fn yaml_acceptance_all_native_functions_run_real_wasm() {
         vision
             .match_calls
             .load(std::sync::atomic::Ordering::Relaxed),
-        6
+        7
     );
     assert_eq!(
         serde_json::from_str::<Value>(&logs.messages()[0]).unwrap(),
         json!({"status": "ready", "literal": "$price"})
     );
     assert_eq!(sink.of("run_end").len(), 1);
+    assert_eq!(sink.of("run_end")[0]["ok"], true);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn yaml_acceptance_template_branches_run_real_wasm() {
+    let source = "run:\n  - match_templates:\n      cases:\n        - template: first.png\n          do:\n            - return: first\n        - template: second.png\n          as: hit\n          do:\n            - tap: $hit.center\n            - return: $hit.template\n      else:\n        - return: missing\n  - return: should-not-run\n";
+    for matched in [false, true] {
+        let trace = Arc::new(tests::Trace::default());
+        let vision = tests::VisionStub::new(FrameSize::new(1000, 1000));
+        vision.push_outcome(MatchOutcome::NotFound);
+        if matched {
+            vision.push_outcome(tests::stub_outcome());
+        }
+        let host = tests::vision_host(
+            trace.clone(),
+            &vision,
+            tests::LogTrace::new(),
+            &["vision.match", "resource.read", "input.tap"],
+        );
+        let sink = tests::EventCollect::new();
+        let result = LazyYamlWasmtimeRuntime::new()
+            .run(run_request(
+                acceptance_program(source),
+                host,
+                Arc::new(AtomicBool::new(false)),
+                Some(sink.clone()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value,
+            json!(if matched { "second.png" } else { "missing" })
+        );
+        assert_eq!(trace.taps.lock().unwrap().len(), usize::from(matched));
+        let expected_path = if matched {
+            "run[0].cases[1].do[0]"
+        } else {
+            "run[0].else[0]"
+        };
+        assert!(sink
+            .of("step_start")
+            .iter()
+            .any(|e| e["path"] == expected_path));
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn yaml_acceptance_break_runs_real_wasm() {
+    let source = r#"run:
+  - repeat: 2
+    do:
+      - repeat: 9
+        do:
+          - log: inner
+          - if: true
+            then:
+              - break: {}
+          - log: skipped
+      - log: outer
+  - repeat: 9
+    do:
+      - match_templates:
+          cases:
+            - template: ready.png
+              do:
+                - break: {}
+          else:
+            - break: {}
+      - log: skipped
+  - log: done
+  - return: true
+"#;
+    let trace = Arc::new(tests::Trace::default());
+    let vision = tests::VisionStub::new(FrameSize::new(1000, 1000));
+    vision.push_outcome(tests::stub_outcome());
+    let logs = tests::LogTrace::new();
+    let sink = tests::EventCollect::new();
+    let host = tests::vision_host(
+        trace,
+        &vision,
+        logs.clone(),
+        &["vision.match", "resource.read", "log.write"],
+    );
+    let result = LazyYamlWasmtimeRuntime::new()
+        .run(run_request(
+            acceptance_program(source),
+            host,
+            Arc::new(AtomicBool::new(false)),
+            Some(sink.clone()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result.value, json!(true));
+    assert_eq!(
+        logs.messages(),
+        ["inner", "outer", "inner", "outer", "done"]
+    );
+    assert!(sink
+        .of("step_end")
+        .iter()
+        .any(|event| event["path"] == "run[1].do[0].cases[0].do[0]" && event["ok"] == true));
     assert_eq!(sink.of("run_end")[0]["ok"], true);
 }

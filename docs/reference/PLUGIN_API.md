@@ -1,5 +1,7 @@
 # 插件 API 参考（gamer:host / manifest v2 / 权限闭集）
 
+资源字节 `GET /api/packages/:pkg/plugins/:plugin/resources/*path` 返回 `ETag`（带引号的内容版本）。覆盖并改名可使用同一路径的 `PUT ?new_path=<编码后的插件内新路径>`，提交图片字节并携带原资源的 `X-Expected-Version`，不允许 `force`。服务端先按新路径校验、归一化并暂存字节，再执行改名及引用更新；发布失败时尝试恢复原名称和引用。版本不符或目标已存在返回 409。模板覆盖由此同步更新搜索区域和 `#1` 颜色标记；带 `#1` 的模板保存时保留颜色。
+
 2026-09-19 UI 补充：可选主题与 `gamer-ui@1` 客户端见 [SDK UI](../../sdk/ui/README.md)，沿用专属 MessagePort、宿主提供的面板身份、`context.get` 和 `status.set/clear`；不扩大沙盒或权限。构建后的单文件示例带 CSP 哈希，原生按钮使用 click 而非被沙盒禁用的表单提交。
 
 Core 录制历史查询新增 `GET /api/recording`（需登录），返回 `{sessions:[...]}`。每项沿用会话元数据：`id/device_id/state/started_at/ended_at/segments/event_count/error`，另含 `missing_media` 分段素材 ID 列表，按开始时间倒序。活动记录优先，磁盘遗留活动态恢复为 interrupted。历史登记独立于素材保存；删除素材不删新登记，但输入事件仍随原媒体目录存储，丢失时 `/api/recording/:id/events` 返回 `recording_events_missing`。没有新增批量清理或分页 API；客户端不能从素材文件名构造录制 ID。

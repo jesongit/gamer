@@ -1,8 +1,10 @@
 //! SQLite 持久化：设备、定时任务、运行日志。
 //!
-//! 数据库从当前 schema v4 空库创建（无 legacy `tasks` 表）；v1 历史库经
+//! 数据库从当前 schema v5 空库创建（无 legacy `tasks` 表）；v1 历史库经
 //! v1→v2（Timer Core 泛化）与 v2→v3（Task 模型收口）逐级迁移，user_version=0
 //! 仍拒绝自动补齐。
+
+pub(crate) mod journal;
 
 use std::any::Any;
 use std::path::{Path, PathBuf};
@@ -268,15 +270,16 @@ fn ensure_schema(conn: &mut Connection, is_new_database: bool) -> anyhow::Result
             "new database has unexpected user_version={version}"
         );
         conn.execute_batch(SCHEMA_V4_DDL)?;
+        conn.execute_batch(journal::DDL)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        return validate_schema_v4(conn);
+        return validate_schema_v5(conn);
     }
 
     match version {
         0 => anyhow::bail!(
-            "database schema is unversioned (user_version=0); back up and remove gamer.db to rebuild schema v4"
+            "database schema is unversioned (user_version=0); back up and remove gamer.db to rebuild schema v5"
         ),
-        SCHEMA_VERSION => validate_schema_v4(conn),
+        SCHEMA_VERSION => validate_schema_v5(conn),
         other => apply_schema_migrations(conn, other),
     }
 }
@@ -287,12 +290,12 @@ fn ensure_schema(conn: &mut Connection, is_new_database: bool) -> anyhow::Result
 /// is rejected before this function is ever reached.
 fn apply_schema_migrations(conn: &mut Connection, from_version: i64) -> anyhow::Result<()> {
     crate::migrations::run_migrations(conn, from_version, crate::migrations::MIGRATIONS)?;
-    validate_schema_v4(conn)
+    validate_schema_v5(conn)
 }
 
 /// v3 结构校验。启动路径与 maintenance CLI（DATA-005 migrate 迁移后校验）
 /// 共用同一实现，保证「迁移后开放」的判定一致。
-pub(crate) fn validate_schema_v4(conn: &Connection) -> anyhow::Result<()> {
+pub(crate) fn validate_schema_v5(conn: &Connection) -> anyhow::Result<()> {
     let mut stmt = conn.prepare(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     )?;
@@ -302,6 +305,8 @@ pub(crate) fn validate_schema_v4(conn: &Connection) -> anyhow::Result<()> {
     let expected_tables = [
         "devices",
         "logs",
+        "run_events",
+        "run_records",
         "scheduled_runs",
         "task_presets",
         "timer_tasks",
@@ -311,9 +316,45 @@ pub(crate) fn validate_schema_v4(conn: &Connection) -> anyhow::Result<()> {
     .collect::<Vec<_>>();
     anyhow::ensure!(
         tables == expected_tables,
-        "schema v4 is incomplete: expected tables {expected_tables:?}, found {tables:?}; back up and rebuild gamer.db"
+        "schema v5 is incomplete: expected tables {expected_tables:?}, found {tables:?}; back up and rebuild gamer.db"
     );
 
+    validate_table(
+        conn,
+        "run_records",
+        &[
+            ("run_id", "TEXT", 0, 1),
+            ("device_id", "TEXT", 1, 0),
+            ("entrypoint", "TEXT", 1, 0),
+            ("started_at", "TEXT", 1, 0),
+            ("finished_at", "TEXT", 0, 0),
+            ("record", "TEXT", 1, 0),
+        ],
+    )?;
+    validate_table(
+        conn,
+        "run_events",
+        &[
+            ("id", "INTEGER", 0, 1),
+            ("run_id", "TEXT", 1, 0),
+            ("time", "TEXT", 1, 0),
+            ("payload", "TEXT", 1, 0),
+        ],
+    )?;
+    validate_index(
+        conn,
+        "run_records",
+        "idx_run_records_device",
+        false,
+        &["device_id", "started_at"],
+    )?;
+    validate_index(
+        conn,
+        "run_events",
+        "idx_run_events_run",
+        false,
+        &["run_id", "id"],
+    )?;
     validate_table(
         conn,
         "devices",
@@ -436,7 +477,7 @@ pub(crate) fn validate_schema_v4(conn: &Connection) -> anyhow::Result<()> {
 /// Compatibility name retained for maintenance callers while the validator
 /// now checks the complete v3 schema.
 pub(crate) fn validate_schema_v1(conn: &Connection) -> anyhow::Result<()> {
-    validate_schema_v4(conn)
+    validate_schema_v5(conn)
 }
 
 /// v1→v2 migration.  Legacy rows are copied into generic timer rows; the old
@@ -585,7 +626,7 @@ fn validate_table(
         .collect::<Vec<_>>();
     anyhow::ensure!(
         actual == expected,
-        "schema v4 is incomplete: table {table} has unexpected columns; back up and rebuild gamer.db"
+        "schema v5 is incomplete: table {table} has unexpected columns; back up and rebuild gamer.db"
     );
     Ok(())
 }
@@ -608,12 +649,12 @@ fn validate_index(
         .find(|(name, _)| name == index);
     let Some((_, is_unique)) = found else {
         anyhow::bail!(
-            "schema v4 is incomplete: missing index {index}; back up and rebuild gamer.db"
+            "schema v5 is incomplete: missing index {index}; back up and rebuild gamer.db"
         );
     };
     anyhow::ensure!(
         is_unique == expected_unique,
-        "schema v4 is incomplete: index {index} has unexpected uniqueness; back up and rebuild gamer.db"
+        "schema v5 is incomplete: index {index} has unexpected uniqueness; back up and rebuild gamer.db"
     );
     let pragma = format!("PRAGMA index_info('{index}')");
     let mut stmt = conn.prepare(&pragma)?;
@@ -626,7 +667,7 @@ fn validate_index(
         .collect::<Vec<_>>();
     anyhow::ensure!(
         actual_columns == expected_columns,
-        "schema v4 is incomplete: index {index} has unexpected columns; back up and rebuild gamer.db"
+        "schema v5 is incomplete: index {index} has unexpected columns; back up and rebuild gamer.db"
     );
     Ok(())
 }
@@ -1920,6 +1961,7 @@ impl Store {
     /// 分批删除过期日志，避免一次大事务长时间占用数据库锁。
     /// 返回本次删除的行数；retain_days=0 表示关闭保留清理。
     pub fn prune_logs(&self, retain_days: u32) -> anyhow::Result<u64> {
+        self.prune_run_history(retain_days)?;
         if retain_days == 0 {
             return Ok(0);
         }
@@ -1984,6 +2026,7 @@ impl Store {
     }
 
     pub async fn prune_logs_async(&self, retain_days: u32) -> anyhow::Result<u64> {
+        self.prune_run_history(retain_days)?;
         if retain_days == 0 {
             return Ok(0);
         }
@@ -2574,12 +2617,12 @@ PRAGMA user_version = 2;
         fs::remove_dir_all(dir).unwrap();
     }
 
-    /// DATA-002：全新建库得到**确定的 schema v4**——表/列（含顺序、类型、
+    /// DATA-002：全新建库得到**确定的 schema v5**——表/列（含顺序、类型、
     /// NOT NULL、PK）与索引（含唯一性、列序）的完整快照与硬编码期望逐一比对。
     /// 任何 DDL 漂移（新增列、改类型、动索引）都必须显式更新此快照并同步
     /// schema-policy 契约，防止「新库 schema」悄悄分叉。
     #[test]
-    fn new_database_schema_matches_v4_snapshot() {
+    fn new_database_schema_matches_v5_snapshot() {
         let (cfg, dir) = temp_config("schema-snapshot");
         let db_path = dir.join("gamer.db");
         let store = Store::open(&cfg).unwrap();
@@ -2588,7 +2631,7 @@ PRAGMA user_version = 2;
         let conn = Connection::open(&db_path).unwrap();
         let actual = dump_schema(&conn);
         let expected = serde_json::json!({
-            "user_version": 4,
+            "user_version": 5,
             "tables": [
                 {
                     "name": "devices",
@@ -2703,6 +2746,34 @@ PRAGMA user_version = 2;
                 }
             ]
         });
+        let mut expected = expected;
+        let tables = expected["tables"].as_array_mut().unwrap();
+        tables.extend(
+            serde_json::json!([
+                {"name":"run_events","columns":[
+                    {"name":"id","type":"INTEGER","notnull":0,"pk":1},
+                    {"name":"run_id","type":"TEXT","notnull":1,"pk":0},
+                    {"name":"time","type":"TEXT","notnull":1,"pk":0},
+                    {"name":"payload","type":"TEXT","notnull":1,"pk":0}]},
+                {"name":"run_records","columns":[
+                    {"name":"run_id","type":"TEXT","notnull":0,"pk":1},
+                    {"name":"device_id","type":"TEXT","notnull":1,"pk":0},
+                    {"name":"entrypoint","type":"TEXT","notnull":1,"pk":0},
+                    {"name":"started_at","type":"TEXT","notnull":1,"pk":0},
+                    {"name":"finished_at","type":"TEXT","notnull":0,"pk":0},
+                    {"name":"record","type":"TEXT","notnull":1,"pk":0}]}
+            ])
+            .as_array()
+            .unwrap()
+            .clone(),
+        );
+        tables.sort_by_key(|t| t["name"].as_str().unwrap().to_string());
+        let indexes = expected["indexes"].as_array_mut().unwrap();
+        indexes.extend(serde_json::json!([
+            {"name":"idx_run_events_run","table":"run_events","unique":0,"columns":["run_id","id"]},
+            {"name":"idx_run_records_device","table":"run_records","unique":0,"columns":["device_id","started_at"]}
+        ]).as_array().unwrap().clone());
+        indexes.sort_by_key(|t| t["name"].as_str().unwrap().to_string());
         // P11.1：v3 快照是全量精确比对——legacy tasks 表已删除，任何漂移在此失败
         assert_eq!(actual, expected, "新库 schema 与 v3 快照不一致");
 
@@ -2717,7 +2788,7 @@ PRAGMA user_version = 2;
         let store = Store::open(&cfg).unwrap();
         drop(store);
         let conn = Connection::open(&db_path).unwrap();
-        conn.pragma_update(None, "user_version", 5).unwrap();
+        conn.pragma_update(None, "user_version", 6).unwrap();
         drop(conn);
 
         let error = match Store::open(&cfg) {
@@ -2726,7 +2797,7 @@ PRAGMA user_version = 2;
         };
         assert!(error
             .to_string()
-            .contains("unsupported database schema version 5"));
+            .contains("unsupported database schema version 6"));
 
         fs::remove_dir_all(dir).unwrap();
     }
@@ -2745,7 +2816,7 @@ PRAGMA user_version = 2;
             Ok(_) => panic!("incomplete database must fail fast"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("schema v4 is incomplete"));
+        assert!(error.to_string().contains("schema v5 is incomplete"));
 
         fs::remove_dir_all(dir).unwrap();
     }

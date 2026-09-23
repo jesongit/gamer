@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { defineComponent, h, reactive, ref } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createOperationFeedback } from './workspace/operation-feedback'
@@ -18,6 +18,7 @@ import { currentPackageId, packageStore, selectPackage } from './package-store'
 import { cellShort, parseStepPath } from '../../plugins/gamer-yaml/ui/src/script-editor/components/kinds'
 
 let wrapper
+beforeEach(() => { vi.spyOn(api, 'listRunHistory').mockResolvedValue([]) })
 
 it('步骤摘要显示完整复合值，错误路径支持中文函数与宿主 functions 前缀', () => {
   expect(cellShort({ lit: { value: true } })).toBe('{"value":true}')
@@ -171,14 +172,27 @@ it('手动保存后保留内联画布和命令栈，实际保存仍携带资源�
   } }))
   await flushPromises()
   const shell = runner.scriptShell
-  shell.scriptDisplayName = 'renamed'
+  const nameInput = wrapper.get('.editor-toolbar input[aria-label="脚本名称"]')
+  expect(nameInput.element.nextElementSibling.classList.contains('add-step')).toBe(true)
+  expect(nameInput.element.value).toBe('main')
+  await nameInput.setValue('renamed')
   const stack = shell.stack
-  const result = await runner.scriptPanel.saveEditScript({ keepOpen: true })
-  expect(result.ok).toBe(true)
+  // 不依赖 blur：输入后直接点击保存也会先提交名称。
+  const saveButton = wrapper.findAll('.resource-action').find(button => button.text() === '保存')
+  expect(saveButton.element.disabled).toBe(false)
+  await saveButton.trigger('click')
+  await flushPromises()
+  expect(save.mock.calls[0][1].name).toBe('renamed.yaml')
   expect(save.mock.calls[0][1].expected_version).toBe('v1')
   expect(shell.stack).toBe(stack)
   expect(shell.dirty).toBe(false)
   expect(wrapper.find('.se-canvas').exists()).toBe(true)
+  await nameInput.setValue('')
+  await saveButton.trigger('click')
+  expect(save).toHaveBeenCalledTimes(1)
+  expect(wrapper.get('[role="alert"]').text()).toBe('名称不能为空')
+  await nameInput.trigger('keydown', { key: 'Escape' })
+  expect(nameInput.element.value).toBe('renamed')
 })
 
 it('从此运行在保存后继续使用编辑器步骤序号，冲突时不发起运行', async () => {
@@ -195,4 +209,49 @@ it('从此运行在保存后继续使用编辑器步骤序号，冲突时不发�
   saveEditScript.mockResolvedValueOnce({ ok: false, reason: 'conflict' })
   await wrapper.get('.test-from-stub').trigger('click'); await flushPromises()
   expect(runScript).toHaveBeenCalledTimes(1)
+})
+
+it.each(['script', 'func'])('顶部运行按钮从第零步运行 %s，不把点击事件当作步骤 UUID', async runKind => {
+  const runScript = vi.fn(), runFunction = vi.fn(), saveEditScript = vi.fn()
+  const model = runKind === 'func'
+    ? { functions: [{ name: '账号日常', params: [], run: [{ uuid: 'first' }] }] }
+    : { run: [{ uuid: 'first' }] }
+  const context = reactive({ runKind, scriptMode: 'edit', packageId: 'qa', selScript: 'qa/main.yaml', editFocusFn: '账号日常', filteredFnViews: [], templateNames: [],
+    store: { running: false, deviceId: 'device' },
+    shell: { hasModel: true, kind: runKind === 'func' ? 'function_library' : 'script', dirty: true, resourceId: 'qa/main.yaml', diagnostics: [], model, stack: {}, scriptDisplayName: '账号日常' },
+    saveEditScript, runScript, runFunction, raw: {}, resourcePreview: {},
+  })
+  saveEditScript.mockImplementation(async () => { context.shell.dirty = false; return { ok: true } })
+  wrapper = mount(ScriptRunner, { props: { context }, global: { stubs: { ScriptPicker: true, StepCanvas: true, ParamEditor: true, ResourcePreviewModal: true, SaveConflictModal: true } } })
+  const button = wrapper.get('.resource-toolbar .btn-primary')
+  expect(button.element.disabled).toBe(false)
+  await button.trigger('click')
+  await flushPromises()
+  const run = runKind === 'func' ? runFunction : runScript
+  expect(run).toHaveBeenCalledExactlyOnceWith(runKind === 'func' ? { fnName: '账号日常', startIndex: 0 } : { startIndex: 0 })
+  expect(saveEditScript.mock.invocationCallOrder[0]).toBeLessThan(run.mock.invocationCallOrder[0])
+  context.shell.dirty = true
+  saveEditScript.mockResolvedValueOnce({ ok: false, reason: 'conflict' })
+  await button.trigger('click')
+  await flushPromises()
+  expect(run).toHaveBeenCalledTimes(1)
+})
+
+
+it('运行被接受后用详情占满编辑区，结束后保留，返回时保留编辑器实例', async () => {
+  const context = reactive({ runKind:'script',scriptMode:'edit',packageId:'qa',selScript:'qa/main.yaml',filteredFnViews:[],templateNames:[],
+    store:{running:false,deviceId:'d',runId:null}, shell:{hasModel:true,kind:'script',dirty:false,resourceId:'qa/main.yaml',diagnostics:[],model:{run:[]},stack:{}},raw:{},resourcePreview:{} })
+  wrapper = mount(ScriptRunner,{props:{context},global:{stubs:{ScriptPicker:true,StepCanvas:{template:'<div />',methods:{closeAdd(){}}},ParamEditor:true,ResourcePreviewModal:true,SaveConflictModal:true,RunDetails:{template:'<section class="details-stub"><button @click="$emit(\'edit\')">返回编辑</button></section>'}}}})
+  expect(wrapper.find('.details-stub').element.style.display).toBe('none')
+  const editor = wrapper.get('.editor-view').element
+  context.store.running = true; context.store.runId = 'accepted'; await flushPromises()
+  expect(wrapper.find('.details-stub').element.style.display).not.toBe('none')
+  expect(editor.style.display).toBe('none')
+  context.store.running = false; context.store.runId = null; await flushPromises()
+  expect(wrapper.find('.details-stub').element.style.display).not.toBe('none')
+  context.selScript = 'qa/another.yaml'; await flushPromises()
+  expect(wrapper.find('.details-stub').element.style.display).not.toBe('none')
+  await wrapper.get('.details-stub button').trigger('click')
+  expect(wrapper.get('.editor-view').element).toBe(editor)
+  expect(editor.style.display).not.toBe('none')
 })

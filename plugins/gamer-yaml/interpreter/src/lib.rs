@@ -166,6 +166,12 @@ pub struct Step {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum StepKind {
+    MatchTemplates {
+        args: Expr,
+        cases: Vec<TemplateBranch>,
+        #[serde(default, rename = "else")]
+        else_steps: Vec<Step>,
+    },
     /// 函数调用：先查 `functions`（Package 函数，本地解释），未命中走宿主
     /// [`HostFunctions`]（原生函数）。`as` 接收返回值。
     Fn {
@@ -188,9 +194,18 @@ pub enum StepKind {
         #[serde(default, rename = "do")]
         body: Vec<Step>,
     },
+    Break,
     Return {
         value: Expr,
     },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TemplateBranch {
+    #[serde(default, rename = "as")]
+    pub save_as: Option<String>,
+    #[serde(rename = "do")]
+    pub body: Vec<Step>,
 }
 
 /// 表达式：字面量或 `$name.field` 引用（无第三种）；字面量容器（数组/映射）
@@ -214,6 +229,7 @@ pub enum Expr {
 
 enum Flow {
     Continue,
+    Break,
     Return(Value),
 }
 
@@ -289,11 +305,22 @@ impl<'a> Interpreter<'a> {
         self.emit(serde_json::json!({ "ev": "run_start" }));
         let mut values = program.vars.clone();
         let steps = &program.run[program.start_index..];
-        let outcome = self.run_steps(steps, &mut values);
+        let outcome = self
+            .run_steps(steps, &mut values)
+            .and_then(|flow| match flow {
+                Flow::Break => {
+                    Err("yaml.break.outside_loop: break 只能在当前函数的 repeat 循环内使用".into())
+                }
+                flow => Ok(flow),
+            });
         match outcome {
-            Ok(Flow::Continue | Flow::Return(_)) => {
+            Ok(flow) => {
                 self.emit(serde_json::json!({ "ev": "run_end", "ok": true }));
-                Ok(values.remove(RETURN_KEY).unwrap_or(Value::Null))
+                Ok(match flow {
+                    Flow::Return(value) => value,
+                    Flow::Break => unreachable!("break is rejected above"),
+                    Flow::Continue => values.remove(RETURN_KEY).unwrap_or(Value::Null),
+                })
             }
             Err(error) => {
                 if let Some(kind) = budget_kind(&error) {
@@ -320,6 +347,10 @@ impl<'a> Interpreter<'a> {
         if let Some(sink) = self.events {
             sink.emit(event);
         }
+    }
+
+    fn detail(&self, name: &str, data: Value) {
+        self.emit(serde_json::json!({"ev":"detail", "name":name, "data":data}));
     }
 
     fn emit_step_start(&self, step: &Step, values: &serde_json::Map<String, Value>) {
@@ -390,6 +421,47 @@ impl<'a> Interpreter<'a> {
         values: &mut serde_json::Map<String, Value>,
     ) -> Result<Flow, String> {
         match &step.kind {
+            StepKind::MatchTemplates {
+                args,
+                cases,
+                else_steps,
+            } => {
+                let args = self.eval(Some(args), values)?;
+                self.detail(
+                    "arguments",
+                    serde_json::json!({"path":step.path,"function":"find_any","args":args}),
+                );
+                let matched = self
+                    .host
+                    .invoke("find_any", args)
+                    .map_err(|e| e.to_string())?;
+                self.detail("branch", serde_json::json!({"path":step.path,"kind":"match_templates","selected":matched.get("index").cloned().unwrap_or(Value::String("else".into())),"result":matched}));
+                if matched.is_null() {
+                    return self.run_steps(else_steps, values);
+                }
+                let index = matched
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .and_then(|i| usize::try_from(i).ok())
+                    .ok_or("匹配结果缺少有效分支 index")?;
+                let branch = cases.get(index).ok_or("匹配分支 index 越界")?;
+                let previous = branch
+                    .save_as
+                    .as_ref()
+                    .map(|name| values.insert(name.clone(), matched));
+                let outcome = self.run_steps(&branch.body, values);
+                if let (Some(name), Some(previous)) = (&branch.save_as, previous) {
+                    match previous {
+                        Some(value) => {
+                            values.insert(name.clone(), value);
+                        }
+                        None => {
+                            values.remove(name);
+                        }
+                    }
+                }
+                outcome
+            }
             StepKind::Fn {
                 name,
                 args,
@@ -399,6 +471,10 @@ impl<'a> Interpreter<'a> {
                 if args.get("name").is_some_and(|value| !value.is_string()) {
                     return Err("name 必须是字符串".to_string());
                 }
+                self.detail(
+                    "arguments",
+                    serde_json::json!({"path":step.path,"function":name,"args":args}),
+                );
                 if self.functions.contains_key(name) {
                     self.call_package_function(name, args, save_as, values)
                 } else {
@@ -411,6 +487,7 @@ impl<'a> Interpreter<'a> {
                 else_steps,
             } => {
                 let value = self.eval(Some(cond), values)?;
+                self.detail("branch", serde_json::json!({"path":step.path,"kind":"if","condition":value,"selected":if is_truthy(&value) {"then"} else {"else"}}));
                 let branch = if is_truthy(&value) {
                     then_steps
                 } else {
@@ -423,16 +500,22 @@ impl<'a> Interpreter<'a> {
                 let count = times
                     .as_u64()
                     .ok_or_else(|| format!("repeat 次数必须是零或正整数，得到 {times}"))?;
-                for _ in 0..count {
+                for iteration in 0..count {
+                    self.detail(
+                        "iteration",
+                        serde_json::json!({"path":step.path,"iteration":iteration+1,"total":count}),
+                    );
                     // 每轮迭代本身也是逻辑步：空转体同样受预算约束终止。
                     self.begin_step()?;
                     match self.run_steps(body, values)? {
                         Flow::Continue => {}
+                        Flow::Break => break,
                         flow => return Ok(flow),
                     }
                 }
                 Ok(Flow::Continue)
             }
+            StepKind::Break => Ok(Flow::Break),
             StepKind::Return { value } => {
                 let value = self.eval(Some(value), values)?;
                 values.insert(RETURN_KEY.to_string(), value.clone());
@@ -452,6 +535,10 @@ impl<'a> Interpreter<'a> {
             .host
             .invoke(name, args)
             .map_err(|error| error.to_string())?;
+        self.detail(
+            "result",
+            serde_json::json!({"function":name,"value":result,"as":save_as}),
+        );
         if let Some(save_as) = save_as {
             values.insert(save_as.clone(), result);
         }
@@ -517,10 +604,17 @@ impl<'a> Interpreter<'a> {
                 }
             }
         }
+        let bound: serde_json::Map<String, Value> = def.params.iter().filter_map(|p| frame.get(&p.name).map(|v| (p.name.clone(), v.clone()))).collect();
+        self.detail("effective_args", serde_json::json!({"function":name,"args":bound}));
         let return_value = match self.run_steps(&def.run, &mut frame)? {
             Flow::Return(value) => value,
             Flow::Continue => Value::Null,
+            Flow::Break => return Err("yaml.break.outside_loop: break 不能跳出调用方的循环".into()),
         };
+        self.detail(
+            "result",
+            serde_json::json!({"function":name,"value":return_value,"as":save_as}),
+        );
         if let Some(save_as) = save_as {
             values.insert(save_as.clone(), return_value);
         }
@@ -574,6 +668,12 @@ fn lookup_path(values: &serde_json::Map<String, Value>, path: &str) -> Option<Va
     }
     Some(current)
 }
+
+#[cfg(test)]
+mod template_branch_tests;
+
+#[cfg(test)]
+mod break_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1036,7 +1136,14 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            vec!["run_start", "step_start", "step_end", "run_end"]
+            vec![
+                "run_start",
+                "step_start",
+                "detail",
+                "detail",
+                "step_end",
+                "run_end"
+            ]
         );
 
         struct Fail;

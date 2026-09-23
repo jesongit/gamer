@@ -215,11 +215,13 @@ impl ResourceHandler for YamlResourceHandler {
         &self,
         req: SaveBinaryValidation<'a>,
     ) -> Result<Cow<'a, [u8]>, serde_json::Value> {
-        // templates/ = 本插件的字节语义区：统一归一化为 8-bit 灰度 PNG
-        // （匹配链路只消费灰度；`#1` 颜色复核标记由文件名承载，归一化不改名）。
+        // 普通模板归一化为灰度；#1 模板保留 RGB/RGBA，供匹配时颜色复核。
         // 非法图片字节报结构化诊断（HTTP 400）。其余路径不解释。
         if req.path.strip_prefix("templates/").is_some() {
-            return match crate::matcher::reencode_template_png(req.bytes, true) {
+            return match crate::matcher::reencode_template_png(
+                req.bytes,
+                !crate::matcher::template_color_from_name(req.path),
+            ) {
                 Ok(normalized) => Ok(Cow::Owned(normalized)),
                 Err(error) => Err(json!([
                     {

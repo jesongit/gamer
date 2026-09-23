@@ -5,7 +5,7 @@
  * `plugins/gamer-yaml/host/syntax.rs` 语义对齐（解析/校验/序列化
  * 双端一致）。V1 只描述流程，所有实际操作都是函数调用：
  * - Program = {name?, params?, vars?, run}；无 version 字段；
- * - Step 为 4 类判别联合：函数调用（fn: args + as）/ if / repeat / return；
+ * - Step 为 6 类判别联合：函数调用（fn: args + as）/ if / repeat / return / match_templates / break；
  *   tap、find、sleep 等不是语法关键字，而是函数；
  * - 函数文件 = {functions: {名: {description?, params?, vars?, returns?, run}}}；
  * - Cell 是字段级取值：{lit: 字面量} 或 {ref: 变量路径}（ref 不含 $，如
@@ -25,6 +25,8 @@ export type ParamType = (typeof PARAM_TYPES)[number]
 
 /** 参数声明（V1 全部为映射形态，rawForm 已随 v3 字符串声明删除）。 */
 export interface ParamDecl {
+  /** 原生函数目录的列表元素提示，不是 YAML 参数声明语法。 */
+  items?: { type: ParamType }
   name: string
   type: ParamType
   required: boolean
@@ -112,10 +114,10 @@ export function emptyArgs(): CallArgs {
   return { kind: 'none' }
 }
 
-// ---------- 步骤（4 类） ----------
+// ---------- 步骤（6 类） ----------
 
 /** 控制流关键字（不能作为函数名/变量名）。 */
-export const RESERVED_WORDS = ['if', 'repeat', 'return'] as const
+export const RESERVED_WORDS = ['if', 'repeat', 'return', 'match_templates', 'break'] as const
 
 /** uuid：浏览器内分配的稳定临时 ID，仅用于编辑态定位，绝不序列化进 YAML。 */
 interface StepUuid {
@@ -126,8 +128,10 @@ export type Step =
   & StepUuid
   & (
     | { kind: 'call'; fn: string; args: CallArgs; as: string | null }
+    | { kind: 'match_templates'; cases: { template: Cell; as: string | null; body: Step[] }[]; threshold: Cell; else: Step[] }
     | { kind: 'if'; cond: Cell; then: Step[]; else: Step[] }
     | { kind: 'repeat'; times: Cell; body: Step[] }
+    | { kind: 'break' }
     | { kind: 'return'; value: Cell }
   )
 
@@ -172,6 +176,8 @@ function reassignUuids(step: Step): void {
  */
 export function childStepLists(step: Step): { key: string; index: number; list: Step[] }[] {
   switch (step.kind) {
+    case 'match_templates':
+      return [...step.cases.map((c, i) => ({ key: `cases[${i}].do`, index: i, list: c.body })), { key: 'else', index: -1, list: step.else }]
     case 'if':
       return [
         { key: 'then', index: -1, list: step.then },
@@ -235,6 +241,12 @@ export function collectStepUsage(
         default:
           break
       }
+      break
+    }
+    case 'match_templates': {
+      collectCellRefs(step.threshold, refs)
+      for (const c of step.cases) collectCellRefs(c.template, refs)
+      for (const child of childStepLists(step)) for (const s of child.list) collectStepUsage(s, calls, refs)
       break
     }
     case 'if': {

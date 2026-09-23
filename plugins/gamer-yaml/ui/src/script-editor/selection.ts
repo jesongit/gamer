@@ -200,6 +200,10 @@ function searchTrail(
 
 /** 容器展示名（面包屑示例：主流程 / 如果为真 / 循环体）。 */
 export function containerLabel(parent: Step | null, containerKey: string, rootFallback = ''): string {
+  if (parent?.kind === 'match_templates') {
+    const index = /^cases\[(\d+)\]\.do$/.exec(containerKey)
+    return index ? `模板分支 ${Number(index[1]) + 1}` : '全部未命中'
+  }
   if (parent === null) return rootFallback || '主流程'
   switch (parent.kind) {
     case 'if':

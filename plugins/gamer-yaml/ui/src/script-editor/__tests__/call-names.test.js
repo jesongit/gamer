@@ -4,22 +4,22 @@ import { mount } from '@vue/test-utils'
 import { parseScript, serialize } from '../codec'
 import { validateSource } from '../validation'
 import { functionCallParams, NATIVE_CALL_NAMES } from '../call-names'
-import { stepSummary } from '../components/kinds'
+import { stepCaption } from '../components/kinds'
 import { SE_TARGET_OPTIONS } from '../targets'
 import StepCard from '../components/StepCard.vue'
 import ScriptSummary from '../../components/console/ScriptSummary.vue'
 import { setupScript, expandCard } from './component_helpers'
 import catalog from '../../../../../../tools/yaml-tests/native-functions.json'
 
-it('全部内置函数的中文默认名与服务端目录一致，timeout 默认为 3s', () => {
+it('全部内置函数的中文默认名与服务端目录一致，timeout 默认为 10s', () => {
   for (const fn of catalog) {
     expect(NATIVE_CALL_NAMES[fn.name]).toBe(fn.params.find(p => p.name === 'name').default)
-    expect(stepSummary(parseScript(`run:\n  - ${fn.name}: {}\n`).model.run[0])).toBe(NATIVE_CALL_NAMES[fn.name])
-    for (const param of fn.params.filter(p => p.name === 'timeout')) expect(param.default).toBe('3s')
+    expect(stepCaption(parseScript(`run:\n  - ${fn.name}: {}\n`).model.run[0]).title).toBe(NATIVE_CALL_NAMES[fn.name])
+    for (const param of fn.params.filter(p => p.name === 'timeout')) expect(param.default).toBe('10s')
   }
 })
 
-it('name 参数可编辑、往返，编辑卡片与只读摘要只显示其值', async () => {
+it('name 参数可编辑、往返，编辑卡片与只读摘要同时显示自定义名称和关键参数', async () => {
   const created = setupScript('run:\n  - tap: {position: [0.5, 0.8], name: 点击登录}\n')
   const schema = catalog.find(f => f.name === 'tap').params
   const wrapper = mount(StepCard, { props: {
@@ -27,14 +27,16 @@ it('name 参数可编辑、往返，编辑卡片与只读摘要只显示其值',
   }, global: { provide: { [SE_TARGET_OPTIONS]: {
     targets: [{ target: 'tap', group: 'plugin' }], resolveParamsSync: () => schema, resolveParams: async () => schema,
   } } } })
-  expect(wrapper.get('.summary').text()).toBe('点击登录')
+  expect(wrapper.get('.kind-name').text()).toBe('点击登录')
+  expect(wrapper.get('.summary').text()).toBe('(0.5, 0.8)')
   await expandCard(wrapper, created.model.run[0].uuid)
   await wrapper.get('input[aria-label="参数 name"]').setValue('确认登录')
   const reparsed = parseScript(serialize(created.model))
   expect(reparsed.model.run[0].args.entries.name).toEqual({ lit: '确认登录' })
   expect(reparsed.model.run[0].fn).toBe('tap')
   const summary = mount(ScriptSummary, { props: { model: reparsed.model } })
-  expect(summary.get('.summary').text()).toBe('确认登录')
+  expect(summary.get('.label').text()).toBe('确认登录')
+  expect(summary.get('.summary').text()).toBe('(0.5, 0.8)')
   wrapper.unmount()
   summary.unmount()
 })

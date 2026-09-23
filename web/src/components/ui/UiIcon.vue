@@ -6,6 +6,8 @@ defineProps({ name: { type: String, default: 'more' } })
 const paths = {
   edit: 'm4 16-1 5 5-1L21 7l-4-4ZM14 6l4 4',
   pause: 'M7 4v16M17 4v16',
+  'frame-prev': 'M5 5v14M19 5 8 12l11 7Z',
+  'frame-next': 'M19 5v14M5 5l11 7-11 7Z',
   upload: 'M12 16V3m-5 5 5-5 5 5M3 15v6h18v-6',
   record: 'M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16',
   phone: 'M6 2h12v20H6ZM10 18h4',

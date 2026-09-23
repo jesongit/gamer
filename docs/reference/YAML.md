@@ -11,7 +11,7 @@ Gamer 自动化脚本只支持 **YAML V1**（Gamer V1 简化计划 Phase 1；无
 **无兼容分支、无 fallback、无迁移工具**）。
 
 核心原则：**YAML 只描述流程，所有实际操作都是函数调用**。解释器只认识
-函数调用 / `if` / `repeat` / `return` 四类步骤；`tap`、`find`、`sleep` 等
+函数调用 / `if` / `repeat` / `return` / `match_templates` / `break` 六类步骤；`tap`、`find`、`sleep` 等
 都不是语法关键字，而是函数。
 
 - 权威实现：`plugins/gamer-yaml/interpreter/`（唯一解释器，WASM guest 与宿主测试
@@ -97,6 +97,7 @@ run:                      # 必有（可为空列表）：执行入口
   - launch: com.example.game
   - wait_find:
       template: home.png
+      click: false
       timeout: $timeout
     as: home
   - if: $home
@@ -113,7 +114,7 @@ duration / point / template / key`（别名 bool/int/float/text 解析期归一�
 
 ## 3. 步骤与表达式
 
-**一个步骤 = 恰好一个动作键**（函数名或 `if/repeat/return`）+ 可选 `as`；
+**一个步骤 = 恰好一个动作键**（函数名或 `if/repeat/return/match_templates/break`）+ 可选 `as`；
 `then/else/do` 是 if/repeat 的结构键。
 
 ```yaml
@@ -152,10 +153,19 @@ run:
   比较用 `eq/gt` 等函数）；
 - 函数调用独立局部作用域：参数显式传入，`as` 接收返回值；
 - `find`/`wait_find` 未命中返回 `null`（不是错误）。`find` 是**单次模板匹配**
-  （无 timeout/interval 参数）；等待轮询用 `wait_find`（timeout 缺省 3s，
-  interval 缺省 250ms，轮询直到命中或超时）；`tap_template` 的 timeout 缺省 3s
-  （显式传 0ms 只尝试一次）、interval 缺省 100ms，找到后点击命中中心并等待 300ms；
-  `wait_disappear` 的 timeout 缺省 3s、interval 缺省 250ms，轮询直到模板消失
+  （无 timeout/interval 参数）；等待轮询用 `wait_find`（timeout 缺省 10s，
+  interval 缺省 250ms，轮询直到命中或超时）。`click` 为 boolean，缺省 `true`：
+  命中后按全局点击前后延迟点击模板中心，再返回匹配对象；`click: false` 仅等待，
+    不点击目标；未配置障碍时不需要 `input.tap` 权限。超时返回 `null`。
+  已有脚本若在 `wait_find` 后单独 `tap`，应加 `click: false` 避免重复点击。
+  `obstacles` 缺省 `[]`，接受模板名列表或列表变量引用：每轮共用一帧，先按顺序匹配
+  障碍，命中第一个即点击中心并等待后进入下一轮，不再处理旧帧上的其他模板；
+  没有障碍命中才匹配目标。障碍点击与等待计入总 `timeout`，不重置计时；
+  `click: false` 只关闭目标点击，不关闭障碍处理。障碍共用 `threshold`，搜索区域取
+  各自模板文件名后缀，不继承目标 `region`。模板列表中的字面量引用随模板重命名更新。
+  `tap_template` 的 timeout 缺省 10s
+  （显式传 0ms 只尝试一次）、interval 缺省 100ms，找到后按全局点击前后延迟点击命中中心；
+  `wait_disappear` 的 timeout 缺省 10s、interval 缺省 250ms，轮询直到模板消失
   （消失返回 true，超时返回 false）。轮询间隔最低 50ms。
 
 **表达式只有两种**：字面量、`$name.field` 引用。字符串以 `$` 开头是引用；
@@ -166,6 +176,37 @@ run:
 诊断码命名空间 `yaml.*`（解析/结构）与 `param.args.*`（绑定）；旧 v3 源在
 解析层直接报 `yaml.version.removed`，其余旧形态报 `yaml.top.unknown`——
 **不接受旧语法**。
+
+### 模板分支 `match_templates`
+
+插件内置复合步骤，字段为 `cases`（1..64 项）、可选 `threshold`（默认 0.8）与可选 `else`。
+每个 case 为 `template`（非空模板名或引用）、可选 `as`（局部匹配结果变量）、必填 `do` 步骤列表。
+模板使用普通模板引用语义，重命名会同步更新。`as` 只在本分支有效，离开分支后恢复原变量；
+分支内其他普通函数调用的 `as` 保持原有语义。顶层步骤不接受 `as`。
+
+匹配通过原生函数 `find_any` 共用一帧并按顺序停止在首个命中，执行该分支后结束本步；
+不自动点击、不轮询、不继续匹配点击前的旧画面。全部未命中执行 `else`；错误不当作未命中，
+动作错误终止运行，`return` 退出当前脚本/函数。每个分支仍受取消及步数/调用深度预算约束。
+运行路径为 `run[0].cases[0].do[0]`、`run[0].else[0]`，与可视化卡片错误定位一致。
+
+```yaml
+run:
+  - match_templates:
+      cases:
+        - template: 关闭公告.png
+          as: hit
+          do:
+            - tap: $hit.center
+        - template: 登录按钮.png
+          do:
+            - log: 已进入登录页
+      else:
+        - log: 未识别到页面
+```
+
+`find_any` 可独立调用，参数 `templates`（模板列表或引用，1..64 项）、`threshold`（默认 0.8）
+和通用 `name`；返回匹配对象附 `index`（零基索引）和输入的 `template`，未命中为 `null`。
+无点击权限要求；模板各用自己的文件名区域。
 
 ## 4. 函数库文件（当前 Package 函数）
 
@@ -202,7 +243,7 @@ run:
     as: success
 ```
 
-- 函数名允许中文汉字（CJK 基本区与扩展 A）、小写英文字母、数字、下划线，不能以数字开头，例如 `每日任务跳转`、`领取_daily2`；空格、点号、斜杠等分隔符不可用，保留字 `if/repeat/return` 不可用；参数名、变量名仍使用 `[a-z_][a-z0-9_]*`；
+- 函数名允许中文汉字（CJK 基本区与扩展 A）、小写英文字母、数字、下划线，不能以数字开头，例如 `每日任务跳转`、`领取_daily2`；空格、点号、斜杠等分隔符不可用，保留字 `if/repeat/return/match_templates/break` 不可用；参数名、变量名仍使用 `[a-z_][a-z0-9_]*`；
 - **统一命名空间**：文件名与目录只是存储组织，不进入调用名（`_function_battle.yaml`
   里的 `attack` 调用仍写 `attack`）；同一文件内函数名唯一，跨文件/与原生函数
   同名直接报冲突（`yaml.fn.conflict`），文件顺序不决定胜者；
@@ -225,3 +266,49 @@ run:
 `template` 实参用模板短名；模板重命名经 AST 同步改写（`yaml.resource.*`，
 文本字面量不误改）。V1 起模板引用改写收敛为上述四个函数 + 任意调用步骤的
 `template` 键。
+
+### 跳出循环：`break`
+
+`break: {}` 无参数，退出当前脚本或函数内最近一层 `repeat`，继续执行循环后的步骤。
+可以放在循环内的 `if`、`match_templates` 分支中；嵌套循环只退出内层。
+`return` 则直接结束整个当前脚本或函数。
+
+```yaml
+run:
+  - repeat: 10
+    do:
+      - find: ready.png
+        as: hit
+      - if: $hit
+        then:
+          - break: {}
+      - sleep: 1s
+  - log: 检查结束
+```
+
+可视化编辑器「添加步骤 → 流程 → 跳出循环」生成同样语法。
+空写 `break:` 也表示无参数；不接受值、`as` 或子步骤。
+循环外使用报 `yaml.break.outside_loop`，参数形态错误报 `yaml.break.shape`。
+每个函数单独校验作用域，被调用函数不能通过 `break` 跳出调用方的循环。
+
+默认模板等待超时可在设置页的“自动化”中修改（初始 10s），作用于 `wait_find`、`tap_template`、`wait_disappear` 未显式传入的 `timeout`。每次运行开始冻结设置，运行途中不改变；显式实参和自定义函数参数默认值优先，可视化编辑器“恢复默认”会移除实参。设置由插件持久化，不是 YAML 关键字或 Core 全局配置。
+
+
+### 运行详情与调试
+
+运行提交成功后，编辑区自动切换到运行详情；结束后保留，点击「返回编辑」恢复原编辑器。编辑器的「运行详情 / 历史记录」入口可以查询当前设备、当前脚本或函数最近 30 次运行。
+
+服务端按 `run_id` 保存步骤开始/结束、函数调用、实际参数（含原生默认值）、返回值、分支选择、循环进度、模板匹配、点击和 `log` 消息。无需连接投屏；刷新页面或服务重启后仍可查询。只从升级后的新运行开始记录，旧运行没有补录。运行记录与事件跟随设置中的日志保留天数清理，0 表示不自动清理；服务异常重启时未完成记录标为中断。
+
+详情按步骤展示耗时和结果，函数内部步骤、参数与返回值、模板轮询可展开。障碍模板命中及点击也会记录。向上滚动暂停跟随，点击「回到最新」恢复；「复制日志」复制当前已加载事件（长运行分批读取）。错误可按执行源版本定位；原文件已变化或当前有未保存修改时使用只读定位提示，避免错位或丢失编辑。
+
+Core API：`GET /api/runs?device_id=...&entrypoint=...` 返回最近运行，`GET /api/runs/:run_id/events?after=0` 返回 `{events,next,has_more}`（每页最多 500 条）；事件 ID 作为增量游标，均需登录。结构化记录不再依赖 WebRTC 事件缓存。
+
+
+### 自动化点击前后延迟
+
+设置 → 自动化提供「点击前延迟」「点击后延迟」，默认均为 **300ms**；可配置 0～60000ms 的整数，0 关闭对应等待。设置持久化，每次运行开始冻结，保存后从下一次运行生效，无需重启。步骤中不提供对应参数。
+
+`tap`、`wait_find` 的目标自动点击、`tap_template`、障碍模板点击共用同一逻辑：确定位置 → 点击前等待 → 按下/松开 → 点击后等待。不会重复追加原先模板点击后的固定 300ms。点击前等待不会重新匹配；匹配等待成功后的点击延迟会增加函数总耗时，障碍处理中的延迟计入本轮轮询耗时。
+
+只匹配而不点击（包括无障碍的 `wait_find(click: false)`）不增加点击延迟；滑动、按键、投屏手动点击不受影响。等待期间支持取消，运行详情显示实际的前后等待时间。

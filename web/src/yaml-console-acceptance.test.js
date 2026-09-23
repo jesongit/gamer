@@ -47,7 +47,7 @@ it('首次函数目录不可用：进入编辑会重试，内置函数仍可从�
   await flushPromises()
   expect(getFunctions).toHaveBeenCalledTimes(2)
   expect(wrapper.get('input[aria-label="脚本名称"]').element.value).toBe('新脚本')
-  await wrapper.findAll('button').find(b => b.text() === '+ 步骤').trigger('click')
+  await wrapper.get('button[title="添加步骤"]').trigger('click')
   // 添加列表通过 Teleport 脱离编辑区滚动裁切，菜单仍消费同一函数目录。
   expect(document.body.querySelector('[aria-label="调用 wait_find"]')).not.toBeNull()
 })

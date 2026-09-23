@@ -13,6 +13,10 @@
 //!
 //! 执行权威在 `yaml-interp`（WASM guest 与测试同源），Core 不认识本模块。
 
+mod break_control;
+mod match_templates;
+use match_templates::TemplateCase;
+
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -215,6 +219,11 @@ impl SurfaceExpr {
 /// 步骤（解析后、未降线）。
 #[derive(Clone, Debug, PartialEq)]
 pub enum SurfaceStep {
+    MatchTemplates {
+        cases: Vec<TemplateCase>,
+        threshold: SurfaceExpr,
+        else_steps: Vec<SurfaceStep>,
+    },
     Call {
         name: String,
         args: SurfaceExpr,
@@ -229,6 +238,7 @@ pub enum SurfaceStep {
         times: SurfaceExpr,
         body: Vec<SurfaceStep>,
     },
+    Break,
     Return {
         value: SurfaceExpr,
     },
@@ -238,6 +248,23 @@ impl SurfaceStep {
     /// 收集本步（含子步）调用的函数名与引用的变量。
     fn collect(&self, calls: &mut BTreeSet<String>, refs: &mut BTreeSet<String>) {
         match self {
+            Self::MatchTemplates {
+                cases,
+                threshold,
+                else_steps,
+            } => {
+                calls.insert("find_any".into());
+                threshold.collect_refs(refs);
+                for case in cases {
+                    case.template.collect_refs(refs);
+                    for step in &case.body {
+                        step.collect(calls, refs);
+                    }
+                }
+                for step in else_steps {
+                    step.collect(calls, refs);
+                }
+            }
             Self::Call { name, args, .. } => {
                 calls.insert(name.clone());
                 args.collect_refs(refs);
@@ -258,6 +285,7 @@ impl SurfaceStep {
                     step.collect(calls, refs);
                 }
             }
+            Self::Break => {}
             Self::Return { value } => value.collect_refs(refs),
         }
     }
@@ -378,7 +406,7 @@ pub fn is_function_name(name: &str) -> bool {
 }
 
 /// 控制流关键字，不能作为函数名。
-const RESERVED_WORDS: &[&str] = &["if", "repeat", "return"];
+const RESERVED_WORDS: &[&str] = &["if", "repeat", "return", "match_templates", "break"];
 
 pub fn is_reserved(name: &str) -> bool {
     RESERVED_WORDS.contains(&name)
@@ -497,7 +525,7 @@ fn yaml_scalar_to_json(value: &YamlValue, path: &str) -> Result<Value, Vec<Diagn
 }
 
 /// 关键字集合。
-const KEYWORDS: &[&str] = &["if", "repeat", "return"];
+const KEYWORDS: &[&str] = &["if", "repeat", "return", "match_templates", "break"];
 
 fn parse_steps(steps: &YamlValue, path: &str) -> Result<Vec<SurfaceStep>, Vec<Diagnostic>> {
     let YamlValue::Sequence(items) = steps else {
@@ -514,7 +542,7 @@ fn parse_steps(steps: &YamlValue, path: &str) -> Result<Vec<SurfaceStep>, Vec<Di
     Ok(out)
 }
 
-/// 单步解析：恰好一个动作键（函数名或 if/repeat/return），`as` 为修饰字段。
+/// 单步解析：恰好一个动作键（函数名或 if/repeat/return/match_templates/break），`as` 为修饰字段。
 fn parse_step(step: &YamlValue, path: &str) -> Result<SurfaceStep, Vec<Diagnostic>> {
     let YamlValue::Mapping(mapping) = step else {
         return Err(one_diagnostic(
@@ -527,7 +555,7 @@ fn parse_step(step: &YamlValue, path: &str) -> Result<SurfaceStep, Vec<Diagnosti
         return Err(one_diagnostic(
             "yaml.step.missing",
             path,
-            "步骤为空——需要一个函数调用或 if/repeat/return",
+            "步骤为空——需要一个函数调用或 if/repeat/return/match_templates/break",
         ));
     }
 
@@ -567,7 +595,7 @@ fn parse_step(step: &YamlValue, path: &str) -> Result<SurfaceStep, Vec<Diagnosti
                     return Err(one_diagnostic(
                         "yaml.step.multi",
                         path,
-                        "一个步骤只能有一个控制流关键字（if/repeat/return）",
+                        "一个步骤只能有一个控制流关键字（if/repeat/return/match_templates/break）",
                     ));
                 }
                 keyword = Some((word, value));
@@ -619,6 +647,19 @@ fn parse_step(step: &YamlValue, path: &str) -> Result<SurfaceStep, Vec<Diagnosti
 
     match (keyword, action) {
         (Some((word, value)), None) => match word {
+            "match_templates" => {
+                if save_as.is_some() {
+                    return Err(as_rejected("match_templates"));
+                }
+                if !structural.is_empty() {
+                    return Err(one_diagnostic(
+                        "yaml.match_templates.shape",
+                        path,
+                        "分支结构须放在 match_templates 内",
+                    ));
+                }
+                match_templates::parse(value, path)
+            }
             "if" => {
                 if save_as.is_some() {
                     return Err(as_rejected("if"));
@@ -672,6 +713,21 @@ fn parse_step(step: &YamlValue, path: &str) -> Result<SurfaceStep, Vec<Diagnosti
                     }
                 };
                 Ok(SurfaceStep::Repeat { times, body })
+            }
+            "break" => {
+                if save_as.is_some() {
+                    return Err(as_rejected("break"));
+                }
+                if !structural.is_empty()
+                    || !(value.is_null() || value.as_mapping().is_some_and(|m| m.is_empty()))
+                {
+                    return Err(one_diagnostic(
+                        "yaml.break.shape",
+                        path,
+                        "break 不接受参数或子步骤，请使用 break: {}",
+                    ));
+                }
+                Ok(SurfaceStep::Break)
             }
             "return" => {
                 if save_as.is_some() {
@@ -728,7 +784,7 @@ fn parse_step(step: &YamlValue, path: &str) -> Result<SurfaceStep, Vec<Diagnosti
         (None, None) => Err(one_diagnostic(
             "yaml.step.missing",
             path,
-            "步骤只有 as——需要一个函数调用或 if/repeat/return",
+            "步骤只有 as——需要一个函数调用或 if/repeat/return/match_templates/break",
         )),
     }
 }
@@ -952,11 +1008,13 @@ pub fn parse_script(source: &str) -> Result<Script, Vec<Diagnostic>> {
         }
     }
 
+    let run = run.unwrap_or_default();
+    break_control::validate(&run, "run", false)?;
     Ok(Script {
         name,
         params,
         vars,
-        run: run.unwrap_or_default(),
+        run,
     })
 }
 
@@ -1014,7 +1072,7 @@ pub fn parse_function_library(source: &str) -> Result<FunctionLibrary, Vec<Diagn
             return Err(one_diagnostic(
                 "yaml.name.invalid",
                 "functions",
-                format!("函数名 {name} 是保留关键字（if/repeat/return）"),
+                format!("函数名 {name} 是保留关键字（if/repeat/return/match_templates/break）"),
             ));
         }
         if !seen.insert(name.to_string()) {
@@ -1088,6 +1146,7 @@ pub fn parse_function_library(source: &str) -> Result<FunctionLibrary, Vec<Diagn
                 ));
             }
         }
+        break_control::validate(&run, &format!("functions.{name}.run"), false)?;
         out.push((
             name.to_string(),
             FunctionDef {
@@ -1222,8 +1281,10 @@ fn step_desc(step: &SurfaceStep, functions: &FunctionLibrary) -> String {
                 })
                 .unwrap_or_else(|| name.clone())
         }
+        SurfaceStep::MatchTemplates { .. } => "模板分支".into(),
         SurfaceStep::If { cond, .. } => format!("如果 {}", cond.describe()),
         SurfaceStep::Repeat { times, .. } => format!("重复 {} 次", times.describe()),
+        SurfaceStep::Break => "跳出循环".into(),
         SurfaceStep::Return { value } => format!("返回 {}", value.describe()),
     }
 }
@@ -1253,6 +1314,13 @@ fn wire_step(step: &SurfaceStep, path: &str, functions: &FunctionLibrary) -> Val
     wire.insert("path".into(), Value::String(path.to_string()));
     wire.insert("desc".into(), Value::String(desc));
     match step {
+        SurfaceStep::MatchTemplates {
+            cases,
+            threshold,
+            else_steps,
+        } => {
+            return match_templates::wire(cases, threshold, else_steps, path, functions);
+        }
         SurfaceStep::Call {
             name,
             args,
@@ -1290,6 +1358,9 @@ fn wire_step(step: &SurfaceStep, path: &str, functions: &FunctionLibrary) -> Val
                 "do".into(),
                 Value::Array(wire_steps(body, &format!("{path}.do"), functions)),
             );
+        }
+        SurfaceStep::Break => {
+            wire.insert("op".into(), Value::String("break".into()));
         }
         SurfaceStep::Return { value } => {
             wire.insert("op".into(), Value::String("return".into()));
@@ -1442,9 +1513,48 @@ fn rewrite_step_template(
     changed: &mut bool,
 ) {
     match step {
+        SurfaceStep::MatchTemplates {
+            cases, else_steps, ..
+        } => {
+            for case in cases {
+                rewrite_args_template(
+                    &mut case.template,
+                    old_name,
+                    old_short,
+                    new_name,
+                    new_short,
+                    changed,
+                );
+                for child in &mut case.body {
+                    rewrite_step_template(child, old_name, old_short, new_name, new_short, changed);
+                }
+            }
+            for child in else_steps {
+                rewrite_step_template(child, old_name, old_short, new_name, new_short, changed);
+            }
+        }
         SurfaceStep::Call { name, args, .. } => {
             if TEMPLATE_PARAM_FUNCTIONS.contains(&name.as_str()) {
                 rewrite_args_template(args, old_name, old_short, new_name, new_short, changed);
+            }
+            if name == "wait_find" || name == "find_any" {
+                if let SurfaceExpr::Map(entries) = args {
+                    if let Some((_, SurfaceExpr::List(obstacles))) =
+                        entries.iter_mut().find(|(key, _)| {
+                            key == if name == "find_any" {
+                                "templates"
+                            } else {
+                                "obstacles"
+                            }
+                        })
+                    {
+                        for obstacle in obstacles {
+                            rewrite_args_template(
+                                obstacle, old_name, old_short, new_name, new_short, changed,
+                            );
+                        }
+                    }
+                }
             }
         }
         SurfaceStep::If {
@@ -1461,7 +1571,7 @@ fn rewrite_step_template(
                 rewrite_step_template(child, old_name, old_short, new_name, new_short, changed);
             }
         }
-        SurfaceStep::Return { .. } => {}
+        SurfaceStep::Break | SurfaceStep::Return { .. } => {}
     }
 }
 
@@ -1580,6 +1690,11 @@ fn expr_yaml_lines(expr: &SurfaceExpr, indent: usize, out: &mut Vec<String>) {
 fn step_yaml_lines(step: &SurfaceStep, indent: usize, out: &mut Vec<String>) {
     let pad = "  ".repeat(indent);
     match step {
+        SurfaceStep::MatchTemplates {
+            cases,
+            threshold,
+            else_steps,
+        } => match_templates::yaml_lines(cases, threshold, else_steps, indent, out),
         SurfaceStep::Call {
             name,
             args,
@@ -1650,6 +1765,7 @@ fn step_yaml_lines(step: &SurfaceStep, indent: usize, out: &mut Vec<String>) {
                 push_dash_item(child, indent + 1, out);
             }
         }
+        SurfaceStep::Break => out.push(format!("{pad}break: {{}}")),
         SurfaceStep::Return { value } => {
             let mut value_lines = Vec::new();
             expr_yaml_lines(value, 0, &mut value_lines);
@@ -1771,6 +1887,19 @@ pub fn serialize_function_library(library: &FunctionLibrary) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn obstacle_template_rename_updates_literals_but_preserves_references() {
+        let source = "run:\n  - wait_find:\n      template: target.png\n      obstacles: [old.png, other.png, $closing]\n";
+        let rewritten = rename_template_source(source, "old.png", "old.png", "new.png", "new.png")
+            .unwrap()
+            .unwrap()
+            .0;
+        assert!(rewritten.contains("new.png"));
+        assert!(!rewritten.contains("old.png"));
+        assert!(rewritten.contains("$closing"));
+        assert!(rewritten.contains("other.png"));
+    }
 
     /// 测试宿主：视觉函数返回 match 对象，其余返回 null。
     struct NullHost;

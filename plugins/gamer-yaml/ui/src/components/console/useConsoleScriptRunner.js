@@ -163,8 +163,8 @@ export function useConsoleScriptRunner({
   const nativeFunctionsLoaded = ref(false)
   let nativeFunctionsRequest = null
 
-  function loadNativeFunctions() {
-    if (nativeFunctionsLoaded.value) return
+  function loadNativeFunctions(force = false) {
+    if (nativeFunctionsLoaded.value && !force) return
     if (nativeFunctionsRequest) return nativeFunctionsRequest
     nativeFunctionsRequest = api.getRunnerFunctions(GAMER_YAML_RUNNER_ID).then(rep => {
       nativeFunctions.value = Array.isArray(rep?.functions) ? rep.functions : []
@@ -300,7 +300,7 @@ export function useConsoleScriptRunner({
   }
 
   function applyLogFilter() {
-    // 日志级别由脚本顶层 log_level 在服务端过滤（debug/info），前端只按运行开始时间截取
+    // 旧状态消息仅按开始时间截取；详细日志由运行详情按 run_id 读取。
     const filtered = (rawLogs || []).filter(l => {
       if (runStartTime && parseLogTime(l.time) < runStartTime) return false
       return true
@@ -594,12 +594,12 @@ export function useConsoleScriptRunner({
 
   /** 运行模式：编辑当前选中的脚本（getScript 读取最新内容与版本短码）——脚本面板专属 */
   async function editCurrentScript() {
-    const s = scripts.value.find(x => x.id === selScript.value)
-    if (!s) return toast('请先选择脚本', 'error')
+    const id = selScript.value
+    if (!id) return toast('请先选择脚本', 'error')
     scriptScope.scriptMode.value = 'edit'
     showYaml.value = false
     try {
-      await scriptShell.loadScript(s.id)
+      await scriptShell.loadScript(id)
     } catch (e) {
       scriptShell.reset()
       scriptScope.scriptMode.value = 'run'
@@ -902,13 +902,58 @@ export function useConsoleScriptRunner({
     }
   }
 
-  /** 编辑态跳转返回（call/func 打开目标后）：载回上一资源；栈空时按钮不显示。 */
-  async function jumpBack() {
+  const navigationPending = ref(false)
+  const currentEditScope = () => scriptShell.kind === 'function_library' ? funcScope : scriptScope
+  async function saveBeforeNavigation() {
+    if (store.running || startPending.value || scriptShell.saving || !scriptShell.hasModel) return false
+    const result = await saveEditScript(currentEditScope(), { keepOpen: true })
+    return result?.ok === true && !scriptShell.dirty
+  }
+
+  /** 保存完整文档后打开函数定义；失败保留原模型和跳转历史。 */
+  async function jumpToFunction(target, uuid) {
+    if (navigationPending.value) return null
+    navigationPending.value = true
+    const requestedPackage = packageId.value
     try {
-      await scriptShell.jumpBack()
+      if (!await saveBeforeNavigation() || packageId.value !== requestedPackage) return null
+      const id = resolveCallTargetId(target)
+      if (!id) { toast(`函数 ${target} 不在当前配置包中`, 'warn'); return null }
+      const fromFunction = scriptShell.kind === 'function_library' ? editFocusFn.value : ''
+      scriptShell.select(uuid)
+      const loaded = await scriptShell.jumpToFunctionFile(id, { fromFunction, targetFunction: target })
+      if (!loaded || packageId.value !== requestedPackage) return null
+      editFocusFn.value = target
+      funcScope.scriptMode.value = 'edit'
+      showYaml.value = false
+      return 'gamer-yaml:functions'
+    } catch (e) {
+      toast('跳转失败：' + e.message, 'error')
+      return null
+    } finally { navigationPending.value = false }
+  }
+
+  /** 返回也先保存当前文档，并恢复来处的函数焦点与步骤选择。 */
+  async function jumpBack() {
+    if (navigationPending.value || !scriptShell.canJumpBack) return null
+    navigationPending.value = true
+    const requestedPackage = packageId.value
+    try {
+      if (!await saveBeforeNavigation() || packageId.value !== requestedPackage) return null
+      const previous = scriptShell.jumpStack.at(-1)
+      if (!await scriptShell.jumpBack() || packageId.value !== requestedPackage) return null
+      if (scriptShell.kind === 'function_library') {
+        editFocusFn.value = previous.functionName || scriptShell.model.functions[0]?.name || ''
+        funcScope.scriptMode.value = 'edit'
+        return 'gamer-yaml:functions'
+      }
+      selScript.value = scriptShell.resourceId
+      scriptScope.scriptMode.value = 'edit'
+      return 'gamer-yaml:automation'
     } catch (e) {
       toast('返回失败：' + e.message, 'error')
-    }
+      return null
+    } finally { navigationPending.value = false }
   }
 
   // 启动提交中（202 快速返回前的防重复点击位）；run_id 在启动成功那一刻即登记为主键
@@ -942,7 +987,7 @@ export function useConsoleScriptRunner({
           ? await runYamlFunction(id, store.deviceId, { function: fnName || undefined, start_index: startIndex, args })
           : await runYamlScript(id, store.deviceId, startIndex, args)
         // 当前运行响应固定含 run_id；启动即登记实例，后续查询只按该主键进行。
-        applyRunRecord({ ...rep, device_id: store.deviceId, script_id: id, source: 'manual', display: name })
+        applyRunRecord({ ...rep, device_id: store.deviceId, entrypoint: kind === 'function_library' ? `${id}#${fnName}` : id, script_id: id, source: 'manual', display: name })
         return rep
       } finally {
         startPending.value = false
@@ -1048,10 +1093,9 @@ export function useConsoleScriptRunner({
     toast('已发送停止指令', 'warn')
   }
 
-  /** 编辑器模板预览的阈值：脚本沿用当前脚本 config，函数/无 config 时让服务端使用全局值。 */
+  /** 无步骤上下文时沿用原生匹配函数默认值，不回退到 Core 测试接口的配置值。 */
   function editorMatchThreshold() {
-    const configured = scriptShell.kind === 'script' ? Number(scriptShell.model?.config?.threshold) : NaN
-    return Number.isFinite(configured) && configured > 0 && configured <= 1 ? configured : undefined
+    return 0.8
   }
 
   function onLogBoxMounted(el) { logBox.value = el }
@@ -1133,8 +1177,10 @@ export function useConsoleScriptRunner({
   /** 面板作用域上下文：同一套共享机制 + 面板锁定的资源类型/编辑模式/选择。
    *  经 workspace context 注入（core.scriptRunner.scripts / .functions），两个
    *  扩展面板各自绑定一份，互不串台。 */
+  const pendingRunLocation = ref(null)
   function buildPanelContext(scope) {
     return {
+      pendingRunLocation,
       kind: scope.kind,
       kindLocked: true,
       runKind: scope.runKind,
@@ -1168,12 +1214,13 @@ export function useConsoleScriptRunner({
       cancelEditScript: () => cancelEditScript(scope),
       saveRawScript: () => saveRawScript(scope),
       cancelRawScript: () => cancelRawScript(scope),
-      showYaml, templateNames, jumpBack,
+      showYaml, templateNames, jumpBack, jumpToFunction, navigationPending,
       // 函数编辑态聚焦的函数名（逐函数「编辑」直达；画布锁函数下拉为静态展示）
       editFocusFn,
       onConflictReload, onConflictOverwrite, onConflictDismiss,
       // call/func 目标实参类型回显（同步缓存命中形态），ScriptRunner 经 ctx 传给画布
       resolveTargetSync,
+      refreshNativeDefaults: () => loadNativeFunctions(true),
     }
   }
   const scriptPanel = buildPanelContext(scriptScope)

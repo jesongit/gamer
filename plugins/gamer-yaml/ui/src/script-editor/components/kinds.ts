@@ -1,8 +1,8 @@
 /**
  * 卡片层共享元数据与定位辅助（YAML V1）。
  *
- * - KIND_META：4 类步骤（call/if/repeat/return）的中文名 + 单字图标；
- * - stepSummary：卡片收起态自然语言摘要（call 摘要 = name 参数或默认中文名）；
+ * - KIND_META：6 类步骤（call/if/repeat/return/match_templates/break）的中文名 + 单字图标；
+ * - stepCaption / stepSummary：动作名称 + 关键参数，同供编辑卡片与运行摘要；
  * - breadcrumbForContainer / basePathOfContainer：容器路径 → 面包屑节点 / step_path 字符串基；
  * - parseStepPath / locateDiagnostic：诊断 step_path（如 run[0].then[1]、login.run[2]）
  *   → 命令路径 → 目标卡片 uuid 与祖先链（ErrorSummary 点击定位用）。
@@ -28,6 +28,8 @@ export interface KindMeta {
 }
 
 export const KIND_META: Record<Step['kind'], KindMeta> = {
+  break: { kind: 'break', label: '跳出循环', icon: '断', hint: '退出最近一层 repeat，继续执行循环后面的步骤' },
+  match_templates: { kind: 'match_templates', label: '模板分支', icon: '图', hint: '同一帧按顺序匹配，只执行首个命中的分支' },
   call: { kind: 'call', label: '函数调用', icon: '调', hint: '调用一个函数（原生插件函数或当前 Package 函数），as 接收返回值' },
   if: { kind: 'if', label: '条件分支', icon: '判', hint: 'false/null 为假、非空结果为真，走 then/else 分支' },
   repeat: { kind: 'repeat', label: '固定循环', icon: '循', hint: '按固定次数执行 do 循环体（受执行预算约束）' },
@@ -47,20 +49,66 @@ export function cellShort(cell: Cell | null | undefined): string {
   return String(cell.lit ?? '')
 }
 
-/** 卡片收起态摘要；空占位字段按新建未完成态显示基础文案。 */
-export function stepSummary(step: Step, defaultName?: string): string {
+/** 保留 0/false/null 与引用；文本换行以转义形式展示，摘要不修改实参。 */
+function valuePreview(cell: Cell | undefined, missing = '未填写', quoted = false): string {
+  if (!cell || cell.missing) return missing
+  if (isRefCell(cell)) return `$${cell.ref}`
+  if (cell.lit === null) return 'null'
+  if (typeof cell.lit === 'string') return quoted || !cell.lit || /[\r\n\t]/.test(cell.lit) ? JSON.stringify(cell.lit) : cell.lit
+  return cellShort(cell)
+}
+function pointPreview(cell: Cell | undefined): string {
+  if (!cell || cell.missing || isRefCell(cell)) return valuePreview(cell, '未设置坐标')
+  const point = cell.lit as { x?: unknown; y?: unknown } | null
+  if (Array.isArray(point) && point.length === 2) return `(${point.join(', ')})`
+  if (point && typeof point === 'object' && 'x' in point && 'y' in point) return `(${point.x}, ${point.y})`
+  return valuePreview(cell)
+}
+
+export function stepCaption(step: Step, defaultName?: string): { title: string; detail: string } {
   switch (step.kind) {
     case 'call': {
-      if (step.args.kind === 'map' && step.args.entries.name) return cellShort(step.args.entries.name)
-      return defaultName ?? NATIVE_CALL_NAMES[step.fn] ?? (step.fn || '（未填函数）')
+      const entries = step.args.kind === 'map' ? step.args.entries : {}
+      const arg = (key: string) => step.args.kind === 'value' ? step.args.cell : entries[key]
+      const title = (entries.name && cellShort(entries.name).trim())
+        || (typeof defaultName === 'string' && defaultName.trim()) || NATIVE_CALL_NAMES[step.fn] || step.fn || '未选择函数'
+      let detail = ''
+      switch (step.fn) {
+        case 'find': case 'wait_find': case 'tap_template': case 'wait_disappear':
+          detail = valuePreview(arg('template'), '未选择模板'); break
+        case 'tap': detail = pointPreview(arg('position')); break
+        case 'swipe': detail = `${pointPreview(entries.from)} → ${pointPreview(entries.to)}`; break
+        case 'sleep': {
+          const cell = arg('duration')
+          detail = cell && !cell.missing && !isRefCell(cell) && typeof cell.lit === 'number'
+            ? `${cell.lit}ms` : valuePreview(cell, '未设置时长')
+          break
+        }
+        case 'key': detail = valuePreview(arg('key'), '未选择按键')
+          + (entries.action ? ` · ${valuePreview(entries.action)}` : ''); break
+        case 'input_text': detail = valuePreview(arg('text'), '未填写文本', true); break
+        case 'log': detail = valuePreview(arg('message'), '未填写内容', true); break
+        case 'launch': case 'stop_app': detail = valuePreview(arg('package'), '设备配置的应用'); break
+        case 'eq': case 'ne': case 'gt': case 'ge': case 'lt': case 'le':
+          detail = `${valuePreview(entries.a)} 与 ${valuePreview(entries.b)}`; break
+        default:
+          detail = step.args.kind === 'value' ? valuePreview(step.args.cell)
+            : Object.entries(entries).filter(([key]) => key !== 'name').map(([key, cell]) => `${key}=${valuePreview(cell)}`).join(' · ')
+      }
+      if (step.as) detail += `${detail ? ' ' : ''}→ ${step.as}`
+      return { title, detail }
     }
-    case 'if': {
-      const c = step.cond
-      return `如果 ${isRefCell(c) ? `$${c.ref}` : String(c.lit ?? '?')}`
-    }
-    case 'repeat': return `重复 ${cellShort(step.times)} 次`
-    case 'return': return `返回 ${cellShort(step.value) || '?'}`
+    case 'match_templates': return { title: '模板分支', detail: step.cases.map(c => valuePreview(c.template, '未选择模板')).join(' → ') }
+    case 'if': return { title: '如果', detail: valuePreview(step.cond, '未填写条件') }
+    case 'repeat': return { title: '重复', detail: `${valuePreview(step.times, '未填写次数')} 次` }
+    case 'break': return { title: '跳出循环', detail: '退出最近一层 repeat' }
+    case 'return': return { title: '返回', detail: valuePreview(step.value, '未填写返回值') }
   }
+}
+
+export function stepSummary(step: Step, defaultName?: string): string {
+  const { title, detail } = stepCaption(step, defaultName)
+  return detail ? `${title} · ${detail}` : title
 }
 
 // ---------- 容器路径辅助 ----------
@@ -152,7 +200,9 @@ export function parseStepPath(stepPath: string): Path | null {
   for (; i < toks.length; i++) {
     const t = toks[i] as { name: string; idx: number | null }
     if (t.idx === null) return null
-    path.push(t.name, t.idx)
+    if (t.name === 'cases' && toks[i + 1]?.name === 'do' && toks[i + 1]?.idx !== null) {
+      path.push(`cases[${t.idx}].do`, toks[++i]!.idx!)
+    } else path.push(t.name, t.idx)
   }
   return path
 }

@@ -216,6 +216,7 @@ struct ActiveRun {
 const HISTORY_CAP: usize = 256;
 
 pub struct RunManager {
+    journal: Option<crate::store::Db>,
     executor: Arc<dyn RunExecutor>,
     /// 设备级互斥：device_id → 活动 run_id
     active_by_device: Mutex<HashMap<String, String>>,
@@ -235,12 +236,26 @@ impl RunManager {
     pub fn new(executor: Arc<dyn RunExecutor>) -> Self {
         Self {
             executor,
+            journal: None,
             active_by_device: Mutex::new(HashMap::new()),
             runs: Mutex::new(HashMap::new()),
             history: Mutex::new(VecDeque::new()),
             draining: AtomicBool::new(false),
             inflight: AtomicUsize::new(0),
             state_changed: tokio::sync::Notify::new(),
+        }
+    }
+
+    pub fn with_journal(mut self, db: crate::store::Db) -> Self {
+        self.journal = Some(db);
+        self
+    }
+
+    fn persist(&self, record: &RunRecord) {
+        if let Some(db) = &self.journal {
+            if let Err(error) = db.save_run_record(record) {
+                tracing::error!(%error, "cannot persist run record");
+            }
         }
     }
 
@@ -364,6 +379,7 @@ impl RunManager {
             task_id = record.task_id.as_deref().unwrap_or("-"),
             "run accepted"
         );
+        self.persist(&record);
         self.runs.lock().unwrap().insert(
             run_id.clone(),
             ActiveRun {
@@ -628,6 +644,7 @@ impl RunManager {
             elapsed_ms = (Utc::now() - rec.started_at).num_milliseconds(),
             "run finished"
         );
+        self.persist(&rec);
         let finished = rec.clone();
         hist.push_back(rec);
         self.state_changed.notify_waiters();

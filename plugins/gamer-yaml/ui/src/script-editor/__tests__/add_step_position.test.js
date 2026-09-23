@@ -10,14 +10,14 @@ afterEach(() => { wrapper?.unmount(); vi.restoreAllMocks() })
 function mountCanvas(created) {
   const anchor = { left: 400, top: 100, bottom: 128 }
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
-    if (this.classList.contains('add-step-panel')) return { height: Math.min(900, parseFloat(this.style.maxHeight) || 480) }
+    if (this.classList.contains('add-step-panel')) return { height: Math.min(900, parseFloat(this.style.maxHeight) || 560) }
     return anchor
   })
   vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function () {
     return this.classList.contains('step-menu') ? 800 : 0
   })
   vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function () {
-    return this.classList.contains('step-menu') ? Math.max(0, (parseFloat(this.parentElement.style.maxHeight) || 480) - 100) : 0
+    return this.classList.contains('step-menu') ? Math.max(0, (parseFloat(this.parentElement.style.maxHeight) || 560) - 100) : 0
   })
   wrapper = mount(StepCanvas, { props: { model: created.model, stack: created.stack }, attachTo: document.body })
   return anchor
@@ -32,7 +32,7 @@ describe('添加步骤浮层的滚动与视口定位', () => {
     const panel = document.body.querySelector('.add-step-panel')
     expect(panel.parentElement.parentElement).toBe(document.body)
     const height = panel.style.maxHeight
-    expect(parseFloat(height)).toBeLessThanOrEqual(480)
+    expect(parseFloat(height)).toBeLessThanOrEqual(560)
     for (let n = 0; n < 3; n++) {
       panel.querySelector('.step-menu').dispatchEvent(new Event('scroll'))
       window.dispatchEvent(new Event('scroll'))
@@ -58,11 +58,11 @@ describe('添加步骤浮层的滚动与视口定位', () => {
     anchor.bottom = anchor.top + 28
     window.dispatchEvent(new Event('resize'))
     await flushPromises()
-    expect(parseFloat(panel.style.maxHeight)).toBeLessThan(480)
+    expect(parseFloat(panel.style.maxHeight)).toBeLessThan(560)
     anchor.top = 100
     anchor.bottom = 128
     window.dispatchEvent(new Event('resize'))
     await flushPromises()
-    expect(panel.style.maxHeight).toBe('480px')
+    expect(panel.style.maxHeight).toBe('560px')
   })
 })

@@ -73,6 +73,7 @@
     "useRouter"
   ],
   "workspace/context": [
+    "WORKSPACE_CONTEXT_KEY",
     "STAGE_MEDIA_CONTROLLER_KEY"
   ],
   "components/console/useConsoleStage": [

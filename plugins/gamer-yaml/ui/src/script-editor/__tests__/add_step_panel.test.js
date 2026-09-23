@@ -32,12 +32,12 @@ const NATIVE_TARGETS = [
 ]
 
 describe('AddStepPanel：分组菜单', () => {
-  it('流程组恒显三项（if/repeat/return）', () => {
+  it('流程组包含模板分支与基础控制步骤', () => {
     const { wrapper } = mountPanel()
     const labels = wrapper.findAll('.step-group-label').map((g) => g.text())
     expect(labels).toContain('流程')
     const controlItems = wrapper.findAll('.step-group')[0].findAll('.step-menu-item')
-    expect(controlItems.map((b) => b.text())).toEqual(['条件分支', '固定循环', '返回值'])
+    expect(controlItems.map((b) => b.text())).toEqual(['模板分支', '条件分支', '固定循环', '跳出循环', '返回值'])
   })
 
   it('函数目录分「插件函数 / 配置包函数」两组', () => {
@@ -54,6 +54,20 @@ describe('AddStepPanel：分组菜单', () => {
     const fnItems = wrapper.findAll('.fn-item').map((b) => b.text())
     expect(fnItems).toHaveLength(1)
     expect(fnItems[0]).toContain('wait_find')
+  })
+
+  it('来源筛选可直接找到配置包函数，搜索说明无结果时显示空态', async () => {
+    const { wrapper } = mountPanel({ targets: NATIVE_TARGETS })
+    await wrapper.get('.source-filters button:last-child').trigger('click')
+    expect(wrapper.findAll('.fn-item').map(b => b.attributes('data-kind'))).toEqual(['call:login'])
+    await wrapper.get('.source-filters button:first-child').trigger('click')
+    await wrapper.get('input[aria-label="搜索函数"]').setValue('等待模板')
+    expect(wrapper.findAll('.fn-item').map(b => b.attributes('data-kind'))).toEqual(['call:wait_find'])
+    await wrapper.get('input[aria-label="搜索函数"]').setValue('not-found')
+    expect(wrapper.get('.step-group-empty').text()).toContain('没有匹配选项')
+    await wrapper.get('.add-step-panel').trigger('keydown', { key: 'Escape' })
+    expect(wrapper.emitted('close')).toHaveLength(1)
+    wrapper.unmount()
   })
 })
 

@@ -45,7 +45,7 @@ it.each(['plugin', 'package'])('%s 函数仅展开无默认值的必填参数，
   expect(wrapper.get('[data-arg-name="region"]').find('.cell-error').exists()).toBe(false)
   expect(wrapper.get('textarea[aria-label="参数 region"]').element.value).toBe('')
   for (const [name, value] of [['flag', 'false'], ['count', '0'], ['empty', '""'], ['nullable', 'null']]) {
-    expect(wrapper.get(`[data-param="${name}"]`).text()).toContain(`= ${value}`)
+    expect(wrapper.get(`[data-param="${name}"]`).text()).toContain(`使用默认值： ${value}`)
     expect(wrapper.get(`[data-param="${name}"]`).attributes('aria-pressed')).toBe('false')
   }
   expect(serialize(model)).not.toContain('region:')

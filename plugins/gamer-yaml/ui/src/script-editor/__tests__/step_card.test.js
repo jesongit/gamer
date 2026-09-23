@@ -10,7 +10,7 @@ import { expandCard, setupScript, setupFunctions } from './component_helpers'
 
 /**
  * StepCard（V1 四类）：收起态摘要、展开态控件经 CommandStack 生效、
- * 字段错误按 Diagnostic.field 标红、选中高亮、上移/下移/复制/删除。
+ * 字段错误按 Diagnostic.field 标红、整行展开、选中高亮、运行/复制/删除。
  */
 
 const YAML_BY_KIND = {
@@ -21,10 +21,10 @@ const YAML_BY_KIND = {
 }
 
 const SUMMARY_BY_KIND = {
-  call: '点击',
-  if: '如果 $flag',
-  repeat: '重复 3 次',
-  return: '返回 ?',
+  call: '点击 · (0.5, 0.5)',
+  if: '如果 · $flag',
+  repeat: '重复 · 3 次',
+  return: '返回 · null',
 }
 
 function mountCard({ yaml = 'run:\n  - log: hello\n', index = 0, props = {} } = {}) {
@@ -59,7 +59,7 @@ describe('StepCard：收起态摘要（V1 四类）', () => {
 })
 
 describe('StepCard：V1 交互', () => {
-  it('call 卡：函数名输入 + 返回值折叠项经命令栈生效', async () => {
+  it('call 卡：函数名和同行返回值输入经命令栈生效', async () => {
     const created = setupScript('run:\n  - tap: [0.5, 0.5]\n')
     const wrapper = mount(StepCard, {
       props: {
@@ -72,10 +72,11 @@ describe('StepCard：V1 交互', () => {
     await fnInput.setValue('wait_find')
     expect(created.model.run[0].fn).toBe('wait_find')
     expect(wrapper.find('input[type="checkbox"]').exists()).toBe(false)
-    expect(wrapper.find('.return-value-options').attributes('open')).toBeUndefined()
+    expect(wrapper.find('.return-value-options').exists()).toBe(false)
+    expect(wrapper.find('.call-signature input[aria-label="返回值变量名"]').exists()).toBe(true)
     await wrapper.find('input[aria-label="返回值变量名"]').setValue('hit')
     expect(created.model.run[0].as).toBe('hit')
-    expect(wrapper.get('.return-value-options summary').text()).toContain('hit')
+    expect(wrapper.get('input[aria-label="返回值变量名"]').element.value).toBe('hit')
     await wrapper.get('[aria-label="清除返回值变量"]').trigger('click')
     expect(created.model.run[0].as).toBeNull()
     created.stack.undo()
@@ -108,6 +109,12 @@ describe('StepCard：V1 交互', () => {
     expect(wrapper.get('[data-arg-name="template"]').find('[aria-label="必填"]').exists()).toBe(true)
     expect(wrapper.find('button[data-param="template"]').exists()).toBe(false)
     expect(wrapper.find('input[aria-label="参数 timeout数值"]').exists()).toBe(false)
+    expect(wrapper.get('button[data-param="timeout"]').text()).toContain('使用默认值：')
+    expect(wrapper.get('button[data-param="timeout"]').text()).toContain('30s')
+    await wrapper.get('button[data-param="timeout"]').trigger('click')
+    expect(created.model.run[0].args.entries.timeout).toEqual({ lit: '30s' })
+    await wrapper.get('button[aria-label="恢复 timeout 默认值"]').trigger('click')
+    expect(created.model.run[0].args.entries).not.toHaveProperty('timeout')
     await wrapper.get('input[aria-label="参数 template"]').setValue('button.png')
     expect(created.model.run[0].args).toEqual({
       kind: 'map',
@@ -164,20 +171,36 @@ describe('StepCard：V1 交互', () => {
     wrapper.unmount()
   })
 
-  it('上移/复制/删除经命令栈', async () => {
+  it('操作区仅保留运行、复制、删除，按钮不触发展开，复制删除经命令栈', async () => {
     const created = setupScript('run:\n  - log: a\n  - log: b\n  - log: c\n')
     const wrapper = mount(StepCard, {
       props: {
         model: created.model, stack: created.stack, step: created.model.run[1],
-        containerPath: ['run'], basePath: 'run', index: 1,
+        containerPath: ['run'], basePath: 'run', index: 1, testFrom: true,
       },
     })
+    expect(wrapper.findAll('.head-actions button').map(b => b.text())).toEqual(['运行', '复制', '删除'])
+    await wrapper.get('button[title="从此步骤运行"]').trigger('click')
+    expect(wrapper.emitted('test-from')[0][0]).toBe(created.model.run[1].uuid)
     await wrapper.find('button[title="复制步骤"]').trigger('click')
     expect(created.model.run).toHaveLength(4)
     await wrapper.find('button[title="删除步骤"]').trigger('click')
     expect(created.model.run).toHaveLength(3)
-    await wrapper.find('button[title="上移"]').trigger('click')
-    expect(created.model.run[0].args).toEqual({ kind: 'value', cell: { lit: 'b' } })
+    expect(wrapper.emitted('toggle-expand')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('点击行标题或空白展开收起，编辑控件和拖动手柄不触发折叠', async () => {
+    const {wrapper} = mountCard()
+    await wrapper.get('.summary').trigger('click')
+    expect(wrapper.find('.card-body').exists()).toBe(true)
+    expect(wrapper.get('.expand-btn').attributes('aria-expanded')).toBe('true')
+    await wrapper.get('input[aria-label="函数名"]').trigger('click')
+    await wrapper.get('.drag-handle').trigger('click')
+    expect(wrapper.emitted('toggle-expand')).toHaveLength(1)
+    await wrapper.get('.card-head').trigger('click')
+    expect(wrapper.find('.card-body').exists()).toBe(false)
+    expect(wrapper.get('.expand-btn').attributes('aria-expanded')).toBe('false')
     wrapper.unmount()
   })
 })

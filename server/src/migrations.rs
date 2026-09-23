@@ -32,9 +32,9 @@ use rusqlite::{Connection, Transaction};
 /// 本 binary 可打开并继续迁移的最低 user_version（v1 基线；0 永远拒绝）
 pub const MIN_READ_SCHEMA: i64 = 1;
 /// 可打开的最高 user_version；高于此值拒绝启动（schema-policy §3/§4 硬规则）
-pub const MAX_READ_SCHEMA: i64 = 4;
+pub const MAX_READ_SCHEMA: i64 = 5;
 /// 本 binary 迁移完成后的目标 schema 版本
-pub const TARGET_SCHEMA: i64 = 4;
+pub const TARGET_SCHEMA: i64 = 5;
 
 /// 契约 §3 冻结约束 `min_read ≤ target ≤ max_read` 编译期固化：取值漂移在
 /// 编译期即失败，不等运行期诊断
@@ -75,6 +75,15 @@ pub(crate) static MIGRATIONS: &[Migration] = &[
         to: 4,
         description: "unify ADB device configuration",
         apply: crate::store::migrate_v3_to_v4,
+    },
+    Migration {
+        from: 4,
+        to: 5,
+        description: "persist execution history and events",
+        apply: |tx| {
+            tx.execute_batch(crate::store::journal::DDL)?;
+            Ok(())
+        },
     },
 ];
 
@@ -386,7 +395,7 @@ mod tests {
 
     #[test]
     fn too_new_database_is_rejected_with_actual_version_and_range() {
-        for too_new in [5i64, 6, 99] {
+        for too_new in [MAX_READ_SCHEMA + 1, MAX_READ_SCHEMA + 2, 99] {
             let mut conn = versioned_memory_db(too_new);
             let err = run_migrations(&mut conn, too_new, MIGRATIONS).unwrap_err();
             let msg = err.to_string();

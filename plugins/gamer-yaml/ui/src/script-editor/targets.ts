@@ -36,3 +36,17 @@ export interface SeTargetOptions {
 }
 
 export const SE_TARGET_OPTIONS: InjectionKey<SeTargetOptions> = Symbol('seTargetOptions')
+
+export interface TemplateMatchOptions {
+  threshold?: number
+  region?: number[]
+  error?: string
+}
+/** Each step supplies its own preview parameters, including nested template lists. */
+export const SE_TEMPLATE_MATCH_OPTIONS: InjectionKey<(argumentName?: string) => TemplateMatchOptions> = Symbol('seTemplateMatchOptions')
+
+/** 编辑器宿主负责保存与导航；只读画布不提供此能力。 */
+export const SE_FUNCTION_NAVIGATION: InjectionKey<{
+  busy: boolean
+  open: (target: string, uuid: string) => void | Promise<void>
+}> = Symbol('seFunctionNavigation')

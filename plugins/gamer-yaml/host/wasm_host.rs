@@ -142,7 +142,23 @@ impl Drop for TickerGuard<'_> {
 
 /// The YAML world has a separate state type. This keeps its function-dispatch
 /// behavior out of the generic extension HostState.
+struct TracedSink {
+    inner: Arc<dyn crate::core::events::EventSink>,
+    trace: Option<serde_json::Value>,
+}
+impl crate::core::events::EventSink for TracedSink {
+    fn emit(
+        &self,
+        mut event: RuntimeEvent,
+    ) -> futures_util::future::BoxFuture<'_, anyhow::Result<()>> {
+        event.trace = self.trace.clone();
+        self.inner.emit(event)
+    }
+}
+
 struct YamlHostState {
+    current_trace: Option<serde_json::Value>,
+    settings: super::settings::Settings,
     host: HostApi,
     cancelled: Arc<AtomicBool>,
     app_context: Option<crate::core::AppContext>,
@@ -157,9 +173,11 @@ impl YamlHostState {
         sink: Option<Arc<dyn crate::core::events::EventSink>>,
     ) -> Self {
         Self {
+            current_trace: None,
             host,
             cancelled,
             app_context: Some(app_context),
+            settings: super::settings::Settings::default(),
             sink,
         }
     }
@@ -172,6 +190,17 @@ impl YamlHostState {
         &mut self,
         args_json: &str,
     ) -> Result<String, wit::yaml::gamer::host::types::HostError> {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(args_json) {
+            self.current_trace = value.get("trace").cloned();
+            if let Some(trace) = self.current_trace.as_mut().filter(|t| t.is_object()) {
+                if let Some(path) = value
+                    .get("path")
+                    .or_else(|| value.get("data").and_then(|d| d.get("path")))
+                {
+                    trace["path"] = path.clone();
+                }
+            }
+        }
         let sink = self.sink.clone();
         let context = self.app_context.clone();
         let args_json = args_json.to_string();
@@ -228,7 +257,13 @@ impl wit::yaml::gamer::host::capability::Host for YamlHostState {
             let host = self.host.clone();
             let context = self.app_context.clone();
             let cancelled = self.cancelled.clone();
-            let sink = self.sink.clone();
+            let sink = self.sink.clone().map(|inner| {
+                Arc::new(TracedSink {
+                    inner,
+                    trace: self.current_trace.clone(),
+                }) as Arc<dyn crate::core::events::EventSink>
+            });
+            let settings = self.settings.clone();
             let result = block_on_yaml(async move {
                 let context =
                     context.ok_or_else(|| anyhow::anyhow!("capability.invoke 需要 AppContext"))?;
@@ -246,6 +281,8 @@ impl wit::yaml::gamer::host::capability::Host for YamlHostState {
                             .unwrap_or(serde_json::Value::Null);
                         Ok((name, args))
                     })?;
+                let args =
+                    super::settings::bind_timeout(&name, args, settings.default_timeout_secs);
                 let value = NativeYamlHost::call_function_json(
                     host,
                     context,
@@ -253,6 +290,7 @@ impl wit::yaml::gamer::host::capability::Host for YamlHostState {
                     sink,
                     &name,
                     &serde_json::to_string(&args)?,
+                    settings,
                 )
                 .await?;
                 Ok::<_, anyhow::Error>(serde_json::to_string(&value)?)
@@ -353,12 +391,20 @@ impl YamlWasmRuntime for LazyYamlWasmtimeRuntime {
         let mut linker = Linker::new(self.engine());
         wit::yaml::YamlExtensionHost::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
             .map_err(|error| anyhow::anyhow!("YAML WIT linker 初始化失败: {error}"))?;
-        let state = YamlHostState::new(
+        let mut state = YamlHostState::new(
             request.host,
             request.stop.clone(),
             request.context,
             request.sink.clone(),
         );
+        state.settings = request
+            .program
+            .get("_native_settings")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()?
+            .unwrap_or_default();
+        state.settings.validate()?;
         let mut store = Store::new(self.engine(), state);
         // epoch 取消兜底（ADR-YAML-04）：deadline 以 1 tick 为步进，每次 tick
         // 到点回调里复查 stop 标志——未取消则续期继续执行，已取消则以
@@ -376,7 +422,11 @@ impl YamlWasmRuntime for LazyYamlWasmtimeRuntime {
         );
         let instance = wit::yaml::YamlExtensionHost::instantiate(&mut store, &component, &linker)
             .map_err(|error| anyhow::anyhow!("YAML 组件实例化失败: {error}"))?;
-        let program = serde_json::to_string(&request.program)?;
+        let mut wire_program = request.program;
+        if let Some(object) = wire_program.as_object_mut() {
+            object.remove("_native_settings");
+        }
+        let program = serde_json::to_string(&wire_program)?;
         // ticker 只在 wasm 执行窗口内推进 epoch（见 EpochTicker 生命周期）。
         // RAII guard：call 异常展开时也要回退活动计数，避免 ticker 永不退出。
         let ticker = self.ticker();

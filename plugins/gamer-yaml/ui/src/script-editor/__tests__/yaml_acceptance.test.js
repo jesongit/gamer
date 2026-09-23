@@ -64,7 +64,7 @@ describe('YAML 跨前后端验收夹具', () => {
     }
   })
 
-  it('教程案例覆盖完整原生函数目录、每个参数及四种步骤', () => {
+  it('教程案例覆盖完整原生函数目录、每个参数及模板分支等步骤', () => {
     const calls = new Map()
     const kinds = new Set()
     function visit(steps) {
@@ -86,7 +86,7 @@ describe('YAML 跨前后端验收夹具', () => {
       if (kind === 'function_library') model.functions.forEach(fn => visit(fn.run))
       else visit(model.run)
     }
-    expect([...kinds].sort()).toEqual(['call', 'if', 'repeat', 'return'])
+    expect([...kinds].sort()).toEqual(['call', 'if', 'match_templates', 'repeat', 'return'])
     for (const fn of catalog) {
       expect(calls.has(fn.name), `教程遗漏函数 ${fn.name}`).toBe(true)
       expect([...calls.get(fn.name)].sort(), `教程遗漏 ${fn.name} 参数`).toEqual(fn.params.map(p => p.name).sort())
@@ -113,6 +113,25 @@ describe('YAML 跨前后端验收夹具', () => {
 })
 
 describe('全部 18 个内置函数的真实参数 Schema 表单', () => {
+  it('障碍模板列表可选取、保存重开和删除，非法元素与缺失模板报错', async () => {
+    const created = setupScript('run:\n  - wait_find: button.png\n')
+    const wrapper = mount(StepCard, { props: { ...created, step: created.model.run[0], containerPath: ['run'], basePath: 'run', index: 0, templates: ['button.png'] }, global: { provide } })
+    await expandCard(wrapper, created.model.run[0].uuid)
+    await wrapper.get('button[data-param="obstacles"]').trigger('click')
+    await wrapper.get('button[aria-label="添加参数 obstacles"]').trigger('click')
+    await wrapper.get('input[aria-label="参数 obstacles 1"]').setValue('button.png')
+    const reopened = setupScript(serialize(created.model))
+    expect(reopened.model.run[0].args.entries.obstacles).toEqual({lit: ['button.png']})
+    expect(validateSource(serialize(created.model), 'script', ctx).diagnostics).toEqual([])
+    await wrapper.get('button[aria-label="删除参数 obstacles 1"]').trigger('click')
+    expect(created.model.run[0].args.entries.obstacles).toEqual({lit: []})
+    wrapper.unmount()
+    for (const value of ['[1]', '[""]', 'bad']) {
+      expect(validateSource(`run:\n  - wait_find: {template: button.png, obstacles: ${value}}\n`, 'script', ctx).diagnostics.map(d => d.code)).toContain('yaml.args.type')
+    }
+    expect(validateSource('run:\n  - wait_find: {template: button.png, obstacles: [missing.png]}\n', 'script', ctx).diagnostics.map(d => d.code)).toContain('yaml.resource.tmpl_not_found')
+  })
+
   for (const fn of catalog) {
     it(`${fn.name}：参数名称是纯文本，添加只能使用声明的参数`, async () => {
       const created = setupScript(`run:\n  - ${fn.name}: {}\n`)
@@ -132,6 +151,25 @@ describe('全部 18 个内置函数的真实参数 Schema 表单', () => {
       wrapper.unmount()
     })
   }
+
+  it('wait_find 更多参数包含 click，默认真且关闭后保存重开保留假', async () => {
+    const created = setupScript('run:\n  - wait_find: button.png\n')
+    const wrapper = mount(StepCard, { props: { ...created, step: created.model.run[0], containerPath: ['run'], basePath: 'run', index: 0 }, global: { provide } })
+    await expandCard(wrapper, created.model.run[0].uuid)
+    const more = wrapper.get('details.optional-params')
+    more.element.open = true
+    const button = more.get('button[data-param="click"]')
+    expect(button.text()).toContain('true')
+    expect(button.attributes('aria-pressed')).toBe('false')
+    await button.trigger('click')
+    const input = more.get('select[aria-label="参数 click"]')
+    expect(input.element.value).toBe('true')
+    await input.setValue('false')
+    const reopened = setupScript(serialize(created.model))
+    expect(reopened.model.run[0].args.entries.click).toEqual({ lit: false })
+    expect(validateSource(serialize(created.model), 'script', ctx).diagnostics).toEqual([])
+    wrapper.unmount()
+  })
 
   it('位置简写使用参数类型控件，补默认参数保留用户输入', async () => {
     const created = setupScript('run:\n  - wait_find: button\n')

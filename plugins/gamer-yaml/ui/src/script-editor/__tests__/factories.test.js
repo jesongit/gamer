@@ -33,7 +33,7 @@ describe('V1 factories', () => {
     expect(makeCall('sleep')).toMatchObject({ kind: 'call', fn: 'sleep', args: { kind: 'none' }, as: null })
   })
 
-  it('CONTROL_ENTRIES covers the three control kinds', () => {
-    expect(CONTROL_ENTRIES.map((e) => e.kind)).toEqual(['if', 'repeat', 'return'])
+  it('CONTROL_ENTRIES covers the control kinds including template branches', () => {
+    expect(CONTROL_ENTRIES.map((e) => e.kind)).toEqual(['match_templates', 'if', 'repeat', 'break', 'return'])
   })
 })
