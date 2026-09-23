@@ -22,3 +22,24 @@ fn unchanged_files_skip_hash_but_replacement_change_and_manifest_change_invalida
     assert!(verify(&layout, &path, &hash, 7).is_err());
     cleanup(&root);
 }
+
+#[test]
+fn same_volume_install_rename_preserves_verification_but_cache_damage_does_not() {
+    let root = unique_root("verification-rename");
+    let layout = InstallLayout::resolve(Some(root.clone()));
+    let staged = root.join("staged.exe");
+    let installed = root.join("installed.exe");
+    let hash = sha256_hex(b"verified app");
+    fs::write(&staged, b"verified app").unwrap();
+    assert!(!verify(&layout, &staged, &hash, 12).unwrap());
+    fs::rename(&staged, &installed).unwrap();
+    assert!(
+        verify(&layout, &installed, &hash, 12).unwrap(),
+        "rename must not cause a second hash"
+    );
+    for receipt in fs::read_dir(layout.state_dir().join("verified")).unwrap() {
+        fs::write(receipt.unwrap().path(), b"broken receipt").unwrap();
+    }
+    assert!(!verify(&layout, &installed, &hash, 12).unwrap());
+    cleanup(&root);
+}

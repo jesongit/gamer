@@ -168,8 +168,10 @@ fn configure(ctx: &egui::Context) {
         }
     }
     ctx.set_fonts(fonts);
-    let mut style = egui::Style::default();
-    style.visuals = egui::Visuals::dark();
+    let mut style = egui::Style {
+        visuals: egui::Visuals::dark(),
+        ..Default::default()
+    };
     style.visuals.panel_fill = Color32::from_rgb(23, 25, 26);
     style.visuals.window_fill = Color32::from_rgb(29, 32, 33);
     style.visuals.override_text_color = Some(Color32::from_rgb(237, 240, 238));
@@ -200,8 +202,7 @@ fn make_tray(ctx: &egui::Context) -> Result<TrayIcon, Box<dyn std::error::Error>
             let yellow = (6..26).contains(&x)
                 && (6..26).contains(&y)
                 && (x < 10
-                    || y < 10
-                    || y > 21
+                    || !(10..=21).contains(&y)
                     || (x > 21 && y > 15)
                     || (y > 14 && y < 19 && x > 16));
             rgba[offset..offset + 4].copy_from_slice(if yellow {
@@ -233,6 +234,10 @@ fn make_tray(ctx: &egui::Context) -> Result<TrayIcon, Box<dyn std::error::Error>
         .build()?)
 }
 static GUI_EVENTS: std::sync::OnceLock<mpsc::Sender<String>> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+#[path = "desktop_tests.rs"]
+mod tests;
 thread_local! { static GUI_RECEIVER: std::cell::RefCell<Option<mpsc::Receiver<String>>> = const { std::cell::RefCell::new(None) }; }
 
 struct Desktop {
@@ -870,14 +875,10 @@ impl Worker {
             {
                 crate::upgrade::engine::UpgradeOutcome::Committed { .. } => {
                     self.child = self.engine.take_managed_child();
-                    self.state.current = Some(model.release.version);
+                    self.state.current = Some(model.release.version.clone());
                     self.state.stage = Stage::Running;
                     self.state.message = "更新完成".into();
-                    crate::commands::open_browser(crate::supervisor::read_configured_port(
-                        &self.layout.config_file(),
-                    ));
-                    let _ = self.events.send(Event::Hide);
-                    return Ok(());
+                    return self.first_plugins(&model);
                 }
                 other => return Err(format!("更新未完成：{other:?}")),
             }

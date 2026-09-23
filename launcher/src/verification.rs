@@ -60,7 +60,12 @@ pub fn verify(
     }
     let path_key = path.to_string_lossy().into_owned();
     let hash = hash.to_ascii_lowercase();
-    let key = to_hex(&Sha256::digest(format!("{path_key}\n{hash}\n{size}")));
+    // 同卷原子移动不会改变文件身份。以身份寻址缓存，staging 中已经校验的文件
+    // 安装到 versions/ 后直接复用；同路径替换文件则因身份变化重新校验。
+    let key = to_hex(&Sha256::digest(format!(
+        "{}:{}\n{hash}\n{size}",
+        before.identity.0, before.identity.1
+    )));
     let receipt = layout
         .state_dir()
         .join("verified")
@@ -68,7 +73,7 @@ pub fn verify(
     let cached: Option<Record> = fs::read(&receipt)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok());
-    if cached.is_some_and(|r| r.path == path_key && r.hash == hash && r.stamp == before) {
+    if cached.is_some_and(|r| r.hash == hash && r.stamp == before) {
         return Ok(true);
     }
     verify_file(path, &hash, size)?;

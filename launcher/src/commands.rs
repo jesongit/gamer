@@ -777,6 +777,10 @@ fn cmd_start(layout: &InstallLayout, cli: &Cli) -> i32 {
 }
 
 /// 双击入口在服务就绪后打开本机控制台；显式 `start` 保持纯 CLI 行为，便于脚本监管。
+#[cfg(test)]
+pub(crate) fn open_browser(_port: u16) {}
+
+#[cfg(not(test))]
 pub(crate) fn open_browser(port: u16) {
     #[cfg(windows)]
     use std::os::windows::process::CommandExt;

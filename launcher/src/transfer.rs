@@ -92,6 +92,14 @@ pub fn download(
             if response.header("Content-Range") != Some(expected.as_str()) {
                 return Err(DownloadError::InvalidRange);
             }
+            if let (Some(previous), Some(current)) = (
+                receipt.as_ref().and_then(|r| r.etag.as_deref()),
+                response.header("ETag"),
+            ) {
+                if previous != current {
+                    return Err(DownloadError::InvalidRange);
+                }
+            }
         }
         _ => return Err(DownloadError::InvalidRange),
     }

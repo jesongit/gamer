@@ -106,3 +106,72 @@ fn mismatched_range_is_rejected_without_appending() {
     assert_eq!(fs::read(&dest).unwrap(), b"abcde");
     cleanup(&root);
 }
+
+#[test]
+fn pause_during_transfer_keeps_progress_and_resumes_remaining_bytes() {
+    use std::time::{Duration, Instant};
+    let root = unique_root("mid-transfer-pause");
+    let dest = root.join("download.part");
+    let opts = FetchOptions::default();
+    let control = opts.control.clone();
+    let calls = AtomicUsize::new(0);
+    let addr = http_server(Arc::new(move |request, stream| {
+        if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            write_response(stream, "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nETag: \"stable\"\r\nConnection: close\r\n\r\nabcde");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while control.progress().0 < 5 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            control.pause();
+            let _ = stream.write_all(b"f");
+        } else {
+            let request = String::from_utf8_lossy(request).to_ascii_lowercase();
+            let range = request
+                .lines()
+                .find(|l| l.starts_with("range: bytes="))
+                .unwrap();
+            let offset: usize = range
+                .trim_start_matches("range: bytes=")
+                .trim_end_matches('-')
+                .parse()
+                .unwrap();
+            assert!((5..=6).contains(&offset));
+            write_response(stream, &format!("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {offset}-9/10\r\nContent-Length: {}\r\nETag: \"stable\"\r\nConnection: close\r\n\r\n", 10-offset));
+            stream.write_all(&b"abcdefghij"[offset..]).unwrap();
+        }
+    }));
+    let url = format!("http://{addr}/a");
+    let hash = sha256_hex(b"abcdefghij");
+    assert!(matches!(
+        download(&url, &dest, &hash, 10, &opts),
+        Err(gamer_launcher::fetch::DownloadError::Paused)
+    ));
+    assert!((5..=6).contains(&fs::metadata(&dest).unwrap().len()));
+    opts.control.resume();
+    assert_eq!(download(&url, &dest, &hash, 10, &opts).unwrap(), 10);
+    assert_eq!(fs::read(&dest).unwrap(), b"abcdefghij");
+    cleanup(&root);
+}
+
+#[test]
+fn changed_etag_on_partial_response_must_not_append() {
+    let root = unique_root("etag-change");
+    let dest = root.join("download.part");
+    let calls = AtomicUsize::new(0);
+    let addr = http_server(Arc::new(move |_, stream| {
+        if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            write_response(stream, "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nETag: \"old\"\r\nConnection: close\r\n\r\nabcde");
+        } else {
+            write_response(stream, "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 5-9/10\r\nContent-Length: 5\r\nETag: \"new\"\r\nConnection: close\r\n\r\nfghij");
+        }
+    }));
+    let url = format!("http://{addr}/a");
+    let hash = sha256_hex(b"abcdefghij");
+    assert!(download(&url, &dest, &hash, 10, &Default::default()).is_err());
+    assert!(matches!(
+        download(&url, &dest, &hash, 10, &Default::default()),
+        Err(gamer_launcher::fetch::DownloadError::InvalidRange)
+    ));
+    assert_eq!(fs::read(&dest).unwrap(), b"abcde");
+    cleanup(&root);
+}
