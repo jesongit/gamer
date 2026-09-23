@@ -423,3 +423,8 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 
 - Windows PowerShell 5.1 会按系统编码读取无 BOM 的中文脚本和 JSON，导致假性语法/JSON 错误；发行 `.ps1` 使用 UTF-8 BOM，注册表 JSON 用 `ReadAllText(..., Encoding.UTF8)` 显式读取。
 - 完整包禁止复制开发机 `server/data`：子目录也含账号、插件状态和业务数据；只携带签名清单声明的 seeds，数据目录由首次启动初始化。
+- 安装后再次启动重复校验：缓存若按 staging 路径寻址，同卷 rename 后会失效；改按卷号/文件 ID 与预期哈希寻址，并继续比较大小和修改时间，文件替换仍重新校验。
+- HTTP 续传收到 206 也不代表可直接追加：除 Content-Range 外还需比对返回的强 ETag，验证器变化时拒绝拼接。
+- 原生 GUI 的 Windows 测试不能把启动后立即读取 Visible 当最终状态：隐藏窗口的逻辑按 repaint 唤醒，重复启动后的窗口恢复需等待一次事件循环，再断言实例数与可见性。
+- Windows 正在运行的 Rust 测试 EXE 无法被链接器覆盖：同一 target 下的测试运行和重新编译需串行；Permission denied 不应通过杀掉所有同名进程解决。
+- 旧性能夹具的低方差灰度块由 FFmpeg 生成，与当前 image 灰度公式有舍入差异；NCC 必命中基准从固定 RGB 孪生按产品流程预先生成灰度模板，转换不计入匹配计时。
