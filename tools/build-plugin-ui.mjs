@@ -3,7 +3,7 @@ import { cpSync, mkdirSync, existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
 
-const repo = fileURLToPath(new URL('../../', import.meta.url))
+const repo = fileURLToPath(new URL('../', import.meta.url))
 const installOnly = process.argv.includes('--install-only')
 const requested = process.argv.slice(2).filter(value => value !== '--install-only')
 const ids = requested.length ? requested : ['gamer-yaml', 'gamer-keymap', 'gamer-video']

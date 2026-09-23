@@ -434,3 +434,5 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - eframe 首帧可能强制显示窗口，单设 ViewportBuilder.visible=false 仍会在启动检查时弹窗；托盘就绪后在 quiet_start 阶段持续发隐藏命令，进入安装/更新/错误或用户主动唤回时才解除。
 - Windows Get-Process.MainWindowHandle 在主窗口隐藏后可能指向托盘的 1×1 辅助窗口，导致“窗口可见”误判；验收按进程 ID 和 Gamer 主窗口标题匹配句柄，再检查 IsWindowVisible。
 - PowerShell 脚本未调用原生命令时 `$LASTEXITCODE` 可能为空或保留旧值，不能据此判定脚本失败；脚本用终止异常传播失败，原生命令才在调用后立即检查退出码。
+- 插件仓搬迁后 pnpm 的 node_modules 记录仍指向原目录，非交互安装会拒绝重建；保留原目录备份，在验收子进程设置 CI=true 后按冻结锁文件重建依赖，不修改用户全局 pnpm 设置。
+- Windows 用户临时目录会继承用户目录祖先的 .cargo/config.toml，即使 CARGO_HOME 指向别处；独立克隆缺锁定版本时先查实际 source replacement，本机 C 盘镜像与 D 盘构建源不同，不能为镜像缺包修改产品锁文件。

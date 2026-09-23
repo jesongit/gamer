@@ -19,6 +19,8 @@ Gamer 是一个通过浏览器操作 Android 设备的游戏自动化工具。�
 
 ### 从源码启动
 
+官方插件源码位于独立的 [gamer-plugins 仓库](https://github.com/jesongit/gamer-plugins)，本仓 `plugins/` 固定引用其提交。首次克隆使用 `git clone --recurse-submodules`；已有工作区更新后运行 `git submodule update --init --recursive`。不要使用 `--remote` 跟随插件最新分支。
+
 以下命令在 Windows PowerShell 中、仓库根目录执行。先安装这些依赖并加入 `PATH`：
 
 | 依赖 | 用途 |
@@ -229,7 +231,7 @@ pnpm --dir web dev
 .\plugins\gamer-video\build.ps1
 
 # 仅构建并同步某个插件的本地静态 UI
-node sdk/ui/build-modules.mjs gamer-yaml
+node tools/build-plugin-ui.mjs gamer-yaml
 ```
 
 插件产物写入 `web/public/plugins/`，市场索引为 `web/public/registry.json`。在「插件」页导入或更新对应归档，保存编辑内容后刷新，即可加载新 UI。已安装插件的 UI 来自安装归档；仅同步本地静态 UI 不会替换已安装的归档。

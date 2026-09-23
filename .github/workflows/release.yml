@@ -58,6 +58,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Check release workflow locally (AST + offline behavior)
         shell: pwsh
@@ -157,6 +159,8 @@ jobs:
       RELEASE_MANIFEST_KEY_ID: ${{ secrets.RELEASE_MANIFEST_KEY_ID }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Derive product version from tag
         id: ver
@@ -183,6 +187,8 @@ jobs:
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
       - name: Cache cargo (server + launcher)
         uses: actions/cache@v4
@@ -209,6 +215,13 @@ jobs:
       - name: Fetch ffmpeg (locked + license red-line + smoke)
         shell: pwsh
         run: ./release/packaging/fetch-ffmpeg.ps1
+
+      - name: Build pinned official plugins and verify SDK
+        shell: pwsh
+        run: |
+          node tools/check-plugin-sdk.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Plugin SDK mismatch" }
+          ./tools/build-plugins.ps1 -KeepStaleArtifacts
 
       # package-app 自带构建信息注入（GAMER_GIT_COMMIT/BUILD_TIME/CHANNEL/BUILD_TARGET，
       # 取自 git HEAD + rustc host triple），并复核 zip 布局与逐文件 sha256
@@ -424,6 +437,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: actions/setup-node@v4
         with:
@@ -529,6 +544,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Download full package for launcher smoke
         env:

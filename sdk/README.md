@@ -52,6 +52,8 @@ pwsh ./build.ps1 -Signer <gamer 仓库>/tools/plugin-signer/target/release/gamer
 
 ## 文档
 
+官方插件独立构建使用 `tools/export-plugin-sdk.ps1 -Destination <插件仓>/sdk` 导出的固定快照：WIT、UI 构建桥、打包工具及逐文件 SHA256。`plugins/sdk/lock.json` 记录确切宿主提交；`node tools/check-plugin-sdk.mjs` 检查主仓与快照一致。SDK 本身不触发官方插件构建，主仓联调入口在 `tools/build-plugin-ui.mjs`。
+
 - 可选 iframe 主题、紧凑控件与通信示例：[ui/README.md](ui/README.md)。
 
 - 插件开发指南（从零到安装运行、manifest 全字段、权限闭集、调试与错误对照）：

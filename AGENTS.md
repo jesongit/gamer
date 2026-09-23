@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## 2026-09-24 官方插件分仓
+
+`plugins/` 是 `jesongit/gamer-plugins` 的固定提交 submodule；更新源码需 `git submodule update --init --recursive`，不得默认跟随远端最新提交。插件改动在插件仓提交，再更新主仓 gitlink。独立构建消费插件仓 sdk/ 固定快照，来源与哈希在 sdk/lock.json；主仓 `node tools/check-plugin-sdk.mjs` 保证接口一致。主仓 `tools/build-plugins.ps1` 为本地市场包装入口，开发 UI 联调使用 `tools/build-plugin-ui.mjs`；`web` 的普通 build 仅构建壳，发行流水线显式构建插件。host/ 仍参加宿主编译，变更仍需要宿主发布。
+
 ## 项目
 
 Gamer 游戏自动化助手：Rust 服务端（axum + webrtc-rs）+ Vue3/Vite 前端。

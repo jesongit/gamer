@@ -61,6 +61,7 @@ if ($null -eq (Get-Command pnpm -ErrorAction SilentlyContinue)) {
 
 # ---- 关卡定义（顺序即执行顺序；与 ci.yml 步骤一一对应）----
 $gates = New-Object System.Collections.Generic.List[object]
+$gates.Add([pscustomobject]@{ Group = 'sdk'; Name = 'pinned plugin SDK'; Exe = 'node'; ArgList = @('tools/check-plugin-sdk.mjs'); Dir = $RepoRoot })
 if (-not $SkipRust) {
     $serverDir = Join-Path $RepoRoot 'server'
     # 与 ci.yml 相同：兼容即将落地的 OPS-004 配置失败即退出策略（dev 档允许无 config.toml）

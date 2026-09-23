@@ -312,3 +312,11 @@ scrcpy-server 单独成包只用于明确分发、复用和修复，不能独立
 
 - 托盘右键仅保留“打开 Gamer / 退出 Gamer”。双击托盘和重复启动 EXE 使用同一打开动作：正在运行时打开网页，其余状态显示安装、更新或恢复窗口。
 - 暂停/继续仅在操作窗口提供；主动检查更新使用工作台设置页；完整修复保留启动自动校验和显式 CLI，不增加托盘维护菜单。
+
+### P5 分仓实施（2026-09-24）
+
+- 官方插件已迁入独立 gamer-plugins 仓库，主仓 plugins/ 改为固定 gitlink；迁移前原目录及所有本机构建缓存保留在 backups/plugin-split-20260924/original-plugins，未移动个人数据或历史 web/public/plugins 安装包。
+- 构建使用固定 SDK 快照（WIT、UI 桥、打包工具源码与 Cargo.lock），sdk/lock.json 记录宿主确切提交和逐文件哈希；主仓与插件仓均校验。插件产物可在无兄弟 Gamer 目录的 checkout 独立构建。
+- 主仓 tools/build-plugins.ps1 委托插件仓构建；SDK 不再反向调度官方插件构建。web 的 build 只构建壳，开发 UI 同步在 tools/build-plugin-ui.mjs，发行流水线显式构建插件。
+- 主仓所有 checkout 增加递归子模块；插件 CI 独立构建与固定宿主集成分别执行。插件 tag 校验 manifest 版本和安装包哈希后仅创建 Release 草稿，不自动正式发布。
+- 本地服务端 703 项、Web/插件 UI 1,023 项、解释器 20 项及发行准备 2 项测试通过；fmt、Clippy、Web 壳构建、原发行工作流离线契约通过。正式在线目录仍需首个插件 Release 发布后切换，保留本地目录避免指向空 Release。

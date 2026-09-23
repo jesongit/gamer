@@ -4,7 +4,7 @@
 
 官方插件源码统一在 `plugins/gamer-yaml`、`plugins/gamer-keymap`、`plugins/gamer-video`，每个目录都有 README 与 `build.ps1`。新增插件使用 `gamer-` 前缀；旧官方 `gamer.*` ID 通过仓库的一次性离线转换工具改名，运行时没有别名。
 
-从仓库根运行 `plugins/<id>/build.ps1` 只构建该插件的 WASM（如果有）与 UI 并生成 `.gplugin`，不会编译主程序，也不会删除其他插件的市场条目。UI 是独立 Vite 工程，`pnpm --dir plugins/<id>/ui test` 运行插件测试，`node sdk/ui/build-modules.mjs <id>` 构建并同步开发静态资源。工作台的面板实现来自插件模块，不再直接导入插件源码。
+官方源码由独立 gamer-plugins 仓库提供，主仓 `plugins/` 为固定提交的 submodule，先运行 `git submodule update --init --recursive`。从主仓运行 `tools/build-plugins.ps1 -Plugin <id>` 构建并更新本地市场；从插件仓运行 `<id>/build.ps1` 则输出到插件仓的 dist/，无需主仓。UI 是独立 Vite 工程，联合工作区中 `pnpm --dir plugins/<id>/ui test` 运行插件测试，`node tools/build-plugin-ui.mjs <id>` 构建并同步开发静态资源。宿主壳的 `pnpm build` 只构建壳，正式插件产物由独立构建步骤提供。
 
 `ui/entry.js` 导出 `sdkVersion = 1`、`panels`（按 component 键索引的 Vue 组件描述）及需要的 Console 接入函数。构建器使用 `sdk/ui/host-modules.json` 中的 SDK 清单共享 Vue、工作区状态及通用 UI，避免重复 Vue 实例和互不相通的 store。宿主 UI 的 `runtime="core"` 可声明 `entry="ui/plugin.js"`；此模式必须同时声明 `permissions=["ui.host", ...]` 与 `[host_api] ui="^1.0"`，安装确认明确说明它与主页面同源运行、可访问当前会话。组件解析同时绑定插件 ID，不能仅凭同名组件键借用另一插件的面板。
 

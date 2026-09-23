@@ -35,6 +35,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Check version consistency (Cargo == web)
         shell: pwsh
@@ -54,6 +56,8 @@ jobs:
       GAMER_PROFILE: dev
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install media test dependencies (ffmpeg / ffprobe)
         run: |
@@ -130,6 +134,8 @@ jobs:
       COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       # WEB-006 版本收口硬门禁：web/src 不得硬编码产品版本字面量（运行时一律消费
       # /api/system/info 的 app.version）。默认即硬失败（-ReportOnly 仅人工观察用）。
@@ -160,6 +166,10 @@ jobs:
 
       - name: pnpm install (--frozen-lockfile)
         run: pnpm install --frozen-lockfile
+
+      - name: Verify pinned plugin SDK
+        working-directory: .
+        run: node tools/check-plugin-sdk.mjs
 
       - name: pnpm test:run
         run: pnpm test:run
