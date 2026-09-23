@@ -246,12 +246,18 @@ mod tests {
     #[tokio::test]
     async fn history_cursor_reaches_older_runs_with_tied_times_and_new_arrivals() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Store::open(&Config { data_dir: dir.path().into(), ..Default::default() }).unwrap();
+        let db = Store::open(&Config {
+            data_dir: dir.path().into(),
+            ..Default::default()
+        })
+        .unwrap();
         let start = Utc::now();
         for i in 0..65 {
             let mut run = record(&format!("run-{i:03}"), "d1");
             run.started_at = start;
-            if i % 2 == 0 { run.entrypoint = "p#function".into(); }
+            if i % 2 == 0 {
+                run.entrypoint = "p#function".into();
+            }
             db.save_run_record(&run).unwrap();
         }
         db.save_run_record(&record("other-device", "d2")).unwrap();
@@ -260,17 +266,34 @@ mod tests {
         assert_eq!(first[0]["run_id"], "run-064");
         assert_eq!(first[29]["run_id"], "run-035");
         db.save_run_record(&record("new-arrival", "d1")).unwrap();
-        let second = db.run_history("d1".into(), None, Some("run-035".into())).await.unwrap();
+        let second = db
+            .run_history("d1".into(), None, Some("run-035".into()))
+            .await
+            .unwrap();
         assert_eq!(second.len(), 30);
         assert_eq!(second[0]["run_id"], "run-034");
         assert_eq!(second[29]["run_id"], "run-005");
-        let third = db.run_history("d1".into(), None, Some("run-005".into())).await.unwrap();
+        let third = db
+            .run_history("d1".into(), None, Some("run-005".into()))
+            .await
+            .unwrap();
         assert_eq!(third.len(), 5);
         assert_eq!(third[4]["run_id"], "run-000");
-        let functions = db.run_history("d1".into(), Some("p#function".into()), Some("run-035".into())).await.unwrap();
+        let functions = db
+            .run_history(
+                "d1".into(),
+                Some("p#function".into()),
+                Some("run-035".into()),
+            )
+            .await
+            .unwrap();
         assert_eq!(functions.len(), 18);
         assert!(functions.iter().all(|r| r["entrypoint"] == "p#function"));
-        assert!(db.run_history("d2".into(), None, Some("run-035".into())).await.unwrap().is_empty());
+        assert!(db
+            .run_history("d2".into(), None, Some("run-035".into()))
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

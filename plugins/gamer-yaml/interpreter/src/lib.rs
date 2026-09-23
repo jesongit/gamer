@@ -604,8 +604,15 @@ impl<'a> Interpreter<'a> {
                 }
             }
         }
-        let bound: serde_json::Map<String, Value> = def.params.iter().filter_map(|p| frame.get(&p.name).map(|v| (p.name.clone(), v.clone()))).collect();
-        self.detail("effective_args", serde_json::json!({"function":name,"args":bound}));
+        let bound: serde_json::Map<String, Value> = def
+            .params
+            .iter()
+            .filter_map(|p| frame.get(&p.name).map(|v| (p.name.clone(), v.clone())))
+            .collect();
+        self.detail(
+            "effective_args",
+            serde_json::json!({"function":name,"args":bound}),
+        );
         let return_value = match self.run_steps(&def.run, &mut frame)? {
             Flow::Return(value) => value,
             Flow::Continue => Value::Null,

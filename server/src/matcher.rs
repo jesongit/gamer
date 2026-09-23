@@ -1842,8 +1842,16 @@ mod tests {
         let templates: Vec<_> = cases
             .iter()
             .map(|(relative, _)| {
-                std::fs::read(dir.join(relative))
-                    .unwrap_or_else(|_| panic!("读取固定夹具 {} 失败", relative))
+                // 老灰度 fixture 由 FFmpeg 的灰度公式生成；低方差色块上与
+                // 当前 image 灰度化的舍入差异会显著降低 NCC，不能当作必命中样本。
+                // 使用同一帧的 RGB 孪生，按产品模板保存链路先转灰度再计时。
+                let name = std::path::Path::new(relative).file_name().unwrap();
+                let raw = std::fs::read(dir.join("tmpl-rgb").join(name))
+                    .unwrap_or_else(|_| panic!("读取固定夹具 {} 失败", relative));
+                let gray = image::load_from_memory(&raw).unwrap().to_luma8();
+                let mut output = std::io::Cursor::new(Vec::new());
+                gray.write_to(&mut output, image::ImageFormat::Png).unwrap();
+                output.into_inner()
             })
             .collect();
         let iterations = std::env::var("GAMER_PERF_ITERS")

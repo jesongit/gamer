@@ -363,7 +363,7 @@ impl NativeYamlHost {
                             check_schema_type(
                                 &ParamSchema {
                                     name: param.name,
-                                    ty: item_type.clone(),
+                                    ty: *item_type,
                                     required: true,
                                     default: None,
                                     desc: param.desc,
@@ -708,9 +708,7 @@ impl NativeYamlHost {
             }
             let mut values = args.values.clone();
             values.insert("template".into(), template.clone());
-            let (outcome, effective_px) = self
-                .match_on_frame(&BoundArgs { values }, frame.clone())
-                .await?;
+            let (outcome, effective_px) = self.match_on_frame(&BoundArgs { values }, frame).await?;
             self.emit_vision_outcome(
                 template.as_str().expect("Schema validated template"),
                 outcome,
@@ -759,8 +757,7 @@ impl NativeYamlHost {
                 values.insert("template".into(), obstacle.clone());
                 values.remove("region"); // 障碍按自己的模板区域搜索，不继承目标区域。
                 let obstacle_args = BoundArgs { values };
-                let (outcome, effective_px) =
-                    self.match_on_frame(&obstacle_args, frame.clone()).await?;
+                let (outcome, effective_px) = self.match_on_frame(&obstacle_args, frame).await?;
                 self.emit_vision_outcome(
                     obstacle.as_str().expect("Schema 已校验模板列表"),
                     outcome,

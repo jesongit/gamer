@@ -246,7 +246,10 @@ pub(crate) fn build_router_with_extensions(
         )
         // 统一执行入口（P11.6 / §11.3）：原 /api/scripts/:id/run 与
         // /api/functions/:id/run 删除，经 Runner 注册表分发。
-        .route("/api/runs", post(runs::api_dispatch_run).get(runs::api_run_history))
+        .route(
+            "/api/runs",
+            post(runs::api_dispatch_run).get(runs::api_run_history),
+        )
         .route("/api/runs/:run_id/events", get(runs::api_run_events))
         .route("/api/devices/:id/run", get(runs::api_device_run))
         .route("/api/runs/:run_id", get(runs::api_get_run))

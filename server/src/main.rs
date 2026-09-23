@@ -31,8 +31,8 @@ mod migrations;
 mod package_archive;
 mod recording;
 mod resources;
-mod run_manager;
 mod run_journal;
+mod run_manager;
 mod scheduler;
 mod settings;
 mod shutdown;
@@ -345,7 +345,8 @@ impl RuntimeServices {
             db.clone(),
         ));
         db.recover_run_history()?;
-        let runs = Arc::new(run_manager::RunManager::new(executor.clone()).with_journal(db.clone()));
+        let runs =
+            Arc::new(run_manager::RunManager::new(executor.clone()).with_journal(db.clone()));
         // ADR-13：裸 Core 组合——Scheduler 不再预置任何 runner；gamer-yaml 的
         // 定时 runner 由扩展 start 生命周期经 registrar 钩子注册。
         let scheduler = Arc::new(scheduler::Scheduler::new(db.clone()));
@@ -383,7 +384,11 @@ impl RuntimeServices {
         executor.attach_yaml_runner(
             ctx.packages.clone(),
             ctx.extensions.clone(),
-            Some(Arc::new(run_journal::JournalEventSink { db: db.clone(), runs: ctx.runs.clone(), viewer: Arc::new(webrtc::ViewerEventSink::new(ctx.viewers.clone())) })),
+            Some(Arc::new(run_journal::JournalEventSink {
+                db: db.clone(),
+                runs: ctx.runs.clone(),
+                viewer: Arc::new(webrtc::ViewerEventSink::new(ctx.viewers.clone())),
+            })),
         );
         // 后台生命周期统一在组合根启动：视频静默看门狗（devices/viewers/metrics
         // 三依赖）+ 会话过期清扫（小时级）。路由组装（api::build_router_*）只注册路由。
