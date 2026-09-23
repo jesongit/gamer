@@ -1,6 +1,6 @@
 manifest_version = 2
 id = "gamer-video"
-version = "1.0.0"
+version = "1.0.2"
 name = "视频工作台"
 description = "视频工作台：媒体素材库、设备录制与操作草稿生成"
 permissions = ["ui.host", "media.read", "media.import", "media.record", "media.write", "media.events.read"]

@@ -173,6 +173,7 @@ const emit = defineEmits([
 ])
 
 const creating = ref(false)
+defineExpose({ beginCreate })
 const newId = ref('')
 const newName = ref('')
 const createError = ref('')

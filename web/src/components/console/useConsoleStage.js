@@ -282,7 +282,13 @@ export function useConsoleStage({
       if (Number.isFinite(el.duration)) durationSec.value = el.duration
       frameReady.value = (el.videoWidth || 0) > 0
     }
-    const syncPlay = () => { if (isCurrent() && kind.value === 'media') playing.value = true }
+    const syncPlay = () => {
+      if (!isCurrent() || kind.value !== 'media') return
+      playing.value = true
+      frameOperationSeq += 1
+      programmaticSeek = false
+      stageFrame.value = null
+    }
     const syncPause = () => { if (isCurrent()) playing.value = false }
     const syncRate = () => { if (isCurrent()) playbackRate.value = el.playbackRate || 1 }
     // seeked：stepFrames 的程序性 seek 保持帧身份；用户手动 seek 使其失效
@@ -451,6 +457,50 @@ export function useConsoleStage({
   }
 
   // ---------- 画面对象与指定帧捕获（裁切/放大镜数据源） ----------
+  /** 匹配预览直接复制播放器已解码帧；不访问帧表，不重新解码视频。
+   * 不声明服务端精确帧身份，原始像素尺寸保证匹配框与舞台坐标一致。 */
+  async function capturePreviewFrame() {
+    const el = mediaVideoEl.value
+    if (kind.value !== 'media' || !el || el.readyState < 2 || el.seeking || !el.videoWidth || !el.videoHeight) return null
+    pauseMedia()
+    const expectedGeneration = generation.value
+    const operation = ++frameOperationSeq
+    const time = el.currentTime
+    const isCurrent = () => !disposed && kind.value === 'media'
+      && mediaVideoEl.value === el && generation.value === expectedGeneration
+      && operation === frameOperationSeq && !el.seeking && el.currentTime === time && !playing.value
+    const canvas = document.createElement('canvas')
+    canvas.width = el.videoWidth
+    canvas.height = el.videoHeight
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('无法读取当前视频画面')
+    ctx.drawImage(el, 0, 0, canvas.width, canvas.height)
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'))
+    if (!isCurrent()) return null
+    if (!blob) throw new Error('当前画面编码失败')
+    if (blob.size > 10 * 1024 * 1024) throw new Error('当前画面 PNG 超过 10MiB')
+    const png = await new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result).split(',')[1])
+      reader.onerror = () => reject(new Error('当前画面读取失败'))
+      reader.readAsDataURL(blob)
+    })
+    return isCurrent() ? { png, width: canvas.width, height: canvas.height, isCurrent } : null
+  }
+
+  /** 浏览器显示的是播放位置之前的最近一帧；播放终点落在末帧之后，夹到末帧索引。 */
+  async function resolvePreviewFrame(mediaId, ptsUs) {
+    const frames = await videoApi.mediaFrames(mediaId, { ptsUs })
+    let position = normalizeStageFrame(frames?.current)
+    if (!position && frames?.frame_count > 0) {
+      return normalizeStageFrame(await videoApi.mediaFrameNeighbors(mediaId, frames.frame_count - 1))
+    }
+    if (position && position.pts_us > ptsUs && position.index > 0) {
+      const neighbors = await videoApi.mediaFrameNeighbors(mediaId, position.index)
+      position = normalizeStageFrame(neighbors?.prev) || position
+    }
+    return position
+  }
   /** 舞台当前活动画面元素：live = WebRTC video；media = 媒体 <video>。 */
   function surfaceEl() {
     if (kind.value === 'media') return mediaVideoEl.value || null
@@ -458,43 +508,45 @@ export function useConsoleStage({
   }
 
   /** 冻结当前画面帧：live = 现有视频元素（既有截图路径）；media = 服务端确定帧
-   *  PNG（mediaFrameUrl 按当前 ptsUs，绝不在保存时重抓最新设备画面）。
-   *  返回 {source,width,height,generation,label}；画面不可用返回 null。 */
+   *  PNG（先将播放位置解析为展示帧索引，保存和匹配复用该帧）。
+   *  返回 {source,width,height,generation,label,frame?}；画面不可用返回 null。 */
   async function captureFrame() {
     if (kind.value === 'live') {
       const el = liveVideoEl?.()
       if (!el?.videoWidth) return null
       return { source: el, width: el.videoWidth, height: el.videoHeight, generation: generation.value, label: '实时画面当前帧' }
     }
+    pauseMedia()
+    if (mediaVideoEl.value) currentTimeSec.value = Math.max(0, Number(mediaVideoEl.value.currentTime) || 0)
     const frame = frameAt.value
     const meta = mediaMeta.value
     if (!frame || !meta) return null
     const expectedGeneration = generation.value
     const expectedMediaId = meta.id
-    const expectedFrame = { ...frame }
-    // 帧身份已知（stageFrame 锁定）→ 按展示序索引寻址（字节级可重复）；
-    // 未锁定 → 按预览 pts 粗定位（服务端解析为首个 pts ≥ 目标的展示帧）
-    const url = frame.index !== null && frame.index !== undefined
-      ? api.mediaFrameUrl(meta.id, { index: frame.index })
-      : api.mediaFrameUrl(meta.id, { ptsUs: frame.ptsUs })
+    const operation = ++frameOperationSeq
+    const previewTime = currentTimeSec.value
+    const isCurrent = () => !disposed && kind.value === 'media'
+      && expectedGeneration === generation.value && expectedMediaId === mediaMeta.value?.id
+      && operation === frameOperationSeq && previewTime === currentTimeSec.value
+    let position
+    try {
+      position = frame.index != null ? { index: frame.index, pts_us: frame.ptsUs }
+        : await resolvePreviewFrame(meta.id, frame.ptsUs)
+    } catch { return null }
+    if (!position || !isCurrent()) return null
+    const url = api.mediaFrameUrl(meta.id, { index: position.index })
     let img = null
     try { img = await loadImage(url) } catch { img = null }
-    const currentFrame = frameAt.value
-    if (!img || !img.naturalWidth || disposed
-      || expectedGeneration !== generation.value
-      || expectedMediaId !== mediaMeta.value?.id
-      || currentFrame?.mediaId !== expectedFrame.mediaId
-      || currentFrame?.index !== expectedFrame.index
-      || currentFrame?.ptsUs !== expectedFrame.ptsUs) return null
+    if (!img || !img.naturalWidth || !isCurrent()) return null
+    stageFrame.value = position
     return {
       source: img,
       width: img.naturalWidth,
       height: img.naturalHeight,
       generation: generation.value,
       // 帧身份随裁切底图走：label 携带展示序索引与真实 PTS（可追溯）
-      label: frame.index !== null && frame.index !== undefined
-        ? `视频帧 #${frame.index} @ ${formatStageClock(frame.ptsUs / 1e6)}`
-        : `视频帧 @ ${formatStageClock(frame.ptsUs / 1e6)}`,
+      label: `视频帧 #${position.index} @ ${formatStageClock(position.pts_us / 1e6)}`,
+      frame: { mediaId: meta.id, index: position.index, ptsUs: position.pts_us },
     }
   }
 
@@ -665,6 +717,8 @@ export function useConsoleStage({
       generation: () => generation.value,
       surfaceEl,
       captureFrame,
+      capturePreviewFrame,
+      frameAt: () => frameAt.value,
     },
   }
 }

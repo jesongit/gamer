@@ -266,6 +266,9 @@ export const videoApi = {
   /** GET /api/recording/:id → RecordingSessionMeta；404 `{"error":"recording_not_found"}`。 */
   recordingStatus: async (id) => request('GET', `/api/recording/${encodeURIComponent(requireId(id, 'recording_id'))}`),
 
+  /** 清理已结束且关联视频已删除的录制历史；409 保留所有数据。 */
+  deleteRecording: async (id) => request('DELETE', `/api/recording/${encodeURIComponent(requireId(id, 'recording_id'))}`),
+
   /** GET /api/recording/active?device_id= → session；404（无活动会话，轮询常态）→ null。 */
   activeRecording: async (deviceId) => {
     try {

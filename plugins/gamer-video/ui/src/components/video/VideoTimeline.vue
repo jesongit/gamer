@@ -22,10 +22,6 @@
         @seeked="onSeeked"
       ></video>
 
-      <div v-if="sharedStage" class="shared-timeline">
-        <button class="mini-btn" :disabled="!stageMatches" :title="sharedStage.playing ? '暂停预览' : '播放预览'" @click="sharedStage.togglePlay()">{{ sharedStage.playing ? 'Ⅱ' : '▷' }}</button>
-        <input class="range" type="range" min="0" :max="totalSeconds || 1" step="0.001" :value="currentTime" :disabled="!stageMatches" aria-label="视频时间轴" @input="seekPreview($event.target.value)" />
-      </div>
       <div class="time-row">
         <span class="mono time-readout" data-testid="video-time">{{ currentTime.toFixed(3) }}s</span>
         <span class="mono time-total">/ {{ totalSeconds.toFixed(3) }}s</span>
@@ -232,7 +228,6 @@ import { alignEvents, eventSummary } from './recordingEvents'
 import { ptsFromTime, videoApi } from './videoApi'
 
 const sharedStage = inject(STAGE_MEDIA_CONTROLLER_KEY, null)
-const timelineOwner = Symbol('video-timeline')
 
 const props = defineProps({
   media: { type: Object, default: null },
@@ -303,6 +298,8 @@ const calibrationText = computed(() => {
 })
 
 watch(() => props.media?.id, () => {
+  eventsLoadSeq += 1
+  eventsBusy.value = false
   mediaGeneration += 1
   currentTime.value = 0
   invalidateProductionFrame()
@@ -317,6 +314,8 @@ watch(() => props.media?.id, () => {
 }, { immediate: true })
 
 watch(() => props.recordingId, () => {
+  eventsLoadSeq += 1
+  eventsBusy.value = false
   // 会话变化：清空旧事件（不自动拉取，避免打开项目就打两三个请求）
   eventsView.value = []
   eventsLoaded.value = false
@@ -490,22 +489,13 @@ function invalidateFromPreview() {
 }
 
 const stageMatches = computed(() => sharedStage?.kind === 'media' && sharedStage.mediaId === props.media?.id)
-watch(stageMatches, matches => {
-  if (matches) sharedStage.timelineOwner = timelineOwner
-  else if (sharedStage?.timelineOwner === timelineOwner) sharedStage.timelineOwner = null
-}, { immediate: true })
 watch(() => sharedStage?.currentTime, time => {
   if (!stageMatches.value || !Number.isFinite(Number(time))) return
   currentTime.value = Number(time)
   if (!isProgrammaticSeekPosition(currentTime.value)) invalidateFromPreview()
 })
 watch(() => sharedStage?.playing, playing => { if (playing && stageMatches.value) invalidateFromPreview() })
-function seekPreview(value) {
-  if (!stageMatches.value) return
-  invalidateFromPreview()
-  sharedStage.seek(Number(value))
-}
-onUnmounted(() => { if (sharedStage?.timelineOwner === timelineOwner) sharedStage.timelineOwner = null })
+onUnmounted(() => { eventsLoadSeq += 1 })
 
 function onTimeUpdate() {
   const t = Number(videoEl.value?.currentTime)
@@ -891,7 +881,7 @@ async function loadEvents() {
 async function jumpToEvent(view) {
   if (view.unmapped || view.ptsUs === null) return
   if (view.mediaId !== props.media?.id) {
-    frameError.value = `该事件在其他分段素材上（${view.mediaId}），请先在素材库切换`
+    frameError.value = '该事件属于另一个视频片段。请将对应片段设为项目主素材，或从素材库为它创建项目后定位。'
     return
   }
   const context = captureFrameContext()
@@ -974,5 +964,4 @@ summary.sub-title { cursor: pointer; }
 .mono { font-family: var(--mono); }
 .frame-count { color: var(--text-2); font-size: 12px; }
 .mini-btn{min-height:28px;padding:3px 7px;font-size:13px}.zone-head,.sub-head{gap:6px}.preview{max-height:200px;object-fit:contain;background:var(--bg-0)}.frame-shot{max-height:180px;object-fit:contain}.zone-title,.sub-title{font-size:13px}.input,.select{min-height:28px;font-size:13px}.cal-grid{gap:7px}.marker-row,.event-row{min-height:32px}
-.shared-timeline{display:flex;align-items:center;gap:9px;padding:7px 0;border-bottom:1px solid var(--border)}.shared-timeline .range{flex:1;min-width:0}
 </style>

@@ -53,13 +53,14 @@ function deferred() {
 
 function mountDraft(props = {}) {
   return mount(VideoDraft, {
-    props: { recordingId: 'rec-a', packageId: 'pkg-a', yamlReady: true, ...props },
+    props: { recordings: [{id: 'rec-a', event_count: 1}, {id: 'rec-b', event_count: 1}], recordingId: 'rec-a', packageId: 'pkg-a', yamlReady: true, ...props },
   })
 }
 
 async function loadCurrent(wrapper, list = A_EVENTS) {
   videoApi.recordingEvents.mockResolvedValueOnce(list)
-  await wrapper.find('[data-testid="draft-load"]').trigger('click')
+  await flushPromises()
+    await wrapper.find('[data-testid="draft-load"]').trigger('click')
   await flushPromises()
 }
 
@@ -83,7 +84,7 @@ describe('VideoDraft V05 草稿与录制会话隔离', () => {
     expect(wrapper.find('[data-testid="draft-switch-protect"]').exists()).toBe(true)
     await wrapper.find('[data-testid="draft-switch-cancel"]').trigger('click')
     expect(wrapper.find('[data-testid="draft-event-check-a-1"]').exists()).toBe(true)
-    expect(videoApi.recordingEvents).toHaveBeenCalledTimes(1)
+    expect(videoApi.recordingEvents).toHaveBeenCalledTimes(2)
 
     await wrapper.find('[data-testid="draft-recording-id"]').setValue('rec-b')
     await wrapper.find('[data-testid="draft-recording-id"]').trigger('change')
@@ -109,6 +110,7 @@ describe('VideoDraft V05 草稿与录制会话隔离', () => {
       .mockImplementationOnce(() => newRequest.promise)
 
     const wrapper = mountDraft()
+    await flushPromises()
     await wrapper.find('[data-testid="draft-load"]').trigger('click')
     await wrapper.setProps({ recordingId: 'rec-b' })
     expect(videoApi.recordingEvents).toHaveBeenNthCalledWith(2, 'rec-b')

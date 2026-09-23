@@ -129,6 +129,12 @@ pub(super) struct PutTextResourceReq {
     force: bool,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PutResourceQuery {
+    new_path: Option<String>,
+}
+
 // ---------- JSON 视图 ----------
 
 fn manifest_json(manifest: &crate::resources::PackageManifest) -> Value {
@@ -570,6 +576,10 @@ pub(super) async fn api_get_plugin_resource(
                 [
                     (header::CONTENT_TYPE, mime.to_string()),
                     (header::CACHE_CONTROL, "no-cache".to_string()),
+                    (
+                        header::ETAG,
+                        format!("\"{}\"", crate::resources::bytes_version(&bytes)),
+                    ),
                 ],
                 bytes,
             )
@@ -586,6 +596,7 @@ pub(super) async fn api_get_plugin_resource(
 pub(super) async fn api_put_plugin_resource(
     State(st): State<AppState>,
     Path((pkg, plugin, path)): Path<(String, String, String)>,
+    Query(query): Query<PutResourceQuery>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -600,6 +611,9 @@ pub(super) async fn api_put_plugin_resource(
         .map(|v| v.to_ascii_lowercase().contains("application/json"))
         .unwrap_or(false);
     if is_json {
+        if query.new_path.is_some() {
+            return ApiError::bad_request("new_path 仅支持字节资源替换").into_response();
+        }
         let Ok(req) = serde_json::from_slice::<PutTextResourceReq>(&body) else {
             return ApiError::bad_request(
                 "请求体必须是 JSON 对象 {content, expected_version?, force?}",
@@ -675,13 +689,17 @@ pub(super) async fn api_put_plugin_resource(
             .and_then(|v| v.to_str().ok())
             .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
             .unwrap_or(false);
+        if query.new_path.is_some() && (expected.is_none() || force) {
+            return ApiError::bad_request("替换并改名必须提供 X-Expected-Version，不能使用 force")
+                .into_response();
+        }
         // 保存前字节钩子（校验 + 可选归一化）：诊断 JSON 与文本路径同一 400
         // 形状。归档导入（POST /api/packages/import）不经过内容校验——包整体
         // 替换语义，内容以导出侧校验为准。
         let validation = {
             let st = st.clone();
             let (pkg, plugin) = validate_ctx;
-            let path = path.clone();
+            let path = query.new_path.clone().unwrap_or_else(|| path.clone());
             let bytes = body.clone();
             tokio::task::spawn_blocking(move || {
                 let store = store_of(&st);
@@ -708,9 +726,20 @@ pub(super) async fn api_put_plugin_resource(
         };
         let result = run_blocking_api(move || -> Result<Value, ApiError> {
             let store = store_of(&st);
-            let entry = store
-                .write_binary(&pkg, &plugin, &path, &bytes, expected.as_deref(), force)
-                .map_err(write_error)?;
+            let entry = match query.new_path {
+                Some(new_path) => store.replace_binary(
+                    &pkg,
+                    &plugin,
+                    &path,
+                    &new_path,
+                    &bytes,
+                    expected.as_deref().expect("replacement version checked"),
+                ),
+                None => {
+                    store.write_binary(&pkg, &plugin, &path, &bytes, expected.as_deref(), force)
+                }
+            }
+            .map_err(write_error)?;
             let mut value = serde_json::to_value(&entry).unwrap_or_default();
             if let Some(obj) = value.as_object_mut() {
                 obj.insert("ok".into(), Value::Bool(true));

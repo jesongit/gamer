@@ -1,4 +1,7 @@
 <template>
+  <div ref="playerRoot" class="player-stage" :class="{ 'is-media': stage?.kind === 'media' }"
+    :tabindex="stage?.kind === 'media' ? 0 : -1" :aria-label="stage?.kind === 'media' ? '视频播放器：空格播放暂停，J或左箭头后退，K或右箭头前进，支持长按' : undefined"
+    @click="focusMediaPlayer" @keydown="mediaKeys.keydown" @keyup="mediaKeys.keyup" @focusout="mediaKeys.release">
   <div
     ref="videoWrap"
     class="video-wrap"
@@ -19,8 +22,7 @@
       @mouseleave="props.onVideoMouseLeave"
     ></video>
 
-    <!-- 视频来源（离线只读）：mediaFileUrl 播放流；输入事件复用舞台处理器，
-         设备输入在路由处按 kind 门禁拒绝，框选/放大镜照常工作 -->
+    <!-- 视频手势只控制本地播放；框选/取点模式优先转交舞台处理器，不向设备发输入。 -->
     <video
       v-if="stage && stage.kind === 'media' && stage.mediaSrc"
       :key="stage.mediaId"
@@ -31,47 +33,15 @@
       tabindex="-1"
       aria-readonly="true"
       class="video-stream media-stream"
-      @mousedown="props.onMouseDown"
-      @mousemove="props.onMouseMove"
-      @mouseup="props.onMouseUp"
+      :class="{ 'is-selecting': selectionMode }"
+      :title="selectionMode ? '选择画面区域' : '点击播放/暂停 · 空格播放/暂停 · J / ← 后退 · K / → 前进（支持长按）'"
+      @mousedown="gestures.down"
+      @mousemove="gestures.hover"
+      @mouseup="gestures.release"
       @wheel.prevent="props.onWheel"
       @contextmenu.prevent
       @mouseleave="props.onVideoMouseLeave"
     ></video>
-
-    <!-- 视频来源顶部条：素材切换 + 返回实时（来源切换属各自 viewer 状态） -->
-    <div v-if="stage && stage.kind === 'media'" class="media-topbar" data-keyboard-ignore="true">
-      <span class="media-mode-badge">🎞 视频来源 · 只读</span>
-      <select class="media-pick mono" :value="stage.mediaId" aria-label="选择素材" @change="stage.onMediaPick($event.target.value)">
-        <option value="" disabled>{{ stage.mediaOptions.length ? '选择素材…' : '媒体库为空' }}</option>
-        <option v-for="m in stage.mediaOptions" :key="m.id" :value="m.id">{{ m.name }}</option>
-      </select>
-      <span v-if="stage.mediaName" class="media-meta mono" :title="stage.mediaName + (stage.mediaSizeLabel ? ' · ' + stage.mediaSizeLabel : '')">{{ stage.mediaName }}<template v-if="stage.mediaSizeLabel"> · {{ stage.mediaSizeLabel }}</template></span>
-      <button class="media-live-btn" type="button" @click="stage.backToLive()">⏻ 返回实时</button>
-    </div>
-
-    <!-- 视频来源控制条：播放/暂停 · seek · 逐帧± · 倍速 · 时间（只读展示，
-         所有动作仅操作当前 Stage 媒体元素，不连设备不触 ADB） -->
-    <div v-if="stage && stage.kind === 'media' && stage.mediaSrc && !stage.timelineOwner" class="media-controls" data-keyboard-ignore="true">
-      <button class="mc-btn" type="button" :title="stage.playing ? '暂停' : '播放'" @click="stage.togglePlay()">{{ stage.playing ? '⏸' : '▶' }}</button>
-      <input
-        class="mc-seek"
-        type="range"
-        min="0"
-        :max="stage.duration || 0"
-        step="0.001"
-        :value="stage.currentTime || 0"
-        :disabled="!stage.stageReady"
-        aria-label="视频播放位置"
-        @input="stage.seek($event.target.value)"
-      />
-      <button class="mc-btn" type="button" title="上一帧" @click="stage.stepFrames(-1)">⏮</button>
-      <button class="mc-btn" type="button" title="下一帧" @click="stage.stepFrames(1)">⏭</button>
-      <select class="mc-rate mono" :value="stage.rate" title="倍速" aria-label="播放倍速" @change="stage.setRate($event.target.value)">
-        <option v-for="r in stage.rateOptions" :key="r" :value="r">{{ r }}×</option>
-      </select>
-      <span class="mc-time mono">{{ stage.timeText }} / {{ stage.durationText }}</span>
-    </div>
 
     <!-- 找图命中框演示（模板测试） -->
     <div v-if="props.showHit" class="hit-box" :class="{ 'hit-miss': props.hitMiss }" :style="props.hitStyle">
@@ -146,12 +116,38 @@
     </div>
 
     <button class="v-fs" @click="props.fullscreen" title="全屏">⛶</button>
+    <div v-if="gestures.feedback.value" class="media-feedback" role="status">{{ gestures.feedback.value }}</div>
+  </div>
+  <div v-if="stage?.kind === 'media'" class="media-controls" data-keyboard-ignore="true">
+    <input class="mc-seek" type="range" min="0" :max="stage.duration || 0" step="0.001"
+      :value="stage.currentTime || 0" :disabled="!stage.stageReady" aria-label="视频播放位置"
+      :style="{ '--progress': `${stage.duration ? Math.min(100, stage.currentTime / stage.duration * 100) : 0}%` }"
+      @input="stage.seek($event.target.value)" />
+    <div class="media-control-row">
+      <button class="mc-btn mc-play" type="button" :disabled="!stage.stageReady" :title="stage.playing ? '暂停' : '播放'"
+        :aria-label="stage.playing ? '暂停' : '播放'" @click="stage.togglePlay()"><UiIcon :name="stage.playing ? 'pause' : 'play'" /></button>
+      <button class="mc-btn" type="button" title="上一帧" aria-label="上一帧" :disabled="!stage.stageReady" @click="stage.stepFrames(-1)"><UiIcon name="frame-prev" /></button>
+      <button class="mc-btn" type="button" title="下一帧" aria-label="下一帧" :disabled="!stage.stageReady" @click="stage.stepFrames(1)"><UiIcon name="frame-next" /></button>
+      <span class="mc-time mono">{{ stage.timeText }} <span>/ {{ stage.durationText }}</span></span>
+      <select class="media-pick" :value="stage.mediaId" aria-label="选择素材" :title="stage.mediaName" @change="stage.onMediaPick($event.target.value)">
+        <option value="" disabled>{{ stage.mediaOptions.length ? '选择素材…' : '媒体库为空' }}</option>
+        <option v-for="m in stage.mediaOptions" :key="m.id" :value="m.id">{{ m.name }}</option>
+      </select>
+      <select class="mc-rate" :value="stage.rate" title="播放倍速" aria-label="播放倍速" @change="stage.setRate($event.target.value)">
+        <option v-for="r in stage.rateOptions" :key="r" :value="r">{{ r }}×</option>
+      </select>
+      <button class="mc-btn media-live-btn" type="button" title="返回实时投屏" @click="stage.backToLive()"><UiIcon name="phone" /><span>返回实时</span></button>
+      <button class="mc-btn" type="button" title="全屏" aria-label="视频全屏" @click="toggleMediaFullscreen"><UiIcon name="expand" /></button>
+    </div>
+  </div>
   </div>
 </template>
 
 <script setup>
 import UiIcon from '../ui/UiIcon.vue'
 import { onMounted, ref, watch } from 'vue'
+import { useMediaGestures } from './useMediaGestures'
+import { useMediaKeyboard } from './useMediaKeyboard'
 
 const props = defineProps({
   connected: { type: Boolean, default: false },
@@ -167,6 +163,7 @@ const props = defineProps({
   hitMiss: { type: Boolean, default: false },
   hitStyle: { type: Object, default: () => ({}) },
   hitLabel: { type: String, default: '' },
+  selectionMode: { type: Boolean, default: false },
   selecting: { type: Boolean, default: false },
   selStyle: { type: Object, default: () => ({}) },
   scriptFx: { type: Object, required: true },
@@ -185,6 +182,23 @@ const props = defineProps({
   fullscreen: { type: Function, required: true },
 })
 
+const gestures = useMediaGestures(props)
+const playerRoot = ref(null)
+const mediaKeys = useMediaKeyboard({
+  stage: () => props.stage,
+  blocked: () => props.selectionMode || props.selecting || [...document.querySelectorAll('[role="dialog"],[aria-modal="true"],.modal-mask,.tpl-view-mask,.add-step-panel')].some(el => el.getClientRects().length > 0),
+  focused: () => document.activeElement === playerRoot.value,
+  report: gestures.show,
+})
+function focusMediaPlayer(event) {
+  if (props.stage?.kind !== 'media' || event.target?.closest?.('button,input,select,textarea,a,[contenteditable]')) return
+  playerRoot.value?.focus({ preventScroll: true })
+  event.stopPropagation()
+}
+function toggleMediaFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen?.()
+  else videoWrap.value?.parentElement?.requestFullscreen?.()
+}
 const emit = defineEmits(['video-mounted', 'wrap-mounted', 'loupe-mounted', 'media-video-mounted'])
 const videoWrap = ref(null)
 const videoElement = ref(null)
@@ -211,42 +225,31 @@ onMounted(() => {
 
 .video-stream { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; user-select: none; }
 
-/* ===== 视频来源（离线只读）===== */
-.media-stream { cursor: crosshair; }
-.media-topbar {
-  position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 9;
-  display: flex; align-items: center; gap: 8px; max-width: calc(100% - 24px);
-  padding: 4px 8px; background: rgba(8,10,16,.78); backdrop-filter: blur(2px);
-  border: 1px solid rgba(251,191,36,.35); border-radius: 20px;
-}
-.media-mode-badge { font-size: 12px; color: #fde68a; white-space: nowrap; }
-.media-pick { max-width: 200px; padding: 2px 6px; font-size: 12px; }
-.media-meta {
-  font-size: 12px; color: var(--text-1); white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis; max-width: 260px;
-}
-.media-live-btn {
-  padding: 3px 10px; font-size: 12px; white-space: nowrap; cursor: pointer;
-  background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent);
-  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent); border-radius: 14px;
-}
-.media-live-btn:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
-.media-controls {
-  position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 9;
-  display: flex; align-items: center; gap: 6px; padding: 5px 10px;
-  background: rgba(8,10,16,.78); backdrop-filter: blur(2px);
-  border: 1px solid rgba(255,255,255,.1); border-radius: 20px;
-}
-.mc-seek { width: clamp(100px, 18vw, 240px); accent-color: var(--accent); cursor: pointer; }
-.mc-seek:disabled { cursor: not-allowed; opacity: .5; }
-.mc-btn {
-  width: 28px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
-  background: none; border: none; color: var(--text-1); font-size: 13px; cursor: pointer; border-radius: var(--radius-sm);
-}
-.mc-btn:hover { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
-.mc-rate { padding: 2px 4px; font-size: 12px; }
-.mc-time { font-size: 12px; color: var(--text-1); min-width: 110px; text-align: center; }
-
+.player-stage { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; background: #0c0d0f; }
+.player-stage:focus { outline: none; }
+.media-stream { cursor: pointer; }
+.media-stream.is-selecting { cursor: crosshair; }
+.media-controls { flex: none; z-index: 9; background: #191b1e; border-top: 1px solid #34373c; color: #e4e6e9; }
+.mc-seek { display: block; appearance: none; width: 100%; height: 12px; margin: -6px 0 0; background: transparent; cursor: pointer; position: relative; }
+.mc-seek::-webkit-slider-runnable-track { height: 3px; background: linear-gradient(to right, var(--accent) 0 var(--progress), #484c52 var(--progress) 100%); }
+.mc-seek::-webkit-slider-thumb { appearance: none; width: 9px; height: 9px; margin-top: -3px; border-radius: 50%; background: var(--accent); }
+.mc-seek::-moz-range-track { height: 3px; background: #484c52; }
+.mc-seek::-moz-range-progress { background: var(--accent); height: 3px; }
+.mc-seek::-moz-range-thumb { width: 9px; height: 9px; border: 0; background: var(--accent); border-radius: 50%; }
+.media-control-row { display: flex; align-items: center; gap: 5px; padding: 3px 10px 8px; min-width: 0; }
+.mc-btn { display: inline-flex; align-items: center; justify-content: center; flex: none; gap: 5px; height: 30px; min-width: 30px; padding: 4px 6px; border: 0; border-radius: 3px; color: #d8dce2; background: transparent; cursor: pointer; }
+.mc-btn:hover { color: var(--accent); background: #303339; }
+.mc-btn:disabled,.mc-seek:disabled { opacity: .4; cursor: default; }
+.mc-play { color: var(--accent); }
+.mc-play :deep(svg) { width: 21px; height: 21px; }
+.mc-time { flex: none; margin: 0 8px; font-size: 12px; color: #eff1f4; font-variant-numeric: tabular-nums; }
+.mc-time span { color: #a4abb5; }
+.media-pick,.mc-rate { height: 28px; padding: 2px 5px; border: 1px solid transparent; border-radius: 3px; background: #191b1e; color: #c5cbd3; font-size: 12px; }
+.media-pick { flex: 1; min-width: 50px; width: 100px; margin-left: auto; text-overflow: ellipsis; }
+.media-pick:hover,.mc-rate:hover { border-color: #484c52; }
+.media-live-btn { font-size: 12px; white-space: nowrap; }
+.media-feedback { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); padding: 12px 20px; background: rgba(15,17,20,.85); color: #fff; font-size: 15px; border-radius: 4px; pointer-events: none; z-index: 8; }
+@media(max-width: 700px) { .media-control-row { gap: 2px; padding-inline: 5px; } .mc-time { margin-inline: 3px; } .media-live-btn span { display: none; } }
 .hit-box {
   position: absolute; border: 2px solid var(--accent);
   box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 50%, transparent); border-radius: 4px;
@@ -330,6 +333,6 @@ onMounted(() => {
   color: var(--text-1); border-radius: var(--radius-sm); width: 30px; height: 30px; cursor: pointer;
 }
 .v-fs:hover { color: var(--accent); border-color: var(--accent); }
-.video-wrap{min-height:0;background:var(--bg-0)}.v-fs{display:none}.media-topbar{border-radius:3px;background:var(--chrome)}
+.video-wrap{min-height:0;background:var(--bg-0)}.v-fs{display:none}
 .v-empty-icon :deep(.ui-icon){width:38px;height:38px;color:var(--text-2)}
 </style>

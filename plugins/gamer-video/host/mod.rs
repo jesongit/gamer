@@ -62,7 +62,7 @@ mod tests {
     fn video_manifest_parses_with_builtin_execution_and_core_panel() {
         let manifest = parse_manifest(VIDEO_EXTENSION_MANIFEST_TOML.as_bytes()).unwrap();
         assert_eq!(manifest.id().as_str(), super::VIDEO_EXTENSION_ID);
-        assert_eq!(manifest.version().as_str(), "1.0.0");
+        assert_eq!(manifest.version().as_str(), "1.0.2");
         // manifest v2 + builtin 执行类型：无 entry、builtin_id 已注册。
         assert_eq!(manifest.execution().kind(), ExecutionKind::Builtin);
         assert_eq!(

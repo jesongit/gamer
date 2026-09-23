@@ -30,6 +30,7 @@ vi.mock('../../plugins/gamer-video/ui/src/components/video/videoApi', async (imp
       recordingCancel: vi.fn(async () => ({})),
       activeRecording: vi.fn(async () => null),
       recordingEvents: vi.fn(async () => []),
+      recordingHistory: vi.fn(async () => []),
       recordingStatus: vi.fn(async () => ({ id: 'rec-1', segments: [] })),
       createVideoDraft: vi.fn(async () => ({ yaml: '', diagnostics: [] })),
       saveDraft: vi.fn(async () => ({ id: 'pkg/draft-1.yaml', path: 'automations/draft-1.yaml', package_id: 'pkg' })),
@@ -116,6 +117,7 @@ beforeEach(() => {
   packageStore.currentPackageId = 'pkg'
   videoApi.listMedia.mockResolvedValue(MEDIA.map(m => ({ ...m })))
   videoApi.activeRecording.mockResolvedValue(null)
+  videoApi.recordingHistory.mockResolvedValue([])
   videoApi.listProjectEntries.mockResolvedValue([])
   // 展示帧表缺省空态（各用例按需覆盖）
   videoApi.mediaFrames.mockResolvedValue({ frame_count: 0, first_pts_us: null, last_pts_us: null })
@@ -405,6 +407,7 @@ describe('VideoWorkbench 项目编辑流', () => {
   })
 
   it('项目关联录制会话：草稿入口带入 recordingId 切到草稿分区', async () => {
+    videoApi.recordingHistory.mockResolvedValue([{id: 'rec-42', state: 'completed', event_count: 1, segments: []}])
     const entry = { ...PROJECT_ENTRY, content: projectJson({ recording: { recording_id: 'rec-42' } }) }
     const w = await mountOpenProject(entry)
     await w.find('[data-testid="project-open-draft"]').trigger('click')
@@ -603,6 +606,19 @@ describe('VideoTimeline 时间轴区', () => {
     w.unmount()
   })
 
+  it('项目时间轴切换素材后丢弃旧操作列表的迟到响应', async () => {
+    let resolveEvents
+    videoApi.recordingEvents.mockReturnValueOnce(new Promise(resolve => { resolveEvents = resolve }))
+    const w = mount(VideoTimeline, {props: {media: MEDIA[0], markers: [], calibration: CAL, recordingId: 'rec-old'}})
+    await w.find('[data-testid="events-load"]').trigger('click')
+    await w.setProps({media: MEDIA[1], recordingId: 'rec-new'})
+    resolveEvents([{event_id: 'old', source: 'manual', kind: 'tap', timeline_us: 1, payload: {x: 1, y: 2}}])
+    await flushPromises()
+    expect(w.findAll('[data-testid="timeline-event-row"]')).toHaveLength(0)
+    expect(w.find('[data-testid="events-load"]').element.disabled).toBe(false)
+    w.unmount()
+  })
+
   it('外部素材（无 recordingId）不渲染事件区——不伪造操作日志', async () => {
     const w = mount(VideoTimeline, { props: { media: MEDIA[1], markers: [], calibration: CAL, recordingId: '' } })
     await flushPromises()
@@ -711,6 +727,7 @@ describe('VideoDraft 草稿区状态流转（Phase 7 可编辑工作流）', () 
   it('载入事件：时间轴升序渲染 kind/时间/来源；全选/清空驱动已选数', async () => {
     const wrapper = mountDraft()
     videoApi.recordingEvents.mockResolvedValue(EVENTS)
+    await flushPromises()
     await wrapper.find('[data-testid="draft-load"]').trigger('click')
     await flushPromises()
 
@@ -732,6 +749,7 @@ describe('VideoDraft 草稿区状态流转（Phase 7 可编辑工作流）', () 
   it('yaml 依赖门禁（§10.1）：未 Running 时生成禁用 + 依赖横幅，注释/重排仍可见', async () => {
     const wrapper = mountDraft('rec-9', false)
     videoApi.recordingEvents.mockResolvedValue(EVENTS)
+    await flushPromises()
     await wrapper.find('[data-testid="draft-load"]').trigger('click')
     await flushPromises()
     expect(wrapper.find('[data-testid="draft-dep-banner"]').exists()).toBe(true)
@@ -752,6 +770,7 @@ describe('VideoDraft 草稿区状态流转（Phase 7 可编辑工作流）', () 
         { event_id: 'e2', kind: 'tap', timeline_us: 5200000, selected: true, mapped: false },
       ] },
     })
+    await flushPromises()
     await wrapper.find('[data-testid="draft-load"]').trigger('click')
     await flushPromises()
 
@@ -778,6 +797,7 @@ describe('VideoDraft 草稿区状态流转（Phase 7 可编辑工作流）', () 
       source: { recording_id: 'rec-9', events: [] },
     })
     videoApi.saveDraft.mockResolvedValue({ id: 'pkg/my-draft.yaml', path: 'automations/my-draft.yaml', package_id: 'pkg' })
+    await flushPromises()
     await wrapper.find('[data-testid="draft-load"]').trigger('click')
     await flushPromises()
 
@@ -808,6 +828,7 @@ describe('VideoDraft 草稿区状态流转（Phase 7 可编辑工作流）', () 
     videoApi.recordingEvents.mockResolvedValue(EVENTS)
     videoApi.createVideoDraft.mockResolvedValue({ yaml: 'version: 3\nsteps: []', diagnostics: [], source: null })
     videoApi.saveDraft.mockRejectedValue(new Error('自动化脚本已存在: pkg/d.yaml（确认覆盖请带 overwrite:true）'))
+    await flushPromises()
     await wrapper.find('[data-testid="draft-load"]').trigger('click')
     await flushPromises()
     await wrapper.find('[data-testid="draft-select-all"]').trigger('click')
@@ -823,6 +844,7 @@ describe('VideoDraft 草稿区状态流转（Phase 7 可编辑工作流）', () 
   it('生成失败 / 空事件会话走错误与空态分支', async () => {
     const wrapper = mountDraft()
     videoApi.recordingEvents.mockResolvedValue([])
+    await flushPromises()
     await wrapper.find('[data-testid="draft-load"]').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('没有可映射的操作事件')
@@ -831,6 +853,7 @@ describe('VideoDraft 草稿区状态流转（Phase 7 可编辑工作流）', () 
     const wrapper2 = mountDraft()
     videoApi.recordingEvents.mockResolvedValue(EVENTS)
     videoApi.createVideoDraft.mockRejectedValue(new Error('extension not running'))
+    await flushPromises()
     await wrapper2.find('[data-testid="draft-load"]').trigger('click')
     await flushPromises()
     await wrapper2.find('[data-testid="draft-select-all"]').trigger('click')
@@ -856,6 +879,27 @@ describe('VideoDraft 草稿区状态流转（Phase 7 可编辑工作流）', () 
 // ---------------------------------------------------------------------------
 
 describe('项目保存 → 媒体引用同步（遗留 #2）', () => {
+  it('项目删除后解除引用失败仍显示重试入口，并能在没有项目详情时完成清理', async () => {
+    stubProject()
+    const w = mount(VideoWorkbench)
+    await flushPromises()
+    await w.find('[data-testid="workbench-tab-projects"]').trigger('click')
+    videoApi.getMedia.mockResolvedValue({id: 'm1', refs: [{package_id: 'pkg', plugin_id: 'gamer-video', kind: 'project'}]})
+    videoApi.setMediaRefs.mockRejectedValueOnce(new Error('网络中断'))
+    videoApi.listProjectEntries.mockResolvedValue([])
+    const button = w.find('[data-testid="project-delete"]')
+    await button.trigger('click')
+    await button.trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain('项目已删除，但媒体引用解除失败')
+    expect(w.find('[data-testid="video-timeline"]').exists()).toBe(false)
+    videoApi.setMediaRefs.mockResolvedValue({})
+    await w.find('[data-testid="deleted-project-ref-retry"]').trigger('click')
+    await flushPromises()
+    expect(videoApi.setMediaRefs).toHaveBeenLastCalledWith('m1', [])
+    expect(w.find('[data-testid="deleted-project-ref-retry"]').exists()).toBe(false)
+    w.unmount()
+  })
   const MARKER = (mediaId = 'm1') => ({ id: 'mk-1', label: '旧标记', note: '', created_at: '', frame: { media_id: mediaId, frame_index: 3, pts_us: 90000, calibration_version: 1 } })
 
   async function mountOpenDirtyProject(content) {

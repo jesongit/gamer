@@ -1,9 +1,10 @@
 <template>
   <section class="video-draft" data-testid="video-draft">
     <div class="zone-head">
-      <span class="zone-title">草稿</span>
+      <span class="zone-title">生成脚本</span>
       <span class="zone-warn-tag" title="生成/保存只是草稿工作流：不创建任务、不启动 Runner、不自动执行">草稿不会自动执行</span>
     </div>
+    <p class="zone-note">选择录制 → 勾选需要的操作 → 生成并检查 → 保存到自动化编辑器。普通视频不含操作记录，可到素材库创建项目制作模板。</p>
 
     <div v-if="!yamlReady" class="zone-error" role="alert" data-testid="draft-dep-banner">
       需要「自动化」插件（gamer-yaml）处于运行状态：草稿生成与保存经其公开动作完成。
@@ -11,24 +12,32 @@
     </div>
 
     <div class="draft-context" data-testid="draft-context">
-      <span>录制：<span class="mono">{{ activeRecordingId || '未选择' }}</span></span>
-      <span>Package：<span class="mono">{{ packageId || '未选择' }}</span></span>
+      <span>配置：<span class="mono">{{ packageId || '未选择（保存前需选择）' }}</span></span>
       <span>设备：<span class="mono">{{ deviceId || '未返回' }}</span></span>
       <span>Android：<span class="mono">{{ androidPackageName || '未返回' }}</span></span>
     </div>
 
     <div class="rid-row">
-      <input
+      <select
         v-model.trim="ridInput"
-        class="input rid-input mono"
+        class="select rid-input"
         aria-label="录制会话来源"
-        placeholder="由录制历史或项目带入 recording id"
         data-testid="draft-recording-id"
         @change="emitRecordingId"
-      />
+      >
+        <option value="">选择含操作记录的录制</option>
+        <option v-for="record in recordingOptions" :key="record.id" :value="record.id" :disabled="record.unavailable">{{ record.label }}</option>
+      </select>
+      <button class="btn btn-sm" type="button" @click="$emit('refresh-recordings')">刷新来源</button>
       <button class="btn btn-sm" type="button" :disabled="!ridInput || loadingEvents" data-testid="draft-load" @click="loadEvents">
         {{ loadingEvents ? '读取中…' : '载入事件' }}
       </button>
+    </div>
+    <div v-if="recordingsError" class="zone-error" role="alert">{{ recordingsError }}</div>
+    <div v-if="!packageId" class="zone-note">请先在投屏上方选择配置，再生成并保存脚本。</div>
+    <div v-if="!activeRecordingId && !recordingsError" class="zone-empty" data-testid="draft-no-source">
+      {{ recordings.some(record => record.event_count > 0 && record.events_available !== false) ? '从上方选择录制，载入操作记录。' : '暂无可生成脚本的录制。请开始录制，并在投屏中执行需要记录的操作。' }}
+      <button class="mini-btn" type="button" @click="$emit('open-library')">前往素材库</button>
     </div>
 
     <div v-if="pendingSwitch" class="switch-protect" role="dialog" aria-live="polite" data-testid="draft-switch-protect">
@@ -106,8 +115,8 @@
         <button
           class="btn btn-sm btn-primary"
           type="button"
-          :disabled="!yamlReady || !selectedIds.length || generating || eventLoadState !== 'ready'"
-          :title="yamlReady ? '' : '需要 gamer-yaml 扩展运行中'"
+          :disabled="!yamlReady || !packageId || !selectedIds.length || generating || eventLoadState !== 'ready'"
+          :title="!packageId ? '请先选择配置' : yamlReady ? '' : '需要 gamer-yaml 扩展运行中'"
           data-testid="draft-generate"
           @click="generate"
         >{{ generating ? '生成中…' : `⚡ 生成 YAML 草稿（${selectedIds.length}）` }}</button>
@@ -129,10 +138,10 @@
         <button
           class="btn btn-sm btn-primary"
           type="button"
-          :disabled="!yamlReady || !yaml || !saveName || saving"
+          :disabled="!yamlReady || !yaml || !saveName || saving || !draftPackageId"
           data-testid="draft-save"
           @click="saveDraft"
-        >{{ saving ? '保存中…' : (saveState === 'failed' ? '重试保存' : '💾 保存到当前 Package') }}</button>
+        >{{ saving ? '保存中…' : (saveState === 'failed' ? '重试保存' : '保存并打开编辑器') }}</button>
       </div>
 
       <div v-if="saveState === 'failed'" class="save-failed" role="status" data-testid="draft-save-failed">
@@ -171,7 +180,7 @@
 // - 生成/保存不创建任务、不启动 Runner、不自动执行；真机运行为显式动作
 //   （现有 YAML 运行机制，Phase 9 验证）。
 // gamer-yaml 未 Running：生成/保存禁用 + 依赖提示（视频其余能力不受影响）。
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useOperationStatus } from '../../../../../../web/src/components/ui/useOperationStatus'
 import { useRouter } from 'vue-router'
 import { requestAutomationEditor } from '../../../../../gamer-yaml/ui/src/components/console/automationEditorBridge'
@@ -185,6 +194,9 @@ import {
 } from './videoDraftWorkflow'
 
 const props = defineProps({
+  active: { type: Boolean, default: true },
+  recordings: { type: Array, default: () => [] },
+  recordingsError: { type: String, default: '' },
   recordingId: { type: String, default: '' },
   packageId: { type: String, default: '' },
   deviceId: { type: String, default: '' },
@@ -192,7 +204,7 @@ const props = defineProps({
   /** gamer-yaml 是否 Running（§10.1 依赖门禁）。 */
   yamlReady: { type: Boolean, default: false },
 })
-const emit = defineEmits(['update:recordingId'])
+const emit = defineEmits(['update:recordingId', 'refresh-recordings', 'open-library'])
 
 const router = useRouter()
 const ridInput = ref(props.recordingId)
@@ -226,11 +238,25 @@ const saving = ref(false)
 const saveState = ref('idle') // idle | saving | saved | failed
 const eventFilters = reactive({ search: '', kind: '', source: '', status: '', from: '', to: '' })
 const draftContext = ref(null)
-useOperationStatus(() => ({
+useOperationStatus(() => props.active ? ({
   text: error.value || (saving.value ? '保存草稿中…' : generating.value ? '生成草稿中…' : loadingEvents.value ? '读取录制事件…' : draftDirty.value ? '草稿未保存' : saveState.value === 'saved' ? '草稿已保存' : ''),
   tone: error.value ? 'error' : '',
   actions: error.value ? [{ label: '详情', detail: error.value }, { label: '复制', copy: error.value }] : [],
-}))
+}) : undefined)
+
+const recordingOptions = computed(() => {
+  const rows = props.recordings.map(record => {
+    const reason = ['recording', 'finalizing'].includes(record.state) ? '录制未结束' : !record.event_count ? '无操作记录' : record.events_available === false ? '操作记录已丢失' : ''
+    const date = record.started_at ? new Date(record.started_at).toLocaleString() : record.id
+    return { id: record.id, unavailable: !!reason, label: `${date} · ${reason || `${record.event_count} 条操作`}` }
+  })
+  // 项目可引用尚未载入列表的会话；保留当前来源，真实可用性由事件接口校验。
+  const id = activeRecordingId.value || props.recordingId
+  if (id && !rows.some(row => row.id === id)) rows.push({ id, label: `当前项目录制 · ${id}` })
+  return rows
+})
+onMounted(() => { if (activeRecordingId.value) startEventLoad(activeRecordingId.value) })
+onBeforeUnmount(invalidateAsyncWork)
 
 // 每次会话切换都递增；所有异步工作都必须带着这份上下文回来。
 let contextVersion = 0
@@ -288,13 +314,13 @@ function markDraftDirty() {
   if (saveState.value !== 'saving') saveState.value = 'idle'
 }
 
-function invalidateAsyncWork() {
+function invalidateAsyncWork({ preserveEvents = false } = {}) {
   contextVersion += 1
-  eventsRequestSeq += 1
+  if (!preserveEvents) eventsRequestSeq += 1
   generationRequestSeq += 1
   saveRequestSeq += 1
   // 旧请求的 finally 也不能结束新上下文的 loading 状态。
-  loadingEvents.value = false
+  if (!preserveEvents) loadingEvents.value = false
   generating.value = false
   saving.value = false
 }
@@ -367,7 +393,6 @@ function startEventLoad(recordingId, { preserveDraft = false } = {}) {
   if (!id) return
 
   const requestSeq = ++eventsRequestSeq
-  const requestVersion = contextVersion
   loadingEvents.value = true
   eventLoadState.value = 'loading'
   loadedOnce.value = false
@@ -381,7 +406,7 @@ function startEventLoad(recordingId, { preserveDraft = false } = {}) {
   void (async () => {
     try {
       const list = await videoApi.recordingEvents(id)
-      if (requestSeq !== eventsRequestSeq || requestVersion !== contextVersion || id !== activeRecordingId.value) return
+      if (requestSeq !== eventsRequestSeq || id !== activeRecordingId.value) return
       const sourceList = Array.isArray(list) ? list : []
       // 合同要求服务端时间轴升序；防御性排序同时保留逆序/非法时间诊断。
       loadDiagnostics.value = [
@@ -394,7 +419,7 @@ function startEventLoad(recordingId, { preserveDraft = false } = {}) {
       refreshDiagnostics()
       emitRecordingId()
     } catch (e) {
-      if (requestSeq !== eventsRequestSeq || requestVersion !== contextVersion || id !== activeRecordingId.value) return
+      if (requestSeq !== eventsRequestSeq || id !== activeRecordingId.value) return
       // 失败和空列表都必须清除旧事件，避免再次提交上一会话的 event_id。
       events.value = []
       resetSelection()
@@ -404,7 +429,7 @@ function startEventLoad(recordingId, { preserveDraft = false } = {}) {
       refreshDiagnostics()
       error.value = `载入事件失败：${e?.message || e}`
     } finally {
-      if (requestSeq === eventsRequestSeq && requestVersion === contextVersion && id === activeRecordingId.value) {
+      if (requestSeq === eventsRequestSeq && id === activeRecordingId.value) {
         loadingEvents.value = false
       }
     }
@@ -441,7 +466,7 @@ function requestRecordingSwitch(recordingId, { emitUpdate = false, reload = fals
 function requestPackageSwitch(packageId) {
   const id = normalizedId(packageId)
   if (!hasUnsavedDraft.value) {
-    invalidateAsyncWork()
+    invalidateAsyncWork({ preserveEvents: true })
     draftRevision.value += 1
     clearDraftState()
     return
@@ -451,7 +476,7 @@ function requestPackageSwitch(packageId) {
 
 function requestDeviceSwitch(kind, value) {
   if (!hasUnsavedDraft.value) {
-    invalidateAsyncWork()
+    invalidateAsyncWork({ preserveEvents: true })
     draftRevision.value += 1
     clearDraftState()
     return

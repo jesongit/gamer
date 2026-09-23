@@ -378,7 +378,47 @@ describe('useConsoleStage：媒体播放控制与指定帧', () => {
     wrapper.unmount()
   })
 
-  it('captureFrame：live = 现有实时视频元素；media = 服务端确定帧 PNG（未锁定按 ptsUs，锁定后按展示序索引）', async () => {
+  it('当前画面匹配直接复制原分辨率像素，跳转与恢复播放使结果失效', async () => {
+    const { ctl, wrapper, el } = await mountInMedia()
+    el.readyState = 2
+    el.seeking = false
+    el.currentTime = 240
+    const drawImage = vi.fn()
+    const canvas = { width: 0, height: 0, getContext: () => ({drawImage}),
+      toBlob: done => done(new Blob(['png'], {type: 'image/png'})) }
+    document.createElement = tag => tag === 'canvas' ? canvas : origCreateElement(tag)
+    fetch.mockClear()
+    const frame = await ctl.templateBridge.capturePreviewFrame()
+    expect(frame).toMatchObject({png: 'cG5n', width: el.videoWidth, height: el.videoHeight})
+    expect(drawImage).toHaveBeenCalledWith(el, 0, 0, el.videoWidth, el.videoHeight)
+    expect(fetch).not.toHaveBeenCalled()
+    expect(frame.isCurrent()).toBe(true)
+    el.currentTime = 241
+    expect(frame.isCurrent()).toBe(false)
+    const second = await ctl.templateBridge.capturePreviewFrame()
+    await el.play()
+    expect(second.isCurrent()).toBe(false)
+    el.seeking = true
+    expect(await ctl.templateBridge.capturePreviewFrame()).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('当前画面编码期间切换来源，丢弃旧图像', async () => {
+    const { ctl, wrapper, el } = await mountInMedia()
+    el.readyState = 2
+    let finish
+    document.createElement = tag => tag === 'canvas' ? {
+      width: 0, height: 0, getContext: () => ({drawImage: vi.fn()}),
+      toBlob: done => { finish = done },
+    } : origCreateElement(tag)
+    const pending = ctl.templateBridge.capturePreviewFrame()
+    ctl.view.backToLive()
+    finish(new Blob(['png'], {type: 'image/png'}))
+    expect(await pending).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('captureFrame：live = 实时视频元素；media = 先定位展示帧，再按索引冻结 PNG 与帧身份', async () => {
     const liveEl = { videoWidth: 1920, videoHeight: 1080 }
     const { ctl, wrapper } = mountStage({ liveVideo: liveEl })
     const liveFrame = await ctl.captureFrame()
@@ -389,15 +429,16 @@ describe('useConsoleStage：媒体播放控制与指定帧', () => {
     const media = await mountInMedia({
       loadImage: async (url) => {
         expect(url).toContain('/api/media/m1/frame')
-        expect(url).toContain('pts_us=')
+        expect(url).toContain('index=60')
         return { naturalWidth: 640, naturalHeight: 360 }
       },
     })
     const { ctl: ctl2, wrapper: w2, el: el2 } = media
     el2.currentTime = 2
     el2.emit('timeupdate')
+    fetch.mockResolvedValueOnce(jsonRes(200, {current: {index: 60, pts_us: 2000000}, frame_count: 300}))
     const frame = await ctl2.captureFrame()
-    expect(frame).toMatchObject({ width: 640, height: 360, label: '视频帧 @ 00:02.0' })
+    expect(frame).toMatchObject({ width: 640, height: 360, label: '视频帧 #60 @ 00:02.0', frame: {mediaId: 'm1', index: 60, ptsUs: 2000000} })
     expect(typeof frame.generation).toBe('number')
     w2.unmount()
 

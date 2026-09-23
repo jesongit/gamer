@@ -179,7 +179,7 @@ fn template_stem(template: &str) -> &str {
     }
 }
 
-/// 模板预处理结果：缓存 PNG 解码后的灰度矩阵、f32 数据和 NCC 统计量。
+/// 模板预处理结果：缓存 PNG 解码后的灰度矩阵和精确整数 NCC 统计量。
 ///
 /// 缓存键是完整模板字节的 SHA-256，因此覆盖上传或同名文件内容变化会自然
 /// 使用新键，不会把旧模板结果带到新内容上。缩放后的模板按目标尺寸另存，
@@ -187,9 +187,9 @@ fn template_stem(template: &str) -> &str {
 #[derive(Clone)]
 struct PreparedTemplate {
     image: Arc<GrayImage>,
-    data: Arc<Vec<f32>>,
-    mean: f32,
-    var: f32,
+    sum: u64,
+    /// n * sum(pixel²) - sum(pixel)²; converted only after exact subtraction.
+    variance: f64,
 }
 
 struct TemplateCacheEntry {
@@ -309,7 +309,7 @@ fn source_memory_bytes(source: &DynamicImage) -> usize {
 
 fn prepared_memory_bytes(prepared: &PreparedTemplate) -> usize {
     let (width, height) = prepared.image.dimensions();
-    image_memory_bytes(width, height, 5)
+    image_memory_bytes(width, height, 1)
 }
 
 fn cache_entry_count(cache: &TemplateCache) -> usize {
@@ -349,25 +349,25 @@ fn cached_template_source(bytes: &[u8]) -> anyhow::Result<([u8; 32], Arc<Dynamic
 }
 
 fn build_prepared_template(image: GrayImage) -> anyhow::Result<PreparedTemplate> {
-    let data: Vec<f32> = image.as_raw().iter().map(|&v| v as f32 / 255.0).collect();
+    let data = image.as_raw();
     if data.is_empty() {
         anyhow::bail!("template is empty");
     }
-    let mean = data.iter().sum::<f32>() / data.len() as f32;
-    let var = data.iter().map(|&v| (v - mean) * (v - mean)).sum();
-    if var < 1e-6 {
+    let sum: u64 = data.iter().map(|&v| u64::from(v)).sum();
+    let sum_squares: u64 = data.iter().map(|&v| u64::from(v) * u64::from(v)).sum();
+    let variance = data.len() as u128 * sum_squares as u128 - (sum as u128).pow(2);
+    if variance == 0 {
         anyhow::bail!("template is uniform color");
     }
     Ok(PreparedTemplate {
         image: Arc::new(image),
-        data: Arc::new(data),
-        mean,
-        var,
+        sum,
+        variance: variance as f64,
     })
 }
 
 /// 获取指定尺寸的模板统计量。尺寸是缩放后的实际模板尺寸，避免重复灰度化、
-/// f32 转换和均值/方差计算；首次 miss 才做一次这些工作。
+/// 整数像素矩统计；首次 miss 才做一次这些工作。
 fn cached_prepared_template(
     key: [u8; 32],
     source: &Arc<DynamicImage>,
@@ -563,9 +563,9 @@ fn match_template_with_source(
         anyhow::bail!("template too large after scaling");
     }
 
-    let t_data = prepared.data.as_slice();
-    let t_mean = prepared.mean;
-    let t_var = prepared.var;
+    let t_data = prepared.image.as_raw().as_slice();
+    let t_sum = prepared.sum;
+    let t_var = prepared.variance;
 
     // 区域映射到缩放坐标系（上界截断到缩放后图像尺寸，防止浮点误差越界）
     let (rx0s, ry0s) = ((rx0 as f32 * scale) as u32, (ry0 as f32 * scale) as u32);
@@ -596,7 +596,7 @@ fn match_template_with_source(
             let mut local_best: Option<(f32, usize, usize)> = None;
             for &y0 in &ys {
                 let y0 = y0 as usize;
-                let score = ncc_at(s_raw, s_w, t_data, t_w, t_h, x0, y0, t_mean, t_var);
+                let score = ncc_at(s_raw, s_w, t_data, t_w, t_h, x0, y0, t_sum, t_var);
                 if local_best.is_none_or(|(b, _, _)| score > b) {
                     local_best = Some((score, x0, y0));
                 }
@@ -633,7 +633,7 @@ fn match_template_with_source(
             if nx + t_w > rx1s as usize || ny + t_h > ry1s as usize {
                 continue;
             }
-            let s = ncc_at(s_raw, s_w, t_data, t_w, t_h, nx, ny, t_mean, t_var);
+            let s = ncc_at(s_raw, s_w, t_data, t_w, t_h, nx, ny, t_sum, t_var);
             if s > best_score {
                 best_score = s;
                 best_pos = (nx, ny);
@@ -660,7 +660,7 @@ fn match_template_with_source(
         true
     };
     let threshold = threshold.unwrap_or(0.8);
-    let result = if best_score < threshold || !color_ok {
+    let result = if !best_score.is_finite() || best_score < threshold || !color_ok {
         None
     } else {
         // 映射回原始坐标系
@@ -693,39 +693,50 @@ fn match_template_with_source(
 fn ncc_at(
     s_raw: &[u8],
     s_w: usize,
-    t_data: &[f32],
+    t_data: &[u8],
     t_w: usize,
     t_h: usize,
     x0: usize,
     y0: usize,
-    t_mean: f32,
-    t_var: f32,
+    t_sum: u64,
+    t_var: f64,
 ) -> f32 {
     // 防御：窗口超出图像范围直接返回 -1（浮点坐标截断可能差 1px）
     if x0 + t_w > s_w || y0 + t_h > s_raw.len() / s_w.max(1) {
         return -1.0;
     }
-    let mut sum_i = 0f32;
-    let mut sum_i2 = 0f32;
-    let mut sum_it = 0f32;
-    let n = (t_w * t_h) as f32;
+    // Raw 8-bit pixels allow exact sums/products. f32 normalized accumulation
+    // loses precision on flat patches; subtracting nearly equal rounded sums
+    // used to produce fabricated variance/covariance and scores well above 1.
+    let mut sum_i = 0u64;
+    let mut sum_i2 = 0u64;
+    let mut sum_it = 0u64;
+    let n = (t_w * t_h) as u128;
     for ty in 0..t_h {
         let row = (y0 + ty) * s_w + x0;
         let t_row = ty * t_w;
         for tx in 0..t_w {
-            let iv = s_raw[row + tx] as f32 / 255.0;
-            let tv = t_data[t_row + tx];
+            let iv = u64::from(s_raw[row + tx]);
+            let tv = u64::from(t_data[t_row + tx]);
             sum_i += iv;
             sum_i2 += iv * iv;
             sum_it += iv * tv;
         }
     }
-    let i_var = sum_i2 - sum_i * sum_i / n;
-    if i_var < 1e-9 {
+    // u128 covers squared sums even at the 32 MP image budget. Convert to f64
+    // only after subtraction so uniform windows remain exactly zero variance.
+    let i_var = n * sum_i2 as u128 - (sum_i as u128).pow(2);
+    if i_var == 0 || t_var <= 0.0 {
         return -1.0;
     }
-    let cov = sum_it - sum_i * t_mean;
-    cov / (i_var * t_var).sqrt()
+    let cov = (n * sum_it as u128) as i128 - (sum_i as u128 * t_sum as u128) as i128;
+    let score = cov as f64 / (i_var as f64 * t_var).sqrt();
+    // Only the final square root/division rounds; tolerate machine epsilon,
+    // but never turn an invalid out-of-range score into a successful match.
+    if !score.is_finite() || score.abs() > 1.0 + 1e-12 {
+        return -1.0;
+    }
+    score.clamp(-1.0, 1.0) as f32
 }
 
 fn to_gray(img: &DynamicImage) -> GrayImage {
@@ -1376,6 +1387,52 @@ mod tests {
     }
 
     #[test]
+    fn ncc_low_contrast_template_never_matches_uniform_background() {
+        let template = GrayImage::from_fn(70, 107, |x, _| image::Luma([40 + (x % 2) as u8]));
+        let screen = RgbImage::from_pixel(72, 109, Rgb([7, 7, 7]));
+        // Previously accumulated f32 moments returned about 2.93 on this flat
+        // image and passed the 0.8 threshold despite there being no pattern.
+        let result = match_template(&MatchRequest {
+            screen_png: encode_png(&screen),
+            template_png: encode_luma_png(&template),
+            threshold: Some(0.8),
+            region: Some([0, 0, 72, 109]),
+            color: false,
+        })
+        .unwrap();
+        assert!(
+            result.is_none(),
+            "uniform background cannot match: {result:?}"
+        );
+    }
+
+    #[test]
+    fn ncc_low_contrast_exact_match_has_unit_score() {
+        let template = GrayImage::from_fn(70, 107, |x, y| {
+            image::Luma([230 + ((x * 7 + y * 3) % 2) as u8])
+        });
+        let mut screen = RgbImage::from_pixel(74, 111, Rgb([7, 7, 7]));
+        for (x, y, pixel) in template.enumerate_pixels() {
+            screen.put_pixel(x + 2, y + 2, Rgb([pixel[0]; 3]));
+        }
+        let result = match_template(&MatchRequest {
+            screen_png: encode_png(&screen),
+            template_png: encode_luma_png(&template),
+            threshold: Some(0.99),
+            region: Some([0, 0, 74, 111]),
+            color: false,
+        })
+        .unwrap()
+        .expect("exact low-contrast pattern must match");
+        assert!(
+            (0.99999..=1.0).contains(&result.score),
+            "score={}",
+            result.score
+        );
+        assert_eq!((result.x, result.y), (2, 2));
+    }
+
+    #[test]
     fn test_template_match_hit() {
         let _lock = TEST_GUARD.lock().unwrap();
         // 400x600 截图：紫底 + 绿色方块
@@ -1752,8 +1809,8 @@ mod tests {
         let prepared2 = cached_prepared_template(key2, &source2, (17, 13)).unwrap();
         assert!(Arc::ptr_eq(&prepared1, &prepared2));
         assert_eq!(prepared1.image.dimensions(), (17, 13));
-        assert_eq!(prepared1.data.len(), 17 * 13);
-        assert!(prepared1.var > 1e-6);
+        assert_eq!(prepared1.image.as_raw().len(), 17 * 13);
+        assert!(prepared1.variance > 0.0);
     }
 
     /// 固定 fixture 的离线基准。每个指标输出墙钟 p50/p95/max、CPU 时间分位数、

@@ -421,7 +421,9 @@ impl MediaService {
                 continue;
             }
             match read_metadata(&entry.path()) {
-                Ok(meta) => items.push(meta),
+                Ok(meta) if meta.state != MediaState::Importing => items.push(meta),
+                // 录制未收口的段和无视频的起录占位目录都不是可播放素材。
+                Ok(_) => (),
                 Err(e) => {
                     // 半成品/损坏目录不阻断列表（警告可观测），也不可被删除外引用
                     tracing::warn!(media_dir = %dir_name, error = %e, "跳过不可读媒体目录");

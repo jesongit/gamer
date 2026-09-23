@@ -37,6 +37,7 @@ impl SearchRegion {
 pub struct MatchOptions {
     pub threshold: Option<f32>,
     pub region: Option<SearchRegion>,
+    /// Require color validation in addition to any marker on the resolved template file.
     pub color_check: bool,
 }
 

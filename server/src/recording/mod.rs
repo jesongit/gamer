@@ -505,7 +505,13 @@ impl SessionShared {
     // ---------- 分段与会话收口 ----------
 
     fn open_segment(&self, st: &mut SessionState, first_pts: u64) -> anyhow::Result<()> {
-        let media = MediaId(uuid::Uuid::new_v4().simple().to_string());
+        // 第一段复用起录时登记的素材目录，使视频、事件与元数据属于同一条素材。
+        let media = if st.segment_seq == 0 {
+            MediaId(self.dir.file_name().and_then(|name| name.to_str())
+                .ok_or_else(|| anyhow::anyhow!("录制素材目录无效"))?.to_owned())
+        } else {
+            MediaId(uuid::Uuid::new_v4().simple().to_string())
+        };
         let dir = self.inner.data_root.join(&media.0);
         std::fs::create_dir_all(&dir)?;
         let mut writer =
@@ -775,6 +781,7 @@ impl SessionShared {
         }
     }
 
+    #[cfg(test)]
     fn read_events(&self) -> Vec<InputEventRecord> {
         read_events_dir(&self.dir)
     }
@@ -1078,8 +1085,25 @@ impl RecordingService {
                     })
                     .map(|segment| segment.media_id.0.clone())
                     .collect();
+                let source = self
+                    .inner
+                    .get(&meta.id)
+                    .map(|shared| shared.dir.clone())
+                    .or_else(|| self.load_from_disk(&meta.id).map(|(_, dir)| dir));
+                let events_available = meta.event_count > 0
+                    && source.is_some_and(|dir| {
+                        std::fs::read_dir(dir.join("recording")).is_ok_and(|entries| {
+                            entries.flatten().any(|entry| {
+                                let name = entry.file_name().to_string_lossy().into_owned();
+                                name.starts_with("events-")
+                                    && name.ends_with(".jsonl")
+                                    && entry.metadata().is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+                            })
+                        })
+                    });
                 let mut value = serde_json::to_value(meta)?;
                 value["missing_media"] = json!(missing);
+                value["events_available"] = json!(events_available);
                 sessions.push(value);
             }
         }
@@ -1092,6 +1116,72 @@ impl RecordingService {
         Ok(sessions)
     }
 
+    /// 先删除视频（媒体服务负责引用保护），再清理终态录制的历史与事件。
+    pub fn delete_history(&self, id: &RecordingId) -> anyhow::Result<()> {
+        let meta = self.status(id)?;
+        if matches!(
+            meta.state,
+            RecordingState::Recording | RecordingState::Finalizing
+        ) {
+            return Err(RecordingFailure::new(FailureKind::Busy, "recording_active: 请先结束录制").into());
+        }
+        let source = self
+            .inner
+            .get(id)
+            .map(|shared| shared.dir.clone())
+            .or_else(|| self.load_from_disk(id).map(|(_, dir)| dir));
+        // 旧起录占位目录只含事件，没有视频；不能要求用户先删除这份事件来源。
+        let empty_placeholder = source.as_ref().filter(|dir| {
+            !dir.join("original.mp4").exists()
+                && std::fs::read(dir.join("metadata.json")).ok()
+                    .and_then(|bytes| serde_json::from_slice::<MediaMetadata>(&bytes).ok())
+                    .is_some_and(|meta| meta.source == MediaSource::Recording
+                        && meta.state == MediaState::Importing && meta.size == 0 && meta.sha256.is_empty())
+        }).map(|dir| dir.join("metadata.json"));
+        if meta.segments.iter().any(|segment| {
+            self.inner.data_root.join(&segment.media_id.0).join("metadata.json").exists()
+        }) || (empty_placeholder.is_none() && source.as_ref().is_some_and(|dir| dir.join("metadata.json").exists())) {
+            return Err(RecordingFailure::new(FailureKind::Busy, "recording_has_media: 请先在素材库删除关联视频；被项目引用的视频需先解除引用").into());
+        }
+        let root = self.inner.data_root.canonicalize()?;
+        let archive = self.inner.data_root.join(".recording-history").join(&id.0);
+        let mut paths = Vec::new();
+        if let Some(source) = source {
+            let path = source.join("recording");
+            if path.exists() {
+                let owner: RecordingSessionMeta =
+                    serde_json::from_slice(&std::fs::read(path.join("session.json"))?)?;
+                if owner.id != *id {
+                    return Err(RecordingFailure::new(FailureKind::Invalid, "recording_path_invalid").into());
+                }
+            }
+            paths.push(path);
+        }
+        paths.push(archive);
+        // 先验证全部路径，拒绝符号链接/目录联接把清理引向媒体根之外。
+        let mut resolved = Vec::new();
+        for path in paths {
+            match path.canonicalize() {
+                Ok(path) if path.starts_with(&root) && path != root => resolved.push(path),
+                Ok(_) => return Err(RecordingFailure::new(FailureKind::Invalid, "recording_path_invalid").into()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if let Some(path) = empty_placeholder {
+            let resolved_file = path.canonicalize()?;
+            if !resolved_file.starts_with(&root) {
+                return Err(RecordingFailure::new(FailureKind::Invalid, "recording_path_invalid").into());
+            }
+            std::fs::remove_file(path)?;
+        }
+        for path in resolved {
+            std::fs::remove_dir_all(path)?;
+        }
+        self.inner.sessions.lock().remove(&id.0);
+        Ok(())
+    }
+
     /// 该设备当前活动会话（无则 None；前端轮询/录制按钮态）。
     pub fn active_for_device(&self, device_id: &str) -> Option<RecordingSessionMeta> {
         self.inner
@@ -1101,17 +1191,20 @@ impl RecordingService {
 
     /// 读取会话的操作事件（时间轴升序；来自 recording/events-*.jsonl）。
     pub fn events(&self, id: &RecordingId) -> anyhow::Result<Vec<InputEventRecord>> {
-        if let Some(shared) = self.inner.get(id) {
-            return Ok(shared.read_events());
-        }
-        self.load_from_disk(id)
+        let source = self
+            .inner
+            .get(id)
+            .map(|shared| (shared.meta_snapshot(), shared.dir.clone()))
+            .or_else(|| self.load_from_disk(id));
+        source
             .map(|(meta, dir)| {
-                if meta.event_count > 0 && !dir.join("recording").is_dir() {
+                let events = read_events_dir(&dir);
+                if meta.event_count > 0 && events.is_empty() {
                     return Err(anyhow::anyhow!(
                         "recording_events_missing: 录制事件来源素材已删除"
                     ));
                 }
-                Ok(read_events_dir(&dir))
+                Ok(events)
             })
             .ok_or_else(|| {
                 anyhow::Error::from(RecordingFailure::new(
@@ -1416,6 +1509,57 @@ mod tests {
         assert!(service.status(&RecordingId("../escape".into())).is_err());
     }
 
+    #[test]
+    fn history_deletion_guards_active_and_media_then_survives_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let shared = test_session(root.path(), "device");
+        let service = RecordingService { inner: shared.inner.clone() };
+        assert!(service.delete_history(&shared.id).unwrap_err().to_string().contains("recording_active"));
+        shared.finalize_cancel();
+        std::fs::write(shared.dir.join("metadata.json"), "{}").unwrap();
+        assert!(service.delete_history(&shared.id).unwrap_err().to_string().contains("recording_has_media"));
+        assert_eq!(service.history().unwrap().len(), 1);
+        std::fs::remove_file(shared.dir.join("metadata.json")).unwrap();
+        service.delete_history(&shared.id).unwrap();
+        assert!(service.history().unwrap().is_empty());
+        assert!(RecordingService::open(root.path().to_path_buf()).unwrap().history().unwrap().is_empty());
+        assert!(service.delete_history(&RecordingId("../escape".into())).is_err());
+    }
+
+    #[test]
+    fn missing_events_are_reported_even_for_in_memory_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        let shared = test_session(root.path(), "device");
+        shared.state.lock().meta.event_count = 1;
+        shared.finalize_cancel();
+        let service = RecordingService { inner: shared.inner.clone() };
+        assert_eq!(service.history().unwrap()[0]["events_available"], false);
+        assert!(service.events(&shared.id).unwrap_err().to_string().contains("recording_events_missing"));
+        std::fs::remove_dir_all(&shared.dir).unwrap();
+        service.delete_history(&shared.id).unwrap();
+        assert!(service.history().unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_placeholder_is_hidden_but_keeps_events_until_history_deleted() {
+        let root = tempfile::tempdir().unwrap();
+        let shared = test_session(root.path(), "device");
+        shared.on_touch(TOUCH_DOWN, 1, 100, 100);
+        shared.on_touch(TOUCH_UP, 1, 100, 100);
+        shared.finalize_cancel();
+        let media_id = MediaId(shared.dir.file_name().unwrap().to_str().unwrap().to_owned());
+        write_media_metadata(&shared.dir, &media_id, "placeholder", 1920, 1080,
+            MediaState::Importing, "", 0, None);
+        let service = RecordingService { inner: shared.inner.clone() };
+        let library = crate::media::MediaService::open(root.path().to_path_buf(), "unused-ffmpeg".into()).unwrap();
+        assert!(library.list().unwrap().is_empty());
+        assert_eq!(service.events(&shared.id).unwrap().len(), 1);
+        assert_eq!(service.history().unwrap()[0]["events_available"], true);
+        service.delete_history(&shared.id).unwrap();
+        assert!(!shared.dir.join("metadata.json").exists());
+        assert!(service.history().unwrap().is_empty());
+    }
+
     fn test_session(root: &Path, device_id: &str) -> Arc<SessionShared> {
         let inner = Arc::new(Inner {
             data_root: root.to_path_buf(),
@@ -1540,6 +1684,9 @@ mod tests {
 
         // 素材转 ready，MP4 落盘
         let media = &stopped.segments[0].media_id.0;
+        assert_eq!(root.join(media), shared.dir);
+        let library = crate::media::MediaService::open(root.clone(), "unused-ffmpeg".into()).unwrap();
+        assert_eq!(library.list().unwrap().len(), 1);
         assert_eq!(media_state(&root, media), MediaState::Ready);
         assert!(root.join(media).join("original.mp4").is_file());
 

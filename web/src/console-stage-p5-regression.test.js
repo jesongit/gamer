@@ -175,10 +175,42 @@ describe('P5-STAGE：统一来源播放器与输入边界', () => {
     })
     await openMedia(controller)
     const pending = controller.captureFrame()
+    await flushPromises()
     controller.view.backToLive()
     resolveImage({ naturalWidth: 640, naturalHeight: 360 })
 
     await expect(pending).resolves.toBeNull()
+    wrapper.unmount()
+  })
+
+  it('播放结束后框选固定到最后一帧，再次播放清除旧帧锁定', async () => {
+    const loadImage = vi.fn(async () => ({naturalWidth: 1280, naturalHeight: 720}))
+    const {controller, wrapper} = mountController({loadImage})
+    const video = await openMedia(controller)
+    video.currentTime = 10
+    video.emit('timeupdate')
+    video.emit('ended')
+    api.mediaFrames.mockResolvedValueOnce({frame_count: 300, last_pts_us: 9966667, current: null})
+    api.mediaFrameNeighbors.mockResolvedValueOnce({index: 299, pts_us: 9966667, next: null})
+    const captured = await controller.captureFrame()
+    expect(loadImage).toHaveBeenCalledWith('/api/media/m1/frame?index=299')
+    expect(captured.frame).toEqual({mediaId: 'm1', index: 299, ptsUs: 9966667})
+    video.play()
+    expect(controller.frameAt().index).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('暂停在两个时间戳之间时取当前显示帧，不取下一帧', async () => {
+    const loadImage = vi.fn(async () => ({naturalWidth: 1280, naturalHeight: 720}))
+    const {controller, wrapper} = mountController({loadImage})
+    const video = await openMedia(controller)
+    video.currentTime = .155
+    video.emit('timeupdate')
+    api.mediaFrames.mockResolvedValueOnce({frame_count: 20, current: {index: 2, pts_us: 200000}})
+    api.mediaFrameNeighbors.mockResolvedValueOnce({index: 2, pts_us: 200000, prev: {index: 1, pts_us: 100000}})
+    const captured = await controller.captureFrame()
+    expect(loadImage).toHaveBeenCalledWith('/api/media/m1/frame?index=1')
+    expect(captured.frame.ptsUs).toBe(100000)
     wrapper.unmount()
   })
 
@@ -245,7 +277,8 @@ describe('P5-STAGE：直接舞台组件使用同一控制器时钟', () => {
     const seek = wrapper.find('.mc-seek')
     await seek.setValue('4.5')
     expect(stage.seek).toHaveBeenCalledWith('4.5')
-    expect(wrapper.find('.media-mode-badge').text()).toContain('只读')
+    expect(wrapper.find('.media-topbar').exists()).toBe(false)
+    expect(wrapper.find('.media-controls .media-pick').exists()).toBe(true)
     wrapper.unmount()
   })
 })

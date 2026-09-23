@@ -3,6 +3,7 @@
     <div class="zone-head">
       <span class="zone-title">素材库</span>
     </div>
+    <p class="zone-note">选视频可在左侧预览；创建项目可逐帧制作模板、保存标记。录制中的点击、滑动等操作可转成脚本。</p>
 
     <!-- 设备选择与录制/刷新/导入集中在标题下方同一行，窄面板允许换行。 -->
     <div class="record-context">
@@ -82,10 +83,16 @@
       </div>
     </div>
 
+    <div v-if="selectedMedia" class="zone-actions" data-testid="media-next-actions">
+      <span class="media-name">已选：{{ selectedMedia.name }}</span>
+      <button class="btn btn-sm" type="button" @click="$emit('select', selectedId)">预览视频</button>
+      <button class="btn btn-sm" type="button" data-testid="media-create-project" @click="$emit('create-project', selectedId)">创建制作项目</button>
+    </div>
+
     <section class="history-box" data-testid="recording-history">
       <div class="history-head">
         <span class="zone-title">录制历史</span>
-        <span class="history-source-note">真实会话 · 含中断与未生成素材的记录</span>
+        <span class="history-source-note">分段是录制的视频片段，事件是录制期间的操作</span>
       </div>
       <button class="btn btn-sm" :disabled="historyLoading" @click="loadHistory">刷新记录</button>
       <div class="history-filters" aria-label="录制历史筛选">
@@ -117,7 +124,7 @@
           v-for="record in filteredRecordingHistory"
           :key="record.sessionId"
           class="history-row"
-          :class="{ selected: record.media.id === selectedId }"
+          :class="{ selected: currentRecording?.id === record.sessionId }"
           data-testid="recording-history-row"
           @click="selectHistory(record)"
         >
@@ -126,8 +133,19 @@
           <span class="mono">{{ record.deviceLabel }}</span>
           <span class="mono">{{ fmtDuration(record.durationUs) }}</span>
           <span class="tag" :class="stateTagClass(record.state)">{{ stateLabel(record.state) }}</span>
-          <button class="mini-btn" type="button" data-testid="recording-history-select" @click.stop="selectHistory(record)">查看</button>
-          <details class="history-segments" @click.stop><summary>分段 {{ record.session.segments.length }} · 事件 {{ record.session.event_count }}<template v-if="record.session.missing_media?.length"> · 素材缺失 {{ record.session.missing_media.length }}</template></summary><p v-if="record.session.error">{{ record.session.error }}</p><div v-for="segment in record.session.segments" :key="segment.media_id"><span>{{ segment.media_id }} · {{ segment.reason }} · {{ fmtDuration(segment.duration_us) }}</span><button class="mini-btn" :disabled="record.session.missing_media?.includes(segment.media_id)" @click="$emit('select', segment.media_id)">预览</button></div></details>
+          <span class="row-actions">
+            <button class="mini-btn" type="button" data-testid="recording-history-select" @click.stop="selectHistory(record)">详情</button>
+            <button class="mini-btn" type="button" data-testid="recording-history-draft" :disabled="!canDraft(record.session)" :title="draftReason(record.session)" @click.stop="$emit('recording-selected', record.session)">生成脚本</button>
+            <button class="mini-btn danger" type="button" data-testid="recording-history-delete" :disabled="!canDelete(record) || deletingHistory" :title="canDelete(record) ? '删除历史和操作记录，不删除视频' : '请先结束录制并在素材库删除关联视频'" @click.stop="removeHistory(record)">{{ armedHistoryId === record.sessionId ? '确认删除' : '删除历史' }}</button>
+          </span>
+          <details class="history-segments" @click.stop>
+            <summary>{{ record.media.id ? `${record.session.segments.length} 个视频片段` : '视频已不存在或未生成' }} · {{ draftReason(record.session) || `${record.session.event_count} 条操作记录` }}</summary>
+            <p v-if="record.session.error">{{ record.session.error }}</p>
+            <div v-for="(segment, index) in record.session.segments" :key="segment.media_id">
+              <span>片段 {{ index + 1 }} · {{ segmentReason(segment.reason) }} · {{ fmtDuration(segment.duration_us) }}</span>
+              <button class="mini-btn" type="button" :disabled="!mediaList.some(media => media.id === segment.media_id)" @click="$emit('select', segment.media_id)">预览</button>
+            </div>
+          </details>
         </div>
       </div>
     </section>
@@ -146,7 +164,7 @@
       <div v-if="currentRecording.error" class="history-event-error" data-testid="recording-terminal-error">{{ currentRecording.error }}</div>
       <div v-if="eventLoading" class="list-empty" data-testid="recording-events-loading">读取事件…</div>
       <div v-else-if="eventError" class="history-event-error" role="alert" data-testid="recording-events-error">{{ eventError }}</div>
-      <div v-else-if="eventsLoaded && !eventRows.length" class="list-empty" data-testid="recording-events-empty">该录制没有可展示的事件</div>
+      <div v-else-if="eventsLoaded && !eventRows.length" class="list-empty" data-testid="recording-events-empty">没有操作记录，无法生成脚本。视频仍可预览和制作模板；开始录制后在投屏中操作，才会记录点击、滑动等事件。</div>
       <div v-else-if="eventsLoaded" class="event-list" data-testid="recording-events-list">
         <div v-for="item in eventRows" :key="item.eventId" class="event-row">
           <span class="mono">{{ item.timelineLabel }}</span>
@@ -177,7 +195,8 @@ const props = defineProps({
   // 父层当前会吞掉 listMedia 错误；保留显式错误入口，避免把失败误报为空。
   loadError: { type: String, default: '' },
 })
-const emit = defineEmits(['select', 'refresh', 'changed', 'recording-finished', 'recording-selected'])
+const emit = defineEmits(['select', 'refresh', 'changed', 'recording-finished', 'recording-selected', 'create-project', 'imported'])
+const selectedMedia = computed(() => props.mediaList.find(media => media.id === props.selectedId))
 
 const devices = devicesData
 // 设备 id 是 UUID 字符串；不能使用 v-model.number，否则以数字开头的 UUID
@@ -189,6 +208,8 @@ const importingName = ref('')
 const error = ref('')
 const operationNote = ref('')
 const armedId = ref('')
+const armedHistoryId = ref('')
+const deletingHistory = ref(false)
 const historySearch = ref('')
 const historyDate = ref('')
 const historyDevice = ref('')
@@ -217,8 +238,8 @@ const historyStates = ['recording', 'finalizing', 'completed', 'interrupted', 'f
 const recordingHistory = computed(() => historySessions.value.map(session => {
   const media = props.mediaList.find(item => session.segments.some(segment => segment.media_id === item.id)) || { id: '' }
   const date = session.started_at
-  return { media, session, sessionId: session.id, name: media.name || `录制 ${session.id}`, date,
-    dateLabel: formatDate(date), deviceId: session.device_id, deviceLabel: session.device_id,
+  return { media, session, sessionId: session.id, name: media.name || `录制 · ${formatDate(date)}`, date,
+    dateLabel: formatDate(date), deviceId: session.device_id, deviceLabel: devices.value.find(device => device.id === session.device_id)?.name || session.device_id,
     durationUs: session.segments.reduce((sum, segment) => sum + segment.duration_us, 0), state: session.state }
 }))
 
@@ -259,8 +280,10 @@ async function pollActive() {
   try {
     const active = await videoApi.activeRecording(id)
     if (seq === pollSeq) {
+      const previous = session.value
       session.value = active
-      if (active && !currentRecording.value) currentRecording.value = active
+      if (active && (!currentRecording.value || currentRecording.value.id === active.id)) currentRecording.value = active
+      if (previous && !active) { emit('changed'); void loadHistory() }
     }
   } catch (e) {
     // 轮询失败不打断面板：保留上次结果，仅首次失败提示
@@ -366,9 +389,10 @@ async function onFileChosen(event) {
   error.value = ''
   try {
     const bytes = new Uint8Array(await file.arrayBuffer())
-    await videoApi.importMedia(bytes, file.name)
+    const imported = await videoApi.importMedia(bytes, file.name)
     operationNote.value = `视频已导入 · ${file.name}`
     emit('changed')
+    if (imported?.id) emit('imported', imported.id)
     void loadHistory()
   } catch (e) {
     error.value = describe(e, '导入失败')
@@ -410,12 +434,46 @@ function selectHistory(record) {
   if (record.media.id) emit('select', record.media.id)
   currentRecording.value = record.session
   if (record.sessionId) {
-    emit('recording-selected', record.session)
     void loadEvents(record.session)
   }
 }
 
+function canDraft(record) {
+  return !['recording', 'finalizing'].includes(record.state) && record.event_count > 0 && record.events_available !== false
+}
+function draftReason(record) {
+  if (['recording', 'finalizing'].includes(record.state)) return '请先结束录制'
+  if (!record.event_count) return '无操作记录'
+  if (record.events_available === false) return '操作记录已丢失'
+  return ''
+}
+function canDelete(record) {
+  return !['recording', 'finalizing'].includes(record.state) && !record.media.id
+}
+function segmentReason(reason) {
+  return { normal: '正常结束', disconnect: '连接中断', codec_change: '画面参数变化', disk_pressure: '磁盘空间不足' }[reason] || reason
+}
+async function removeHistory(record) {
+  if (!canDelete(record) || deletingHistory.value) return
+  if (armedHistoryId.value !== record.sessionId) { armedHistoryId.value = record.sessionId; return }
+  deletingHistory.value = true
+  error.value = ''
+  try {
+    await videoApi.deleteRecording(record.sessionId)
+    if (currentRecording.value?.id === record.sessionId) { currentRecording.value = null; eventsSeq++ }
+    armedHistoryId.value = ''
+    operationNote.value = '录制历史已删除'
+    await loadHistory()
+  } catch (e) { error.value = describe(e, '删除录制历史失败') }
+  finally { deletingHistory.value = false }
+}
+
 async function loadEvents(recording) {
+  if (recording?.events_available === false) {
+    eventsSeq++; eventLoading.value = false; eventsLoaded.value = true; eventRows.value = []
+    eventError.value = recording.event_count > 0 ? '操作记录已丢失，无法查看或生成脚本' : ''
+    return
+  }
   const id = String(recording?.id || '').trim()
   if (!id) {
     eventsLoaded.value = false
@@ -521,7 +579,12 @@ function stateTagClass(state) {
 .history-filters { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(100px, 1fr) minmax(100px, 1fr); gap: 5px; }
 .history-filters .input, .history-filters .select { min-width: 0; padding: 4px 6px; font-size: 12px; }
 .history-list { border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden auto; max-height: 190px; }
-.history-row { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(90px, 1fr) minmax(70px, .8fr) 58px 48px auto; align-items: center; gap: 5px; min-height: 28px; padding: 5px 7px; border-bottom: 1px solid color-mix(in srgb, var(--border) 25%, transparent); color: var(--text-1); font-size: 12px; cursor: pointer; }
+.history-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-height: 28px; padding: 8px; border-bottom: 1px solid color-mix(in srgb, var(--border) 25%, transparent); color: var(--text-1); font-size: 12px; cursor: pointer; }
+.history-row .history-name { flex: 1 1 150px; }
+.history-row .row-actions { margin-left: auto; flex-wrap: wrap; }
+.history-segments { flex-basis: 100%; }
+.mini-btn:disabled { opacity: .45; cursor: not-allowed; }
+.zone-note { margin: 0; line-height: 1.5; }
 .history-row:last-child { border-bottom: 0; }
 .history-row:hover, .history-row.selected { background: var(--bg-3); }
 .history-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-0); }

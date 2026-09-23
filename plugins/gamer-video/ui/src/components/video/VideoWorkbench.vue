@@ -28,14 +28,21 @@
         @changed="refresh"
         @recording-finished="onRecordingFinished"
         @recording-selected="onRecordingSelected"
+        @create-project="beginProjectFromMedia"
+        @imported="onImported"
       />
     </template>
 
     <template v-else-if="activeTab === 'projects'">
+      <div v-if="!openProject && (staleSaveError || mediaRefSyncError)" class="zone-error" role="alert">
+        {{ staleSaveError || mediaRefSyncError }}
+        <button v-if="pendingMediaRefSync" class="mini-btn" type="button" data-testid="deleted-project-ref-retry" :disabled="mediaRefSyncing" @click="retryMediaRefs">重试引用同步</button>
+      </div>
       <div v-if="!mediaList.length" class="zone-note" role="status" data-testid="projects-no-media-note">
         素材库为空：项目需要引用至少一个素材，请先在「素材库」导入或录制
       </div>
       <VideoProjects
+        ref="projectsPanel"
         :projects="projectSummaries"
         :open-id="openId"
         :loading="projectsLoading"
@@ -117,8 +124,8 @@
             data-testid="project-save"
             @click="saveProject"
           >{{ saving ? '保存中…' : '保存项目' }}</button>
-          <button v-if="openProject.recording?.recording_id" class="btn btn-sm" type="button" data-testid="project-open-draft" @click="openDraft">
-            → 草稿区
+          <button v-if="projectRecording?.recording_id" class="btn btn-sm" type="button" data-testid="project-open-draft" :disabled="!projectCanDraft" :title="projectCanDraft ? '' : '录制未结束、没有操作记录或记录已丢失'" @click="openDraft">
+            生成脚本
           </button>
         </div>
 
@@ -126,7 +133,7 @@
           :media="primaryMedia"
           :markers="openProject.markers"
           :calibration="openProject.calibration"
-          :recording-id="openProject.recording?.recording_id || ''"
+          :recording-id="projectRecording?.recording_id || ''"
           :yaml-ready="yamlReady"
           @add-marker="onAddMarker"
           @remove-marker="onRemoveMarker"
@@ -138,16 +145,21 @@
       <div v-else class="zone-empty" data-testid="project-detail-empty">选择一个项目进行制作（打开项目会联动左侧画面来源）</div>
     </template>
 
-    <template v-else>
+    <div v-if="draftVisited" v-show="activeTab === 'draft'">
       <VideoDraft
+        :active="activeTab === 'draft'"
+        :recordings="recordings"
+        :recordings-error="recordingsError"
         :recording-id="draftRecordingId"
         :package-id="packageId"
         :device-id="draftDeviceId"
         :android-package-name="draftAndroidPackageName"
         :yaml-ready="yamlReady"
         @update:recording-id="onRecordingIdUpdate"
+        @refresh-recordings="loadRecordings"
+        @open-library="activeTab = 'library'"
       />
-    </template>
+    </div>
 
     <!-- 模板工作台弹窗（§10.2：确定帧 → 模板创建/离线测试；经 gamer-yaml 动作清单缝） -->
     <TemplateStudio
@@ -172,13 +184,14 @@ import { useOperationStatus } from '../../../../../../web/src/components/ui/useO
 //   不改 deviceId/androidPackageName/currentPackageId 四 Context）；
 // - 状态 UI：缺 Package / 素材缺失 / 保存冲突（version_conflict 可重载）。
 // 面板自取数据（videoApi），纯离线制作，不发送任何设备输入。
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import MediaLibrary from './MediaLibrary.vue'
 import TemplateStudio from './TemplateStudio.vue'
 import VideoDraft from './VideoDraft.vue'
 import VideoProjects from './VideoProjects.vue'
 import VideoTimeline from './VideoTimeline.vue'
 import { requestStageMedia } from '../../../../../../web/src/components/console/useConsoleStage'
+import { STAGE_MEDIA_CONTROLLER_KEY } from '../../../../../../web/src/workspace/context'
 import { api } from '../../../../../../web/src/api'
 import { devicesData, store, templatesData } from '../../../../../../web/src/store'
 import { packageStore, selectPackage } from '../../../../../../web/src/package-store'
@@ -213,22 +226,28 @@ const draftDeviceId = computed(() => {
 })
 const draftAndroidPackageName = computed(() => {
   const source = recordingContext.value
-  return source?.recordingId === recordingId.value && source.androidPackageName
+  return source?.recordingId === recordingId.value && source.deviceId
     ? source.androidPackageName
     : currentAndroidPackageName.value
 })
 
 const activeTab = ref('library')
+const sharedStage = inject(STAGE_MEDIA_CONTROLLER_KEY, null)
+const draftVisited = ref(false)
+const projectsPanel = ref(null)
+const recordings = ref([])
+const recordingsError = ref('')
+let recordingRequestSeq = 0
+watch(activeTab, tab => {
+  if (tab === 'draft') { draftVisited.value = true; void loadRecordings() }
+})
 const mediaList = ref([])
 const loading = ref(false)
 const mediaLoadError = ref('')
 let mediaRequestSeq = 0
 const selectedId = ref('')
-const recordingId = ref('') // 最近一次录制会话（停止后自动带入草稿区）
-// VideoDraft 的首次非空 prop 不会自动触发事件加载；草稿区切换时先以空
-// 来源挂载，再在下一渲染周期交付真实 recording id，确保走其代次保护路径。
+const recordingId = ref('')
 const draftRecordingId = ref('')
-let draftSourceRevision = 0
 
 // ---- 项目状态 ----
 const projectsLoading = ref(false)
@@ -287,10 +306,16 @@ const openAsset = computed(() => (openProject.value
 const primaryAssetId = computed(() => openAsset.value?.media_id || '')
 const primaryMedia = computed(() => mediaList.value.find(media => media.id === primaryAssetId.value) || null)
 const primaryMissing = computed(() => !!openProject.value && !primaryMedia.value)
+const projectRecording = computed(() => openProject.value?.recording || recordingForMedia(primaryAssetId.value))
+const projectCanDraft = computed(() => {
+  const record = recordings.value.find(row => row.id === projectRecording.value?.recording_id)
+  return !!record && record.event_count > 0 && record.events_available !== false && !['recording', 'finalizing'].includes(record.state)
+})
 
 // ---------- 素材库 ----------
 
 async function refresh() {
+  void loadRecordings()
   const requestSeq = ++mediaRequestSeq
   loading.value = true
   mediaLoadError.value = ''
@@ -298,6 +323,10 @@ async function refresh() {
     const next = await videoApi.listMedia()
     if (requestSeq !== mediaRequestSeq) return
     mediaList.value = Array.isArray(next) ? next : []
+    if (sharedStage?.kind === 'media' && sharedStage.mediaId && !mediaList.value.some(media => media.id === sharedStage.mediaId)) {
+      sharedStage.backToLive()
+    }
+    void sharedStage?.refreshMedia()
     // 选中项被删除后回落到空态，不自动跳选其它素材
     if (selectedId.value && !mediaList.value.some(media => media.id === selectedId.value)) {
       selectedId.value = ''
@@ -317,12 +346,37 @@ function onSelect(id) {
   requestStageMedia(id)
 }
 
-function onRecordingFinished(meta) {
-  const id = normalizeId(meta && typeof meta === 'object' ? meta.id : meta)
-  if (!id) return
-  setRecordingSource(id, meta, { openDraft: true })
-  // 录制停止后先刷新素材列表；该调用不影响已冻结的录制来源。
-  void refresh()
+async function onRecordingFinished(meta) {
+  await refresh()
+  const mediaId = meta?.segments?.find(segment => mediaList.value.some(media => media.id === segment.media_id))?.media_id
+  if (mediaId) onSelect(mediaId)
+}
+
+async function onImported(id) {
+  await refresh()
+  if (mediaList.value.some(media => media.id === id)) onSelect(id)
+}
+
+async function loadRecordings() {
+  const seq = ++recordingRequestSeq
+  try {
+    const rows = await videoApi.recordingHistory()
+    if (seq === recordingRequestSeq) { recordings.value = rows; recordingsError.value = '' }
+  } catch (error) {
+    if (seq === recordingRequestSeq) recordingsError.value = describe(error, '录制来源读取失败')
+  }
+}
+
+function recordingForMedia(id) {
+  const recording = recordings.value.find(row => row.segments?.some(segment => segment.media_id === id))
+  return recording ? { recording_id: recording.id } : null
+}
+
+async function beginProjectFromMedia(id) {
+  onSelect(id)
+  activeTab.value = 'projects'
+  await nextTick()
+  projectsPanel.value?.beginCreate()
 }
 
 function onRecordingSelected(record) {
@@ -330,10 +384,12 @@ function onRecordingSelected(record) {
   // MediaLibrary 只有在后端确实返回 session id 时才发出该事件；不在这里
   // 根据 media_id 或名称拼造 recording id。
   if (!id) return
-  setRecordingSource(id, record, { openDraft: true })
+  // 先让草稿处理未保存保护；只有它接受来源并回传后才切换设备上下文。
+  draftRecordingId.value = id
+  activeTab.value = 'draft'
 }
 
-function setRecordingSource(id, meta = {}, { openDraft = false } = {}) {
+function setRecordingSource(id, meta = {}) {
   const previous = recordingContext.value?.recordingId === id ? recordingContext.value : null
   const deviceId = normalizeId(meta?.device_id || meta?.deviceId || previous?.deviceId)
   const device = devicesData.value.find(item => String(item?.id || '') === deviceId)
@@ -343,22 +399,16 @@ function setRecordingSource(id, meta = {}, { openDraft = false } = {}) {
     androidPackageName: normalizeId(device?.pkg || previous?.androidPackageName),
   }
   recordingId.value = id
-  if (openDraft) {
-    const revision = ++draftSourceRevision
-    activeTab.value = 'draft'
-    nextTick(() => {
-      if (revision === draftSourceRevision && activeTab.value === 'draft') draftRecordingId.value = id
-    })
-  } else {
-    draftRecordingId.value = id
-  }
+  draftRecordingId.value = id
 }
 
 function onRecordingIdUpdate(value) {
   const next = normalizeId(value)
   recordingId.value = next
   draftRecordingId.value = next
-  if (recordingContext.value?.recordingId !== next) recordingContext.value = null
+  if (recordingContext.value?.recordingId !== next) {
+    setRecordingSource(next, recordings.value.find(record => record.id === next))
+  }
 }
 
 // ---------- 项目加载 / 持久化 ----------
@@ -503,6 +553,7 @@ function onAssetChange(detail) {
   })
   const next = detail.project
   if (!openProject.value || !next || next.id !== openId.value || next.package_id !== packageId.value) return
+  if (primaryAssetIdOf(next) !== primaryAssetId.value) next.recording = recordingForMedia(primaryAssetIdOf(next))
   const diagnostics = validateProject(next)
   if (diagnostics.length) {
     staleSaveError.value = `项目素材调整被拒绝：${diagnostics[0].message}`
@@ -556,6 +607,7 @@ async function createProject({ id, name }) {
   if (!packageId.value || !media) return
   const scopePackageId = packageId.value
   const project = newProject({ id, name, packageId: packageId.value, media })
+  project.recording = recordingForMedia(media.id)
   const submittedMediaIds = projectMediaIds(project)
   const diagnostics = validateProject(project)
   if (diagnostics.length) {
@@ -627,10 +679,9 @@ async function deleteProject(id) {
     if (before.length) {
       const pending = createMediaRefSync(scopePackageId, id, before, [], projectContextRevision)
       const result = await runMediaRefSync(pending, summaries || projectSummaries.value)
-      // 删除后的项目没有可供重试的详情面板；仍完成同步并保留其它 Package/plugin
-      // 引用，失败只在仍处于同一打开项目上下文时显示。
-      if (!result.ok && openId.value && packageId.value === scopePackageId) {
-        staleSaveError.value = `项目已删除，但媒体引用同步失败：${result.failures[0]?.error?.message || result.failures[0]?.error || '未知错误'}`
+      if (!result.ok && packageId.value === scopePackageId) {
+        applyMediaRefSyncResult({ ...pending, deleted: true }, result)
+        mediaRefSyncError.value = `项目已删除，但媒体引用解除失败：${result.failures[0]?.error?.message || '未知错误'}。可重试，不必重建项目。`
       }
     }
   } catch (error) {
@@ -792,13 +843,15 @@ function applyMediaRefSyncResult(pending, result) {
 
 async function retryMediaRefs() {
   const pending = pendingMediaRefSync.value
-  if (!pending || mediaRefSyncing.value || !openProject.value || packageId.value !== pending.packageId
-    || openId.value !== pending.projectId || pending.contextRevision !== projectContextRevision) return
+  if (!pending || mediaRefSyncing.value || packageId.value !== pending.packageId
+    || (!pending.deleted && (!openProject.value || openId.value !== pending.projectId)) || pending.contextRevision !== projectContextRevision) return
   mediaRefSyncState.value = 'syncing'
   mediaRefSyncError.value = ''
+  if (pending.deleted) mediaRefSyncing.value = true
   const summaries = await loadProjects(pending.packageId, { preserveOpen: true })
   const result = await runMediaRefSync(pending, summaries || projectSummaries.value)
-  if (pending.contextRevision === projectContextRevision && packageId.value === pending.packageId && openId.value === pending.projectId) {
+  if (pending.contextRevision === projectContextRevision && packageId.value === pending.packageId && (pending.deleted || openId.value === pending.projectId)) {
+    if (pending.deleted) mediaRefSyncing.value = false
     applyMediaRefSyncResult(pending, result)
   }
 }
@@ -844,12 +897,8 @@ function onSaveCalibration(next) {
 }
 
 function openDraft() {
-  if (openProject.value?.recording?.recording_id) {
-    setRecordingSource(
-      normalizeId(openProject.value.recording.recording_id),
-      { device_id: openProject.value.recording.device_id },
-    )
-    activeTab.value = 'draft'
+  if (projectRecording.value?.recording_id && projectCanDraft.value) {
+    onRecordingSelected(recordings.value.find(record => record.id === projectRecording.value.recording_id))
   }
 }
 
