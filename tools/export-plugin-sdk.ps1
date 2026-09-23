@@ -15,6 +15,8 @@ foreach ($file in (& git -C $repo ls-files tools/plugin-signer)) {
 }
 $commit = (& git -C $repo rev-parse HEAD | Out-String).Trim()
 if ($LASTEXITCODE -ne 0) { throw '无法读取 SDK 来源提交' }
+& git -C $repo diff --quiet HEAD -- @($files.Keys)
+if ($LASTEXITCODE -ne 0) { throw 'SDK 源文件尚有未提交改动，请先提交再导出，以保证来源提交可复现' }
 $entries = @()
 foreach ($source in $files.Keys) {
     $target = Join-Path $destinationRoot $files[$source]

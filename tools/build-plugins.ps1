@@ -1,4 +1,4 @@
-﻿#requires -Version 7.0
+﻿#requires -Version 5.1
 <# Main-repository convenience entry. Plugin build recipes belong to gamer-plugins. #>
 [CmdletBinding()]
 param(
