@@ -1,40 +1,11 @@
 #!/usr/bin/env node
-/**
- * Gamer Release Manifest v1 校验器（ARC-002）
- *
- * 纯 Node 实现（仅 node:crypto / node:fs / node:path / node:url），禁止第三方依赖。
- * 规则来源：docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md §6.2 / §11.1，
- * 签名与 fixture 格式定义：release/contracts/manifest-v1.md。
- *
- * 用法：
- *   node validate-manifest.mjs selftest
- *       遍历 fixtures/manifest/valid 与 fixtures/manifest/invalid 全部 fixture：
- *       合法 manifest 必须通过（并额外做一次“改一字节必须验签失败”的篡改检查），
- *       非法 fixture 必须被其文件名对应的错误码拒绝。全部通过退出码 0。
- *
- *   node validate-manifest.mjs check <manifest.json> [--sig <file>] [--key <pem>]
- *       [--keys-dir <dir>] [--expect-current-version x.y.z] [--expect-channel stable|beta]
- *       校验单个 manifest。--sig 缺省取 <manifest 去掉 .json 后缀>.sig；
- *       --key 缺省按签名文件头中的 key_id 在 --keys-dir（缺省 fixtures/keys/）下查找 <key_id>.pem。
- *       校验通过退出码 0，校验失败 1，用法错误 2。
- *
- * 校验顺序（fail closed）：读原始字节 → 验签（Ed25519，覆盖原始字节）→ 解析 JSON →
- * 显式语义规则（schema_version/平台白名单/SemVer/降级/通道/hash/size/jar 绑定/路径安全）→
- * 结构回退校验（内置迷你 JSON Schema 解释器执行 manifest-v1.schema.json）。
- */
-
-import {
-  createPublicKey,
-  sign as cryptoSign,
-  verify as cryptoVerify,
-} from 'node:crypto';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+// Release manifest 结构、语义与 SHA256 声明校验；来源由官方 HTTPS 发布渠道保障。
+import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = path.join(SCRIPT_DIR, 'fixtures');
-const DEFAULT_KEYS_DIR = path.join(FIXTURES_DIR, 'keys');
 const VALID_DIR = path.join(FIXTURES_DIR, 'manifest', 'valid');
 const INVALID_DIR = path.join(FIXTURES_DIR, 'manifest', 'invalid');
 const SCHEMA_PATH = path.join(SCRIPT_DIR, 'manifest-v1.schema.json');
@@ -43,13 +14,10 @@ const SCHEMA_PATH = path.join(SCRIPT_DIR, 'manifest-v1.schema.json');
 // 冻结常量（与 manifest-v1.md 保持一致）
 // ---------------------------------------------------------------------------
 
-const SIG_MAGIC = 'gamebot-manifest-sig-1';
 const PRODUCT = 'gamebot';
 const KNOWN_PLATFORMS = ['windows-x86_64'];
 const KNOWN_CHANNELS = ['stable', 'beta'];
 const JAR_BINDING = 'application';
-const KEY_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // 同时防止 key_id 被用于路径穿越
-const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 const SEMVER_RE =
   /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 
@@ -71,12 +39,7 @@ const RESERVED_BASES = new Set([
 // selftest 中 invalid fixture 文件名（去 .json）→ 必须命中的错误码。
 // 新增 invalid fixture 必须在此登记，否则 selftest 直接失败。
 const INVALID_EXPECTATIONS = {
-  'unsigned-manifest': 'unsigned-manifest',
-  'tampered-manifest-byte': 'signature-invalid',
-  'wrong-key-signature': 'signature-invalid',
-  'sig-format-invalid': 'sig-format-invalid',
-  'unknown-key-id': 'unknown-key-id',
-  'malformed-json-but-signed': 'json-parse-failed',
+  'malformed-json': 'json-parse-failed',
   'unknown-schema-version': 'unknown-schema-version',
   'unknown-platform': 'unknown-platform',
   'version-not-semver': 'version-not-semver',
@@ -109,13 +72,6 @@ const SELFTEST_EXPECT_CHANNEL = 'stable';
 
 const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
 
-class ValidationError extends Error {
-  constructor(code, detail) {
-    super(`${code}: ${detail}`);
-    this.code = code;
-    this.detail = detail;
-  }
-}
 
 function parseSemver(s) {
   const m = SEMVER_RE.exec(s);
@@ -155,51 +111,6 @@ function semverLt(aStr, bStr) {
   }
   if (a.pre && !b.pre) return true; // prerelease < 正式版
   return false;
-}
-
-// ---------------------------------------------------------------------------
-// 签名文件格式（冻结）：
-//   行1: gamebot-manifest-sig-1 <key_id>
-//   行2: base64(64 字节 Ed25519 签名)
-// 详见 manifest-v1.md。
-// ---------------------------------------------------------------------------
-
-function parseSignatureFile(buf) {
-  const fail = (detail) => new ValidationError('sig-format-invalid', detail);
-  const text = buf.toString('utf8');
-  const lines = text.split(/\r?\n/);
-  while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
-  if (lines.length !== 2) throw fail(`expected exactly 2 non-empty lines, got ${lines.length}`);
-  const head = lines[0].trim().split(/\s+/);
-  if (head.length !== 2 || head[0] !== SIG_MAGIC) {
-    throw fail(`header must be "${SIG_MAGIC} <key_id>"`);
-  }
-  const keyId = head[1];
-  if (!KEY_ID_RE.test(keyId)) throw fail(`bad key_id "${keyId}"`);
-  const b64 = lines[1].trim();
-  if (!B64_RE.test(b64) || b64.length % 4 !== 0) throw fail('line 2 is not canonical base64');
-  const sig = Buffer.from(b64, 'base64');
-  if (sig.length !== 64) throw fail(`signature must decode to 64 bytes, got ${sig.length}`);
-  return { keyId, sig };
-}
-
-function loadTrustedPublicKey(keyId, keysDir, keyOverridePath) {
-  if (keyOverridePath) {
-    const pem = readFileSync(keyOverridePath, 'utf8');
-    return createPublicKey(pem); // 解析失败按未知 key 处理（fail closed）
-  }
-  if (!KEY_ID_RE.test(keyId)) {
-    throw new ValidationError('unknown-key-id', `key_id "${keyId}" not in trust store`);
-  }
-  const pemPath = path.join(keysDir, `${keyId}.pem`);
-  if (!existsSync(pemPath)) {
-    throw new ValidationError('unknown-key-id', `no trusted public key "${keyId}" in ${keysDir}`);
-  }
-  try {
-    return createPublicKey(readFileSync(pemPath, 'utf8'));
-  } catch {
-    throw new ValidationError('unknown-key-id', `public key "${keyId}" is not parseable`);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -536,21 +447,12 @@ function schemaWalk(schema, root, value, ptr, errors) {
 }
 
 // ---------------------------------------------------------------------------
-// 主校验流程：先验签再解析（fail closed）
+// 主校验流程：解析 JSON、语义与结构校验
 // ---------------------------------------------------------------------------
-
-function defaultSigPath(manifestPath) {
-  return manifestPath.toLowerCase().endsWith('.json')
-    ? manifestPath.slice(0, -'.json'.length) + '.sig'
-    : manifestPath + '.sig';
-}
 
 function validateManifestFile(options) {
   const {
     manifestPath,
-    sigPath = defaultSigPath(manifestPath),
-    keysDir = DEFAULT_KEYS_DIR,
-    keyPath = null,
     expectCurrentVersion = null,
     expectChannel = null,
   } = options;
@@ -563,43 +465,17 @@ function validateManifestFile(options) {
     return { ok: false, errors: [{ code: 'io-error', detail: `cannot read manifest: ${e.message}` }], info: {} };
   }
 
-  // 1) detached 签名：Ed25519 覆盖 manifest 原始字节（先验签、再解析）
-  if (!existsSync(sigPath)) {
-    errors.push({ code: 'unsigned-manifest', detail: `signature file not found: ${sigPath}` });
-    return { ok: false, errors, info: {} };
-  }
-  let keyId = null;
-  try {
-    const { keyId: kid, sig } = parseSignatureFile(readFileSync(sigPath));
-    keyId = kid;
-    const pub = loadTrustedPublicKey(kid, keysDir, keyPath);
-    if (!cryptoVerify(null, raw, pub, sig)) {
-      errors.push({
-        code: 'signature-invalid',
-        detail: `Ed25519 verify failed for key_id=${kid} over raw manifest bytes (tampered, wrong key, or re-signed manifest)`,
-      });
-    }
-  } catch (e) {
-    if (e instanceof ValidationError) {
-      errors.push({ code: e.code, detail: e.detail });
-      return { ok: false, errors, info: { keyId } };
-    }
-    errors.push({ code: 'io-error', detail: `signature handling failed: ${e.message}` });
-    return { ok: false, errors, info: { keyId } };
-  }
-  if (errors.length > 0) return { ok: false, errors, info: { keyId } };
-
   // 2) 解析
   let manifest;
   try {
     manifest = JSON.parse(raw.toString('utf8'));
   } catch (e) {
-    errors.push({ code: 'json-parse-failed', detail: `signature is valid but bytes are not JSON: ${e.message}` });
-    return { ok: false, errors, info: { keyId } };
+    errors.push({ code: 'json-parse-failed', detail: `invalid JSON: ${e.message}` });
+    return { ok: false, errors, info: {} };
   }
   if (!isObj(manifest)) {
     errors.push({ code: 'schema-invalid', detail: 'root must be a JSON object' });
-    return { ok: false, errors, info: { keyId } };
+    return { ok: false, errors, info: {} };
   }
 
   // 3) 显式语义规则（专属错误码）
@@ -615,7 +491,6 @@ function validateManifestFile(options) {
   }
 
   const info = {
-    keyId,
     version: isObj(manifest.release) ? manifest.release.version : undefined,
     channel: isObj(manifest.release) ? manifest.release.channel : undefined,
     platforms: isObj(manifest.platforms) ? Object.keys(manifest.platforms) : [],
@@ -645,10 +520,7 @@ function runCheck(args) {
       }
       return v;
     };
-    if (a === '--sig') opts.sigPath = needValue(a);
-    else if (a === '--key') opts.keyPath = needValue(a);
-    else if (a === '--keys-dir') opts.keysDir = needValue(a);
-    else if (a === '--expect-current-version') opts.expectCurrentVersion = needValue(a);
+    if (a === '--expect-current-version') opts.expectCurrentVersion = needValue(a);
     else if (a === '--expect-channel') opts.expectChannel = needValue(a);
     else {
       console.error(`unknown option: ${a}`);
@@ -658,7 +530,6 @@ function runCheck(args) {
   const res = validateManifestFile(opts);
   console.log(`manifest: ${manifestPath}`);
   if (res.ok) {
-    console.log(`signature: verified (key_id=${res.info.keyId})`);
     console.log(`release: ${res.info.version} (${res.info.channel}); platforms: ${res.info.platforms.join(', ')}`);
     console.log('OK — release manifest v1 valid');
     return 0;
@@ -666,18 +537,6 @@ function runCheck(args) {
   console.log(`FAIL — ${res.errors.length} error(s)`);
   printErrors(res.errors);
   return 1;
-}
-
-function flipOneByte(buf) {
-  for (let i = 0; i < buf.length; i++) {
-    const ch = String.fromCharCode(buf[i]);
-    if (/[A-Za-z0-9]/.test(ch)) {
-      const flipped = Buffer.from(buf);
-      flipped[i] = ch === 'a' ? 0x62 /* b */ : 0x61 /* a */;
-      if (flipped[i] !== buf[i]) return { buf: flipped, index: i };
-    }
-  }
-  return null;
 }
 
 function runSelfTest() {
@@ -691,7 +550,6 @@ function runSelfTest() {
   };
 
   const baseOpts = {
-    keysDir: DEFAULT_KEYS_DIR,
     expectCurrentVersion: SELFTEST_EXPECT_CURRENT_VERSION,
     expectChannel: SELFTEST_EXPECT_CHANNEL,
   };
@@ -701,29 +559,7 @@ function runSelfTest() {
   for (const file of validFiles) {
     const manifestPath = path.join(VALID_DIR, file);
     const res = validateManifestFile({ ...baseOpts, manifestPath });
-    report(res.ok, `valid/${file}`, res.ok ? `v${res.info.version} key=${res.info.keyId}` : `unexpected errors:`.concat('\n').concat(res.errors.map((e) => `    [${e.code}] ${e.detail}`).join('\n')));
-    if (!res.ok) continue;
-
-    // 篡改检查：合法 manifest 任意改一字节，验签必须失败（计划 §11.1）。
-    const raw = readFileSync(manifestPath);
-    const sigText = readFileSync(defaultSigPath(manifestPath));
-    const flipped = flipOneByte(raw);
-    if (!flipped) {
-      report(false, `valid/${file} (tamper-1-byte)`, 'no flippable byte found');
-      continue;
-    }
-    try {
-      const { keyId, sig } = parseSignatureFile(sigText);
-      const pub = loadTrustedPublicKey(keyId, DEFAULT_KEYS_DIR, null);
-      const stillOk = cryptoVerify(null, flipped.buf, pub, sig);
-      report(
-        stillOk === false,
-        `valid/${file} (tamper-1-byte @${flipped.index})`,
-        stillOk === false ? 'verify rejected as expected' : 'tampered bytes still verify',
-      );
-    } catch (e) {
-      report(false, `valid/${file} (tamper-1-byte)`, e.message);
-    }
+    report(res.ok, `valid/${file}`, res.ok ? `v${res.info.version}` : `unexpected errors:`.concat('\n').concat(res.errors.map((e) => `    [${e.code}] ${e.detail}`).join('\n')));
   }
 
   console.log('== invalid fixtures ==');
@@ -753,7 +589,7 @@ function runSelfTest() {
   console.log('---- selftest results ----');
   for (const line of results) console.log(line);
   console.log(
-    `selftest: ${pass} passed, ${fail} failed  (valid: ${validFiles.length}, tamper checks: ${validFiles.length}, invalid: ${invalidFiles.length})`,
+    `selftest: ${pass} passed, ${fail} failed  (valid: ${validFiles.length}, invalid: ${invalidFiles.length})`,
   );
   return fail === 0 ? 0 : 1;
 }
@@ -763,8 +599,8 @@ function usage(exitCode) {
     [
       'Usage:',
       '  node validate-manifest.mjs selftest',
-      '  node validate-manifest.mjs check <manifest.json> [--sig <file>] [--key <pem>]',
-      '       [--keys-dir <dir>] [--expect-current-version x.y.z] [--expect-channel stable|beta]',
+      '  node validate-manifest.mjs check <manifest.json>',
+      '       [--expect-current-version x.y.z] [--expect-channel stable|beta]',
     ].join('\n'),
   );
   return exitCode;

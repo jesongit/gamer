@@ -371,6 +371,7 @@ fn classify_read_error(e: std::io::Error) -> DownloadError {
 
 pub(crate) fn build_agent(url: &str, opts: &FetchOptions) -> ureq::Agent {
     let mut builder = ureq::AgentBuilder::new()
+        .https_only(url.starts_with("https://"))
         .timeout_connect(opts.connect_timeout)
         .timeout_read(opts.read_timeout)
         .timeout(opts.overall_timeout)

@@ -436,3 +436,9 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - PowerShell 脚本未调用原生命令时 `$LASTEXITCODE` 可能为空或保留旧值，不能据此判定脚本失败；脚本用终止异常传播失败，原生命令才在调用后立即检查退出码。
 - 插件仓搬迁后 pnpm 的 node_modules 记录仍指向原目录，非交互安装会拒绝重建；保留原目录备份，在验收子进程设置 CI=true 后按冻结锁文件重建依赖，不修改用户全局 pnpm 设置。
 - Windows 用户临时目录会继承用户目录祖先的 .cargo/config.toml，即使 CARGO_HOME 指向别处；独立克隆缺锁定版本时先查实际 source replacement，本机 C 盘镜像与 D 盘构建源不同，不能为镜像缺包修改产品锁文件。
+
+## 2026-09-24：发行签名移除必须覆盖整条链路
+
+启动器、Node 清单校验器、生成/打包脚本、CI、SDK 快照和演练脚本必须同时移除 `.sig`/公钥依赖，否则本地启动通过而发行仍失败。当前使用 GitHub HTTPS + SHA256；远端禁 HTTP，HTTPS 禁降级重定向。本地 loopback 测试仍可用 HTTP。旧密钥和历史演练证据不代表当前发布要求。
+
+- Windows 的 ADB daemon 会继承启动目录；即使 Gamer 已退出，旧 daemon 仍可能占用 `versions/<版本>` 导致修复 rename 报 os error 32。本次验收核对 EXE 属于目标安装、确认无 Gamer 运行后重启该 ADB，并从稳定安装根启动，修复即通过；不能按进程名批量终止其他安装。

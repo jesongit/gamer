@@ -1,4 +1,4 @@
-//! 在线/离线发行发现。网络仅提供候选，签名与本机信任库决定能否安装。
+//! 在线/离线发行发现。HTTPS 提供清单，安装前校验文件大小与 SHA256。
 use crate::{
     layout::InstallLayout,
     manifest::{model::Manifest, ValidateOptions},
@@ -14,31 +14,8 @@ pub const RELEASE_URL: &str =
     "https://github.com/jesongit/gamer/releases/latest/download/gamer-release.json";
 pub const PLATFORM: &str = "windows-x86_64";
 
-pub fn keys(layout: &InstallLayout) -> Result<PathBuf, String> {
-    if let Ok(path) = std::env::var("GAMER_LAUNCHER_KEYS_DIR") {
-        if !path.trim().is_empty() {
-            return Ok(path.into());
-        }
-    }
-    let dir = layout.root.join("keys");
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    // 固定内置信任锚，首次单 EXE 运行不依赖额外下载公钥。
-    let key = dir.join("prod-ed25519-1.pem");
-    let pem = include_bytes!("../../release/keys/prod-ed25519-1.pem");
-    if fs::read(&key).ok().as_deref() != Some(pem.as_slice()) {
-        fs::write(key, pem).map_err(|e| e.to_string())?;
-    }
-    Ok(dir)
-}
-pub fn read(layout: &InstallLayout, path: &Path) -> Result<Manifest, String> {
-    let check = crate::manifest::validate_manifest_file(
-        path,
-        &ValidateOptions {
-            keys_dir: Some(keys(layout)?),
-            // 先验证后展示；最低启动器版本在执行安装前单独拦截，以便显示更新说明。
-            ..Default::default()
-        },
-    );
+pub fn read(_layout: &InstallLayout, path: &Path) -> Result<Manifest, String> {
+    let check = crate::manifest::validate_manifest_file(path, &ValidateOptions::default());
     if !check.ok {
         return Err(check
             .errors
@@ -83,10 +60,6 @@ pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
         _ => a.cmp(b),
     }
 }
-pub fn signature_url(url: &str) -> String {
-    url.strip_suffix(".json")
-        .map_or_else(|| format!("{url}.sig"), |s| format!("{s}.sig"))
-}
 fn fetch(url: &str, deadline: Instant, limit: u64) -> Result<Vec<u8>, String> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
@@ -130,15 +103,36 @@ pub(crate) fn download_manifest(
     url: &str,
     timeout: Duration,
 ) -> Result<PathBuf, String> {
+    validate_manifest_url(url)?;
     let deadline = Instant::now() + timeout;
     let raw = fetch(url, deadline, 3 * 1024 * 1024)?;
-    let sig = fetch(&signature_url(url), deadline, 16 * 1024)?;
     let staging = layout.staging_dir().join("discovery");
     fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
     let path = staging.join("manifest.json");
     fs::write(&path, raw).map_err(|e| e.to_string())?;
-    fs::write(path.with_extension("sig"), sig).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+fn validate_manifest_url(url: &str) -> Result<(), String> {
+    if url.starts_with("https://") {
+        return Ok(());
+    }
+    // 显式指定的 loopback HTTP 仅用于本机发行演练；远端必须 HTTPS。
+    if let Some(rest) = url.strip_prefix("http://") {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        let loopback = authority
+            .parse::<std::net::SocketAddr>()
+            .map(|addr| addr.ip().is_loopback())
+            .unwrap_or_else(|_| {
+                authority
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+            });
+        if loopback {
+            return Ok(());
+        }
+    }
+    Err("远程发行清单必须使用 HTTPS".into())
 }
 
 fn cache(
@@ -151,11 +145,8 @@ fn cache(
         .manifests_dir()
         .join(format!("{}.json", model.release.version));
     if source != dest {
-        let signature = fs::read(source.with_extension("sig")).map_err(|e| e.to_string())?;
         let raw = fs::read(source).map_err(|e| e.to_string())?;
-        crate::state::atomic::write_bytes_atomic(&dest.with_extension("sig"), &signature)
-            .and_then(|_| crate::state::atomic::write_bytes_atomic(&dest, &raw))
-            .map_err(|e| e.to_string())?;
+        crate::state::atomic::write_bytes_atomic(&dest, &raw).map_err(|e| e.to_string())?;
     }
     Ok((dest, model))
 }
@@ -196,4 +187,28 @@ pub fn plan(
         config_path: layout.config_file(),
         log_path: layout.logs_dir().join("gamer-server.log"),
     })
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::validate_manifest_url;
+
+    #[test]
+    fn remote_manifest_requires_https_but_local_test_server_is_allowed() {
+        for url in [
+            super::RELEASE_URL,
+            "http://127.0.0.1:8000/release.json",
+            "http://[::1]:8000/release.json",
+        ] {
+            assert!(validate_manifest_url(url).is_ok(), "{url}");
+        }
+        for url in [
+            "http://example.com/release.json",
+            "http://127.0.0.1.evil:80/release.json",
+            "http://127.0.0.1@evil/release.json",
+            "ftp://example.com/release.json",
+        ] {
+            assert!(validate_manifest_url(url).is_err(), "{url}");
+        }
+    }
 }

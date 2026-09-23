@@ -12,14 +12,14 @@
 
 | 路径 | 用途 | 属主 | 可写 | 生命周期（升级时） |
 |---|---|---|---|---|
-| `gamer-launcher.exe` | 启动器/升级器本体：单实例锁、依赖安装修复、server 监管、版本切换、journal/备份/回滚、manifest 验签下载 | launcher | 运行期只读（exe 被自身占用） | 仅经 trampoline 两阶段自更新（LCH-013）；失败保留旧 launcher。位于版本目录之外，永不随应用版本重建 |
+| `gamer-launcher.exe` | 启动器/升级器本体：单实例锁、依赖安装修复、server 监管、版本切换、journal/备份/回滚、manifest 校验下载 | launcher | 运行期只读（exe 被自身占用） | 仅经 trampoline 两阶段自更新（LCH-013）；失败保留旧 launcher。位于版本目录之外，永不随应用版本重建 |
 | `config/config.toml` | 用户配置（auth、adb/ffmpeg 来源模式等） | 用户数据 | 是 | 永久保留；升级前纳入快照；结构变更走显式迁移，不做隐式改写 |
 | `data/` | 业务数据：SQLite `gamer.db` + 文件资源 `data/<pkg>/{yaml,func,tmpl}/`（schema v1 布局） | 用户数据 | 是 | 永久保留；升级前离线快照，schema 迁移有编号 journal（DATA-\*） |
 | `logs/` | server 日志（`GB_LOG` 指向文件）与 launcher 日志 | 用户数据 | 是 | 保留；可按保留策略轮转清理 |
 | `state/current.json` | 当前版本指针（current/previous 版本号）；具体字段由 LCH-002 fixture 冻结 | launcher | launcher 专用 | 原子写；升级切换的唯一入口 |
 | `state/update-journal.json` | 升级状态机持久 journal：update id、from/to、child PID、current/previous、snapshot、schema before/after、最后完成步骤、错误摘要（计划 §6.6） | launcher | launcher 专用 | 原子写；每次动作先记意图后执行；崩溃后据此恢复 |
 | `state/launcher.lock` | 单实例锁 | launcher | launcher 专用 | 运行期存在，持有进程退出即失效；不跨升级保留 |
-| `manifests/<version>.json[.sig]` | 已验签缓存的 release manifest 与 detached 签名 | launcher | launcher 专用（下载写入） | 保留（成功升级后 current/previous 的 manifest 属于必须保留的证据，计划 §14）；可按数量/年龄清理 |
+| `manifests/<version>.json` | 已校验缓存的 release manifest | launcher | launcher 专用（下载写入） | 保留（成功升级后 current/previous 的 manifest 属于必须保留的证据，计划 §14）；可按数量/年龄清理 |
 | `versions/<semver>/` | 应用版本目录：`gamer-server.exe`、`web-dist/`、`assets/scrcpy-server.jar`（manifest `entrypoint` 指向 exe） | launcher（写入）/ 业务（只读） | **安装成功后只读** | 新版本写新目录，永不原地覆盖；至少保留 current + previous，其余按数量/年龄/磁盘上限清理，不删 current、previous、唯一 rollback point |
 | `runtime/adb/<version>/` | managed adb：`adb.exe` + `AdbWinApi.dll` + `AdbWinUsbApi.dll`，逐文件哈希（计划 §11.2） | launcher | 运行期只读（安装/修复期由 launcher 写） | 与版本目录同理：新版本新目录，不原地覆盖；损坏目录走 §5 quarantine-then-rename 修复 |
 | `runtime/ffmpeg/<version>/` | managed ffmpeg：`ffmpeg.exe`（锁定 buildconf） | launcher | 同上 | 同上 |
@@ -44,7 +44,7 @@
 ### 3.1 launcher 职责
 
 - 单实例锁（`state/launcher.lock`）与并发写者唯一性；
-- manifest 验签（Ed25519 detached、覆盖原始字节）、组件下载（seed/cache/远端）、安全解压、依赖安装与修复（inventory→seed/cache→remote→probe）；
+- manifest 结构/语义校验、组件下载（seed/cache/远端）、安全解压、依赖安装与修复（inventory→seed/cache→remote→probe）；
 - server 子进程精确监管：注入环境、持有准确 child handle/PID、按 handle 等待退出（不按端口或进程名猜）；
 - 版本切换、升级 journal、快照/备份、候选启动与 activation gate 编排、commit 与自动回滚；
 - Windows named pipe IPC server（protocol v1，仅当前用户 DACL），只接受内部枚举操作，不接受 shell 命令字符串。
@@ -59,7 +59,7 @@
 ### 3.3 边界禁令
 
 - server **永不**替换、移动、删除任何程序文件（`versions/`、`runtime/`、`gamer-launcher.exe`）；程序文件写操作只属于 launcher。
-- server **永不**接受浏览器传入的下载 URL、镜像地址、验签开关；信任只来自签名、公钥与内容 hash。
+- server **永不**接受浏览器传入的下载 URL、镜像地址或绕过校验的开关；来源由官方 GitHub HTTPS 与发布权限保障，完整性由 SHA256 校验。
 - 用户数据（`config/ data/ logs/` 及 `state/` 中业务侧内容）**不得**位于 `versions/<semver>/` 内；删除任一版本目录不得影响用户数据。
 - 直跑 server 模式无 launcher：server 以 `UnsupportedUpdateController` / external strategy 降级，安装类 API 返回 `update_not_managed`，不得因此启动失败。
 
@@ -94,7 +94,7 @@ launcher 启动 server 时注入以下**绝对路径**环境变量，server 不�
 |---|---|
 | `state/current.json` 写入 | 同目录临时文件 + 落盘 flush + rename 原子替换；半截 JSON 必须可恢复（LCH-002） |
 | `state/update-journal.json` 意图记录 | 同上；顺序固定为「先原子记录意图 → 执行动作 → 推进状态」（计划 §6.6） |
-| staging → `versions/<semver>/` 切换 | 同卷目录 rename；前置条件：验签/逐文件校验通过且目标不存在。Windows 上 rename 到已存在目录会失败，因此不存在「覆盖式 rename」 |
+| staging → `versions/<semver>/` 切换 | 同卷目录 rename；前置条件：清单/逐文件校验通过且目标不存在。Windows 上 rename 到已存在目录会失败，因此不存在「覆盖式 rename」 |
 | 损坏组件目录修复 | 两步夹 journal：旧目录 rename 入 `quarantine/` → staging 新目录 rename 到位；第二步失败则 rename 回，保持旧目录可用（「失败不破坏上一份 runtime」，计划 §11.2） |
 | 数据快照恢复 swap | 恢复 staging 与 data 同卷（见 §2 第 5 条待定项）；快照 hash/marker 验证通过后才 rename 替换，替换前旧数据保留 |
 | 下载产物落盘（manifest、artifacts） | 临时文件 + rename；截断/超时/hash 错不污染安装目录（LCH-005） |
@@ -115,7 +115,7 @@ launcher 启动 server 时注入以下**绝对路径**环境变量，server 不�
 | 文件 | 说明 | 任务 |
 |---|---|---|
 | `release/contracts/manifest-v1.schema.json` | Release manifest v1 JSON Schema（字段、路径安全、hash 规则） | ARC-002 |
-| `release/contracts/fixtures/` | manifest 有效/无效 fixture、签名 fixture、危险路径反例，可自动校验 | ARC-002 / QA-001 |
+| `release/contracts/fixtures/` | manifest 有效/无效 fixture、危险路径反例，可自动校验 | ARC-002 / QA-001 |
 | `release/contracts/system-api-v1.md` | system/update API 请求响应、状态、统一错误码契约 | ARC-003 |
 | `release/contracts/ipc-v1.md` | launcher named pipe IPC protocol v1（消息上限、超时、幂等） | ARC-003 |
 | `release/contracts/schema-policy.md` | DB/文件 schema 兼容表、rollback floor、pre/post-commit 回滚承诺 | ARC-004 |

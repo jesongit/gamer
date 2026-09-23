@@ -371,7 +371,7 @@ fn start_full_chain_with_fake_server_probe_ready_then_waits_exit() {
         "@echo off\r\nping -n 2 127.0.0.1 >nul\r\nexit /b 0\r\n",
     )
     .unwrap();
-    signed_start_fixture(&layout, "fake-server.bat");
+    start_fixture(&layout, "fake-server.bat");
 
     let root_s = layout.root.to_string_lossy().into_owned();
     let cli = Cli::parse_from(["gamer-launcher", "--install-root", &root_s, "start"]);
@@ -409,7 +409,7 @@ fn start_reports_nonzero_when_fake_server_fails() {
         "@echo off\r\nexit /b 3\r\n",
     )
     .unwrap();
-    signed_start_fixture(&layout, "failing-server.bat");
+    start_fixture(&layout, "failing-server.bat");
 
     let root_s = layout.root.to_string_lossy().into_owned();
     let cli = Cli::parse_from(["gamer-launcher", "--install-root", &root_s, "start"]);
@@ -417,9 +417,7 @@ fn start_reports_nonzero_when_fake_server_fails() {
     cleanup(&layout.root);
 }
 
-fn signed_start_fixture(layout: &InstallLayout, entrypoint: &str) {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    use ed25519_dalek::{Signer, SigningKey};
+fn start_fixture(layout: &InstallLayout, entrypoint: &str) {
     let mut model: serde_json::Value = serde_json::from_str(include_str!(
         "../../release/contracts/fixtures/manifest/valid/manifest-valid-basic.json"
     ))
@@ -427,28 +425,5 @@ fn signed_start_fixture(layout: &InstallLayout, entrypoint: &str) {
     model["release"]["version"] = "0.2.0".into();
     model["platforms"]["windows-x86_64"]["app"]["entrypoint"] = entrypoint.into();
     let raw = serde_json::to_vec(&model).unwrap();
-    let key = SigningKey::from_bytes(&[43; 32]);
-    let signature = key.sign(&raw);
-    fs::create_dir_all(layout.root.join("keys")).unwrap();
-    let mut der = vec![
-        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-    ];
-    der.extend_from_slice(key.verifying_key().as_bytes());
-    fs::write(
-        layout.root.join("keys/test-start.pem"),
-        format!(
-            "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
-            STANDARD.encode(der)
-        ),
-    )
-    .unwrap();
     fs::write(layout.manifests_dir().join("0.2.0.json"), raw).unwrap();
-    fs::write(
-        layout.manifests_dir().join("0.2.0.sig"),
-        format!(
-            "gamebot-manifest-sig-1 test-start\n{}\n",
-            STANDARD.encode(signature.to_bytes())
-        ),
-    )
-    .unwrap();
 }

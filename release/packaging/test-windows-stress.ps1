@@ -39,7 +39,6 @@ Set-StrictMode -Version 2.0
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Tmp = 'D:\qa-stress-tmp'
 $Rig = Join-Path $Tmp 'rig'
-$Keys = Join-Path $Tmp 'keys'
 $Dist = Join-Path $Tmp 'dist'
 $Manifests = Join-Path $Tmp 'manifests'
 $Evidence = Join-Path $Tmp 'logs'
@@ -234,7 +233,7 @@ function Assert-PortFree {
 }
 
 function Ensure-TestAssets {
-  foreach ($dir in @($Dist, $Keys, $Manifests)) {
+  foreach ($dir in @($Dist, $Manifests)) {
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
   }
   $baseName = 'gamer-app-0.1.0-windows-x64.zip'
@@ -251,25 +250,11 @@ function Ensure-TestAssets {
     if (-not (Test-Path $candidate)) { Copy-Item -LiteralPath $base -Destination $candidate -Force }
   }
 
-  $publicKey = Join-Path $Keys 'dev-ed25519-1.pem'
-  $privateKey = Join-Path $Keys 'dev-ed25519-1.private.pem'
-  if (-not (Test-Path $publicKey) -or -not (Test-Path $privateKey)) {
-    Remove-Item -LiteralPath $publicKey, $privateKey -Force -ErrorAction SilentlyContinue
-    $node = Get-Command node.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($null -eq $node) { throw 'node.exe is required to generate the temporary QA signing key' }
-    $keygen = Invoke-CapturedProcess -FilePath $node.Path -ArgumentList @(
-      (Join-Path $RepoRoot 'release\packaging\sign-manifest.mjs'), 'keygen',
-      '--id', 'dev-ed25519-1', '--out-dir', $Keys, '--force'
-    )
-    Write-Evidence 'assets-keygen.txt' "exit=$($keygen.ExitCode)`n$($keygen.StdOut)`n$($keygen.StdErr)"
-    if ($keygen.ExitCode -ne 0) { throw 'temporary QA signing key generation failed' }
-  }
-
   $python = Get-Command python.exe -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($null -eq $python) { throw 'python.exe is required for QA-007 fixture generation' }
   $manifestArgs = @(
     $GenerateManifests, '--repo-root', $RepoRoot, '--dist-dir', $Dist,
-    '--manifests-dir', $Manifests, '--keys-dir', $Keys, '--versions'
+    '--manifests-dir', $Manifests, '--versions'
   ) + $Versions
   $manifestGen = Invoke-CapturedProcess -FilePath $python.Path -ArgumentList $manifestArgs
   Write-Evidence 'assets-manifests.txt' "exit=$($manifestGen.ExitCode)`n$($manifestGen.StdOut)`n$($manifestGen.StdErr)"
@@ -301,9 +286,7 @@ password_hash = ""
 "@
   [System.IO.File]::WriteAllText((Join-Path $Rig 'config\config.toml'), $config + "`n", (New-Object System.Text.UTF8Encoding($false)))
 
-  Copy-Item -LiteralPath (Join-Path $Keys 'dev-ed25519-1.pem') -Destination (Join-Path $Rig 'keys\dev-ed25519-1.pem') -Force
   Copy-Item -LiteralPath (Join-Path $Manifests '0.1.0.json') -Destination (Join-Path $Rig 'manifests\0.1.0.json') -Force
-  Copy-Item -LiteralPath (Join-Path $Manifests '0.1.0.sig') -Destination (Join-Path $Rig 'manifests\0.1.0.sig') -Force
   foreach ($v in $Versions) {
     Copy-Item -LiteralPath (Join-Path $Dist "gamer-app-$v-windows-x64.zip") -Destination (Join-Path $Rig "seeds\gamer-app-$v-windows-x64.zip") -Force
   }
@@ -336,10 +319,10 @@ password_hash = ""
   Copy-Item -LiteralPath $ffmpegSrc -Destination (Join-Path $Rig 'runtime\ffmpeg\local-9.0\ffmpeg.exe') -Force
 
   # baseline repair (seed hit => offline) + doctor
-  $r = Invoke-Launcher -LauncherArgs @('--install-root', $Rig, '--keys-dir', $Keys, 'repair', '--manifest', (Join-Path $Rig 'manifests\0.1.0.json'))
+  $r = Invoke-Launcher -LauncherArgs @('--install-root', $Rig, 'repair', '--manifest', (Join-Path $Rig 'manifests\0.1.0.json'))
   Write-Evidence 'setup-repair.txt' "=== repair exit=$($r.ExitCode) in $($r.Seconds)s`n$($r.StdOut)`n$($r.StdErr)"
   if ($r.ExitCode -ne 0) { throw 'baseline repair failed' }
-  $d = Invoke-Launcher -LauncherArgs @('--install-root', $Rig, '--keys-dir', $Keys, 'doctor')
+  $d = Invoke-Launcher -LauncherArgs @('--install-root', $Rig, 'doctor')
   Write-Evidence 'setup-doctor.txt' "=== doctor exit=$($d.ExitCode)`n$($d.StdOut)"
   if ($d.ExitCode -ne 0) { throw 'baseline doctor failed' }
   Write-Evidence 'setup-pass.txt' "setup PASS: rig ready at $Rig (port $Port)"
@@ -443,7 +426,7 @@ function Invoke-Scenario1 {
   $t0 = Get-Date
   $r = $null
   if ($needUpgrade) {
-    $r = Invoke-Launcher -LauncherArgs @('--install-root', $Rig, '--keys-dir', $Keys, 'upgrade', '--manifest', (Join-Path $Manifests '0.2.0.json')) -TimeoutSec 900
+    $r = Invoke-Launcher -LauncherArgs @('--install-root', $Rig, 'upgrade', '--manifest', (Join-Path $Manifests '0.2.0.json')) -TimeoutSec 900
     $dt = ((Get-Date) - $t0).TotalSeconds
     Write-Evidence 's1-upgrade.txt' "=== upgrade 0.1.0->0.2.0 exit=$($r.ExitCode) wall=$([math]::Round($dt,1))s`n$($r.StdOut)`n$($r.StdErr)"
     if ($r.ExitCode -ne 0) { throw 'scenario1 upgrade failed' }
@@ -538,7 +521,7 @@ function Invoke-Scenario2 {
   #     `launcher upgrade` runs => clean failure, no partial state
   $before = Get-Journal
   $lock = Start-FileLock -Path $journalPath -Milliseconds 3000 -Tag 'journal'
-  $r = Invoke-Launcher -LauncherArgs @('--install-root', $Rig, '--keys-dir', $Keys, 'upgrade', '--manifest', (Join-Path $Manifests '0.3.0.json')) -TimeoutSec 300
+  $r = Invoke-Launcher -LauncherArgs @('--install-root', $Rig, 'upgrade', '--manifest', (Join-Path $Manifests '0.3.0.json')) -TimeoutSec 300
   Wait-Process -Id $lock.Id -Timeout 30 -ErrorAction SilentlyContinue
   $after = Get-Journal
   Write-Evidence 's2a-journal-lock.txt' ("lock log: " + (Get-Content (Join-Path $Evidence 'lock-journal.txt') -Raw) +
@@ -546,9 +529,10 @@ function Invoke-Scenario2 {
     "`njournal state before=$($before.state)/$($before.last_step) after=$($after.state)/$($after.last_step)")
 
   # (a2) positive case: lock DURING the launcher run so the journal rename lands
-  # inside the bounded-retry window (~10 x 25ms). Manifest = tampered signature,
-  # so a SUCCESSFUL retry surfaces as a signature error (not a journal IO error).
-  $upgradeProc = Start-LauncherBg -LauncherArgs @('--install-root', $Rig, '--keys-dir', $Keys, 'upgrade', '--manifest', (Join-Path $Manifests 'bad-signature.json')) -Tag 's2a2'
+  # inside the bounded-retry window (~10 x 25ms). Manifest = invalid JSON,
+  # so a SUCCESSFUL retry surfaces as a manifest error (not a journal IO error).
+  [IO.File]::WriteAllText((Join-Path $Manifests 'bad-manifest.json'), '{broken', [Text.UTF8Encoding]::new($false))
+  $upgradeProc = Start-LauncherBg -LauncherArgs @('--install-root', $Rig, 'upgrade', '--manifest', (Join-Path $Manifests 'bad-manifest.json')) -Tag 's2a2'
   Start-Sleep -Milliseconds 60
   $null = Start-FileLock -Path $journalPath -Milliseconds 150 -Tag 'journal2'
   Wait-Process -Id $upgradeProc.Id -Timeout 120 -ErrorAction SilentlyContinue
@@ -584,7 +568,7 @@ function Invoke-Scenario2 {
   $lock = Start-FileLock -Path (Join-Path $target 'gamer-server.exe') -Milliseconds 120000 -Tag 'exe'
   $dataBefore = Get-DirBytes (Join-Path $Rig 'data')
   $t0 = Get-Date
-  $r = Invoke-Launcher -LauncherArgs @('--install-root', $Rig, '--keys-dir', $Keys, 'upgrade', '--manifest', (Join-Path $Manifests '0.3.0.json')) -TimeoutSec 900
+  $r = Invoke-Launcher -LauncherArgs @('--install-root', $Rig, 'upgrade', '--manifest', (Join-Path $Manifests '0.3.0.json')) -TimeoutSec 900
   $dt = [math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
   Write-Evidence 's2c-exe-lock-upgrade.txt' "=== upgrade 0.2.0->0.3.0 with locked target exe: exit=$($r.ExitCode) wall=${dt}s`nstdout: $($r.StdOut)`nstderr: $($r.StdErr)"
   $j = Get-Journal
@@ -605,7 +589,7 @@ function Invoke-Scenario2 {
   # release the lock and retry => committed
   try { Stop-Process -Id $lock.Id -Force -ErrorAction SilentlyContinue } catch { }
   Start-Sleep -Seconds 2
-  $r2 = Invoke-Launcher -LauncherArgs @('--install-root', $Rig, '--keys-dir', $Keys, 'upgrade', '--manifest', (Join-Path $Manifests '0.3.0.json')) -TimeoutSec 900
+  $r2 = Invoke-Launcher -LauncherArgs @('--install-root', $Rig, 'upgrade', '--manifest', (Join-Path $Manifests '0.3.0.json')) -TimeoutSec 900
   Write-Evidence 's2c-retry-after-release.txt' "retry exit=$($r2.ExitCode)`nstdout: $($r2.StdOut)"
   if ($r2.ExitCode -ne 0) { throw 'scenario2 retry after release failed' }
   Copy-Item -LiteralPath (Join-Path $Rig 'logs\launcher.log') -Destination (Join-Path $Evidence 'launcher-scenario2.log') -Force
@@ -664,7 +648,7 @@ function Invoke-Scenario3 {
   Stop-RigProcesses
 
   # part 2: kill the upgrade launcher mid-snapshot (safe injection point with 1 GiB data)
-  $upgradeProc = Start-LauncherBg -LauncherArgs @('--install-root', $Rig, '--keys-dir', $Keys, 'upgrade', '--manifest', (Join-Path $Manifests "$targetVersion.json")) -Tag 's3upgrade'
+  $upgradeProc = Start-LauncherBg -LauncherArgs @('--install-root', $Rig, 'upgrade', '--manifest', (Join-Path $Manifests "$targetVersion.json")) -Tag 's3upgrade'
   $killedAt = $null
   $deadline = (Get-Date).AddSeconds(300)
   while ((Get-Date) -lt $deadline) {

@@ -1,4 +1,4 @@
-﻿# 独立启动器与官方插件种子；在生成签名 manifest 前运行。
+﻿# 独立启动器与官方插件种子；在生成发行 manifest 前运行。
 [CmdletBinding()]
 param([switch]$SkipBuild, [string]$DistDir = '', [string]$Version = '')
 $ErrorActionPreference = 'Stop'

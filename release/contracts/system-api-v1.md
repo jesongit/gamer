@@ -137,7 +137,7 @@
 | `state` | string | §5 的 11 态展示枚举；**前端业务分支只允许依赖此字段** |
 | `detail` | string | 计划 §6.6 journal 精细步骤名（诊断展示用，见 §5.2 映射表；前端不得据此分支业务逻辑） |
 | `update_id` | string \| null | 当前/最近一次升级事务 id（journal 的 update id）；无事务时 `null`。格式建议 `upd-<yyyymmdd>-<8hex>`（建议值） |
-| `candidate` | object \| null | 已知的新版本候选（来自已验签 manifest `release` 块）；无候选时 `null`。`size_bytes` = 应用组件包大小 |
+| `candidate` | object \| null | 已知的新版本候选（来自已校验 manifest `release` 块）；无候选时 `null`。`size_bytes` = 应用组件包大小 |
 | `progress` | object \| null | 仅 `downloading` 态非空：`bytes_done` / `bytes_total`；其他态恒为 `null` |
 | `policy` | object | §6 定义的当前生效策略（`direct` 模式同样返回） |
 | `last_error` | object \| null | 最近一次失败的 `{ "code": <§7 错误码>, "message": <无泄露描述> }`；无失败时 `null` |
@@ -180,7 +180,7 @@
 
 | blocking 值 | 含义 |
 |---|---|
-| `staging_not_ready` | 新组件未完整下载/验签/校验并位于 staging |
+| `staging_not_ready` | 新组件未完整下载/校验并位于 staging |
 | `active_run` | 存在 active/starting/stopping 的脚本运行 |
 | `update_transaction` | 存在另一个升级/回滚/备份/迁移/维护事务 |
 | `cron_freeze_window` | 距下一次启用 cron 的触发时间 ≤ 冻结窗口 |
@@ -197,8 +197,8 @@
 |---|---|---|
 | `idle` | 无进行中的更新事务 | → checking |
 | `checking` | 正在检查远端是否有新版本（自动/手动） | → available（有候选）、idle（无候选）、failed |
-| `available` | 检查完成、存在已验签候选、尚未下载 | → downloading、checking（重新检查） |
-| `downloading` | 后台下载 + 验签 + staging 中 | → staged、failed |
+| `available` | 检查完成、存在已校验候选、尚未下载 | → downloading、checking（重新检查） |
+| `downloading` | 后台下载 + 校验 + staging 中 | → staged、failed |
 | `staged` | 候选已就位于 staging，等待安装 | → waiting（auto 策略）、installing（手动/门禁满足）、downloading（重新下载）、failed |
 | `waiting` | auto 策略：等待维护窗口 + 空闲门禁 | → installing（窗口与门禁满足）、staged（窗口错过/门禁退出） |
 | `installing` | 停机 drain → 快照 → 迁移 → 切换 已开始；**服务即将重启** | → restarting、rolling_back、failed |
@@ -259,9 +259,9 @@
 |---|---|---|---|---|
 | `update_not_managed` | `direct` 模式（`update_strategy != managed`）调用 check/download/install/rollback | 409 | 否（部署模式不变则恒定；UI 应隐藏/禁用对应按钮） | 无 |
 | `update_busy` | 已有升级/回滚事务进行中，或对非幂等动作（install/rollback）的并发第二个请求（计划 §11.4：两个 install 只有一个取得事务） | 409 | 是（轮询 `GET /api/system/update` 至事务结束后重试） | 无 |
-| `update_not_available` | 无已验签候选时请求 download/install（未检查、检查无新版本、候选已清理） | 409 | 条件性（出现新候选后可重试；同参数立即重试无意义） | 无 |
+| `update_not_available` | 无已校验候选时请求 download/install（未检查、检查无新版本、候选已清理） | 409 | 条件性（出现新候选后可重试；同参数立即重试无意义） | 无 |
 | `update_not_ready` | install 门禁未满足（§4.3 六项之一） | 409 | 是（`details.blocking` 中的门禁满足后重试） | `blocking`: 数组，枚举见 §4.3 |
-| `signature_invalid` | manifest Ed25519 detached 验签失败（错 key、篡改、未签名；fail closed） | 422 | 否（同候选重试必然同败；重新 check 发现新 release 后可恢复） | 无。主要出现形态：异步——`state=failed` + `last_error.code` |
+| `manifest_invalid` | manifest 结构或语义校验失败 | 422 | 否（同候选重试必然同败；重新 check 发现新 release 后可恢复） | 无。主要出现形态：异步——`state=failed` + `last_error.code` |
 | `artifact_invalid` | 下载产物 hash/大小/格式校验失败（截断、篡改、zip-slip 等） | 422 | 条件性（重新 download 可修复传输损坏；产物源本身损坏则需等新版本） | 无。主要出现形态：异步——`state=failed` + `last_error.code` |
 | `insufficient_space` | 磁盘空间不足以容纳 staging、数据快照、新旧两版本及安全余量（受理前预检或后台检查失败） | 507 | 是（清理空间后重试） | `required_bytes` / `available_bytes`（整数；不给路径） |
 | `schema_incompatible` | 候选目标 schema 超出当前 binary 的 `min_read/max_read` 兼容范围，或低于 `rollback_floor` 约束 | 422 | 否（需等待兼容的新版本） | `candidate_schema` / `supported_range`（整数/二元组） |
@@ -300,7 +300,7 @@
 | `system-info.degraded-direct.json` | direct 模式 200（capability 全 false、unsupported strategy） |
 | `system-info.unauthorized.json` | 未登录 401 |
 | `system-update.success.json` | GET 200，`state=staged` |
-| `system-update.failed-signature-invalid.json` | GET 200，`failed` + `signature_invalid` |
+| `system-update.failed-manifest-invalid.json` | GET 200，`failed` + `manifest_invalid` |
 | `system-update.failed-artifact-invalid.json` | GET 200，`failed` + `artifact_invalid` |
 | `system-update.manual-recovery.json` | GET 200，`manual_recovery` |
 | `system-update.unauthorized.json` | 未登录 401 |

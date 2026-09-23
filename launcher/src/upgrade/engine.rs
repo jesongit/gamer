@@ -70,8 +70,6 @@ impl Progress {
 /// 升级引擎参数。
 #[derive(Debug, Clone)]
 pub struct UpgradeOptions {
-    /// 可信公钥目录（manifest 验签）。
-    pub keys_dir: PathBuf,
     pub fetch: FetchOptions,
     pub probe: ReadyProbe,
     /// 优雅停机等待上限；超时按契约默认取消升级（准确 PID 未退出不硬杀）。
@@ -89,7 +87,6 @@ pub struct UpgradeOptions {
 impl Default for UpgradeOptions {
     fn default() -> Self {
         Self {
-            keys_dir: PathBuf::from("keys"),
             fetch: FetchOptions::default(),
             probe: ReadyProbe::default(),
             shutdown_timeout: Duration::from_secs(90),
@@ -109,7 +106,7 @@ pub enum ManifestSource {
     Url(String),
 }
 
-/// check 阶段产物（已验签候选）。
+/// check 阶段产物（已校验候选）。
 #[derive(Debug)]
 pub struct Checked {
     pub version: String,
@@ -353,7 +350,7 @@ impl Engine {
         }
     }
 
-    /// manifest 获取 + 验签 + 语义门禁 + 空间预估 + 缓存。
+    /// manifest 获取 + 结构 + 语义门禁 + 空间预估 + 缓存。
     fn load_candidate(
         &self,
         source: &ManifestSource,
@@ -370,7 +367,6 @@ impl Engine {
             ManifestSource::Url(url) => (self.fetch_remote_manifest(url)?, true),
         };
         let opts = ValidateOptions {
-            keys_dir: Some(self.opts.keys_dir.clone()),
             expect_current_version: Some(current.to_string()),
             launcher_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             ..ValidateOptions::default()
@@ -383,7 +379,7 @@ impl Engine {
                 .map(|e| format!("[{}] {}", e.code, e.detail))
                 .collect::<Vec<_>>()
                 .join("; ");
-            // 版本不高于当前 = 没有可用更新；其余 manifest 故障按验签/清单无效 fail closed
+            // 版本不高于当前 = 没有可用更新；其余 manifest 故障按结构/清单无效 fail closed
             let downgrade = outcome
                 .errors
                 .iter()
@@ -397,7 +393,7 @@ impl Engine {
             } else if launcher_too_old {
                 codes::LAUNCHER_TOO_OLD
             } else {
-                codes::SIGNATURE_INVALID
+                codes::MANIFEST_INVALID
             };
             return Err(BusinessError::new(
                 code,
@@ -405,21 +401,21 @@ impl Engine {
             ));
         }
         let raw = fs::read(&path).map_err(|e| {
-            BusinessError::new(codes::SIGNATURE_INVALID, format!("读取 manifest 失败: {e}"))
+            BusinessError::new(codes::MANIFEST_INVALID, format!("读取 manifest 失败: {e}"))
         })?;
         let value: Value = serde_json::from_slice(&raw).map_err(|e| {
             BusinessError::new(
-                codes::SIGNATURE_INVALID,
+                codes::MANIFEST_INVALID,
                 format!("manifest 不是合法 JSON: {e}"),
             )
         })?;
         let manifest = Manifest::parse(&value).map_err(|e| {
             BusinessError::new(
-                codes::SIGNATURE_INVALID,
+                codes::MANIFEST_INVALID,
                 format!("manifest 模型解析失败: {e}"),
             )
         })?;
-        // validate_manifest_file 已完成签名/结构门禁；这里再显式调用同一最低
+        // validate_manifest_file 已完成结构/语义门禁；这里再显式调用同一最低
         // launcher 版本规则，避免未来新增 manifest 消费入口时绕过门禁。
         super::check_minimum_launcher_version(&manifest.release.minimum_launcher_version)?;
         let version = manifest.release.version.clone();
@@ -461,10 +457,7 @@ impl Engine {
 
         // 空间预估：产物声明总量 + 现网数据体积（快照副本）+ 64 MiB 余量
         let platform = manifest.platforms.get("windows-x86_64").ok_or_else(|| {
-            BusinessError::new(
-                codes::SIGNATURE_INVALID,
-                "manifest 缺少 windows-x86_64 平台",
-            )
+            BusinessError::new(codes::MANIFEST_INVALID, "manifest 缺少 windows-x86_64 平台")
         })?;
         let mut required: u64 = u64::try_from(platform.app.artifact.size).unwrap_or(0);
         for comp in &platform.components {
@@ -485,22 +478,17 @@ impl Engine {
             ));
         }
 
-        // 缓存已验签 manifest（download/prepare/入口解析复用）
+        // 缓存已校验 manifest（download/prepare/入口解析复用）
         let cached = self.layout.manifests_dir().join(format!("{version}.json"));
         fs::create_dir_all(self.layout.manifests_dir()).map_err(|e| {
             BusinessError::new(
-                codes::SIGNATURE_INVALID,
+                codes::MANIFEST_INVALID,
                 format!("创建 manifests/ 失败: {e}"),
             )
         })?;
-        let signature = fs::read(crate::manifest::default_sig_path(&path)).map_err(|e| {
-            BusinessError::new(codes::SIGNATURE_INVALID, format!("读取签名失败: {e}"))
+        crate::state::atomic::write_bytes_atomic(&cached, &raw).map_err(|e| {
+            BusinessError::new(codes::MANIFEST_INVALID, format!("缓存 manifest 失败: {e}"))
         })?;
-        crate::state::atomic::write_bytes_atomic(&cached.with_extension("sig"), &signature)
-            .and_then(|_| crate::state::atomic::write_bytes_atomic(&cached, &raw))
-            .map_err(|e| {
-                BusinessError::new(codes::SIGNATURE_INVALID, format!("缓存 manifest 失败: {e}"))
-            })?;
         if temporary {
             let _ = fs::remove_file(&path);
         }
@@ -2323,15 +2311,7 @@ mod tests {
     fn qa007_insufficient_space_is_rejected_before_current_data_or_snapshot_changes() {
         let root = temp_root("qa007-insufficient-space");
         let layout = InstallLayout { root: root.clone() };
-        let opts = UpgradeOptions {
-            keys_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
-                .join("release")
-                .join("contracts")
-                .join("fixtures")
-                .join("keys"),
-            ..UpgradeOptions::default()
-        };
+        let opts = UpgradeOptions::default();
         let engine = Engine::with_available_space_provider(
             layout.clone(),
             opts,

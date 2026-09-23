@@ -26,7 +26,7 @@ pub struct RepairOptions {
     pub probe: bool,
 }
 
-/// 应用组件安装规格（来自已验签 manifest `platforms.<plat>.app` +
+/// 应用组件安装规格（来自已校验 manifest `platforms.<plat>.app` +
 /// `resources.scrcpy_server`；安装位 = `versions/<release.version>/`）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppInstallSpec {
@@ -44,7 +44,7 @@ pub struct AppInstallSpec {
 }
 
 impl AppInstallSpec {
-    /// 从已验签 manifest 模型构建（version 用作目录名、entrypoint/path 用作拼接，
+    /// 从已校验 manifest 模型构建（version 用作目录名、entrypoint/path 用作拼接，
     /// 全部先过 manifest 同源路径安全检查，防目录逃逸）。
     pub fn from_model(platform: &Platform, release_version: &str) -> Result<Self, String> {
         if let Some(reason) = crate::manifest::pathsafe::check_single_path(release_version) {

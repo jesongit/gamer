@@ -1,5 +1,5 @@
 {
-  "scenario": "GET /api/system/update：检查阶段验签失败 → state=failed，last_error.code=signature_invalid（异步出现形态）",
+  "scenario": "GET /api/system/update：检查阶段清单校验失败 → state=failed，last_error.code=manifest_invalid（异步出现形态）",
   "endpoint": "GET /api/system/update",
   "request": {
     "method": "GET",
@@ -28,8 +28,8 @@
         "freeze_window_minutes": 30
       },
       "last_error": {
-        "code": "signature_invalid",
-        "message": "发布清单验签失败，已拒绝该候选版本；等待新的正式版本后重新检查"
+        "code": "manifest_invalid",
+        "message": "发布清单清单校验失败，已拒绝该候选版本；等待新的正式版本后重新检查"
       },
       "updated_at": "2026-08-31T12:05:00Z"
     }

@@ -1,6 +1,6 @@
 # Gamer 发布与人工恢复手册（维护者向）
 
-> 面向维护者的发布 runbook：draft 发布流程、签名密钥轮换、`manual_recovery` 人工恢复、
+> 面向维护者的发布 runbook：draft 发布流程、SHA256 完整性校验、`manual_recovery` 人工恢复、
 > 首次真实 tag 演练 checklist。
 > 事实依据：`.github/workflows/release.yml`（发布 workflow）、`docs/guides/UPDATE_CONTRACT.md`（安装目录契约）、
 > `release/contracts/`（manifest / system-api / IPC 契约）、`launcher/` 与 `release/packaging/`（当前实现）。
@@ -22,10 +22,12 @@ vite 注入 `__APP_VERSION__`（取自 `web/package.json`），与服务端不�
 
 ```text
 push tag v*
-  → verify（win）        版本门禁 + scrcpy 三方绑定 + tag 指向触发 commit
-  → build-windows（win） 构建 + 打包 + manifest 生产钥签名 + full 包 + SBOM
-  → draft-release        创建 draft Release 并上传资产（同名资产 hash 门禁）
-  → smoke（win）         environment: release 人工批准；从 Release 重新下载全量资产核验
+  → verify（win）        版本门禁 + scrcpy 绑定 + tag 指向触发 commit
+  → draft-release        创建空 draft Release
+  → build-windows（win） 构建本体、启动器、依赖、官方插件、清单与 full 包 + SBOM
+  → upload-assets        同名资产 hash 门禁，生成 SHA256SUMS
+  → artifact-verify      从 Release 重新下载全量资产核验
+  → smoke（win）         environment: release 人工批准后运行安装探针
   → publish              draft → 正式；纯 semver 才标 latest
 ```
 
@@ -37,7 +39,7 @@ push tag v*
 - `tools/check-scrcpy-binding.ps1`：代码 / jar / lock 三方绑定一致。
 - tag 指向的 commit 必须就是触发 workflow 的 commit（防止 tag 重打到别的历史）。
 
-### 2.2 build-windows：构建、打包、签名
+### 2.2 build-windows：构建、打包、校验
 
 1. 从 tag 派生产品版本（`v` 剥离；不合法立即失败）。
 2. `release/packaging/fetch-adb.ps1` / `fetch-ffmpeg.ps1`：按 `release/dependencies.lock.toml`
@@ -45,12 +47,10 @@ push tag v*
 3. `package-app.ps1 -Channel stable`：构建 server + web-dist + scrcpy jar 并打 zip，注入
    构建信息（git commit / 构建时间 / channel / target），生成包内 `SHA256SUMS`。
 4. `package-components.ps1`：adb / ffmpeg 组件 zip。
-5. `gen-manifest.ps1 -SkipSign` 生成未签名 manifest；随后用 **生产私钥**（CI secrets
-   `RELEASE_MANIFEST_PRIVATE_KEY` + `RELEASE_MANIFEST_KEY_ID`）签名并经
-   `validate-manifest.mjs` 全量校验。workflow 内兜底：key_id 为空 / 等于 `dev-ed25519-1` /
-   对应公钥不在 `release/keys/` —— 任一命中立即失败。
-6. `package-full.ps1`：生成便携 full 包（launcher + manifest + seeds + 许可文件），内部
-   自建 launcher 并做包内验签 + doctor 冒烟。
+5. `package-launcher.ps1` 打包独立启动器和官方插件；`gen-manifest.ps1` 实算
+   归档/文件 SHA256 与大小，并执行结构/语义校验。不需要签名或密钥。
+6. `package-full.ps1 -SkipBuild`：使用已写入清单的启动器字节生成完整包，
+   校验包内 SHA256SUMS、manifest 与 doctor 冒烟。
 7. `tools/gen-sbom.ps1`：CycloneDX SBOM。资产暂存 artifact 并上传。
 
 本地只想复现构包链路时，入口按以下顺序执行；这些命令不会创建或发布 GitHub Release：
@@ -58,35 +58,31 @@ push tag v*
 ```powershell
 .\release\packaging\fetch-adb.ps1
 .\release\packaging\fetch-ffmpeg.ps1
+.\tools\build-plugins.ps1
 .\release\packaging\package-app.ps1 -Channel stable
 .\release\packaging\package-components.ps1
+.\release\packaging\package-launcher.ps1
 .\release\packaging\gen-manifest.ps1 -Version '<version>' -Channel stable `
   -DownloadBaseUrl 'https://<发布源>/download/<tag>' `
-  -ReleaseNotesUrl 'https://<发布源>/releases/tag/<tag>' -SkipSign
-node release/packaging/sign-manifest.mjs sign .\release\manifests\<version>.json `
-  --key-env RELEASE_MANIFEST_PRIVATE_KEY --key-id $env:RELEASE_MANIFEST_KEY_ID
-node release/contracts/validate-manifest.mjs check .\release\manifests\<version>.json `
-  --keys-dir .\release\keys --expect-current-version '<version>' --expect-channel stable
-.\release\packaging\package-full.ps1 -Version '<version>' -KeyId $env:RELEASE_MANIFEST_KEY_ID
+  -ReleaseNotesUrl 'https://<发布源>/releases/tag/<tag>'
+.\release\packaging\package-full.ps1 -SkipBuild -Version '<version>'
 .\tools\gen-sbom.ps1
 $sbom = Get-ChildItem .\release\sbom\*.cdx.json | Select-Object -First 1
 .\release\packaging\augment-sbom.ps1 -SbomPath $sbom.FullName
 .\release\packaging\verify-sbom.ps1 -SbomPath $sbom.FullName -ExpectedVersion '<version>'
 ```
 
-生产签名由 workflow 在 `release-sign` environment 中从 `RELEASE_MANIFEST_PRIVATE_KEY` 和
-`RELEASE_MANIFEST_KEY_ID` 读取，不把私钥写入仓库；实际调用为
-`node release/packaging/sign-manifest.mjs sign ... --key-env RELEASE_MANIFEST_PRIVATE_KEY
---key-id <key_id>`，随后用仓库 `release/keys/` 中的公钥验证 manifest。`gen-manifest.ps1` 的
-默认 URL 是示例值，真实发布必须像 workflow 一样显式传入下载与 release notes URL。
+清单及资产默认来自官方 GitHub HTTPS，文件用 SHA256 校验。SHA256 无法认证发布者；
+来源可信性依赖 GitHub 账号与发布权限。发布脚本不再读取签名 secrets，也不生成密钥。
+`gen-manifest.ps1` 默认 URL 是示例值；正式发布必须传入实际下载和 release notes URL。
 
 ### 2.4 draft-release：draft 与资产上传
 
 - 幂等创建 draft Release（说明含安装三步、资产核验）。
 - 资产上传带 **hash 门禁**：同名资产已存在时重新下载比对，hash 一致跳过、不一致直接
   失败——同一 tag 绝不静默覆盖不同内容。
-- 最后生成 `SHA256SUMS.txt`（8 个内容资产：full zip、app zip、adb zip、ffmpeg zip、licenses
-  zip、manifest `.json`、`.sig`、SBOM `.cdx.json`）并同样受 hash 门禁保护。
+- 最后生成 `SHA256SUMS.txt`，覆盖 12 个内容资产：full/app/adb/ffmpeg/scrcpy/
+  launcher/official-plugins/licenses 共 8 个 ZIP、独立 EXE、两个 JSON 清单和 SBOM。
 
 ### 2.5 smoke：重新下载核验（人工批准闸）
 
@@ -94,13 +90,12 @@ $sbom = Get-ChildItem .\release\sbom\*.cdx.json | Select-Object -First 1
 必需评审人；**首次演练前必须先配置**）。批准后：
 
 1. 从 Release **重新下载全部资产**（QA-008 语义：脱离构建 workspace，以发布物为准）；
-2. 校验 `SHA256SUMS.txt` 覆盖且仅覆盖 8 个内容资产、下载目录 9 文件不多不少；
+2. 校验 `SHA256SUMS.txt` 覆盖且仅覆盖 12 个内容资产、下载目录 13 文件不多不少；
 3. 解压 full 包，核对包内 `SHA256SUMS` 逐条一致；
 4. 发布级 manifest 与包内副本字节一致；
-5. manifest 验签 ×2：仓库信任锚（`release/keys/`）与包内信任锚（解压出的 `keys/`）各跑
-   一次 `validate-manifest.mjs check`（期望 current version / stable channel）；
+5. 发布与包内 manifest 各跑一次 `validate-manifest.mjs check`（绑定版本与通道）；
 6. manifest 声明的 app sha256 == 实际发布的 app zip；SBOM 为合法 JSON；
-7. `gamer-launcher doctor` 双跑：未安装库存（应 WARN 不 FAIL）+ `--manifest` 验签校验；
+7. `gamer-launcher doctor` 双跑：未安装库存（应 WARN 不 FAIL）+ `--manifest` 校验校验；
    workflow 的 artifact verify 还会执行深度包内容与 probe 校验。
 
 ### 2.6 publish：draft → 正式
@@ -108,72 +103,13 @@ $sbom = Get-ChildItem .\release\sbom\*.cdx.json | Select-Object -First 1
 smoke 全过后自动 `gh release edit --draft=false`；纯 `X.Y.Z` 追加 `--latest`，预发布版本
 不标 latest。发布后 URL 与 draft 状态打印在 job 日志。
 
-## 3. 签名密钥轮换
+## 3. 来源与完整性
 
-信任模型：manifest 用 Ed25519 分离签名，**私钥只存 GitHub Actions secrets，永不离库**；
-公钥随 full 包内置于 `keys/` 作为包内信任锚，同时仓库 `release/keys/<key_id>.pem` 是 CI
-验签信任锚。`dev-ed25519-1` 仅供本地开发，禁止用于发布签名（workflow 内显式拒绝）。
-
-轮换流程（详见 `release/docs/KEY_ROTATION.md`，REL-006 维护）：
-
-1. 本地生成新生产密钥对（如 `prod-ed25519-2`），私钥按 PKCS#8 PEM 原样保存，**不入库**；
-2. PR 将新公钥提交到 `release/keys/<key_id>.pem`，旧公钥与新公钥先共存；
-3. 更新 GitHub environment `release-sign` 的两个 secrets：
-   `RELEASE_MANIFEST_PRIVATE_KEY`（新私钥）与 `RELEASE_MANIFEST_KEY_ID`（新 key_id）；
-4. 用预发布 tag（如 `v0.x.y-rc.1`）走完整 workflow，确认新 key 能生成并验签；
-5. 旧 key 退役，但公钥继续保留，以便验证历史 manifest；更新 key ledger；
-6. 删除旧私钥的所有本地副本，GitHub secret 覆盖而不是并存。
-
-仓库内可重复执行的轮换验证是离线 fixture 检查：
-
-```powershell
-.\release\packaging\verify-key-rotation.ps1 -FixtureDir .\release\contracts\fixtures\key-rotation
-```
-
-它验证 fixture 双公钥（current/next 均可验签）并复测四类负例全部 fail closed：
-未签名（`unsigned-manifest`）、manifest 篡改 1 字节（`signature-invalid`）、
-撤销 current key——信任库移除其公钥后签名必拒（`unknown-key-id`）、
-错误 key——用另一把公钥验签名（`signature-invalid`）。它只消费 fixture 公钥与签名，
-不证明生产 secret、GitHub Release 已经轮换成功。泄露应急
-仍按 `release/docs/KEY_ROTATION.md` 的新 key → 公钥 PR → 检查已发布资产 → 发布修复版本顺序
-处理，不删除历史公钥。
-
-### 3.1 本机 dev 密钥轮换演练记录（2026-08-31 实测）
-
-用 dev 密钥在本机完整走了一遍轮换语义（生成新钥 → 重签 → 双钥共存 → 撤销负例）。
-**这只验证工具链与信任库行为，不替代生产 Release environment 的真实轮换演练**
-（生产钥只能存在于 GitHub secrets，本机不存在也不许造）。
-
-已验证的步骤与实测结果（产品版本 0.1.0，manifest 由 `gen-manifest.ps1 -SkipSign` 按
-`release/dist/` 真实产物生成）：
-
-1. **生成新钥**：`node release/packaging/sign-manifest.mjs keygen --id dev-ed25519-2`
-   → 公钥 `release/keys/dev-ed25519-2.pem`（可提交），私钥
-   `release/keys/dev-ed25519-2.private.pem`（被 `.gitignore` 的 `release/keys/*.private.pem`
-   忽略，`git status`/`git check-ignore` 实证不入库）。
-2. **用新钥重签真实 manifest**：`node release/packaging/sign-manifest.mjs sign
-   release\manifests\0.1.0.json --key release\keys\dev-ed25519-2.private.pem`
-   （key_id 从文件名推断）→ `.sig` 首行 `gamebot-manifest-sig-1 dev-ed25519-2`。
-3. **双钥共存验签**（`release/keys/` 同时有 -1/-2 公钥）：`validate-manifest.mjs check
-   ... --expect-current-version 0.1.0 --expect-channel stable` 输出
-   `signature: verified (key_id=dev-ed25519-2)`；launcher 侧
-   `gamer-launcher doctor --manifest ... --keys-dir release\keys` 同样通过
-   （Node 与 Rust 双实现一致）。旧钥 -1 无本地私钥（符合"私钥永不落仓库机器"），
-   其双钥期正例由 fixture 脚本 current/next 双验签覆盖。
-4. **撤销负例**：临时信任库只保留另一把公钥 → 被撤 key 的签名 manifest 必须被拒，
-   双实现均 `[unknown-key-id]` 退出码 1；声称已撤 key_id 的签名同样
-   `[unknown-key-id]`（信任库查找先于验签，fail closed 顺序正确）。
-5. **未签名 / 篡改负例**：无 `.sig` → `unsigned-manifest`；manifest 翻转 1 字节或
-   `.sig` base64 翻转 1 字节 → `signature-invalid`（Node + launcher doctor 一致拒绝）。
-
-轮换时两条字节稳定性纪律（已固化为仓库约束）：
-
-- manifest/`.sig` 是对**原始字节**的签名：仓库 `.gitattributes` 已将
-  `release/contracts/fixtures/**`、`release/keys/*.pem` 固定 LF 检出。此前
-  `core.autocrlf=true` 的机器检出 fixture 为 CRLF 时，全部签名 fixture 会
-  `signature-invalid`（实测 validator selftest 5/28 通过）——凡新增签名覆盖的文本
-  fixture 必须纳入 LF 规则。
-- 生成的签名不要经会改行尾/编码的工具（编辑器、某些 scp/邮件网关）中转后再验。
+默认发布源为 `https://github.com/jesongit/gamer/releases/latest/download/gamer-release.json`。
+发行清单不附 `.sig`，完整包不含 `keys/`，构建不需要签名 secrets 或密钥轮换。
+在线传输使用 HTTPS；下载归档先对 size/SHA256，再安全解压并校验组件逐文件清单。
+离线种子、下载缓存和修复走相同完整性检查。远程清单拒绝 HTTP，loopback 测试除外。
+HTTPS 请求禁止重定向降级到 HTTP。已有安装里的旧签名文件不再被读取。
 
 ## 4. `manual_recovery` 人工恢复指引
 
@@ -195,7 +131,7 @@ smoke 全过后自动 `gh release edit --draft=false`；纯 `X.Y.Z` 追加 `--la
 | `state/update-journal.json` | 升级状态机 journal：update id、from/to、child PID、current/previous、snapshot、schema before/after、最后完成步骤、错误摘要 |
 | `backups/<update-id>/` | 升级前 data+config 离线快照（manifest + 逐文件 hash），自动回滚/人工恢复数据的唯一依据 |
 | `versions/<semver>/` | 新旧两个版本目录（安装后只读，升级证据） |
-| `manifests/<version>.json[.sig]` | 已验签 manifest 与签名 |
+| `manifests/<version>.json` | 已校验 manifest |
 | `quarantine/` | 回滚失败/损坏数据保留区（只增不自动删，供取证） |
 
 ### 4.3 处置步骤
@@ -257,8 +193,6 @@ smoke 全过后自动 `gh release edit --draft=false`；纯 `X.Y.Z` 追加 `--la
 前置（一次性）：
 
 - [ ] 仓库 Settings → Environments → `release` 配置必需评审人（否则 smoke 永远挂起）；
-- [ ] 生成生产密钥对，公钥 PR 入库 `release/keys/<key_id>.pem`，私钥/key_id 注入两个
-      secrets（见 §3；`dev-ed25519-1` 不可用）；
 - [ ] main 分支 CI 三 job（version / rust / web，含 WEB-006 硬门禁）全绿。
 
 演练链路：
@@ -266,8 +200,8 @@ smoke 全过后自动 `gh release edit --draft=false`；纯 `X.Y.Z` 追加 `--la
 - [ ] push 预发布 tag 后 Release workflow 触发，verify 三项门禁通过（tag==版本==Cargo==web、
       scrcpy 绑定、tag 指向触发 commit）；
 - [ ] build-windows 产物齐全：full zip / app zip / adb zip / ffmpeg zip / licenses zip /
-      manifest `.json`+`.sig` / SBOM，manifest 由生产 key 签名且 validate 全量校验通过；
-- [ ] draft-release 创建 draft 且 8 个内容资产 + SHA256SUMS.txt 上传齐全；人为重跑一次确认
+      scrcpy/launcher/official-plugins ZIP、独立 EXE、两个 manifest JSON / SBOM，清单校验通过；
+- [ ] draft-release 创建 draft 且 12 个内容资产 + SHA256SUMS.txt 上传齐全；人为重跑一次确认
       同名同 hash 跳过（幂等），不同 hash 拒绝覆盖；
 - [ ] 批准 release environment，smoke 七步全过（§2.5）；
 - [ ] publish 后 draft 转正且**未标 latest**（预发布语义验证）。
@@ -275,13 +209,11 @@ smoke 全过后自动 `gh release edit --draft=false`；纯 `X.Y.Z` 追加 `--la
 演练后验证：
 
 - [ ] 任一干净 Windows 环境（或干净目录）按 full 包内 `INSTALL.md`：解压 full 包 →
-      `gamer-launcher doctor --manifest` 验签 → `repair` → `start` → 浏览器登录；
+      `gamer-launcher doctor --manifest` 校验 → `repair` → `start` → 浏览器登录；
 - [ ] 设置页显示版本与 `/api/system/info` 一致、无混包警告条；更新能力按部署模式正确
       降级（直跑显示 update_not_managed）；
 - [ ] 双里程碑升级证据（计划 §14）：先安装 N-1 基线版本，再经基线 launcher 自动升级到
       本 tag 版本，验证快照/切换/回滚与 journal 记录；
-- [ ] key rotation 演练一遍（REL-006：生成 `prod-ed25519-2` → 公钥 PR → 切 secrets →
-      双钥期说明）；
 - [ ] 踩到的坑按仓库规则记入 `docs/PITFALLS.md`。
 
 ## 6. 相关文档
@@ -289,6 +221,5 @@ smoke 全过后自动 `gh release edit --draft=false`；纯 `X.Y.Z` 追加 `--la
 - 计划与批次 checklist：`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md`（§14 / §17.5）
 - 安装目录契约（journal/backups/quarantine 语义）：`docs/guides/UPDATE_CONTRACT.md`
 - manifest/API/IPC/schema/许可契约与 fixtures：`release/contracts/`
-- 密钥轮换 runbook：`release/docs/KEY_ROTATION.md`
 - 完整包用户入口：打包生成的 `INSTALL.md`；launcher 参数以 `launcher/src/cli.rs` 为准
 - 踩坑记录：`docs/PITFALLS.md`

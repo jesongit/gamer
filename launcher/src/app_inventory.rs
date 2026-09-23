@@ -1,4 +1,4 @@
-//! 从已验签 manifest 对应的完整 ZIP 建立应用逐文件清单，覆盖 EXE 和所有 Web 资源。
+//! 从已校验 manifest 对应的完整 ZIP 建立应用逐文件清单，覆盖 EXE 和所有 Web 资源。
 use crate::{layout::InstallLayout, repair::AppInstallSpec};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

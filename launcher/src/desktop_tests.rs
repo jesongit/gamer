@@ -109,33 +109,10 @@ impl Drop for Harness {
     }
 }
 
-fn sign_candidate(layout: &InstallLayout, mut value: serde_json::Value) {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    use ed25519_dalek::{Signer, SigningKey};
-    let signing = SigningKey::from_bytes(&[53; 32]);
-    let mut der = vec![
-        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-    ];
-    der.extend_from_slice(signing.verifying_key().as_bytes());
-    fs::write(
-        layout.root.join("keys/desktop-test.pem"),
-        format!(
-            "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
-            STANDARD.encode(der)
-        ),
-    )
-    .unwrap();
+fn write_candidate(layout: &InstallLayout, mut value: serde_json::Value) {
     value["release"]["version"] = "0.2.1".into();
     let raw = serde_json::to_vec_pretty(&value).unwrap();
     fs::write(layout.manifests_dir().join("0.2.1.json"), &raw).unwrap();
-    fs::write(
-        layout.manifests_dir().join("0.2.1.sig"),
-        format!(
-            "gamebot-manifest-sig-1 desktop-test\n{}\n",
-            STANDARD.encode(signing.sign(&raw).to_bytes())
-        ),
-    )
-    .unwrap();
 }
 
 #[test]
@@ -240,7 +217,7 @@ fn real_desktop_install_repair_restart_update_and_rollback() {
     let base: serde_json::Value =
         serde_json::from_slice(&fs::read(layout.manifests_dir().join("0.2.0.json")).unwrap())
             .unwrap();
-    sign_candidate(&layout, base);
+    write_candidate(&layout, base);
     harness.job(Job::Inspect(true), Stage::Update);
     assert!(
         std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),

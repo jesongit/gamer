@@ -586,7 +586,6 @@ impl Worker {
     ) {
         let store = StateStore::new(&layout.root);
         let setup = (|| -> Result<_, String> {
-            let keys = dist::keys(&layout)?;
             let id = crate::installation::load_or_create(&store).map_err(|e| e.to_string())?;
             let token = crate::installation::new_session_token().map_err(|e| e.to_string())?;
             let admin = crate::installation::load_or_create_admin_token(&store)
@@ -595,7 +594,6 @@ impl Worker {
             let extras = crate::supervisor::LaunchExtras::managed(pipe.clone(), token.clone())
                 .with_admin_token(Some(admin.clone()));
             let options = crate::upgrade::engine::UpgradeOptions {
-                keys_dir: keys.clone(),
                 fetch: crate::fetch::FetchOptions {
                     control: control.clone(),
                     ..Default::default()
@@ -612,7 +610,7 @@ impl Worker {
                 crate::upgrade::engine::ManifestSource::Path(source.into())
             };
             let dispatcher =
-                crate::ipc::Dispatcher::new(layout.clone(), id, source, keys, options, false);
+                crate::ipc::Dispatcher::new(layout.clone(), id, source, options, false);
             let engine = dispatcher.engine.clone();
             let ipc_dispatcher = dispatcher.clone();
             std::thread::spawn(move || {
@@ -811,7 +809,7 @@ impl Worker {
         if current {
             let version = dist::current(&self.layout).ok_or("尚未安装")?;
             return dist::cached(&self.layout, Some(&version))
-                .ok_or("当前版本的签名清单不可用".into());
+                .ok_or("当前版本的发行清单不可用".into());
         }
         let path = self.candidate.clone().ok_or("请先检查更新")?;
         let model = dist::read(&self.layout, &path)?;

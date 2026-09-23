@@ -67,10 +67,10 @@ describe('GET /api/system/info 与 /api/system/update：字段与契约 fixture 
     expect(info.deployment).toEqual({ mode: 'direct', update_strategy: 'unsupported' })
   })
 
-  it('update status：staged / failed(signature_invalid) / failed(artifact_invalid) / manual_recovery 全部原样透传', async () => {
+  it('update status：staged / failed(manifest_invalid) / failed(artifact_invalid) / manual_recovery 全部原样透传', async () => {
     for (const name of [
       'system-update.success.json',
-      'system-update.failed-signature-invalid.json',
+      'system-update.failed-manifest-invalid.json',
       'system-update.failed-artifact-invalid.json',
       'system-update.manual-recovery.json',
     ]) {
@@ -246,7 +246,7 @@ describe('SYSTEM_ERRORS 错误码常量表（§7 冻结：11 码 + HTTP 状态�
       update_busy: 409,
       update_not_available: 409,
       update_not_ready: 409,
-      signature_invalid: 422,
+      manifest_invalid: 422,
       artifact_invalid: 422,
       insufficient_space: 507,
       schema_incompatible: 422,
@@ -388,13 +388,13 @@ describe('useUpdateFlow：安装 202 → 断连等待 → 重连判定（WEB-004
       pollOnce: vi.fn().mockResolvedValue({
         ok: true,
         info: { app: { version: '0.2.0' }, startup: { boot_id: 'boot-1' } },
-        update: { state: 'failed', detail: 'failed', last_error: { code: 'signature_invalid', message: '发布清单验签失败' } },
+        update: { state: 'failed', detail: 'failed', last_error: { code: 'manifest_invalid', message: '发布清单清单校验失败' } },
       }),
       sleep: vi.fn().mockResolvedValue(),
     })
     await f.submitInstall(BEFORE_INFO)
     expect(f.flow.verdict).toBe('failed')
-    expect(f.flow.error).toEqual({ code: 'signature_invalid', message: '发布清单验签失败', details: null })
+    expect(f.flow.error).toEqual({ code: 'manifest_invalid', message: '发布清单清单校验失败', details: null })
   })
 
   it('waiting 期轮询返回 rolling_back/installing 一律继续等待；回滚流程 idle 即成功（不要求版本变化）', async () => {

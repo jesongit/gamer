@@ -61,7 +61,6 @@ fn test_dispatcher(tag: &str, run_inline: bool) -> (Arc<Dispatcher>, PathBuf) {
         InstallLayout { root: root.clone() },
         "lch009-test-installation".to_string(),
         ManifestSource::None,
-        root.join("keys"),
         UpgradeOptions::default(),
         run_inline,
     );

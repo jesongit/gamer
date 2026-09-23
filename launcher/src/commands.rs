@@ -25,8 +25,6 @@ use crate::upgrade::trampoline;
 #[derive(Debug, Clone)]
 pub struct DoctorInvocation {
     pub manifest: Option<PathBuf>,
-    pub sig: Option<PathBuf>,
-    pub key: Option<PathBuf>,
     pub expect_current_version: Option<String>,
     pub expect_channel: Option<String>,
 }
@@ -52,20 +50,9 @@ pub fn normalize_cli_paths(cli: &mut Cli) {
     if let Some(p) = cli.install_root.as_mut() {
         ext(p);
     }
-    if let Some(p) = cli.keys_dir.as_mut() {
-        ext(p);
-    }
     match &mut cli.command {
-        Command::Doctor {
-            manifest, sig, key, ..
-        } => {
+        Command::Doctor { manifest, .. } => {
             if let Some(p) = manifest.as_mut() {
-                ext(p);
-            }
-            if let Some(p) = sig.as_mut() {
-                ext(p);
-            }
-            if let Some(p) = key.as_mut() {
                 ext(p);
             }
         }
@@ -101,8 +88,6 @@ pub fn dispatch(cli: &Cli, layout: &InstallLayout) -> i32 {
         Command::Status => cmd_status(layout),
         Command::Doctor {
             manifest,
-            sig,
-            key,
             expect_current_version,
             expect_channel,
             deep,
@@ -110,8 +95,6 @@ pub fn dispatch(cli: &Cli, layout: &InstallLayout) -> i32 {
         } => {
             let invocation = DoctorInvocation {
                 manifest: manifest.clone(),
-                sig: sig.clone(),
-                key: key.clone(),
                 expect_current_version: expect_current_version.clone(),
                 expect_channel: expect_channel.clone(),
             };
@@ -436,24 +419,14 @@ fn print_component_finding(finding: &crate::inventory::ComponentFinding, out: &m
     }
 }
 
-/// doctor --manifest：对任意 manifest 文件跑完整校验（先验签、后解析，fail closed）。
+/// doctor --manifest：对任意 manifest 文件跑完整校验（fail closed）。
 fn cmd_doctor_manifest(
-    layout: &InstallLayout,
-    cli: &Cli,
+    _layout: &InstallLayout,
+    _cli: &Cli,
     invocation: &DoctorInvocation,
     manifest: &Path,
 ) -> i32 {
-    let keys_dir = match resolve_keys_dir(cli.keys_dir.as_ref(), layout) {
-        Ok(dir) => Some(dir),
-        Err(msg) => {
-            eprintln!("错误: {msg}");
-            return 2;
-        }
-    };
     let opts = ValidateOptions {
-        sig_path: invocation.sig.clone(),
-        keys_dir,
-        key_path: invocation.key.clone(),
         expect_current_version: invocation.expect_current_version.clone(),
         expect_channel: invocation.expect_channel.clone(),
         launcher_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -461,10 +434,6 @@ fn cmd_doctor_manifest(
     let outcome = validate_manifest_file(manifest, &opts);
     println!("manifest: {}", manifest.display());
     if outcome.ok {
-        println!(
-            "signature: verified (key_id={})",
-            outcome.info.key_id.as_deref().unwrap_or("?")
-        );
         println!(
             "release: {} ({}); platforms: {}",
             outcome.info.version.as_deref().unwrap_or("?"),
@@ -691,7 +660,7 @@ fn cmd_start(layout: &InstallLayout, cli: &Cli) -> i32 {
     let bundle = match load_manifest_model(layout, cli, None) {
         Ok(bundle) if bundle.model.release.version == version => bundle,
         Ok(_) => {
-            eprintln!("当前安装版本缺少对应的签名发行清单");
+            eprintln!("当前安装版本缺少对应的发行清单");
             return 1;
         }
         Err(e) => {
@@ -731,13 +700,7 @@ fn cmd_start(layout: &InstallLayout, cli: &Cli) -> i32 {
 
     // 批次 3：named pipe IPC server（后台线程，进程退出即结束）
     if ipc_enabled {
-        let keys_dir = resolve_keys_dir(cli.keys_dir.as_ref(), layout).ok();
-        spawn_ipc_server(
-            layout.clone(),
-            installation_id.clone(),
-            ipc_token,
-            keys_dir.unwrap_or_else(|| layout.root.join("keys")),
-        );
+        spawn_ipc_server(layout.clone(), installation_id.clone(), ipc_token);
     }
 
     match supervisor::wait_for_ready(port, &ReadyProbe::default()) {
@@ -799,12 +762,7 @@ pub(crate) fn open_browser(port: u16) {
 }
 
 /// 拉起 IPC named pipe 服务端（独立线程 + 独立 tokio runtime）。
-pub(crate) fn spawn_ipc_server(
-    layout: InstallLayout,
-    installation_id: String,
-    token: String,
-    keys_dir: PathBuf,
-) {
+pub(crate) fn spawn_ipc_server(layout: InstallLayout, installation_id: String, token: String) {
     let check_source = check_source_from_env();
     let store = StateStore::new(&layout.root);
     let admin_token = installation::load_or_create_admin_token(&store)
@@ -814,9 +772,7 @@ pub(crate) fn spawn_ipc_server(
         layout,
         installation_id.clone(),
         check_source,
-        keys_dir.clone(),
         UpgradeOptions {
-            keys_dir,
             admin_token,
             ..UpgradeOptions::default()
         },
@@ -873,7 +829,7 @@ fn check_source_from_env() -> ManifestSource {
 
 /// upgrade（LCH-010/011/012）：§6.6 全链路编排 + 启动恢复 + 自动回滚。
 /// 退出码：0=committed；1=失败但旧版健康/取消；2=manual_recovery_required。
-fn cmd_upgrade(layout: &InstallLayout, cli: &Cli, manifest: &str) -> i32 {
+fn cmd_upgrade(layout: &InstallLayout, _cli: &Cli, manifest: &str) -> i32 {
     println!("upgrade：检查并执行升级");
     println!("安装根: {}", layout.root.display());
     let lock = match InstanceLock::acquire(&layout.state_dir()) {
@@ -904,13 +860,6 @@ fn cmd_upgrade(layout: &InstallLayout, cli: &Cli, manifest: &str) -> i32 {
             return 1;
         }
     }
-    let keys_dir = match resolve_keys_dir(cli.keys_dir.as_ref(), layout) {
-        Ok(k) => k,
-        Err(msg) => {
-            eprintln!("错误: {msg}");
-            return 2;
-        }
-    };
     let source = if manifest.starts_with("http://") || manifest.starts_with("https://") {
         ManifestSource::Url(manifest.to_string())
     } else {
@@ -924,7 +873,6 @@ fn cmd_upgrade(layout: &InstallLayout, cli: &Cli, manifest: &str) -> i32 {
         .map_err(|e| tracing::warn!("admin-token 生成失败（{e}），drain 将为匿名请求"))
         .ok();
     let opts = UpgradeOptions {
-        keys_dir,
         ipc: Some((installation::pipe_name_for(&installation_id), ipc_token)),
         admin_token,
         ..UpgradeOptions::default()
@@ -957,16 +905,14 @@ pub(crate) struct ManifestBundle {
     pub model: Manifest,
 }
 
-/// 装载并完整校验（验签）release manifest：显式 --manifest 优先；否则扫描
+/// 装载并完整校验release manifest：显式 --manifest 优先；否则扫描
 /// manifests/ 缓存（匹配当前版本的优先，其余按 SemVer 降序），取第一份通过者。
 pub(crate) fn load_manifest_model(
     layout: &InstallLayout,
-    cli: &Cli,
+    _cli: &Cli,
     explicit: Option<&Path>,
 ) -> Result<ManifestBundle, String> {
-    let keys_dir = Some(resolve_keys_dir(cli.keys_dir.as_ref(), layout)?);
     let opts = ValidateOptions {
-        keys_dir,
         launcher_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         ..ValidateOptions::default()
     };
@@ -976,7 +922,7 @@ pub(crate) fn load_manifest_model(
     };
     if candidates.is_empty() {
         return Err(
-            "未找到可用 release manifest：用 --manifest 指定，或先把已验签 manifest 放入 manifests/。"
+            "未找到可用 release manifest：用 --manifest 指定，或先把已校验 manifest 放入 manifests/。"
                 .to_string(),
         );
     }
@@ -996,7 +942,7 @@ pub(crate) fn load_manifest_model(
         failures.push(format!("{}: {}", path.display(), codes.join(",")));
     }
     Err(format!(
-        "候选 manifest 全部校验失败（信任库/签名不匹配或内容非法）:\n  {}",
+        "候选 manifest 全部校验失败（结构或内容非法）:\n  {}",
         failures.join("\n  ")
     ))
 }
@@ -1056,35 +1002,6 @@ pub(crate) fn cached_manifest_candidates(layout: &InstallLayout) -> Vec<PathBuf>
         })
     });
     scored.into_iter().map(|(_, p)| p).collect()
-}
-
-/// 公钥目录解析顺序：--keys-dir > GAMER_LAUNCHER_KEYS_DIR > <安装根>/keys > <exe 目录>/keys。
-fn resolve_keys_dir(explicit: Option<&PathBuf>, layout: &InstallLayout) -> Result<PathBuf, String> {
-    if let Some(dir) = explicit {
-        return Ok(dir.clone());
-    }
-    if let Ok(env_dir) = std::env::var("GAMER_LAUNCHER_KEYS_DIR") {
-        if !env_dir.trim().is_empty() {
-            return Ok(PathBuf::from(env_dir));
-        }
-    }
-    let mut candidates: Vec<PathBuf> = vec![layout.root.join("keys")];
-    if let Some(exe_keys) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("keys")))
-    {
-        candidates.push(exe_keys);
-    }
-    for candidate in candidates {
-        if candidate.is_dir() {
-            return Ok(candidate);
-        }
-    }
-    Err(
-        "未找到可信公钥目录：请用 --keys-dir 指定（例如 release/contracts/fixtures/keys），\
-         或设置 GAMER_LAUNCHER_KEYS_DIR，或在安装根下放置 keys/*.pem"
-            .to_string(),
-    )
 }
 
 fn count_files_with_ext(dir: &Path, ext: &str) -> usize {

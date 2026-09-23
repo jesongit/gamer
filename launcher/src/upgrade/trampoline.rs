@@ -131,7 +131,7 @@ fn stage_candidate(request: &LauncherUpdateRequest) -> Result<StagedLauncher, Tr
         target.flush()?;
         target.sync_all()?;
         // 读取一次以确保测试/mock 也只把完整文件视为 staged 产物；不做版本或
-        // PE 解析，候选身份由上游签名 manifest 门禁负责。
+        // PE 解析，候选完整性由上游 manifest SHA256 校验负责。
         let mut check = File::open(&staged)?;
         let mut byte = [0u8; 1];
         let _ = check.read(&mut byte)?;

@@ -1,5 +1,5 @@
 {
-  "scenario": "download 操作：受理即回（长操作），下载/验签进度经 status 轮询；同 request_id 重发返回同一受理帧，不开第二次事务",
+  "scenario": "download 操作：受理即回（长操作），下载/校验进度经 status 轮询；同 request_id 重发返回同一受理帧，不开第二次事务",
   "operation": "download",
   "note": "fixture 只含帧的 JSON 载荷；线上传输为 u32 little-endian 长度前缀 + UTF-8 JSON。长操作受理后以 status 轮询（活跃 1s / 空闲 5s，建议值），下方附一条轮询响应示例",
   "request_frame": {

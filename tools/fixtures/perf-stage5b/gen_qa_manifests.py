@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create signed app-only manifests for the local QA-007 rig."""
+"""Create app-only manifests for the local QA-007 rig."""
 
 from __future__ import annotations
 
@@ -25,7 +25,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--dist-dir", type=Path, required=True)
     parser.add_argument("--manifests-dir", type=Path, required=True)
-    parser.add_argument("--keys-dir", type=Path, required=True)
     parser.add_argument("--versions", nargs="+", required=True)
     return parser.parse_args()
 
@@ -35,10 +34,7 @@ def main() -> int:
     repo = args.repo_root.resolve()
     dist = args.dist_dir.resolve()
     manifests = args.manifests_dir.resolve()
-    keys = args.keys_dir.resolve()
-    sign_tool = repo / "release" / "packaging" / "sign-manifest.mjs"
     validate_tool = repo / "release" / "contracts" / "validate-manifest.mjs"
-    private_key = keys / "dev-ed25519-1.private.pem"
     manifests.mkdir(parents=True, exist_ok=True)
 
     for version in args.versions:
@@ -86,35 +82,13 @@ def main() -> int:
         }
         path = manifests / f"{version}.json"
         path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-        signed = subprocess.run(
-            [
-                "node",
-                str(sign_tool),
-                "sign",
-                str(path),
-                "--key",
-                str(private_key),
-                "--key-id",
-                "dev-ed25519-1",
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-        if signed.returncode != 0:
-            raise RuntimeError(f"sign failed for {version}: {signed.stdout}{signed.stderr}")
         checked = subprocess.run(
             [
                 "node",
                 str(validate_tool),
                 "check",
                 str(path),
-                "--sig",
-                str(manifests / f"{version}.sig"),
-                "--keys-dir",
-                str(keys),
+
             ],
             capture_output=True,
             text=True,

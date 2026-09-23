@@ -25,14 +25,9 @@ fn main() {
     }
     let mut cli = Cli::parse_from(args);
     cli.implicit_start = implicit_start;
-    // CLI 路径（安装根/密钥目录/manifest 路径）先统一 verbatim 化，
+    // CLI 路径（安装根/manifest 路径）先统一 verbatim 化，
     // 再解析安装根——LongPathsEnabled=0 的主机上 >260 字符路径可用。
     commands::normalize_cli_paths(&mut cli);
-    if matches!(cli.command, gamer_launcher::cli::Command::Gui) {
-        if let Some(keys) = &cli.keys_dir {
-            std::env::set_var("GAMER_LAUNCHER_KEYS_DIR", keys);
-        }
-    }
     let layout = InstallLayout::resolve(cli.install_root.clone());
     logging::init(&layout, cli.log_level.as_deref());
     tracing::debug!(install_root = %layout.root.display(), "gamer-launcher 启动");

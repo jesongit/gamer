@@ -65,7 +65,7 @@ pub fn write_json_atomic<T: Serialize + ?Sized>(path: &Path, value: &T) -> io::R
     write_bytes_atomic(path, &bytes)
 }
 
-/// 原始字节原子写入；签名文件不能经过 JSON 再序列化。
+/// 原始字节原子写入；保留发行清单的原始内容。
 pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {

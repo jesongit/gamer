@@ -5,16 +5,15 @@
 #   config/config.toml                  模板（launcher 托管模式：路径留空由注入，
 #                                       password_hash 占位，字段按 server/src/config.rs 写全）
 #   data/                              空目录，不携带个人配置或运行数据
-#   manifests/<version>.json + .sig     gen-manifest.ps1 产物
-#   keys/<key_id>.pem                   dev 公钥（生产改为内置信任库）
-#   seeds/                              签名清单锁定的本体、运行依赖、启动器、官方插件 ZIP
+#   manifests/<version>.json     gen-manifest.ps1 产物
+#   seeds/                              发行清单锁定的本体、运行依赖、启动器、官方插件 ZIP
 #   SHA256SUMS.txt                      包内全部文件哈希清单
 #   INSTALL.md                          解压即用说明
 #   licenses/                           DEP-005 第三方声明（NOTICE + 各许可全文 + FFmpeg
 #                                       源码 offer + BUILD-CONFIG，履约 dependencies.lock.toml）
 #
 # 组包后自动结构校验：解压到临时目录 → 文件齐全 → SHA256SUMS 逐条对 →
-# manifest 用包内公钥验签。可选 -SkipSmoke 跳过 gamer-launcher.exe doctor 冒烟。
+# manifest 结构与语义校验。可选 -SkipSmoke 跳过 gamer-launcher.exe doctor 冒烟。
 # 兼容 Windows PowerShell 5.1 与 pwsh。
 
 [CmdletBinding()]
@@ -25,12 +24,11 @@ param(
     [switch]$SkipSmoke,
     # 产品版本（默认读 server/Cargo.toml）
     [string]$Version = '',
-    # 签名 key_id（默认 dev-ed25519-1）
-    [string]$KeyId = 'dev-ed25519-1',
+    [ValidateSet('stable', 'beta')]
+    [string]$Channel = 'stable',
     [string]$DistDir = '',
     # manifest 目录（gen-manifest.ps1 输出，默认 <repo>/release/manifests）
-    [string]$ManifestDir = '',
-    [string]$KeysDir = ''
+    [string]$ManifestDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -151,7 +149,7 @@ function Get-InstallTemplate {
 
 把 `Gamer-__VERSION__-windows-x64-full.zip` 解压到本地目录（建议路径不含中文与
 空格，例如 `D:\Gamer`）。**必须保持解压出的相对布局**：`gamer-launcher.exe`
-与 `config\`、`data\`、`manifests\`、`keys\`、`seeds\`、`licenses\`、`SHA256SUMS.txt` 在
+与 `config\`、`data\`、`manifests\`、`seeds\`、`licenses\`、`SHA256SUMS.txt` 在
 同一目录，不要单独把 exe 拖出去运行。
 
 ## 第 2 步：双击启动
@@ -190,7 +188,6 @@ function Get-InstallTemplate {
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not $DistDir)     { $DistDir     = Join-Path $repoRoot 'release\dist' }
 if (-not $ManifestDir) { $ManifestDir = Join-Path $repoRoot 'release\manifests' }
-if (-not $KeysDir)     { $KeysDir     = Join-Path $repoRoot 'release\keys' }
 
 Import-Module (Join-Path $PSScriptRoot 'LockFile.psm1') -Force
 
@@ -210,8 +207,6 @@ if (-not $Version) { Exit-Fail "无法确定产品版本" }
 # ---------- 输入清单 ----------
 $launcherExe    = Join-Path $repoRoot 'launcher\target\release\gamer-launcher.exe'
 $manifestJson   = Join-Path $ManifestDir ('{0}.json' -f $Version)
-$manifestSig    = Join-Path $ManifestDir ('{0}.sig' -f $Version)
-$pubKey         = Join-Path $KeysDir ('{0}.pem' -f $KeyId)
 $licensesDir    = Join-Path $repoRoot 'licenses'
 
 $components = Import-LockComponents -Path (Join-Path $repoRoot 'release\dependencies.lock.toml')
@@ -232,16 +227,16 @@ if (-not $SkipBuild) {
 }
 
 foreach ($must in @(
-    $launcherExe, $manifestJson, $manifestSig, $pubKey,
+    $launcherExe, $manifestJson,
     (Join-Path $DistDir $appZipName), (Join-Path $DistDir $adbZipName), (Join-Path $DistDir $ffmpegZipName),
     (Join-Path $licensesDir 'NOTICE.md')
 )) {
     if (-not (Test-Path -LiteralPath $must)) {
-        Exit-Fail "缺少输入: $must（按需运行 package-app.ps1 / package-components.ps1 / gen-manifest.ps1；公钥缺失时由 gen-manifest.ps1 自动 keygen）"
+        Exit-Fail "缺少输入: $must（按需运行 package-app.ps1 / package-components.ps1 / gen-manifest.ps1）"
     }
 }
 
-Write-Host "[package-full] 版本 $Version，key_id=$KeyId"
+Write-Host "[package-full] 版本 $Version"
 
 # ---------- 组装 staging ----------
 $stage = Join-Path $DistDir ('staging-full-' + $Version)
@@ -249,7 +244,7 @@ $distBoundary = [IO.Path]::GetFullPath($DistDir).TrimEnd('\') + '\'
 if ($Version -notmatch '^[A-Za-z0-9._+-]+$' -or $Version.Contains('..')) { Exit-Fail '版本号不能用作目录名' }
 if (-not [IO.Path]::GetFullPath($stage).StartsWith($distBoundary, [StringComparison]::OrdinalIgnoreCase)) { Exit-Fail 'staging 超出输出目录' }
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
-foreach ($d in @('config', 'data', 'manifests', 'keys', 'seeds')) {
+foreach ($d in @('config', 'data', 'manifests', 'seeds')) {
     New-Item -ItemType Directory -Path (Join-Path $stage $d) -Force | Out-Null
 }
 try {
@@ -258,8 +253,6 @@ try {
 
     # 数据目录留空，首次启动由 Core 播种默认配置包。
     Copy-Item -LiteralPath $manifestJson -Destination (Join-Path $stage ('manifests\{0}.json' -f $Version))
-    Copy-Item -LiteralPath $manifestSig  -Destination (Join-Path $stage ('manifests\{0}.sig' -f $Version))
-    Copy-Item -LiteralPath $pubKey       -Destination (Join-Path $stage ('keys\{0}.pem' -f $KeyId))
     $releaseModel = Get-Content -LiteralPath $manifestJson -Raw | ConvertFrom-Json
     $seedNames = @($releaseModel.platforms.'windows-x86_64'.app.artifact.name) + @($releaseModel.platforms.'windows-x86_64'.components | ForEach-Object { $_.artifact.name })
     foreach ($n in $seedNames) {
@@ -307,7 +300,7 @@ try {
 }
 Remove-Item -LiteralPath $stage -Recurse -Force
 
-# ---------- 结构校验：解压 → 文件齐全 → SHA256SUMS → manifest 验签 ----------
+# ---------- 结构校验：解压 → 文件齐全 → SHA256SUMS → manifest 校验 ----------
 Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
 $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
 if ($null -eq $zip) { Exit-Fail "zip 打开失败: $zipPath" }
@@ -326,8 +319,7 @@ try {
     foreach ($rel in @(
         'gamer-launcher.exe',
         'config\config.toml',
-        ('manifests\{0}.json' -f $Version), ('manifests\{0}.sig' -f $Version),
-        ('keys\{0}.pem' -f $KeyId),
+        ('manifests\{0}.json' -f $Version),
         ('seeds\' + $appZipName), ('seeds\' + $adbZipName), ('seeds\' + $ffmpegZipName),
         'SHA256SUMS.txt', 'INSTALL.md',
         'licenses\NOTICE.md',
@@ -367,10 +359,10 @@ try {
     }
     Write-Host "[package-full] SHA256SUMS 校验通过（$($expected.Count) 条）"
 
-    # manifest 验签（包内公钥 = 信任锚）
+    # manifest 结构与语义校验
     $extractedManifest = Join-Path $verify ('manifests\{0}.json' -f $Version)
-    & node (Join-Path $repoRoot 'release\contracts\validate-manifest.mjs') check $extractedManifest --keys-dir (Join-Path $verify 'keys') --expect-current-version $Version --expect-channel stable
-    if ($LASTEXITCODE -ne 0) { Exit-Fail "包内 manifest 验签未通过（退出码 $LASTEXITCODE）" }
+    & node (Join-Path $repoRoot 'release\contracts\validate-manifest.mjs') check $extractedManifest --expect-current-version $Version --expect-channel $Channel
+    if ($LASTEXITCODE -ne 0) { Exit-Fail "包内 manifest 校验未通过（退出码 $LASTEXITCODE）" }
 
     # launcher doctor 冒烟失败必须阻断组包。
     if (-not $SkipSmoke) {

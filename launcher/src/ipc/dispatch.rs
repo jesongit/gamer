@@ -58,7 +58,6 @@ pub struct Dispatcher {
     pub engine: Arc<Engine>,
     /// check 操作的候选来源（通道配置；IPC 请求不接受来源指定）。
     pub check_source: ManifestSource,
-    pub keys_dir: PathBuf,
     /// 测试/CLI 内联执行长操作（不另起线程）。
     pub run_inline: bool,
     inner: Mutex<Inner>,
@@ -84,7 +83,6 @@ impl Dispatcher {
         layout: InstallLayout,
         installation_id: String,
         check_source: ManifestSource,
-        keys_dir: PathBuf,
         engine_opts: UpgradeOptions,
         run_inline: bool,
     ) -> Arc<Self> {
@@ -94,7 +92,6 @@ impl Dispatcher {
             installation_id,
             launcher_version: env!("CARGO_PKG_VERSION").to_string(),
             check_source,
-            keys_dir,
             run_inline,
             inner: Mutex::new(Inner::default()),
         })
@@ -382,7 +379,7 @@ impl Dispatcher {
         let manifest = match self.load_repair_manifest() {
             Ok(m) => m,
             Err(msg) => {
-                tracing::error!("repair_dependency 无法装载已验签 manifest: {msg}");
+                tracing::error!("repair_dependency 无法装载已校验 manifest: {msg}");
                 return;
             }
         };
@@ -428,7 +425,6 @@ impl Dispatcher {
             .collect();
         candidates.sort();
         let opts = crate::manifest::ValidateOptions {
-            keys_dir: Some(self.keys_dir.clone()),
             launcher_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             ..crate::manifest::ValidateOptions::default()
         };
