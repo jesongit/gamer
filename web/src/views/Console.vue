@@ -134,6 +134,7 @@
         :fx-hit-style="fxHitStyle"
         :loupe="loupe"
         :stage="stageCtl.view"
+        :selection-mode="picking || !!cellPick.mode || selecting"
         :on-mouse-down="onMouseDown"
         :on-mouse-move="onMouseMove"
         :on-mouse-up="onMouseUp"
@@ -1175,7 +1176,8 @@ watch(() => stageCtl.view.kind, () => {
 })
 
 function fullscreen() {
-  if (videoWrap.value?.requestFullscreen) videoWrap.value.requestFullscreen()
+  const target = stageCtl.view.kind === 'media' ? videoWrap.value?.parentElement : videoWrap.value
+  if (target?.requestFullscreen) target.requestFullscreen()
 }
 
 function onVideoMounted(el) { videoElement.value = el }
@@ -1278,7 +1280,11 @@ onUnmounted(() => {
 .tb-row { display:flex; align-items:center; flex-wrap:wrap; gap:8px 16px; min-width:0; min-height:40px; padding:6px 10px; }
 .tb-row + .tb-row { border-top:1px solid var(--border); }
 .tb-group { display:flex; align-items:center; gap:6px; min-width:0; }
-.tb-label { flex:none; font-size:12px; color:var(--text-2); white-space:nowrap; }
+.tb-label, .stage-package :deep(.pkg-bar-label) {
+  flex:none; align-self:center; font-size:12px; line-height:1; color:var(--text-2);
+  writing-mode:vertical-rl; text-orientation:upright; white-space:nowrap;
+  letter-spacing:2px; padding-top:2px;
+}
 .tb-device-group, .tb-app-group { flex:0 1 auto; flex-wrap:wrap; max-width:100%; }
 .tb-control-group { flex:0 1 auto; flex-wrap:wrap; justify-content:flex-end; max-width:100%; margin-left:auto; }
 .tb-row .btn { flex:none; height:28px; min-width:28px; justify-content:center; padding:3px 7px; }

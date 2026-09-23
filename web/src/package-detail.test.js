@@ -3,6 +3,7 @@
 // 缺失提示（§36）：ctx 逻辑（usePackageContext）+ PackageDetailModal 挂载渲染。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
+import { zipSync, strToU8 } from 'fflate'
 import { ApiError } from './api'
 import PackageDetailModal from './workspace/PackageDetailModal.vue'
 import PackageContextBar from './workspace/PackageContextBar.vue'
@@ -347,6 +348,33 @@ describe('导入覆盖弹窗 Required Plugin 缺失提示（plan §36）', () =>
     expect(warning.exists()).toBe(true)
     expect(warning.text()).toContain('缺少插件 other.plugin')
     expect(warning.text()).toContain('导入后部分功能不可用，安装插件后自动恢复')
+  })
+
+  it('导出菜单先展示可搜索的实际清单，确认后才下载', async () => {
+    const { api } = setup()
+    const download = vi.fn()
+    api.exportPackageArchive = vi.fn(async () => ({ blob: new Blob([zipSync({
+      'package.toml': strToU8('id = "com.demo"'),
+      'plugins/gamer-yaml/templates/首页.png': new Uint8Array([1]),
+      'media/index.json': strToU8('{"entries":[]}'),
+    })]) }))
+    const ctx = usePackageContext({ api, download })
+    const wrapper = mount(PackageContextBar, { props: { context: ctx }, global: { stubs: { teleport: true } } })
+    await wrapper.get('[title="导出当前配置为 .gamerpkg"]').trigger('click')
+    await flushPromises()
+    const dialog = wrapper.get('[role="dialog"]')
+    expect(dialog.text()).toContain('3 个文件')
+    expect(dialog.text()).toContain('模板图片')
+    expect(dialog.text()).toContain('未保存的修改')
+    expect(download).not.toHaveBeenCalled()
+    await dialog.get('[type="search"]').setValue('首页')
+    await flushPromises()
+    expect(wrapper.findAll('.export-files tbody tr')).toHaveLength(1)
+    await wrapper.get('.export-modal .btn-primary').trigger('click')
+    await flushPromises()
+    expect(download).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it('配置包菜单选择动作后收起，删除仍先确认且不直接发送请求', async () => {

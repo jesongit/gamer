@@ -181,7 +181,7 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(runner).toContain('<StepCanvas')
     expect(runner).toContain('<ScriptSummary')
     expect(runner).toContain('<SaveConflictModal')
-    expect(runner).toContain('<RunLogPanel ')
+    expect(runner).toContain('<RunDetails ')
     expect(logs).toContain('props.onMounted(logBox.value)')
   })
 
@@ -367,9 +367,9 @@ describe('Console 视觉组件拆分静态回归', () => {
     const cell = read('../../plugins/gamer-yaml/ui/src/script-editor/components/CellEditor.vue')
     expect(cell).toContain('框选')
     expect(cell).toContain('匹配')
-    expect(cell).toContain('tools.matchTemplate(name)')
-    expect(consoleImpl).toContain('matchTemplate: name => testMatch(name, { stepSemantics: true })')
-    expect(consoleImpl).toContain('const region = stepSemantics ? undefined : templateRegionPixels(name)')
+    expect(cell).toContain('tools.matchTemplate(name, matchOptions(props.argumentName))')
+    expect(consoleImpl).toContain('testMatch(name, { stepSemantics: true, matchOptions })')
+    expect(consoleImpl).toContain('matchOptions.threshold ?? editorMatchThreshold()')
   })
 
   it('波次 2-F：运行与模板资源调用点只使用当前契约', () => {
