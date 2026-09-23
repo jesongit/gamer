@@ -289,15 +289,11 @@ data_dir = "./data"
 adb_path = ""
 ffmpeg_path = ""
 scrcpy_server = ""
-interval = "500ms"
 threshold = 0.85
-log_level = "info"
-judge_delay_ms = 200
 decode_frames = true
 max_size = 0
 bitrate_mbps = 12
 fps = 15
-encoder_name = ""
 probe_encoder = false
 
 [auth]

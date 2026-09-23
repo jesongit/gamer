@@ -28,6 +28,7 @@ pub(crate) mod native_funcs;
 pub(crate) mod resources;
 pub(crate) mod run_target;
 pub(crate) mod runner_adapter;
+pub(crate) mod settings;
 pub(crate) mod syntax;
 pub(crate) mod task_params;
 pub(crate) mod timer_yaml;

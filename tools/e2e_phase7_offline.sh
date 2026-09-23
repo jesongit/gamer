@@ -38,14 +38,11 @@ data_dir = "$DATA"
 adb_path = "adb-missing-on-purpose"
 ffmpeg_path = "ffmpeg"
 scrcpy_server = "./assets/scrcpy-server.jar"
-interval = "300ms"
 threshold = 0.85
-log_level = "info"
 decode_frames = true
 max_size = 0
 bitrate_mbps = 12
 fps = 15
-encoder_name = ""
 probe_encoder = false
 idle_power_secs = 0
 TOML

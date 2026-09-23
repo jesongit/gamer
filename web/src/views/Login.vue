@@ -18,6 +18,7 @@
           <label>确认密码</label>
           <input v-model="confirmPass" class="input" type="password" placeholder="再次输入管理员密码" autocomplete="new-password" />
         </div>
+        <label class="remember-login"><input v-model="remember" type="checkbox" /> 保持登录（30 天）</label>
         <button class="btn btn-primary login-btn" type="submit" :disabled="checkingSetup || busy || countdown > 0">
           {{ checkingSetup ? '检查中…' : (busy ? (setupMode ? '保存中…' : '登录中…') : (countdown > 0 ? `请稍候（${countdown}s）` : (setupMode ? '设置密码并进入' : '登 录'))) }}
         </button>
@@ -41,6 +42,7 @@ const route = useRoute()
 const user = ref('')
 const pass = ref('')
 const confirmPass = ref('')
+const remember = ref(true)
 const setupMode = ref(false)
 const checkingSetup = ref(true)
 const busy = ref(false)
@@ -82,8 +84,8 @@ async function onLogin() {
   busy.value = true
   errMsg.value = ''
   const res = setupMode.value
-    ? await setupInitialPassword(pass.value, confirmPass.value)
-    : await login(user.value.trim(), pass.value)   // 必须 await：凭 Set-Cookie 回包后才能放行路由
+    ? await setupInitialPassword(pass.value, confirmPass.value, remember.value)
+    : await login(user.value.trim(), pass.value, remember.value)
   busy.value = false
   if (res.ok) {
     // 服务端会话已建立（Cookie 同源自动携带）；回跳到被 401/守卫拦下的原目标
@@ -93,6 +95,10 @@ async function onLogin() {
     return
   }
   switch (res.code) {
+    case 'session_persist_failed':
+    case 'http_500':
+      errMsg.value = '登录状态保存失败，请检查服务端存储后重试'
+      break
     case 'password_mismatch':
       errMsg.value = '两次输入的密码不一致'
       break
@@ -140,6 +146,7 @@ onBeforeUnmount(stopCountdown)
 </script>
 
 <style scoped>
+.remember-login { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
 .login-wrap {
   height: 100%; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 24px;

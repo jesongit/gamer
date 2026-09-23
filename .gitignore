@@ -21,6 +21,9 @@ server/*.20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]
 # 属本机数据；.gamerpkg 归档经 POST /api/packages/import 导入（plan §7-§11）。
 # 个人资产如需随仓库保留，可在此追加显式例外（!server/data/packages/<id>/...）
 server/data/gamer.db
+server/data/auth-sessions.json
+server/data/_backups/
+server/data/extension-data/
 server/data/*.db-shm
 server/data/*.db-wal
 server/data/pending_restore.json
@@ -37,6 +40,7 @@ server/data/media/
 docker-data/
 
 # ===== Node (web) =====
+.vite/
 web/node_modules/
 web/dist/
 plugins/*/ui/node_modules/

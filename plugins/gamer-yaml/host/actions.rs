@@ -78,6 +78,30 @@ pub(crate) struct PublicAction {
 /// gamer-yaml 公开动作清单（唯一声明点；顺序即文档顺序）。
 pub(crate) const PUBLIC_ACTIONS: &[PublicAction] = &[
     PublicAction {
+        name: super::settings::GET_SETTINGS,
+        version: 1,
+        surface: ActionSurface::Native,
+        summary: "读取自动化默认设置",
+        caller: "user-management",
+        required_permissions: &[],
+        caller_permissions: &[],
+        context: &[],
+        params: &[],
+        mapping: "",
+    },
+    PublicAction {
+        name: super::settings::SAVE_SETTINGS,
+        version: 1,
+        surface: ActionSurface::Native,
+        summary: "保存默认模板等待超时，下次运行生效",
+        caller: "user-management",
+        required_permissions: &[],
+        caller_permissions: &[],
+        context: &[],
+        params: &["settings", "expected"],
+        mapping: "",
+    },
+    PublicAction {
         name: TEMPLATE_CREATE_FROM_FRAME,
         version: 1,
         surface: ActionSurface::Native,
@@ -166,6 +190,10 @@ pub(crate) fn native_call_action(
     }
     let result = match action {
         AUTOMATION_CREATE_DRAFT => video_draft::create_draft(values, data_dir),
+        super::settings::GET_SETTINGS | super::settings::SAVE_SETTINGS => {
+            super::settings::dispatch(action, values, data_dir)
+                .map_err(|e| ExtensionError::CallRejected(e.to_string()))
+        }
         AUTOMATION_SAVE_DRAFT => save_draft(values, data_dir),
         TEMPLATE_CREATE_FROM_FRAME => create_template_from_frame(values, data_dir),
         _ => return None,
@@ -196,6 +224,7 @@ pub(crate) fn native_action_expected_caller(
     PUBLIC_ACTIONS
         .iter()
         .find(|candidate| candidate.surface == ActionSurface::Native && candidate.name == action)
+        .filter(|candidate| candidate.caller != "user-management")
         .map(|candidate| candidate.caller)
 }
 
@@ -656,6 +685,8 @@ mod tests {
             .map(|action| action.name)
             .collect();
         let dispatch_branches = [
+            super::super::settings::GET_SETTINGS,
+            super::super::settings::SAVE_SETTINGS,
             AUTOMATION_CREATE_DRAFT,
             AUTOMATION_SAVE_DRAFT,
             TEMPLATE_CREATE_FROM_FRAME,

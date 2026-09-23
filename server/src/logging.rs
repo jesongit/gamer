@@ -57,7 +57,8 @@ pub struct PruneOutcome {
 /// `retain_days`：滚动文件保留天数（仅滚动文件形态消费；0 = 不清理）。
 /// 返回 `(最终形态, 可选的 WorkerGuard)`——stdout 形态时 guard 为 None。
 /// 必须在 Tokio 运行时内调用（滚动形态会启动每日零点清理任务）。
-pub fn init(retain_days: u32) -> anyhow::Result<(LogTarget, Option<WorkerGuard>)> {
+pub fn init(cfg: crate::config::Config) -> anyhow::Result<(LogTarget, Option<WorkerGuard>)> {
+    let retain_days = cfg.current_settings().log_retain_days;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| DEFAULT_FILTER.into());
 
     let gb_log = std::env::var("GB_LOG").ok();
@@ -101,7 +102,7 @@ pub fn init(retain_days: u32) -> anyhow::Result<(LogTarget, Option<WorkerGuard>)
                 retain_days,
                 Utc::now().date_naive(),
             ));
-            spawn_retention_loop(dir, prefix, retain_days);
+            spawn_retention_loop(dir, prefix, cfg);
             Ok((target, Some(guard)))
         }
         _ => {
@@ -202,13 +203,11 @@ fn rotated_file_date(name: &str, prefix: &str) -> Option<NaiveDate> {
 }
 
 /// 后台循环：每过一个 UTC 零点顺带清理一次；与 tracing-appender 的日期后缀口径一致。
-fn spawn_retention_loop(dir: PathBuf, prefix: String, retain_days: u32) {
-    if retain_days == 0 {
-        return; // 与启动清理口径一致：0 视为关闭保留策略
-    }
+fn spawn_retention_loop(dir: PathBuf, prefix: String, cfg: crate::config::Config) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(duration_until_next_utc_midnight()).await;
+            let retain_days = cfg.current_settings().log_retain_days;
             let today = Utc::now().date_naive();
             report_prune(prune_rotated_logs(&dir, &prefix, retain_days, today));
         }

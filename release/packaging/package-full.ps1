@@ -106,16 +106,12 @@ adb_path = ""
 ffmpeg_path = ""
 scrcpy_server = ""
 
-# 脚本引擎默认参数（可被脚本内 config: 段覆盖）
-interval = "500ms"        # 轮询与点击后等待间隔，带单位 ms/s/m/min/h/d；裸数字非法
+# 视觉测试接口未传阈值时使用；自动化函数使用自身参数默认值
 threshold = 0.85          # 模板匹配阈值，(0, 1]
-log_level = "info"        # debug / info / warn / error
-judge_delay_ms = 200      # 判断类步骤命中后延迟毫秒，0 = 关闭，上限 60000
 decode_frames = true      # 视频流软解码（模板匹配取帧）
 max_size = 0              # scrcpy 最大分辨率，0 = 原始；非 0 须为 8 的倍数 [16, 4096]
 bitrate_mbps = 12         # 码率上限 [1, 50]
 fps = 15                  # 帧率上限，0 = 设备默认，≤120
-encoder_name = ""         # scrcpy 编码器名，空 = 设备默认
 probe_encoder = false     # 编码器质量探针（纯诊断，默认关闭）
 
 # 空闲低功耗秒数：无 viewer 且无脚本运行持续 N 秒后拆会话/关屏；0 = 关闭

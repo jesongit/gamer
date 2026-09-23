@@ -80,10 +80,6 @@ pub struct UpdateConfig {
     pub maintenance_window_end: String,
     /// cron 冻结窗口分钟数（0~1440；距下一次启用 cron 触发须大于该值才可安装）
     pub freeze_minutes: i64,
-    /// 预留：更新检查源 URL（可空）。launcher 托管模式下远端检查由 launcher
-    /// 执行（通道来自 launcher 配置，ipc-v1 §4 check 载荷恒 `{}`），server 不消费
-    #[serde(default)]
-    pub check_url: Option<String>,
 }
 
 impl Default for UpdateConfig {
@@ -93,7 +89,6 @@ impl Default for UpdateConfig {
             maintenance_window_start: "02:00".into(),
             maintenance_window_end: "06:00".into(),
             freeze_minutes: 30,
-            check_url: None,
         }
     }
 }
@@ -183,6 +178,10 @@ fn env_path(key: &str) -> Option<PathBuf> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(skip)]
+    pub live_settings: std::sync::Arc<crate::settings::LiveSettings>,
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
     /// HTTP 监听端口
     pub port: u16,
     /// 数据目录（SQLite、模板图片、脚本）
@@ -198,16 +197,9 @@ pub struct Config {
     pub ffmpeg_path: String,
     /// scrcpy-server jar 路径
     pub scrcpy_server: PathBuf,
-    /// 脚本引擎默认 interval（轮询与点击后等待间隔，带单位时长串如 "500ms"；
-    /// 可被脚本内 config: 段覆盖；裸数字非法——引擎 parse_duration 强制单位）
-    #[serde(default = "default_interval")]
-    pub interval: String,
-    /// 默认模板匹配阈值（可被脚本内 config: 段覆盖）
+    /// 视觉测试接口未传 threshold 时的默认阈值；自动化函数使用自身参数默认值。
     #[serde(default = "default_threshold")]
     pub threshold: f32,
-    /// 引擎日志等级 debug|info|warn|error（可被脚本内 config: 段覆盖）
-    #[serde(default = "default_log_level")]
-    pub log_level: String,
     /// 视频流软解码（供模板匹配取帧）
     pub decode_frames: bool,
     /// scrcpy 最大分辨率（0 = 原始）
@@ -216,9 +208,6 @@ pub struct Config {
     pub bitrate_mbps: u32,
     /// 帧率上限（0 = 默认）
     pub fps: u32,
-    /// scrcpy 编码器名（空 = 设备默认；可指定 c2.android.avc.encoder 软编避开 MTK 硬件块效应）
-    #[serde(default)]
-    pub encoder_name: String,
     /// 编码器输出质量探针（关键帧 + 1/30 P 帧起 ffmpeg 解码检测块效应）。
     /// 纯诊断用：60fps 游戏画面下 ~2.5 进程/秒 + ~15MB/s 管道流量抢 pusher 的
     /// CPU/worker，推高单帧 RTP 发送耗时（饱和 → 积压 → 冻结跳帧），默认关闭
@@ -276,37 +265,28 @@ fn default_log_retain_days() -> u32 {
     14
 }
 
-fn default_interval() -> String {
-    "500ms".into()
-}
-
 fn default_threshold() -> f32 {
     0.85
-}
-
-fn default_log_level() -> String {
-    "info".into()
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            live_settings: Default::default(),
+            source_path: None,
             port: 8443,
             data_dir: PathBuf::from("./data"),
             app_dir: None,
             adb_path: "adb".into(),
             ffmpeg_path: "ffmpeg".into(),
             scrcpy_server: PathBuf::from("./assets/scrcpy-server.jar"),
-            interval: default_interval(),
             threshold: default_threshold(),
-            log_level: default_log_level(),
             decode_frames: true,
             max_size: 0,
             bitrate_mbps: 20,
             // 默认 15fps：防止无 config.toml 时 scrcpy 全速发帧（55fps+），
             // 服务端 ffmpeg 软解 + PNG 编解码单核跑满（CPU 100% 持续拖垮进程）
             fps: 15,
-            encoder_name: String::new(),
             probe_encoder: false,
             idle_power_secs: default_idle_power_secs(),
             log_retain_days: default_log_retain_days(),
@@ -318,28 +298,6 @@ impl Default for Config {
             rtc_external_port: 0,
         }
     }
-}
-
-/// 解析带单位时长串为毫秒数。与引擎 parse_duration 同口径：
-/// 数字部分 + 单位（ms/s/m/min/h/d，m≡min，数字可带小数）；裸数字非法。
-/// 返回 None 表示格式非法或数值不可表示。
-pub fn duration_str_to_ms(value: &str) -> Option<f64> {
-    let v = value.trim();
-    let split = v.find(|c: char| !(c.is_ascii_digit() || c == '.'))?;
-    let num: f64 = v[..split].parse().ok()?;
-    if !num.is_finite() {
-        return None;
-    }
-    let unit = v[split..].trim();
-    let mult = match unit {
-        "ms" => 1.0,
-        "s" => 1_000.0,
-        "m" | "min" => 60_000.0,
-        "h" => 3_600_000.0,
-        "d" => 86_400_000.0,
-        _ => return None,
-    };
-    Some(num * mult)
 }
 
 /// 外部工具探测结果（阶段 4 OBS-001 readiness 端点可直接复用）
@@ -447,7 +405,7 @@ impl Config {
     /// 非敏感生效值摘要（供启动日志展示来源与关键参数；密码/哈希等敏感项绝不输出）
     pub fn non_sensitive_summary(&self) -> String {
         format!(
-            "port={} data_dir={} interval=\"{}\" threshold={:.2} log_level={} \
+            "port={} data_dir={} threshold={:.2} \
              decode_frames={} max_size={} bitrate_mbps={} fps={} idle_power_secs={}s \
              log_retain_days={}d compute_max_concurrency={} \
              rtc_external_ip={} rtc_udp_port={} rtc_external_port={} \
@@ -455,9 +413,7 @@ impl Config {
              login_max_fails={}/{}s password_hash={}",
             self.port,
             self.data_dir.display(),
-            self.interval,
             self.threshold,
-            self.log_level,
             self.decode_frames,
             self.max_size,
             self.bitrate_mbps,
@@ -532,19 +488,6 @@ impl Config {
             ));
         }
 
-        match duration_str_to_ms(&self.interval) {
-            None => errs.push(format!(
-                "interval = \"{}\" 非法：须为带单位的时长串，支持 ms/s/m/min/h/d \
-                 （如 \"500ms\"、\"2s\"、\"30min\"）；裸数字不接受",
-                self.interval
-            )),
-            Some(ms) if ms <= 0.0 => errs.push(format!(
-                "interval = \"{}\" 非法：轮询/点击后等待间隔必须大于 0",
-                self.interval
-            )),
-            _ => {}
-        }
-
         if !(0.0 < self.threshold && self.threshold <= 1.0) {
             errs.push(format!(
                 "threshold = {} 非法：模板匹配阈值须在 (0, 1]，建议 0.7~0.9",
@@ -574,13 +517,6 @@ impl Config {
             errs.push(format!(
                 "max_size = {} 非法：须为 0（原始分辨率）或 8 的倍数且在 [16, 4096]",
                 self.max_size
-            ));
-        }
-
-        if !matches!(self.log_level.as_str(), "debug" | "info" | "warn" | "error") {
-            errs.push(format!(
-                "log_level = \"{}\" 非法：只接受 debug / info / warn / error",
-                self.log_level
             ));
         }
 
@@ -678,28 +614,7 @@ impl Config {
                 self.update.freeze_minutes
             ));
         }
-        if let Some(url) = &self.update.check_url {
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
-                errs.push(format!(
-                    "update.check_url = \"{}\" 非法：须为 http(s) URL 或留空",
-                    redact_url(url)
-                ));
-            }
-        }
-
         errs
-    }
-}
-
-/// check_url 报错展示：只保留 scheme + host，剥离 query/路径（避免诊断日志
-/// 带上可能内嵌凭据的完整 URL）
-fn redact_url(url: &str) -> String {
-    match url.split_once("://") {
-        Some((scheme, rest)) => {
-            let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-            format!("{scheme}://{authority}/…")
-        }
-        None => "<invalid>".to_string(),
     }
 }
 
@@ -707,7 +622,6 @@ fn redact_url(url: &str) -> String {
 fn normalize_paths(cfg: &mut Config) {
     cfg.adb_path = cfg.adb_path.trim().to_string();
     cfg.ffmpeg_path = cfg.ffmpeg_path.trim().to_string();
-    cfg.encoder_name = cfg.encoder_name.trim().to_string();
     cfg.rtc_external_ip = cfg.rtc_external_ip.trim().to_string();
     for p in [&mut cfg.data_dir, &mut cfg.scrcpy_server] {
         if let Some(s) = p.to_str() {
@@ -730,6 +644,8 @@ fn normalize_paths(cfg: &mut Config) {
 /// 加载收口（PATH-001 固定顺序）：环境变量覆盖 → 规范化 → 相对路径按冻结
 /// 契约解析（基准 = 配置文件所在目录 / GAMER_APP_DIR）
 fn finalize_paths(cfg: &mut Config, env: &PathEnv, config_path: &Path) {
+    cfg.source_path =
+        Some(std::path::absolute(config_path).unwrap_or_else(|_| config_path.to_path_buf()));
     apply_env_overrides(cfg, env);
     normalize_paths(cfg);
     resolve_stable_paths(cfg, &config_dir(config_path));
@@ -907,24 +823,19 @@ fps = 15
         assert_eq!(defaults.maintenance_window_start, "02:00");
         assert_eq!(defaults.maintenance_window_end, "06:00");
         assert_eq!(defaults.freeze_minutes, 30);
-        assert!(defaults.check_url.is_none());
 
         // 显式段落解析 + 非法值启动期拒绝
         let dir = temp_dir("update-section");
         let path = dir.join("config.toml");
         std::fs::write(
             &path,
-            "port = 8443\ndata_dir = \"./data\"\nadb_path = \"adb\"\nffmpeg_path = \"ffmpeg\"\nscrcpy_server = \"./assets/scrcpy-server.jar\"\ndecode_frames = true\nmax_size = 0\nbitrate_mbps = 12\nfps = 15\n\n[update]\nstrategy = \"auto\"\nmaintenance_window_start = \"23:00\"\nmaintenance_window_end = \"05:00\"\nfreeze_minutes = 15\ncheck_url = \"https://releases.example.invalid/v1\"\n",
+            "port = 8443\ndata_dir = \"./data\"\nadb_path = \"adb\"\nffmpeg_path = \"ffmpeg\"\nscrcpy_server = \"./assets/scrcpy-server.jar\"\ndecode_frames = true\nmax_size = 0\nbitrate_mbps = 12\nfps = 15\n\n[update]\nstrategy = \"auto\"\nmaintenance_window_start = \"23:00\"\nmaintenance_window_end = \"05:00\"\nfreeze_minutes = 15\n",
         )
         .unwrap();
         let loaded = Config::load_from(&path, Profile::Dev).unwrap();
         assert_eq!(loaded.cfg.update.strategy, "auto");
         assert_eq!(loaded.cfg.update.maintenance_window_start, "23:00");
         assert_eq!(loaded.cfg.update.freeze_minutes, 15);
-        assert_eq!(
-            loaded.cfg.update.check_url.as_deref(),
-            Some("https://releases.example.invalid/v1")
-        );
 
         // 非法 strategy / start==end / freeze 越界 → validate 报错（含字段名）
         let mut bad = loaded.cfg.clone();
@@ -967,7 +878,7 @@ fps = 15
     }
 
     #[test]
-    fn validation_rejects_bad_port_duration_level_bitrate() {
+    fn validation_rejects_bad_port_bitrate_threshold() {
         // 反例统一用结构体更新语法实例化（避免 Default 后逐字段赋值的 clippy 提示）
         let cases: Vec<(Config, &str)> = vec![
             (
@@ -976,34 +887,6 @@ fps = 15
                     ..Default::default()
                 },
                 "端口",
-            ),
-            (
-                Config {
-                    interval: "500".into(), // 裸数字非法
-                    ..Default::default()
-                },
-                "带单位",
-            ),
-            (
-                Config {
-                    interval: "abc".into(),
-                    ..Default::default()
-                },
-                "interval",
-            ),
-            (
-                Config {
-                    interval: "0s".into(),
-                    ..Default::default()
-                },
-                "大于 0",
-            ),
-            (
-                Config {
-                    log_level: "verbose".into(),
-                    ..Default::default()
-                },
-                "log_level",
             ),
             (
                 Config {
@@ -1171,20 +1054,6 @@ rtc_external_port = 50000
             "{:?}",
             cfg.validate()
         );
-    }
-
-    #[test]
-    fn duration_parser_matches_engine_units() {
-        assert_eq!(duration_str_to_ms("500ms"), Some(500.0));
-        assert_eq!(duration_str_to_ms("2s"), Some(2000.0));
-        assert_eq!(duration_str_to_ms("1.5m"), Some(90_000.0));
-        assert_eq!(duration_str_to_ms("30min"), Some(30.0 * 60_000.0));
-        assert_eq!(duration_str_to_ms("1h"), Some(3_600_000.0));
-        assert_eq!(duration_str_to_ms("1d"), Some(86_400_000.0));
-        assert_eq!(duration_str_to_ms("500"), None); // 裸数字非法
-        assert_eq!(duration_str_to_ms("500xyz"), None); // 未知单位
-        assert_eq!(duration_str_to_ms(""), None);
-        assert_eq!(duration_str_to_ms("-1s"), None);
     }
 
     #[test]

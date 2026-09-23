@@ -1,8 +1,7 @@
 //! 认证与会话治理（阶段 2 SEC-001/002/003）
 //!
 //! 结构一览：
-//! - [`AuthState`]：内存会话表 + 登录限流表 + 凭据校验。**重启即全体失效**是
-//!   设计行为（会话无持久化价值，重新登录成本极低）。
+//! - [`AuthState`]：持久化会话摘要 + 内存登录限流表 + 凭据校验；有效会话跨重启保留。
 //! - [`auth_guard`]：axum 中间件，保护 build_router 里"受保护分组"的全部路由
 //!   （其余 /api/**、/ws/device/:id）。豁免清单见 api/mod.rs 的 public 分组
 //!   （login / session / logout / health / 静态资源）。
@@ -25,7 +24,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Mutex, RwLock,
+    Arc, Mutex, RwLock,
 };
 use std::time::{Duration, Instant};
 
@@ -45,9 +44,12 @@ use super::common::err_response;
 use super::AppState;
 use crate::config::AuthConfig;
 
+mod session_store;
+use session_store::{session_key, session_now};
+
 // ---------- 认证（契约钉死，见 web/src/auth.js 同款口径） ----------
 //
-// POST /api/login {username,password} → 200 Set-Cookie gb_session(Path=/; HttpOnly; SameSite=Strict)
+// POST /api/login {username,password,remember?} → 200 Set-Cookie gb_session(Path=/; HttpOnly; SameSite=Strict)
 //                                        body {ok:true,username}
 //   401 {"error":"invalid_credentials"}；429 {"error":"too_many_attempts","retry_after":秒}
 // GET  /api/session → 200 {authenticated:true,username} / 401 {"error":"unauthorized"}
@@ -60,6 +62,8 @@ use crate::config::AuthConfig;
 pub(super) struct LoginReq {
     username: String,
     password: String,
+    #[serde(default)]
+    remember: bool,
 }
 
 pub(super) async fn api_login(
@@ -79,7 +83,10 @@ pub(super) async fn api_login(
     {
         return err_response(StatusCode::BAD_REQUEST, "bad_request");
     }
-    match st.auth.attempt_login(&req.username, &req.password, &ip.0) {
+    match st
+        .auth
+        .attempt_login_remember(&req.username, &req.password, &ip.0, req.remember)
+    {
         Ok((sid, username)) => (
             StatusCode::OK,
             [(header::SET_COOKIE, st.auth.session_cookie_for(&sid))],
@@ -91,6 +98,9 @@ pub(super) async fn api_login(
             Json(serde_json::json!({"error": "invalid_credentials"})),
         )
             .into_response(),
+        Err(LoginError::Persist) => {
+            err_response(StatusCode::INTERNAL_SERVER_ERROR, "session_persist_failed")
+        }
         Err(LoginError::RateLimited { retry_after_secs }) => (
             StatusCode::TOO_MANY_REQUESTS,
             [(header::RETRY_AFTER, retry_after_secs.to_string())],
@@ -106,6 +116,8 @@ pub(super) async fn api_login(
 pub(super) struct SetupPasswordReq {
     password: String,
     confirm_password: String,
+    #[serde(default)]
+    remember: bool,
 }
 
 /// 首次启动状态探测。setup_required 只会在本机配置为空且未提供环境变量时为 true。
@@ -113,7 +125,7 @@ pub(super) async fn api_setup_status(State(st): State<AppState>) -> Response {
     Json(json!({"setup_required": st.auth.setup_required()})).into_response()
 }
 
-/// 首次设置管理员密码：仅允许回环来源，成功后直接下发普通会话 Cookie。
+/// 首次设置管理员密码：仅允许回环来源，成功后按 remember 下发会话 Cookie。
 pub(super) async fn api_setup_password(
     State(st): State<AppState>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
@@ -134,7 +146,15 @@ pub(super) async fn api_setup_password(
     }
     match st.auth.setup_initial_password(&req.password) {
         Ok(()) => {
-            let (sid, username) = st.auth.issue_admin_session();
+            let (sid, username) = match st.auth.issue_admin_session(req.remember) {
+                Ok(session) => session,
+                Err(_) => {
+                    return err_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "session_persist_failed",
+                    )
+                }
+            };
             (
                 StatusCode::OK,
                 [(header::SET_COOKIE, st.auth.session_cookie_for(&sid))],
@@ -168,7 +188,9 @@ pub(super) async fn api_logout(State(st): State<AppState>, headers: HeaderMap) -
         return err_response(StatusCode::FORBIDDEN, "forbidden_origin");
     }
     if let Some(sid) = AuthState::extract_sid(&headers) {
-        st.auth.destroy(&sid);
+        if st.auth.destroy(&sid).is_err() {
+            return err_response(StatusCode::INTERNAL_SERVER_ERROR, "session_persist_failed");
+        }
     }
     (
         StatusCode::NO_CONTENT,
@@ -305,12 +327,16 @@ fn random_hex_id(bytes: usize) -> String {
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Session {
     username: String,
     /// 绝对过期时刻（登录起算，续期不可延长）
-    abs_expire: Instant,
+    abs_expire: u64,
     /// 最近一次认证请求时刻（滑动空闲判据）
-    last_seen: Instant,
+    last_seen: u64,
+    remember: bool,
+    #[serde(default)]
+    idle_secs: Option<u64>,
 }
 
 #[derive(Default)]
@@ -328,10 +354,13 @@ struct LoginKey {
 
 #[derive(Debug)]
 pub enum LoginError {
+    Persist,
     /// 用户名或口令错误 → 401 invalid_credentials
     Invalid,
     /// 触发限流 → 429 too_many_attempts（携带建议重试秒数）
-    RateLimited { retry_after_secs: u64 },
+    RateLimited {
+        retry_after_secs: u64,
+    },
 }
 
 pub struct AuthState {
@@ -341,8 +370,10 @@ pub struct AuthState {
     /// 回环管理令牌（None = 通道禁用）
     admin_token: Option<String>,
     cfg: AuthConfig,
+    live_settings: Arc<crate::settings::LiveSettings>,
     setup_required: AtomicBool,
     config_path: PathBuf,
+    session_path: Option<PathBuf>,
 }
 
 struct Inner {
@@ -351,6 +382,21 @@ struct Inner {
 }
 
 impl AuthState {
+    pub(crate) fn with_live_settings(
+        mut self,
+        settings: Arc<crate::settings::LiveSettings>,
+    ) -> Self {
+        self.live_settings = settings;
+        self
+    }
+
+    fn login_settings(&self) -> crate::settings::LoginSettings {
+        self.live_settings
+            .snapshot()
+            .map(|s| s.auth)
+            .unwrap_or_else(|| (&self.cfg).into())
+    }
+
     /// 组装鉴权状态。credential 由 main 在配置加载后按开发环境变量或
     /// `[auth].password_hash` 解析传入，运行期只持有 Argon2id PHC 或不可用状态。
     #[allow(dead_code)]
@@ -381,8 +427,10 @@ impl AuthState {
             secure_cookies,
             admin_token,
             cfg,
+            live_settings: Default::default(),
             setup_required: AtomicBool::new(setup_required),
             config_path: configured_path(),
+            session_path: None,
         }
     }
 
@@ -416,11 +464,22 @@ impl AuthState {
     /// 登录尝试：成功返回 (session_id, username)，失败给出契约错误分类。
     /// 限流键为 `(来源 IP, 用户名)` 组合；IP 取不到时为 "unknown"，相同用户名的
     /// 非标准直连共享桶。用户名不做折叠，因为当前唯一合法值精确为 `admin`。
+    #[cfg(test)]
     pub fn attempt_login(
         &self,
         username: &str,
         password: &str,
         ip_key: &str,
+    ) -> Result<(String, String), LoginError> {
+        self.attempt_login_remember(username, password, ip_key, false)
+    }
+
+    pub fn attempt_login_remember(
+        &self,
+        username: &str,
+        password: &str,
+        ip_key: &str,
+        remember: bool,
     ) -> Result<(String, String), LoginError> {
         // 形状粗校验先于限流判定？不：先查限流（被封锁期间连形状探测也不做），
         // 但形状不合格计一次失败（组合爆破面收敛到同一桶）
@@ -433,7 +492,7 @@ impl AuthState {
         };
 
         if let Some(f) = g.fails.get(&fail_key) {
-            if f.attempts.len() >= self.cfg.login_max_fails as usize {
+            if f.attempts.len() >= self.login_settings().login_max_fails as usize {
                 let oldest = f.attempts.front().copied().unwrap_or(now);
                 let retry = self
                     .window_duration()
@@ -455,7 +514,7 @@ impl AuthState {
         if !cred_ok {
             let entry = g.fails.entry(fail_key.clone()).or_default();
             entry.attempts.push_back(now);
-            while entry.attempts.len() > self.cfg.login_max_fails as usize {
+            while entry.attempts.len() > self.login_settings().login_max_fails as usize {
                 entry.attempts.pop_front();
             }
             if g.fails.len() > MAX_TRACKED_LOGIN_KEYS {
@@ -470,14 +529,12 @@ impl AuthState {
 
         g.fails.remove(&fail_key); // 成功即清空该 IP+用户名组合的失败计数
         let sid = random_hex_id(32); // 256bit 高熵 ID
-        g.sessions.insert(
-            sid.clone(),
-            Session {
-                username: "admin".to_string(),
-                abs_expire: now + self.abs_duration(),
-                last_seen: now,
-            },
-        );
+        let key = session_key(&sid);
+        g.sessions.insert(key.clone(), self.make_session(remember));
+        if self.persist_sessions(&g).is_err() {
+            g.sessions.remove(&key);
+            return Err(LoginError::Persist);
+        }
         Ok((sid, "admin".to_string()))
     }
 
@@ -509,67 +566,72 @@ impl AuthState {
     }
 
     /// 首次设置成功后直接创建管理员会话，避免用户再手工提交一次登录表单。
-    pub fn issue_admin_session(&self) -> (String, String) {
-        let now = Instant::now();
+    pub fn issue_admin_session(&self, remember: bool) -> Result<(String, String), LoginError> {
         let sid = random_hex_id(32);
-        self.inner.lock().unwrap().sessions.insert(
-            sid.clone(),
-            Session {
-                username: "admin".to_string(),
-                abs_expire: now + self.abs_duration(),
-                last_seen: now,
-            },
-        );
-        (sid, "admin".to_string())
+        let key = session_key(&sid);
+        let mut g = self.inner.lock().unwrap();
+        g.sessions.insert(key.clone(), self.make_session(remember));
+        if self.persist_sessions(&g).is_err() {
+            g.sessions.remove(&key);
+            return Err(LoginError::Persist);
+        }
+        Ok((sid, "admin".to_string()))
     }
 
-    /// 校验并滑动续期：命中返回用户名；绝对/空闲到期均即时销毁并拒绝
+    /// 令牌仅按摘要查找；绝对/空闲到期均拒绝，普通会话沿用配置期限。
     pub fn validate(&self, sid: &str) -> Option<String> {
-        let now = Instant::now();
+        let now = session_now();
+        let key = session_key(sid);
         let mut g = self.inner.lock().unwrap();
-        let s = g.sessions.get_mut(sid)?;
-        if now >= s.abs_expire {
-            g.sessions.remove(sid);
+        let s = g.sessions.get(&key)?;
+        if !self.session_active(s, now) {
+            g.sessions.remove(&key);
             return None;
         }
-        if now.duration_since(s.last_seen) >= self.idle_duration() {
-            g.sessions.remove(sid);
-            return None;
+        let username = s.username.clone();
+        // 记住登录仅受固定到期时间约束；普通会话每秒最多持久化一次空闲续期。
+        if !s.remember && now / 1000 != s.last_seen / 1000 {
+            let previous = s.last_seen;
+            g.sessions.get_mut(&key)?.last_seen = now;
+            if let Err(error) = self.persist_sessions(&g) {
+                g.sessions.get_mut(&key)?.last_seen = previous;
+                warn!(%error, "session persistence failed");
+                return None;
+            }
         }
-        s.last_seen = now;
-        Some(s.username.clone())
+        Some(username)
     }
 
-    /// 销毁指定会话（登出/接管失效）；幂等
-    pub fn destroy(&self, sid: &str) {
-        self.inner.lock().unwrap().sessions.remove(sid);
+    pub fn destroy(&self, sid: &str) -> anyhow::Result<()> {
+        let mut g = self.inner.lock().unwrap();
+        let key = session_key(sid);
+        let previous = g.sessions.remove(&key);
+        if let Err(error) = self.persist_sessions(&g) {
+            if let Some(previous) = previous {
+                g.sessions.insert(key, previous);
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
-    /// 后台清扫：清两类过期（绝对到期 / 空闲超时）。build_router 启动小时级循环任务调用
     pub fn sweep(&self) {
-        let now = Instant::now();
         let mut g = self.inner.lock().unwrap();
-        let idle = self.idle_duration();
-        g.sessions
-            .retain(|_, s| now < s.abs_expire && now.duration_since(s.last_seen) < idle);
-        self.prune_fails(&mut g.fails, now);
+        let now = session_now();
+        g.sessions.retain(|_, s| self.session_active(s, now));
+        if let Err(error) = self.persist_sessions(&g) {
+            warn!(%error, "session cleanup persistence failed");
+        }
+        self.prune_fails(&mut g.fails, Instant::now());
     }
 
-    #[cfg(test)] // 仅测试透出：断言会话表规模
+    #[cfg(test)]
     pub fn sessions_len(&self) -> usize {
         self.inner.lock().unwrap().sessions.len()
     }
 
-    fn abs_duration(&self) -> Duration {
-        Duration::from_secs(self.cfg.session_abs_secs.max(1))
-    }
-
-    fn idle_duration(&self) -> Duration {
-        Duration::from_secs(self.cfg.session_idle_secs.max(1))
-    }
-
     fn window_duration(&self) -> Duration {
-        Duration::from_secs(self.cfg.login_window_secs.max(1))
+        Duration::from_secs(self.login_settings().login_window_secs.max(1))
     }
 
     fn prune_fails(&self, fails: &mut HashMap<LoginKey, LoginFails>, now: Instant) {
@@ -583,10 +645,25 @@ impl AuthState {
     // ---------- Cookie ----------
 
     pub fn session_cookie_for(&self, sid: &str) -> String {
+        let persistent = self
+            .inner
+            .lock()
+            .unwrap()
+            .sessions
+            .get(&session_key(sid))
+            .filter(|s| s.remember)
+            .map(|s| {
+                format!(
+                    "; Max-Age={}",
+                    s.abs_expire.saturating_sub(session_now()) / 1000
+                )
+            })
+            .unwrap_or_default();
         format!(
-            "{}={}; Path=/; HttpOnly; SameSite=Strict{}",
+            "{}={}; Path=/; HttpOnly; SameSite=Strict{}{}",
             SESSION_COOKIE,
             sid,
+            persistent,
             if self.secure_cookies { "; Secure" } else { "" }
         )
     }
@@ -1143,9 +1220,9 @@ mod tests {
     fn logout_destroys_immediately() {
         let st = state(credential("pw"), 100, 100, 10, 300);
         let (sid, _) = st.attempt_login("admin", "pw", "ipD").unwrap();
-        st.destroy(&sid);
+        st.destroy(&sid).unwrap();
         assert_eq!(st.validate(&sid), None);
-        st.destroy(&sid); // 幂等
+        st.destroy(&sid).unwrap(); // 幂等
     }
 
     #[test]
