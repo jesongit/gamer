@@ -5,12 +5,12 @@ import { createRequire } from 'node:module'
 
 // Host-integrated UI packages share Vue and the explicit SDK with the shell.
 // Sandboxed iframe plugins keep using the message-port SDK instead.
-export async function pluginUiConfig(configUrl) {
+export async function pluginUiConfig(configUrl, { hostSourceRoot } = {}) {
   const root = dirname(fileURLToPath(configUrl))
   const require = createRequire(configUrl)
   const { default: vue } = await import(pathToFileURL(require.resolve('@vitejs/plugin-vue')).href)
   const modules = JSON.parse(readFileSync(new URL('./host-modules.json', import.meta.url), 'utf8'))
-  const coreRoot = fileURLToPath(new URL('../../web/src/', import.meta.url))
+  const coreRoot = hostSourceRoot || fileURLToPath(new URL('../../web/src/', import.meta.url))
   const virtualPrefix = '\0gamer-host-sdk:'
   return {
     root,
@@ -24,6 +24,7 @@ export async function pluginUiConfig(configUrl) {
           const target = resolve(dirname(importer.split('?')[0]), source)
           const key = relative(coreRoot, target).replaceAll('\\', '/')
           if (Object.hasOwn(modules, key)) return virtualPrefix + key
+          if (!key.startsWith('../') && !key.includes(':')) throw new Error(`Undeclared Gamer UI SDK import: ${key}`)
           return null
         },
         load(id) {
