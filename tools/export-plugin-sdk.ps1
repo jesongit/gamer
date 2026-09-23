@@ -10,7 +10,7 @@ $files = [ordered]@{
     'server/wit/gamer/host.wit' = 'wit/gamer/host.wit'
     'server/wit/keymap/keymap.wit' = 'wit/keymap/keymap.wit'
 }
-foreach ($file in (& git -C $repo ls-files tools/plugin-signer)) {
+foreach ($file in (& git -C $repo ls-files tools/plugin-packer)) {
     $files[$file] = $file.Substring('tools/'.Length)
 }
 $commit = (& git -C $repo rev-parse HEAD | Out-String).Trim()

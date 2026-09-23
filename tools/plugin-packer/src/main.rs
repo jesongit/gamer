@@ -17,24 +17,12 @@
 //!   manifest.toml 可解析、wasm 包 entry 存在且为 `\0asm` magic（builtin 包跳过
 //!   entry 校验）。打印 id=/version=/kind=/sha256=/size=。
 //!
-//! legacy 子命令（默认链不调用；仅为存量签名包/应急保留）：
-//!
-//! - `keygen`：`--out <key 文件> [--key-id gamer-dev-1] [--pem-out <pem 文件>]`。
-//! - `sign`：`--manifest <toml> --wasm <component.wasm> --key <key 文件>
-//!   --key-id <id> --out <gplugin> [--file ...]...`；旧版「打包 + Ed25519
-//!   manifest 签名」一体路径。registry-proof 子命令已随 Registry proof 机制
-//!   一并删除。
-
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine;
-use ed25519_dalek::{Signer, SigningKey};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const SIG_MAGIC: &str = "gamebot-gplugin-sig-1";
 const MANIFEST_FILE: &str = "manifest.toml";
 const WASM_MAGIC: [u8; 4] = [0x00, b'a', b's', b'm'];
 
@@ -43,7 +31,7 @@ fn main() -> ExitCode {
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("plugin-signer: {error}");
+            eprintln!("plugin-packer: {error}");
             ExitCode::FAILURE
         }
     }
@@ -51,14 +39,12 @@ fn main() -> ExitCode {
 
 fn run(args: &[String]) -> Result<(), String> {
     let Some(command) = args.first() else {
-        return Err("用法: plugin-signer <pack|inspect|verify|keygen|sign> ...".into());
+        return Err("用法: plugin-packer <pack|inspect|verify> ...".into());
     };
     match command.as_str() {
         "pack" => pack(&flags(&args[1..])?),
         "inspect" => inspect(&flags(&args[1..])?),
         "verify" => verify(&flags(&args[1..])?),
-        "keygen" => keygen(&flags(&args[1..])?),
-        "sign" => sign(&flags(&args[1..])?),
         other => Err(format!("未知子命令: {other}")),
     }
 }
@@ -368,109 +354,6 @@ fn verify(flags: &Flags) -> Result<(), String> {
     Ok(())
 }
 
-// ---------- legacy：keygen / sign（默认链不调用） ----------
-
-fn load_key(path: &str) -> Result<SigningKey, String> {
-    let hex = std::fs::read_to_string(path).map_err(|error| format!("读取私钥失败: {error}"))?;
-    let hex = hex.trim();
-    let mut bytes = [0u8; 32];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        let pair = hex
-            .get(index * 2..index * 2 + 2)
-            .ok_or_else(|| "私钥长度必须是 64 位 hex".to_string())?;
-        *byte =
-            u8::from_str_radix(pair, 16).map_err(|error| format!("私钥不是合法 hex: {error}"))?;
-    }
-    Ok(SigningKey::from_bytes(&bytes))
-}
-
-/// SPKI DER 包装（302a300506032b6570032100 + 32 字节公钥）→ PEM。
-fn public_key_pem(verifying: &ed25519_dalek::VerifyingKey) -> String {
-    let mut der = vec![
-        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-    ];
-    der.extend_from_slice(verifying.as_bytes());
-    let body = B64.encode(der);
-    let mut pem = String::from("-----BEGIN PUBLIC KEY-----\n");
-    for chunk in body.as_bytes().chunks(64) {
-        pem.push_str(std::str::from_utf8(chunk).expect("base64 是 ASCII"));
-        pem.push('\n');
-    }
-    pem.push_str("-----END PUBLIC KEY-----\n");
-    pem
-}
-
-fn keygen(flags: &Flags) -> Result<(), String> {
-    let out = require(flags, "out")?;
-    let key_id = flags
-        .values
-        .get("key-id")
-        .cloned()
-        .unwrap_or_else(|| "gamer-dev-1".into());
-    let mut secret = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut secret);
-    let signing = SigningKey::from_bytes(&secret);
-    if let Some(parent) = PathBuf::from(&out).parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("创建目录失败: {error}"))?;
-    }
-    std::fs::write(&out, hex(&signing.to_bytes()))
-        .map_err(|error| format!("写入私钥失败: {error}"))?;
-    let pem = public_key_pem(&signing.verifying_key());
-    if let Some(pem_out) = flags.values.get("pem-out") {
-        std::fs::write(pem_out, &pem).map_err(|error| format!("写入公钥 PEM 失败: {error}"))?;
-    }
-    println!("key_id={key_id}");
-    print!("{pem}");
-    Ok(())
-}
-
-fn sign(flags: &Flags) -> Result<(), String> {
-    let manifest_path = require(flags, "manifest")?;
-    let wasm_path = require(flags, "wasm")?;
-    let key_path = require(flags, "key")?;
-    let key_id = require(flags, "key-id")?;
-    let out = require(flags, "out")?;
-    let manifest =
-        std::fs::read(&manifest_path).map_err(|error| format!("读取 manifest 失败: {error}"))?;
-    let wasm = std::fs::read(&wasm_path).map_err(|error| format!("读取 wasm 失败: {error}"))?;
-    let signing = load_key(&key_path)?;
-
-    let signature = signing.sign(&manifest);
-    let sig_file = format!(
-        "{SIG_MAGIC} {key_id}\n{}\n",
-        B64.encode(signature.to_bytes())
-    );
-
-    let mut bytes = Vec::new();
-    {
-        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated)
-            .unix_permissions(0o644);
-        write_entry(&mut writer, MANIFEST_FILE, &manifest, options)?;
-        write_entry(&mut writer, "plugin.wasm", &wasm, options)?;
-        for (_, source) in &flags.multi {
-            let Some((archive_name, source_path)) = source.split_once('=') else {
-                return Err(format!("--file 需要 <归档路径>=<源文件> 形式: {source}"));
-            };
-            let content = std::fs::read(source_path)
-                .map_err(|error| format!("读取附加文件 {source_path} 失败: {error}"))?;
-            write_entry(&mut writer, archive_name, &content, options)?;
-        }
-        write_entry(&mut writer, "signature.sig", sig_file.as_bytes(), options)?;
-        writer
-            .finish()
-            .map_err(|error| format!("收尾 zip 失败: {error}"))?;
-    }
-    if let Some(parent) = PathBuf::from(&out).parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("创建目录失败: {error}"))?;
-    }
-    std::fs::write(&out, &bytes).map_err(|error| format!("写入 {out} 失败: {error}"))?;
-    println!("sha256={:x}", Sha256::digest(&bytes));
-    println!("size={}", bytes.len());
-    Ok(())
-}
-
 fn write_entry(
     writer: &mut zip::ZipWriter<std::io::Cursor<&mut Vec<u8>>>,
     name: &str,
@@ -484,8 +367,4 @@ fn write_entry(
         .write_all(content)
         .map_err(|error| format!("写入 {name} 内容失败: {error}"))?;
     Ok(())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

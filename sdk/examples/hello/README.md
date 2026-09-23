@@ -23,11 +23,11 @@ WIT 契约快照 `wit/gamer/host.wit`（`gamer:host@1.0.0`）。
 rustup target add wasm32-unknown-unknown   # guest 目标
 ```
 
-打包/校验直接复用 Gamer 仓库自带的 `tools/plugin-signer`（免签名，不需要任何密钥）。
+打包/校验直接复用 Gamer 仓库自带的 `tools/plugin-packer`（免签名，不需要任何密钥）。
 
 ## 构建（build → pack → verify）
 
-从 Gamer 仓库检出内（自动定位 signer）：
+从 Gamer 仓库检出内（自动定位 packer）：
 
 ```sh
 pwsh ./build.ps1
@@ -35,7 +35,7 @@ pwsh ./build.ps1
 ```
 
 等价的原始命令（跨 shell / 仓库外复制本目录后适用，`$SIGNER` 指向从
-Gamer 仓库构建出的 `gamer-plugin-signer.exe`，见 `tools/plugin-signer`）：
+Gamer 仓库构建出的 `gamer-plugin-packer.exe`，见 `tools/plugin-packer`）：
 
 ```sh
 # 1. guest core module（wasm32）
