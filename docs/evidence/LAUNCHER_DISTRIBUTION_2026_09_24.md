@@ -103,3 +103,11 @@ cargo test --test offline_install -- --ignored
 - 部分组合验收命令被自动审批以 blocked by policy 拒绝，未执行；最终通过实际安装 API 和逐项可核对的生命周期操作完成上述验证。
 
 最新本地完整包为同路径 `release/dist/Gamer-0.2.0-windows-x64-full.zip`，大小 **154,417,675 字节**，SHA-256 **`6f05d090d9d240724364df6a2168b7189f4ecd7bb098fb42bc41d315fbe332c6`**。仍为未发布的开发签名产物，替代前述旧摘要。
+
+## 托盘精简复验（2026-09-24）
+
+- 右键菜单缩为“打开 Gamer / 退出 Gamer”；双击托盘和重复运行 EXE 共用打开逻辑，Running 且空闲时打开网页，其余状态显示操作窗口。暂停与继续仍在安装/更新窗口，检查更新沿用工作台设置；完整维护保留启动自动修复与显式 CLI。
+- `cargo test`：203 项通过，4 项显式忽略；新增安装/更新/暂停/错误等状态从托盘恢复窗口且不重复提交任务的测试，退出测试改经实际菜单动作入口，验证重复退出只提交一次并保留进度。fmt、Clippy 全目标全功能 `-D warnings` 与 release 构建通过；本轮未做真实托盘鼠标点击验收。
+- 已更新用户解压目录 `release/dist/Gamer-0.2.0-windows-x64-full` 的启动器、种子、签名清单及说明，未覆盖个人 config/data/state；更新时目标无运行进程，完成后保持停止。repair 从 seed 同步内部 launcher 组件后，doctor --deep --probe 为 0 失败 / 0 警告。
+- 完整包重新生成并通过打包冒烟：154414713 字节；SHA256 `ec3c44a51ac92bc8b72b86a7db7877140db5b9c909348f73e3e9b93ee36e1969`。仍为 0.2.0 本地开发签名验收包，未发布。
+- 日志：临时目录 `gamer-tray-tests.log`、`gamer-tray-clippy.log`、`gamer-tray-build.log`、`gamer-tray-full.log`、`gamer-tray-user-repair.log`、`gamer-tray-user-doctor.log`。

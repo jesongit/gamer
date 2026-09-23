@@ -2,6 +2,46 @@ use super::*;
 use std::time::Instant;
 
 #[test]
+fn opening_tray_during_setup_reveals_window_without_starting_another_job() {
+    for stage in [
+        Stage::Install,
+        Stage::Update,
+        Stage::Working,
+        Stage::Paused,
+        Stage::Plugins,
+        Stage::Error,
+        Stage::Stopped,
+    ] {
+        let (jobs, receiver) = mpsc::channel();
+        let (_, updates) = mpsc::channel();
+        let mut desktop = Desktop {
+            layout: InstallLayout {
+                root: PathBuf::new(),
+            },
+            jobs,
+            updates,
+            control: TransferControl::default(),
+            snapshot: Snapshot {
+                stage,
+                ..Default::default()
+            },
+            tray: None,
+            exit: false,
+            cancelling: false,
+            quiet_start: true,
+        };
+        desktop.action("open", &egui::Context::default());
+        assert!(
+            !desktop.quiet_start,
+            "{stage:?} must be reachable from the tray"
+        );
+        assert_eq!(desktop.snapshot.stage, stage);
+        assert!(receiver.try_recv().is_err());
+        assert!(!desktop.cancelling);
+    }
+}
+
+#[test]
 fn cancelling_busy_install_preserves_progress_and_queues_exit_once() {
     let (jobs, receiver) = mpsc::channel();
     let (_, updates) = mpsc::channel();
@@ -21,8 +61,8 @@ fn cancelling_busy_install_preserves_progress_and_queues_exit_once() {
         cancelling: false,
         quiet_start: true,
     };
-    desktop.cancel();
-    desktop.cancel();
+    desktop.action("exit", &egui::Context::default());
+    desktop.action("exit", &egui::Context::default());
     assert!(desktop.control.is_paused());
     assert!(desktop.cancelling);
     assert!(matches!(receiver.try_recv(), Ok(Job::Exit)));

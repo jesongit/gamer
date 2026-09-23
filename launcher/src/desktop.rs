@@ -58,7 +58,9 @@ enum Job {
     Install,
     Plugins(Vec<String>),
     Start,
+    #[cfg(test)]
     Repair,
+    #[cfg(test)]
     Stop,
     Exit,
 }
@@ -188,16 +190,7 @@ fn configure(ctx: &egui::Context) {
 }
 fn make_tray(ctx: &egui::Context) -> Result<TrayIcon, Box<dyn std::error::Error>> {
     let menu = Menu::new();
-    for (id, label) in [
-        ("show", "打开启动器"),
-        ("open", "打开工作台"),
-        ("check", "检查更新"),
-        ("pause", "暂停下载"),
-        ("resume", "继续下载"),
-        ("repair", "校验并修复"),
-        ("stop", "停止 Gamer"),
-        ("exit", "退出 Gamer"),
-    ] {
+    for (id, label) in [("open", "打开 Gamer"), ("exit", "退出 Gamer")] {
         menu.append(&MenuItem::with_id(id, label, true, None))?;
     }
     let mut rgba = vec![0; 32 * 32 * 4];
@@ -228,13 +221,13 @@ fn make_tray(ctx: &egui::Context) -> Result<TrayIcon, Box<dyn std::error::Error>
     let wake = ctx.clone();
     TrayIconEvent::set_event_handler(Some(move |e| {
         if matches!(e, TrayIconEvent::DoubleClick { .. }) {
-            let _ = GUI_EVENTS.get().map(|tx| tx.send("show".into()));
+            let _ = GUI_EVENTS.get().map(|tx| tx.send("open".into()));
         }
         wake.request_repaint();
     }));
     Ok(TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip("Gamer · 运行管理")
+        .with_tooltip("Gamer")
         .with_icon(tray_icon::Icon::from_rgba(rgba, 32, 32)?)
         .build()?)
 }
@@ -277,24 +270,12 @@ impl Desktop {
     }
     fn action(&mut self, action: &str, ctx: &egui::Context) {
         match action {
-            "show" => self.show(ctx),
-            "pause" => self.control.pause(),
-            "open" if self.snapshot.stage == Stage::Running => crate::commands::open_browser(
-                crate::supervisor::read_configured_port(&self.layout.config_file()),
-            ),
-            "resume" if !self.snapshot.busy => {
-                self.control.resume();
-                self.send(Job::Install);
+            "open" if self.snapshot.stage == Stage::Running && !self.snapshot.busy => {
+                crate::commands::open_browser(crate::supervisor::read_configured_port(
+                    &self.layout.config_file(),
+                ))
             }
-            "check" if !self.snapshot.busy => {
-                self.show(ctx);
-                self.send(Job::Inspect(false));
-            }
-            "repair" if !self.snapshot.busy => {
-                self.show(ctx);
-                self.send(Job::Repair);
-            }
-            "stop" if !self.snapshot.busy => self.send(Job::Stop),
+            "open" => self.show(ctx),
             "exit" => self.cancel(),
             _ => {}
         }
@@ -359,7 +340,7 @@ impl eframe::App for Desktop {
         let show = self.layout.state_dir().join("show-launcher");
         if show.exists() {
             let _ = fs::remove_file(show);
-            self.show(ctx);
+            self.action("open", ctx);
         }
         if !self.exit && ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
@@ -735,8 +716,11 @@ impl Worker {
             Job::Install => self.install(),
             Job::Plugins(selected) => self.install_plugins(selected),
             Job::Start => self.start(),
+            #[cfg(test)]
             Job::Repair => self.repair(),
-            Job::Stop | Job::Exit => self.stop(),
+            #[cfg(test)]
+            Job::Stop => self.stop(),
+            Job::Exit => self.stop(),
         };
         self.state.busy = false;
         if let Err(e) = result {
@@ -979,6 +963,7 @@ impl Worker {
         }
         Ok(())
     }
+    #[cfg(test)]
     fn repair(&mut self) -> Result<(), String> {
         self.stop()?;
         let (_, model) = self.manifest(true)?;
