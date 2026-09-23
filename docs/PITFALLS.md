@@ -420,3 +420,6 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - 已选脚本/函数切回面板后仍提示打开编辑器：KeepAlive 面板共享一个编辑模型，需在激活或选择变化时恢复所选资源；隐藏面板不得抢加载，显式跳转/保存期间不重复加载，已有脚本 ID 可直接读取而不等待列表。
 
 - Vue Test Utils 的 Teleport stub 更新时可能替换弹窗节点，搜索后旧 DOMWrapper 仍指向旧清单；交互后从根 wrapper 重新查询弹窗节点再断言。
+
+- Windows PowerShell 5.1 会按系统编码读取无 BOM 的中文脚本和 JSON，导致假性语法/JSON 错误；发行 `.ps1` 使用 UTF-8 BOM，注册表 JSON 用 `ReadAllText(..., Encoding.UTF8)` 显式读取。
+- 完整包禁止复制开发机 `server/data`：子目录也含账号、插件状态和业务数据；只携带签名清单声明的 seeds，数据目录由首次启动初始化。

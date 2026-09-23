@@ -38,6 +38,14 @@
 | `platforms.*.resources.scrcpy_server` | 见下 | `version`（协议锁定 3.3.3）、`path`（必须 `assets/` 前缀，随应用放 `versions/<v>/assets/`）、`sha256`、`binding`（`const "application"`，jar 永远随应用版本更换，不得独立更新） |
 
 hash 一律 **64 位小写 hex SHA-256**；`size` 一律 ≥0；平台内所有声明 size 之和 ≤6 GiB。
+
+0.2.0 发行继续使用 v1 的开放组件 ID，不新增字段；最低启动器版本为 0.2.0。
+`components` 除 `adb`、含 ffprobe 的 `ffmpeg` 外，还包含 `scrcpy-server`、`launcher`、
+`official-plugins`。后两项版本来自相应产品打包版本，不属于第三方依赖锁。
+`scrcpy-server` 组件与 `resources.scrcpy_server` 的协议版本和 JAR 哈希必须相同，
+只随整套发行配方切换，不能追随上游最新版独立更新。保留 app 内 JAR 供 v1 资源
+完整性契约校验，实际启动注入受管组件路径。离线 seeds 仅保存清单中的组件归档。
+`data_schema` 由生成脚本读取服务端迁移目标版本，当前为 5。
 URL 仅接受 `https://`（镜像可替换 URL，但信任只来自签名、公钥与内容 hash；浏览器不得覆盖 URL）。
 
 ## 3. 签名格式（冻结，launcher 实现以 fixtures 为准）

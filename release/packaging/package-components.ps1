@@ -17,8 +17,8 @@ param(
     # 产物输出目录（默认 <repo>/release/dist）
     [string]$DistDir = '',
     # 只打包指定组件（默认 adb + ffmpeg）
-    [ValidateSet('adb', 'ffmpeg')]
-    [string[]]$ComponentIds = @('adb', 'ffmpeg')
+    [ValidateSet('adb', 'ffmpeg', 'scrcpy-server')]
+    [string[]]$ComponentIds = @('adb', 'ffmpeg', 'scrcpy-server')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,6 +49,8 @@ foreach ($id in $ComponentIds) {
     $c = Get-LockComponent -Components $components -Id $id
     $version = [string]$c['version']
     $vendorDir = Join-Path $VendorRoot "$id\$version"
+    if ($id -eq 'scrcpy-server') { $vendorDir = Split-Path -Parent (Join-Path $repoRoot ([string]$c['repo_path'])) }
+    if ($version -match '[\\/]|\.\.' -or $version -notmatch '^[A-Za-z0-9._+-]+$') { Exit-Fail '组件版本不能用作目录名' }
 
     # ---------- 前置: vendor 与锁 files[] 逐文件一致 ----------
     if (-not (Test-Path -LiteralPath $vendorDir)) {
@@ -60,6 +62,8 @@ foreach ($id in $ComponentIds) {
 
     # ---------- staging: 平铺所需文件 ----------
     $stage = Join-Path $DistDir ("staging-{0}-{1}" -f $id, $version)
+    $distBoundary = [IO.Path]::GetFullPath($DistDir).TrimEnd('\') + '\'
+    if (-not [IO.Path]::GetFullPath($stage).StartsWith($distBoundary, [StringComparison]::OrdinalIgnoreCase)) { Exit-Fail 'staging 超出输出目录' }
     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
     try {
@@ -92,6 +96,7 @@ foreach ($id in $ComponentIds) {
             Exit-Fail ("zip 条目集合与锁 files[] 不符: 期望 [{0}] 实际 [{1}]" -f ($expectedNames -join ', '), ($actualNames -join ', '))
         }
         $tmpDir = Join-Path $DistDir ("verify-{0}-{1}" -f $id, $version)
+        if (-not [IO.Path]::GetFullPath($tmpDir).StartsWith($distBoundary, [StringComparison]::OrdinalIgnoreCase)) { Exit-Fail 'verify 超出输出目录' }
         if (Test-Path -LiteralPath $tmpDir) { Remove-Item -LiteralPath $tmpDir -Recurse -Force }
         New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
         foreach ($f in $c.files) {

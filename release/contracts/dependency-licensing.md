@@ -10,7 +10,7 @@
 | 依赖 | 决策 | 许可 | 能否随 full 包再分发 |
 |---|---|---|---|
 | adb（Android Platform-Tools 三件套） | 来源锁定 Google 官方 dl.google.com；只取 `adb.exe` + `AdbWinApi.dll` + `AdbWinUsbApi.dll` | Apache-2.0（SDK 许可 §3.5 开源组件豁免） | **是**（须附带 Apache-2.0 文本与归属，逐文件 hash 入 lock） |
-| ffmpeg.exe | **BtbN/FFmpeg-Builds 的 win64-lgpl（static）构建**；gyan.dev 已全面 GPLv3，排除 | LGPL-3.0-or-later（现行 BtbN 构建带 `--enable-version3`） | **是**（须附 LGPL 文本 + 对应版本源码 offer + buildconf 归档；严禁 GPL/nonfree 构建） |
+| ffmpeg.exe / ffprobe.exe | **BtbN/FFmpeg-Builds 的 win64-lgpl（static）构建**；gyan.dev 已全面 GPLv3，排除 | LGPL-3.0-or-later（现行 BtbN 构建带 `--enable-version3`） | **是**（须附 LGPL 文本 + 对应版本源码 offer + buildconf 归档；严禁 GPL/nonfree 构建） |
 | scrcpy-server.jar | 与应用版本强绑定 **3.3.3**，不独立升级 | Apache-2.0 | **是**（附 Apache-2.0 文本 + 归属；无 NOTICE 文件，无 §4(d) 保留义务） |
 | Rust crate 依赖 | 不随包分发源码义务（编译进自家二进制） | 以扫描结果为准 | 由 cargo-deny 门禁保证清单一致 |
 
@@ -70,7 +70,7 @@
 
 ### 2.2 选定路线与验收方式（含 2026-08-31 实测记录）
 
-**选定**：`https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-<branch>-latest-win64-lgpl.zip`（static 变体，产物为单文件 `bin/ffmpeg.exe`，与计划 §5.1 的 `runtime/ffmpeg/<version>/ffmpeg.exe` 布局一致）。
+**选定**：`https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-<branch>-latest-win64-lgpl.zip`（static 变体，产物含 `bin/ffmpeg.exe`、`bin/ffprobe.exe`，与计划 §5.1 的 `runtime/ffmpeg/<version>/ffmpeg.exe` 布局一致）。
 
 ⚠️ **供应链注意**：BtbN 的 `latest` 是持续滚动更新的 tag，资产会被覆盖。DEP-001 锁定时必须：记录**下载当时**产物的 zip sha256 与 `ffmpeg -version` 输出的版本串（形如 `N-xxxxx-g<commit>-<date>`）；并把该产物副本收入 seed/发布存储，后续修复/重装一律从 seed 取已锁产物，**而不是反复追 latest**。
 
@@ -80,7 +80,7 @@
 2. `ffmpeg.exe -L`：输出为 **GNU Lesser General Public License**（现行构建因 `--enable-version3` 显示 version 3）。
 3. **真实冒烟**（计划 §11.2）：项目实际使用的 H.264 Annex-B **stdin 管道 → PNG stdout** 命令成功，输出为合法 PNG。
    - 实测记录（2026-08-31，`ffmpeg-master-latest-win64-lgpl.zip`，zip sha256 `c55a9c349ef915565c5755473d858c98d80d96feefe693fe6ab38705d29c920e`，版本串 `N-126335-gb32f8d1c23-20260830`）：buildconf 无 gpl/nonfree ✓；`-L` 输出 LGPL v3 ✓；`type smoke.h264 | ffmpeg -f h264 -i pipe:0 -frames:v 1 -f image2pipe -c:v png pipe:1` 输出 22,948 字节、PNG 魔数有效 ✓。
-4. 裁包：保留 `bin/ffmpeg.exe` 与许可文本，其余（ffplay/ffprobe/doc/presets）不入包；`ffmpeg.exe` 单文件 sha256 入 lock 与 manifest `required_files`。
+4. 裁包：保留 `bin/ffmpeg.exe`、`bin/ffprobe.exe` 与许可文本，其余（ffplay/doc/presets）不入包；两份可执行文件各自的 sha256 入 lock 与 manifest `required_files`。
 5. 体积注意：该构建 `ffmpeg.exe` ≈ **110 MB**（全功能静态链接）。首发可接受；若需瘦身，转 2.1 备选"自建最小 LGPL 构建"，验收门禁不变。
 
 ### 2.3 LGPL 履约清单（DEP-003/DEP-005 落地）

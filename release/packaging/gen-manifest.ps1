@@ -25,7 +25,7 @@ param(
     # 发布说明 URL（https）
     [string]$ReleaseNotesUrl = '',
     # 最低 launcher / 升级起点版本（批次基线 0.1.0）
-    [string]$MinLauncherVersion = '0.1.0',
+    [string]$MinLauncherVersion = '0.2.0',
     [string]$MinUpgradeVersion = '0.1.0',
     # 只生成 manifest，不签名不校验
     [switch]$SkipSign
@@ -115,6 +115,28 @@ $jarVersion    = [string]$scrcpy['version']
 $appZipName   = 'gamer-app-{0}-windows-x64.zip' -f $Version
 $adbZipName   = 'gamer-adb-{0}-windows-x64.zip' -f $adbVersion
 $ffmpegZipName = 'gamer-ffmpeg-{0}-windows-x64.zip' -f $ffmpegVersion
+$scrcpyZipName = 'gamer-scrcpy-server-{0}-windows-x64.zip' -f $jarVersion
+$launcherVersion = [regex]::Match([IO.File]::ReadAllText((Join-Path $repoRoot 'launcher/Cargo.toml')), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+
+# 通用组件字段保持 v1；新启动器独占解释 launcher / official-plugins 的产品行为。
+function New-ZipComponent {
+    param([string]$Id, [string]$ComponentVersion)
+    $name = "gamer-$Id-$ComponentVersion-windows-x64.zip"
+    Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+    $zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $DistDir $name))
+    try {
+        $files = @()
+        foreach ($entry in $zip.Entries) {
+            if ($entry.FullName.EndsWith('/')) { continue }
+            $stream = $entry.Open()
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try { $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+            finally { $stream.Dispose(); $sha.Dispose() }
+            $files += [ordered]@{path=$entry.FullName;size=[long]$entry.Length;sha256=$hash}
+        }
+        return [ordered]@{id=$Id;version=$ComponentVersion;artifact=(New-Artifact -Name $name -Url "$DownloadBaseUrl/$name");required_files=$files}
+    } finally { $zip.Dispose() }
+}
 
 # ---------- jar 强绑定门禁 ----------
 $jarPath = Join-Path $repoRoot ('server\assets\scrcpy-server.jar')
@@ -135,7 +157,7 @@ $manifest = [ordered]@{
         published_at             = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         minimum_launcher_version = $MinLauncherVersion
         minimum_upgrade_version  = $MinUpgradeVersion
-        data_schema              = 1
+        data_schema              = [int]([regex]::Match([IO.File]::ReadAllText((Join-Path $repoRoot 'server/src/migrations.rs')), 'TARGET_SCHEMA:\s*i64\s*=\s*(\d+)').Groups[1].Value)
         rollback_floor           = 1
         release_notes_url        = $ReleaseNotesUrl
     }
@@ -157,7 +179,15 @@ $manifest = [ordered]@{
                     version        = $ffmpegVersion
                     artifact       = New-Artifact -Name $ffmpegZipName -Url ('{0}/{1}' -f $DownloadBaseUrl, $ffmpegZipName)
                     required_files = New-RequiredFiles -Files $ffmpeg.files
-                }
+                },
+                [ordered]@{
+                    id = 'scrcpy-server'
+                    version = $jarVersion
+                    artifact = New-Artifact -Name $scrcpyZipName -Url "$DownloadBaseUrl/$scrcpyZipName"
+                    required_files = New-RequiredFiles -Files $scrcpy.files
+                },
+                (New-ZipComponent -Id 'launcher' -ComponentVersion $launcherVersion),
+                (New-ZipComponent -Id 'official-plugins' -ComponentVersion $Version)
             )
             resources = [ordered]@{
                 scrcpy_server = [ordered]@{
