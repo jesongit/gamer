@@ -176,6 +176,14 @@ pub(crate) async fn build_rtc_setting_engine(cfg: &Config) -> anyhow::Result<Set
 
     let mut se = SettingEngine::default();
     se.set_ice_multicast_dns_mode(webrtc::ice::mdns::MulticastDnsMode::Disabled);
+    if cfg.local_only {
+        // Loopback candidates are normally excluded by ICE. Explicitly include
+        // only IPv4 loopback interfaces so local tests never open LAN UDP sockets.
+        se.set_include_loopback_candidate(true);
+        se.set_network_types(vec![webrtc::ice::network_type::NetworkType::Udp4]);
+        se.set_ip_filter(Box::new(|ip| ip.is_loopback()));
+        return Ok(se);
+    }
     if !nat_ip.is_empty() {
         se.set_nat_1to1_ips(vec![nat_ip.to_string()], RTCIceCandidateType::Host);
     }
@@ -188,6 +196,39 @@ pub(crate) async fn build_rtc_setting_engine(cfg: &Config) -> anyhow::Result<Set
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn local_only_peer_gathers_usable_loopback_candidates_only() {
+        let cfg = crate::config::Config {
+            local_only: true,
+            ..Default::default()
+        };
+        let api = webrtc::api::APIBuilder::new()
+            .with_setting_engine(super::build_rtc_setting_engine(&cfg).await.unwrap())
+            .build();
+        let peer = api.new_peer_connection(Default::default()).await.unwrap();
+        peer.create_data_channel("probe", None).await.unwrap();
+        let mut complete = peer.gathering_complete_promise().await;
+        let offer = peer.create_offer(None).await.unwrap();
+        peer.set_local_description(offer).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), complete.recv())
+            .await
+            .unwrap();
+        let description = peer.local_description().await.unwrap();
+        let candidates: Vec<_> = description
+            .sdp
+            .lines()
+            .filter(|line| line.starts_with("a=candidate:"))
+            .collect();
+        assert!(
+            !candidates.is_empty(),
+            "local-only mode must produce usable ICE candidates"
+        );
+        for line in candidates {
+            assert_eq!(line.split_whitespace().nth(4), Some("127.0.0.1"), "{line}");
+        }
+        peer.close().await.unwrap();
+    }
+
     use super::*;
 
     #[test]
@@ -348,6 +389,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "binds a LAN UDP socket and may prompt Windows Firewall; run explicitly with --ignored"
+    )]
     async fn build_rtc_setting_engine_some_with_fixed_port() {
         // 固定端口（合法成对配置）：绑定一次成功即可（进程级 OnceCell 共享，
         // 先到先得；重复调用拿到缓存实例）

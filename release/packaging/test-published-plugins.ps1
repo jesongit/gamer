@@ -39,6 +39,8 @@ if ($FreshConfig) {
 } else {
     [IO.File]::WriteAllText($config, ([IO.File]::ReadAllText($config) -replace '(?m)^port = 8443', "port = $port"), [Text.UTF8Encoding]::new($false))
 }
+$oldLocalOnly = $env:GAMER_LOCAL_ONLY
+$env:GAMER_LOCAL_ONLY = '1'
 $proc = Start-Process -FilePath $exe -ArgumentList @('--install-root', $root, 'start') -WorkingDirectory $root -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $root 'start.log') -RedirectStandardError (Join-Path $root 'start.err.log')
 $oldTestRoot = $env:GAMER_TEST_INSTALL_ROOT
 try {
@@ -69,6 +71,7 @@ try {
     Write-Host "PASS: $($info.app.version), all three plugins running with accessible UI"
 } finally {
     $env:GAMER_TEST_INSTALL_ROOT = $oldTestRoot
+    $env:GAMER_LOCAL_ONLY = $oldLocalOnly
     $tokenPath = Join-Path $root 'state/admin-token'
     if ($ready -and (Test-Path -LiteralPath $tokenPath)) {
         $token = (Get-Content -LiteralPath $tokenPath -Raw | ConvertFrom-Json).token

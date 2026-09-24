@@ -75,6 +75,7 @@ fn child_env_injects_contract_vars_with_minimal_path() {
         "GB_CONFIG",
         "GB_LOG",
         "GAMER_ADMIN_PASSWORD",  // 仅父进程显式设置时透传（登录链路）
+        "GAMER_LOCAL_ONLY",      // 显式本机测试开关透传
         "GAMER_DEPLOYMENT_MODE", // 默认注入 launcher（用户显式设置不覆盖）
     ];
     for key in env.keys() {

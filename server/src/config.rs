@@ -184,6 +184,9 @@ pub struct Config {
     pub source_path: Option<PathBuf>,
     /// HTTP 监听端口
     pub port: u16,
+    /// 仅本机访问：HTTP 和 WebRTC 都只监听回环地址；GAMER_LOCAL_ONLY 可覆盖。
+    #[serde(default)]
+    pub local_only: bool,
     /// 数据目录（SQLite、模板图片、脚本）
     pub data_dir: PathBuf,
     /// 应用资产根目录（PATH-001：GAMER_APP_DIR，launcher 注入；scrcpy jar 与
@@ -275,6 +278,7 @@ impl Default for Config {
             live_settings: Default::default(),
             source_path: None,
             port: 8443,
+            local_only: false,
             data_dir: PathBuf::from("./data"),
             app_dir: None,
             adb_path: "adb".into(),
@@ -316,7 +320,11 @@ impl Config {
         let path =
             PathBuf::from(std::env::var("GB_CONFIG").unwrap_or_else(|_| "config.toml".into()));
         let env = PathEnv::from_env();
-        Self::load_from_with_env(&path, Profile::from_env(), &env)
+        let mut loaded = Self::load_from_with_env(&path, Profile::from_env(), &env)?;
+        loaded
+            .cfg
+            .apply_local_only_override(env_value("GAMER_LOCAL_ONLY").as_deref())?;
+        Ok(loaded)
     }
 
     /// 纯函数化加载入口：路径与 profile 显式传入、无环境变量注入，便于测试
@@ -388,8 +396,25 @@ impl Config {
         })
     }
 
+    fn apply_local_only_override(&mut self, value: Option<&str>) -> anyhow::Result<()> {
+        if let Some(value) = value {
+            self.local_only = match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" => true,
+                "0" | "false" => false,
+                _ => bail!("GAMER_LOCAL_ONLY 必须为 true/false 或 1/0"),
+            };
+            ensure_valid(self)?;
+        }
+        Ok(())
+    }
+
     pub fn listen_addr(&self) -> String {
-        format!("0.0.0.0:{}", self.port)
+        let ip = if self.local_only {
+            "127.0.0.1"
+        } else {
+            "0.0.0.0"
+        };
+        format!("{ip}:{}", self.port)
     }
 
     /// web-dist 静态资源目录（PATH-002）：GAMER_APP_DIR 注入时相对应用版本
@@ -405,13 +430,14 @@ impl Config {
     /// 非敏感生效值摘要（供启动日志展示来源与关键参数；密码/哈希等敏感项绝不输出）
     pub fn non_sensitive_summary(&self) -> String {
         format!(
-            "port={} data_dir={} threshold={:.2} \
+            "port={} local_only={} data_dir={} threshold={:.2} \
              decode_frames={} max_size={} bitrate_mbps={} fps={} idle_power_secs={}s \
              log_retain_days={}d compute_max_concurrency={} \
              rtc_external_ip={} rtc_udp_port={} rtc_external_port={} \
              session_abs_secs={} session_idle_secs={} \
              login_max_fails={}/{}s password_hash={}",
             self.port,
+            self.local_only,
             self.data_dir.display(),
             self.threshold,
             self.decode_frames,
@@ -480,6 +506,15 @@ impl Config {
 
     fn validate_with_password_hash(&self) -> Vec<String> {
         let mut errs = Vec::new();
+        if self.local_only
+            && (!self.rtc_external_ip.trim().is_empty()
+                || self.rtc_udp_port != 0
+                || self.rtc_external_port != 0)
+        {
+            errs.push(
+                "local_only 不能与 rtc_external_ip/rtc_udp_port/rtc_external_port 同时配置".into(),
+            );
+        }
 
         if self.port == 0 {
             errs.push(format!(
@@ -750,6 +785,23 @@ fn probe_tool(name: &'static str, path: &str, args: &[&str]) -> ToolProbe {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn local_only_config_and_environment_are_explicit_and_validated() {
+        let mut cfg = super::Config::default();
+        assert_eq!(cfg.listen_addr(), "0.0.0.0:8443");
+        cfg.apply_local_only_override(Some("1")).unwrap();
+        assert_eq!(cfg.listen_addr(), "127.0.0.1:8443");
+        let raw = toml::to_string(&cfg).unwrap();
+        assert!(toml::from_str::<super::Config>(&raw).unwrap().local_only);
+        cfg.apply_local_only_override(None).unwrap();
+        assert!(cfg.local_only);
+        cfg.apply_local_only_override(Some("false")).unwrap();
+        assert!(!cfg.local_only);
+        assert!(cfg.apply_local_only_override(Some("invalid")).is_err());
+        cfg.rtc_external_ip = "192.0.2.1".into();
+        assert!(cfg.apply_local_only_override(Some("true")).is_err());
+    }
+
     use super::*;
 
     #[test]

@@ -137,6 +137,11 @@ pub fn build_child_env_with_extras(
     if let Some(v) = non_empty(getenv("GAMER_ADMIN_PASSWORD")) {
         env.insert("GAMER_ADMIN_PASSWORD".to_string(), v);
     }
+    // Local acceptance must keep both normal and update/rollback children on
+    // loopback despite the intentionally minimal inherited environment.
+    if let Some(value) = non_empty(getenv("GAMER_LOCAL_ONLY")) {
+        env.insert("GAMER_LOCAL_ONLY".into(), value);
+    }
     // 部署模式：默认注入 launcher 托管（server Mode::detect 认得该枚举值，
     // 使 system/info 的 deployment.mode=managed 链路成立）；用户显式设置不覆盖。
     let mode = non_empty(getenv("GAMER_DEPLOYMENT_MODE")).unwrap_or_else(|| "launcher".to_string());
@@ -237,6 +242,10 @@ pub fn spawn_trampoline(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // Preserve the user's local-only choice across launcher self-update restart.
+    if let Ok(value) = std::env::var("GAMER_LOCAL_ONLY") {
+        command.env("GAMER_LOCAL_ONLY", value);
+    }
     command.spawn()
 }
 
@@ -543,6 +552,19 @@ mod tests {
             Some("direct"),
             "用户显式设置的部署模式不得被覆盖"
         );
+    }
+
+    #[test]
+    fn child_env_preserves_explicit_local_only_for_all_launch_modes() {
+        let extras = LaunchExtras {
+            activation_gate: true,
+            ..Default::default()
+        };
+        let env = build_child_env_with_extras(&plan(), &extras, |key| {
+            (key == "GAMER_LOCAL_ONLY").then(|| "1".to_owned())
+        });
+        assert_eq!(env.get("GAMER_LOCAL_ONLY").map(String::as_str), Some("1"));
+        assert!(!build_child_env_from(&plan(), |_| None).contains_key("GAMER_LOCAL_ONLY"));
     }
 
     #[test]

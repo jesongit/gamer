@@ -154,6 +154,8 @@ cd web && pnpm dev                      # 单起前端
 
 ## 2026-09-24 网页更新与独立插件市场
 
+本机验收使用 `GAMER_LOCAL_ONLY=1`（或配置 `local_only=true`），同时限制 HTTP 与 WebRTC ICE 为 IPv4 回环地址；启动器显式透传该环境变量。默认仍支持局域网；本机模式与 rtc_external_ip/rtc_udp_port/rtc_external_port 互斥。固定 UDP 端口测试在 Windows 需显式 `--ignored` 运行，避免日常测试触发防火墙提示；Linux 正常覆盖。
+
 网页更新的 IPC `prepare_install` 已执行完整的快照、切换、候选验证和失败回滚，使用已下载清单，不重新发现候选。常驻启动器接管新/回滚子进程，保留 IPC 会话。SQLite 快照诊断只能在临时副本上执行，不能打开封存备份。
 
 默认插件目录为认证 API `GET /api/extensions/market/registry.json`（`?refresh=true` 强制刷新），由宿主发现 `jesongit/gamer-plugins` 最近公开的完整目录；beta 宿主允许预发布，正式宿主过滤预发布。目录缓存五分钟，网络失败保留进程内缓存并回退发行附带快照。归档经同源 `/api/extensions/market/:id/:version/archive` 下载、size/SHA256 校验，再走现有 inspect/权限确认/安装流程，不自动更新已安装插件。首装种子仍由 `release/plugins.lock.json` 固定；新增原生 host 能力仍须发布本体。
