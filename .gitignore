@@ -48,6 +48,8 @@ plugins/*/dist/
 plugins/*/guest/target/
 plugins/*/interpreter/target/
 web/public/plugin-ui/
+# 本地插件打包归档（已跟踪的发行快照不受影响）
+web/public/plugins/*.gplugin
 docs/node_modules/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
@@ -83,6 +85,8 @@ baseline-backups/
 # ===== Release 运行依赖 vendor（DEP-002/003：adb/ffmpeg 二进制绝不入库）=====
 # 由 release/packaging/fetch-adb.ps1 / fetch-ffmpeg.ps1 按锁文件重建；含下载缓存
 release/vendor/
+# 插件发行包下载缓存，可按 release/plugins.lock.json 重建
+release/cache/
 
 # ===== Release 打包/SBOM 运行产物（全部可由脚本重建）=====
 # dist: package-app / package-components / package-full 的 zip 与临时 staging
