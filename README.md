@@ -17,6 +17,12 @@ Gamer 是一个通过浏览器操作 Android 设备的游戏自动化工具。�
 
 ## 快速开始
 
+### 下载 Windows 测试版
+
+当前已公开 [Gamer 0.2.0-beta.6](https://github.com/jesongit/gamer/releases/tag/v0.2.0-beta.6)，仍为测试版。可选择独立 `gamer-launcher.exe` 在线安装，或下载 `Gamer-0.2.0-beta.6-windows-x64-full.zip` 离线安装。完整包带齐本体、启动器、ADB、FFmpeg/FFprobe、scrcpy 和首次可选的官方插件，不携带个人数据。文件用 HTTPS + SHA256 校验，不需要签名密钥。
+
+启动器安装在所在目录；已安装且无更新时收起到托盘并打开网页，有更新时显示“更新 / 取消”。完整包解压后仍需点击“安装”，将包内组件展开到运行目录。详细步骤见 [启动器快速上手](docs/guides/launcher-quickstart.md)。
+
 ### 从源码启动
 
 官方插件源码位于独立的 [gamer-plugins 仓库](https://github.com/jesongit/gamer-plugins)，本仓 `plugins/` 固定引用其提交。首次克隆使用 `git clone --recurse-submodules`；已有工作区更新后运行 `git submodule update --init --recursive`。不要使用 `--remote` 跟随插件最新分支。
@@ -80,7 +86,7 @@ pnpm --dir web install --frozen-lockfile
 
 ## 第一次使用
 
-1. **安装插件**：进入「插件」页，从本地市场安装所需官方插件，或导入 `.gplugin`。安装前查看权限，安装成功后会自动启用；新安装或更新 UI 后刷新页面。
+1. **安装插件**：启动器首次安装时选择需要的官方插件，也可随后进入「插件」页安装或导入 `.gplugin`。插件页独立发现 [官方插件仓 Release](https://github.com/jesongit/gamer-plugins/releases)，网络失败时回退缓存和随包目录；安装或更新仍需确认权限，不自动覆盖已安装插件。安装成功后自动启用；新安装或更新 UI 后刷新页面。
 2. **连接设备**：先用 `adb devices -l` 确认设备已授权且可用，再在工作台扫描设备或填写 ADB 地址。选择屏幕模式，建立投屏连接。
 3. **选择应用**：在工作台工具栏选择设备上要操作的 Android 应用，再启动应用。建立投屏连接本身不会自动启动应用。
 4. **选择配置**：使用首次启动创建的空白默认配置，或在「配置包」页新建、导入自己的配置包。
@@ -117,6 +123,8 @@ Gamer 使用 **ADB 地址**识别设备。USB 真机、无线设备和模拟器�
 相同虚拟分辨率可以减少模板适配工作，实际画面仍可能受游戏布局、方向和缩放影响。
 
 默认 WebRTC 使用 host candidate 直连，适合同机或局域网，没有内置 STUN/TURN。跨 NAT 访问需配置 `rtc_external_ip`、`rtc_udp_port`、`rtc_external_port`，并保证浏览器能访问对应 UDP 地址；仅能打开网页不代表视频链路已经可达。
+
+仅在本机使用或验收时，可在配置顶层设置 `local_only = true`，或启动前设置 `$env:GAMER_LOCAL_ONLY = '1'`，让 HTTP 与 WebRTC 都使用回环地址；其他电脑将无法访问，USB ADB 仍可使用。该选项与上述 NAT 配置的非默认值互斥，详见 [本机模式](docs/guides/launcher-quickstart.md#本机测试与防火墙提示)。
 
 ## 配置包与自动化
 
@@ -212,7 +220,7 @@ cargo run
 pnpm --dir web dev
 ```
 
-已有进程时先停掉对应服务，避免端口冲突。`pnpm --dir web build` 会先构建插件 UI，再将主前端输出至 `server/web-dist/`，由服务端在 8443 端口托管。
+已有进程时先停掉对应服务，避免端口冲突。`pnpm --dir web build` 仅构建主界面壳并输出至 `server/web-dist/`，由服务端在 8443 端口托管；插件构建由下方独立入口完成，发行流程显式准备插件资产。
 
 ### 官方插件开发
 
@@ -226,9 +234,9 @@ pnpm --dir web dev
 
 ```powershell
 # 单独构建一个插件，保留其他插件的发行条目
-.\plugins\gamer-yaml\build.ps1
-.\plugins\gamer-keymap\build.ps1
-.\plugins\gamer-video\build.ps1
+.\tools\build-plugins.ps1 -Plugin gamer-yaml
+.\tools\build-plugins.ps1 -Plugin gamer-keymap
+.\tools\build-plugins.ps1 -Plugin gamer-video
 
 # 仅构建并同步某个插件的本地静态 UI
 node tools/build-plugin-ui.mjs gamer-yaml

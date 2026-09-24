@@ -5,7 +5,7 @@
 > 事实依据：`.github/workflows/release.yml`（发布 workflow）、`docs/guides/UPDATE_CONTRACT.md`（安装目录契约）、
 > `release/contracts/`（manifest / system-api / IPC 契约）、`launcher/` 与 `release/packaging/`（当前实现）。
 > 计划文档仅作背景，不作为“已完成”依据；最终用户以完整包内生成的 `INSTALL.md` 和 launcher CLI 为准。
-> 本手册不代表当前已经有成功的 GitHub Release 发布或生产演练结果。
+> 当前已公开 beta.6 测试版，实际产物与公开在线安装的验收范围见 [beta.6 发行记录](../evidence/BETA6_RELEASE_2026_09_24.md)；不能将其等同于全部生产环境验收。
 
 ## 1. 版本单一来源与发布链路总览
 
@@ -17,8 +17,8 @@ vite 注入 `__APP_VERSION__`（取自 `web/package.json`），与服务端不�
 显示混包警告条（不阻塞使用）。
 
 发布由 push tag `v*` 触发 `.github/workflows/release.yml`（不提供 workflow_dispatch，
-避免 tag 语义分叉；预发演练用带预发布后缀的 tag，如 `v0.1.0-rc.1`）。链路不允许中途取消
-（`cancel-in-progress: false`）：
+避免 tag 语义分叉；预发演练用带预发布后缀的 tag，如 `v0.1.0-rc.1`）。新任务不会自动取消旧任务
+（`cancel-in-progress: false`）；废弃候选可以主动取消，但不得覆盖已发布标签和资产：
 
 ```text
 push tag v*
@@ -44,7 +44,7 @@ push tag v*
 1. 从 tag 派生产品版本（`v` 剥离；不合法立即失败）。
 2. `release/packaging/fetch-adb.ps1` / `fetch-ffmpeg.ps1`：按 `release/dependencies.lock.toml`
    锁定版本拉取依赖（ffmpeg 有许可红线与冒烟检查）。
-3. `package-app.ps1 -Channel stable`：构建 server + web-dist + scrcpy jar 并打 zip，注入
+3. `fetch-plugins.ps1` 取发行锁指定的插件发布字节并检查固定 SDK；`package-app.ps1 -Channel beta`（稳定版使用 stable）：构建 server + web-dist + scrcpy jar 并打 zip，注入
    构建信息（git commit / 构建时间 / channel / target），生成包内 `SHA256SUMS`。
 4. `package-components.ps1`：adb / ffmpeg 组件 zip。
 5. `package-launcher.ps1` 打包独立启动器和官方插件；`gen-manifest.ps1` 实算
@@ -58,14 +58,15 @@ push tag v*
 ```powershell
 .\release\packaging\fetch-adb.ps1
 .\release\packaging\fetch-ffmpeg.ps1
-.\tools\build-plugins.ps1
-.\release\packaging\package-app.ps1 -Channel stable
+.\release\packaging\fetch-plugins.ps1
+node tools/check-plugin-sdk.mjs
+.\release\packaging\package-app.ps1 -Channel beta
 .\release\packaging\package-components.ps1
 .\release\packaging\package-launcher.ps1
-.\release\packaging\gen-manifest.ps1 -Version '<version>' -Channel stable `
+.\release\packaging\gen-manifest.ps1 -Version '<version>' -Channel beta `
   -DownloadBaseUrl 'https://<发布源>/download/<tag>' `
   -ReleaseNotesUrl 'https://<发布源>/releases/tag/<tag>'
-.\release\packaging\package-full.ps1 -SkipBuild -Version '<version>'
+.\release\packaging\package-full.ps1 -SkipBuild -Version '<version>' -Channel beta
 .\tools\gen-sbom.ps1
 $sbom = Get-ChildItem .\release\sbom\*.cdx.json | Select-Object -First 1
 .\release\packaging\augment-sbom.ps1 -SbomPath $sbom.FullName
@@ -84,19 +85,18 @@ $sbom = Get-ChildItem .\release\sbom\*.cdx.json | Select-Object -First 1
 - 最后生成 `SHA256SUMS.txt`，覆盖 12 个内容资产：full/app/adb/ffmpeg/scrcpy/
   launcher/official-plugins/licenses 共 8 个 ZIP、独立 EXE、两个 JSON 清单和 SBOM。
 
-### 2.5 smoke：重新下载核验（人工批准闸）
+### 2.5 产物复核与 smoke 批准闸
 
-`environment: release` 挂起等待批准（需在仓库 Settings → Environments → release 配置
-必需评审人；**首次演练前必须先配置**）。批准后：
+`artifact-verify` 在批准前自动完成以下检查（脱离构建 workspace，以发布物为准）：
 
 1. 从 Release **重新下载全部资产**（QA-008 语义：脱离构建 workspace，以发布物为准）；
 2. 校验 `SHA256SUMS.txt` 覆盖且仅覆盖 12 个内容资产、下载目录 13 文件不多不少；
 3. 解压 full 包，核对包内 `SHA256SUMS` 逐条一致；
 4. 发布级 manifest 与包内副本字节一致；
 5. 发布与包内 manifest 各跑一次 `validate-manifest.mjs check`（绑定版本与通道）；
-6. manifest 声明的 app sha256 == 实际发布的 app zip；SBOM 为合法 JSON；
-7. `gamer-launcher doctor` 双跑：未安装库存（应 WARN 不 FAIL）+ `--manifest` 校验校验；
-   workflow 的 artifact verify 还会执行深度包内容与 probe 校验。
+6. manifest 声明的归档及离线种子大小/SHA256 与实际文件一致；SBOM 为合法 JSON。
+
+随后 `smoke` 在 `environment: release` 等待批准（仓库 Settings → Environments → release 配置必需评审人）。维护者先下载草稿实际产物，用 `test-published-plugins.ps1 -RemotePlugins -FreshConfig` 和 `test-web-update.ps1` 验收首装、插件下载、升级及回滚，再批准。smoke 重新下载完整包，执行未安装库存 doctor 与 `doctor --manifest`；它不代替实际安装和运行验收。
 
 ### 2.6 publish：draft → 正式
 
@@ -105,7 +105,7 @@ smoke 全过后自动 `gh release edit --draft=false`；纯 `X.Y.Z` 追加 `--la
 
 ## 3. 来源与完整性
 
-默认发布源为 `https://github.com/jesongit/gamer/releases/latest/download/gamer-release.json`。
+稳定启动器从 `https://github.com/jesongit/gamer/releases/latest/download/gamer-release.json` 发现版本；beta 启动器查询公开 Release 列表，按 SemVer 选择带有效清单的候选，跳过草稿。两种通道均使用对应 Release 的不可变清单与归档。
 发行清单不附 `.sig`，完整包不含 `keys/`，构建不需要签名 secrets 或密钥轮换。
 在线传输使用 HTTPS；下载归档先对 size/SHA256，再安全解压并校验组件逐文件清单。
 离线种子、下载缓存和修复走相同完整性检查。远程清单拒绝 HTTP，loopback 测试除外。
@@ -137,7 +137,7 @@ HTTPS 请求禁止重定向降级到 HTTP。已有安装里的旧签名文件不
 ### 4.3 处置步骤
 
 1. **取证**：读 `state/update-journal.json` 的「最后完成步骤 + 错误摘要」，结合设置页
-   错误码（`signature_invalid`/`artifact_invalid`/`insufficient_space`/`schema_incompatible`
+   错误码（`manifest_invalid`/`artifact_invalid`/`insufficient_space`/`schema_incompatible`
    等）判断停在哪个阶段、数据处于哪个状态；可先只读查看：
 
    ```powershell
@@ -203,7 +203,7 @@ HTTPS 请求禁止重定向降级到 HTTP。已有安装里的旧签名文件不
       scrcpy/launcher/official-plugins ZIP、独立 EXE、两个 manifest JSON / SBOM，清单校验通过；
 - [ ] draft-release 创建 draft 且 12 个内容资产 + SHA256SUMS.txt 上传齐全；人为重跑一次确认
       同名同 hash 跳过（幂等），不同 hash 拒绝覆盖；
-- [ ] 批准 release environment，smoke 七步全过（§2.5）；
+- [ ] artifact-verify 与草稿实际文件验收通过后，批准 release environment，smoke 双跑通过（§2.5）；
 - [ ] publish 后 draft 转正且**未标 latest**（预发布语义验证）。
 
 演练后验证：
@@ -230,4 +230,4 @@ HTTPS 请求禁止重定向降级到 HTTP。已有安装里的旧签名文件不
 2. 核对插件包、registry、合集 ZIP 与 SHA256 后公开插件 Release。主仓 `release/plugins.lock.json` 锁定该发布的提交、URL、大小、SHA256。
 3. `fetch-plugins.ps1` 校验 gitlink/来源提交和下载字节，将发布包作为本地市场与离线包种子；主发行清单的官方插件 URL 指向插件仓 Release。
 4. 本地安装、启动和首次插件选择验收通过，再提交并推送主仓版本标签。主仓流水线复用相同插件发布字节。
-5. beta 启动器通过 GitHub 发布列表按 SemVer 选择有清单的已公开版本，跳过草稿；稳定启动器仍用 latest。插件市场目前是固定发行快照，不自动切换到插件最新 Release。
+5. beta 启动器通过 GitHub 发布列表按 SemVer 选择有清单的已公开版本，跳过草稿；稳定启动器仍用 latest。启动器首装插件保持发行锁指定版本；软件插件页通过宿主独立发现插件仓最新公开目录，beta 宿主允许预发布、稳定宿主过滤预发布，网络失败回退缓存及发行快照。发现新版本不会自动安装或更新。

@@ -7,6 +7,7 @@
 | 配置 | 用途 |
 | --- | --- |
 | `port` | HTTP 监听端口，默认 8443 |
+| `local_only` | 默认 false；true 时 HTTP 与 WebRTC 都只使用 IPv4 回环地址 |
 | `data_dir` | 数据根目录，源码开发通常为 `./data` |
 | `adb_path` | ADB 命令名或绝对路径 |
 | `ffmpeg_path` | FFmpeg 命令名或绝对路径；视频功能还需要 ffprobe |
@@ -41,6 +42,8 @@
 
 ## WebRTC 网络
 
+仅本机使用时可设置 `local_only = true`，或用 `GAMER_LOCAL_ONLY=1` 临时覆盖；本机浏览器和 USB ADB 仍可用，其他电脑无法访问。此模式与 `rtc_external_ip`、`rtc_udp_port`、`rtc_external_port` 的非默认值互斥，配置修改后重启生效。
+
 默认同机 / 局域网直接使用 host candidate，无内置 STUN/TURN。固定外部可达地址和端口时可配置：
 
 ```toml
@@ -63,6 +66,7 @@ rtc_external_port = 50000
 | `GAMER_PROFILE` | 开发或生产配置策略 |
 | `GAMER_APP_DIR` | 应用资产目录 |
 | `GAMER_DATA_DIR` | 覆盖数据目录 |
+| `GAMER_LOCAL_ONLY` | 覆盖本机模式，接受 `1`/`true` 或 `0`/`false`；启动器会透传给升级和回滚进程 |
 | `GAMER_ADB_PATH`、`GAMER_FFMPEG_PATH` | 覆盖工具路径 |
 | `GAMER_SCRCPY_SERVER` | 覆盖 scrcpy server 路径 |
 

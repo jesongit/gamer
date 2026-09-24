@@ -116,8 +116,14 @@ function Get-InstallTemplate {
 - 高级维护仍可在命令行运行 `gamer-launcher.exe doctor`、`repair` 或 `upgrade`，
   日常使用不需要这些命令。
 - 第三方组件许可声明见 `licenses\NOTICE.md`（Apache-2.0 / LGPL-3.0 履约文本）。
-- 升级：`gamer-launcher.exe upgrade`（检查 manifest 并原子升级；离线环境把新版
-  full 包解压覆盖即可，数据目录不受影响）。
+- 日常升级使用启动器的“更新”或工作台“设置 → 软件更新”。beta.4 及更早启动器
+  先通过启动器升级，旧版网页安装入口只校验下载内容。
+- 离线升级先退出并备份 `config/` 与 `data/`，将新包的 `seeds/`、`manifests/`
+  合并到原安装目录，并替换根目录的 `gamer-launcher.exe`，再运行
+  `gamer-launcher.exe upgrade --manifest manifests/<新版本>.json`。
+  不要直接覆盖原有 `config/` 或 `data/`，新包配置模板仅供首次安装。
+- 仅本机使用可在配置顶层设置 `local_only = true`，HTTP 与 WebRTC 都限制为回环地址；
+  USB ADB 仍可用，其他电脑无法访问，不能与非默认 NAT 配置同时使用。
 '@
     return $s
 }

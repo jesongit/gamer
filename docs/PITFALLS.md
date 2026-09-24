@@ -462,3 +462,5 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - 隔离发行测试每次更换 EXE 路径，且旧服务固定监听所有网卡，会反复触发 Windows 防火墙提示；使用 `GAMER_LOCAL_ONLY=1` 将 HTTP/ICE 限制在回环地址，并显式透传启动器的最小子环境及自更新 helper，不能只改 HTTP 或依赖环境自然继承。默认仍支持局域网，旧版 EXE 不认识该开关。
 
 - `cargo test` 的固定 UDP mux 测试直接构造配置并监听所有网卡，不读取 `GAMER_LOCAL_ONLY`，同样会触发防火墙提示；Windows 默认忽略该项，需验证局域网绑定时显式 `--ignored` 运行，Linux CI 保留自动覆盖。
+
+- 启动器发行变更容易遗漏官网包装页和完整包 `INSTALL.md` 模板，导致文档仍使用旧命令或建议覆盖个人配置；同步检查 README、docs/site、安装/发行指南和 package-full 模板，已发布归档不改字节，以 Release 勘误说明更正。
