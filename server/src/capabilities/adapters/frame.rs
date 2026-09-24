@@ -78,6 +78,18 @@ impl FrameAdapter {
 
 #[async_trait]
 impl FrameService for FrameAdapter {
+    async fn device_size(&self, device: &DeviceHandle) -> CapabilityResult<FrameSize> {
+        let session = self
+            .devices
+            .session(device.id().as_str())
+            .ok_or_else(|| CapabilityError::NotFound("device session".into()))?;
+        let (width, height) = session.video_size();
+        if width == 0 || height == 0 {
+            return Err(CapabilityError::Failed("设备画面尺寸尚未就绪".into()));
+        }
+        Ok(FrameSize::new(width, height))
+    }
+
     async fn latest(&self, device: &DeviceHandle) -> CapabilityResult<Option<FrameHandle>> {
         self.capture(device).await.map(Some)
     }

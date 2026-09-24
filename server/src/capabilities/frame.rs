@@ -32,6 +32,10 @@ impl FrameSize {
 /// retention, and screenshot encoding policy.
 #[async_trait]
 pub trait FrameService: Send + Sync {
+    /// Current input/video coordinate space. Metadata only: do not decode a
+    /// screenshot just to convert a relative tap or swipe to pixels.
+    async fn device_size(&self, device: &DeviceHandle) -> CapabilityResult<FrameSize>;
+
     async fn latest(&self, device: &DeviceHandle) -> CapabilityResult<Option<FrameHandle>>;
 
     async fn capture(&self, device: &DeviceHandle) -> CapabilityResult<FrameHandle>;
