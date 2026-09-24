@@ -1,6 +1,6 @@
 # Windows 启动器使用
 
-本次预发布版本为 `0.2.0-beta.1`，完整包为 `Gamer-0.2.0-beta.1-windows-x64-full.zip`，使用 SHA256 校验。在线安装下载同一 Release 的 `gamer-launcher.exe` 放入专用目录后运行；测试版启动器会发现已公开的 beta，稳定版仍只读取稳定发布入口。
+本次预发布版本为 `0.2.0-beta.2`，完整包为 `Gamer-0.2.0-beta.2-windows-x64-full.zip`，使用 SHA256 校验。在线安装下载同一 Release 的 `gamer-launcher.exe` 放入专用目录后运行；测试版启动器会发现已公开的 beta，稳定版仍只读取稳定发布入口。
 
 完整包目前是离线安装布局：外层 ZIP 带齐各组件的压缩包（`seeds/`），第一次点击“安装 Gamer”才将它们校验并展开到 `versions/` 和 `runtime/`。这一步不需要重新下载这些组件；保留 seeds 可供后续离线修复。因此解开外层 ZIP 后仍有一次本地展开步骤。
 

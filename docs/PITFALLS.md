@@ -446,3 +446,5 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - Matcher 的模块测试锁无法隔离其他模块对进程级 metrics 的写入，精确增量断言会偶发失败并毒化锁；测试钩子改为线程局部且复制函数表，全局统计只验证增量下界，分类精确值在隔离钩子和独立 Metrics 实例中验证。
 
 - GitHub 的 latest 不返回 Pre-release，beta 启动器必须从公开发布列表按 SemVer 选择带发行清单的版本，且发布 workflow 要显式设置 prerelease，不能只省略 latest。
+
+- FFmpeg 的滚动 latest 即使锁定 SHA256 也会在干净 CI 上下载到新字节并失败；改用固定月末 autobuild Release，并同步二进制哈希、版本、源码 offer 后重跑许可和 H.264 探针。失败发布标签保留，新修复使用下一个 beta 标签。

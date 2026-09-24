@@ -4,19 +4,19 @@ Gamer 随包分发的 FFmpeg 构建源码提供（LGPL-3.0 §4 / §6 源码 offe
 
 随包分发的组件 : ffmpeg.exe（Windows x64 静态构建，单文件）
 构建来源       : BtbN/FFmpeg-Builds（win64-lgpl）
-版本串         : N-126335-gb32f8d1c23-20260830
-                 （对应 FFmpeg 上游 commit b32f8d1c23）
-完整源码下载   : https://github.com/FFmpeg/FFmpeg/archive/b32f8d1c23.tar.gz
+版本串         : N-126342-gf88b741dbf-20260831
+                 （对应 FFmpeg 上游 commit f88b741dbf）
+完整源码下载   : https://github.com/FFmpeg/FFmpeg/archive/f88b741dbf.tar.gz
                  （与上述 commit 精确对应的上游源码 archive）
 
 备选获取方式   :
   git clone https://github.com/FFmpeg/FFmpeg.git
-  git checkout b32f8d1c23
+  git checkout f88b741dbf
 
 构建配置（-buildconf 归档）
 ------------------------------------------------------------------------------
 完整 -buildconf 输出见随包 licenses/ffmpeg/BUILD-CONFIG.txt（原始归档位于仓库
-release/vendor/ffmpeg/N-126335-gb32f8d1c23-20260830/BUILD-CONFIG.txt，由
+release/vendor/ffmpeg/N-126342-gf88b741dbf-20260831/BUILD-CONFIG.txt，由
 release/packaging/fetch-ffmpeg.ps1 在锁定时从 ffmpeg.exe -buildconf 生成）。
 
 关键构建参数（与 release/dependencies.lock.toml 一致）:
@@ -33,4 +33,4 @@ FFmpeg 源码、未与其静态链接；LGPL-3.0 义务仅针对随包分发的�
 （依据 release/contracts/dependency-licensing.md §2.3）。
 
 上述 archive 链接随本版本发布资产提供并长期保持可访问；若链接失效，请依据
-版本串中的 commit（b32f8d1c23）向上游 FFmpeg 仓库请求对应源码。
+版本串中的 commit（f88b741dbf）向上游 FFmpeg 仓库请求对应源码。

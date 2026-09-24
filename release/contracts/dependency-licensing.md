@@ -70,9 +70,11 @@
 
 ### 2.2 选定路线与验收方式（含 2026-08-31 实测记录）
 
-**选定**：`https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-<branch>-latest-win64-lgpl.zip`（static 变体，产物含 `bin/ffmpeg.exe`、`bin/ffprobe.exe`，与计划 §5.1 的 `runtime/ffmpeg/<version>/ffmpeg.exe` 布局一致）。
+**选定**：`https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-N-126342-gf88b741dbf-win64-lgpl.zip`（static 变体，产物含 `bin/ffmpeg.exe`、`bin/ffprobe.exe`，与计划 §5.1 的 `runtime/ffmpeg/<version>/ffmpeg.exe` 布局一致）。
 
 ⚠️ **供应链注意**：BtbN 的 `latest` 是持续滚动更新的 tag，资产会被覆盖。DEP-001 锁定时必须：记录**下载当时**产物的 zip sha256 与 `ffmpeg -version` 输出的版本串（形如 `N-xxxxx-g<commit>-<date>`）；并把该产物副本收入 seed/发布存储，后续修复/重装一律从 seed 取已锁产物，**而不是反复追 latest**。
+
+2026-09-24：干净发布 runner 复现 latest 漂移后，锁改为上述固定月末保留 tag。ZIP SHA256 `7a7d7ad65d5d53aefc57fc3f78e00febe7b65156c03d14d43efc1393ef46a111`，版本 `N-126342-gf88b741dbf-20260831`；两份二进制版本及 LGPL 门禁通过，H.264 管道产出 7,361 字节有效 PNG。
 
 **验收门禁（DEP-003 每次锁新版本必须全部通过）**：
 

@@ -24,3 +24,11 @@
 ## 范围
 
 插件市场仍使用本体发行锁定的插件快照；独立插件新版本动态发现不在本次发布中。beta 启动器通过 GitHub 公开发布列表发现本体版本，稳定启动器仍使用 latest。设备实机投屏、触控和用户脚本未作为本次发行验收执行。
+
+## beta.2 修订
+
+- beta.1 主发布在干净 runner 下载 FFmpeg 时被大小门禁阻断：上游 latest 已滚动，锁定归档不再可取；保留失败标签和草稿，不公开、不重打标签。
+- 改用 `autobuild-2026-08-31-13-27` 的固定月末构建，版本 `N-126342-gf88b741dbf-20260831`；从上游重新下载，核对 GitHub 资产 digest、归档及两份 EXE 哈希，同步来源和源码 offer。
+- `fetch-ffmpeg.ps1` 版本/LGPL/buildconf/H.264 stdin→PNG 探针全部通过；重新构建 `0.2.0-beta.2` 本体、启动器和完整包，校验和与 doctor 通过。
+- `test-published-plugins.ps1 -RemotePlugins` 在 `backups/beta-release/beta2-verified` 重跑通过：真实公开插件下载、首次安装和重复选择、三插件 Running/UI、本体版本、正常退出全部成功。
+- beta.2 仅变更版本元数据和锁定依赖来源/字节，不改业务逻辑；beta.1 的全量回归记录继续适用，新依赖另外走上述实际安装和媒体探针。
