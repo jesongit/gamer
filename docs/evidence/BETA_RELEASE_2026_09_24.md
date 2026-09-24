@@ -47,3 +47,14 @@
 - 启动器全量 203 passed，6 ignored；服务端配置 18 项通过，launcher Clippy all-targets / deny warnings、版本一致性及插件 SDK 快照检查通过。
 - `test-published-plugins.ps1 -RemotePlugins -FreshConfig` 使用实际 beta.4 EXE，在隔离目录移出完整包配置和插件种子，验证首次配置生成、实际本体就绪、公开插件下载、三插件首次/重复安装、Running 与 UI 资源及认证退出。
 - 真实桌面后台验收同样移出配置，从无配置状态开始：暂停续装、首装启动和插件选择、损坏修复、缓存复用、用户数据保留、失败候选回滚与退出全部通过（87.69s）。
+- 启动器真实成功升级 `beta.3 → beta.4` 通过（20.25s），配置逐字节不变，用户数据保留，更新后服务正常退出。
+- 补测发现网页更新的现有缺口：`prepare_install` 仅复验 staging，未接实际版本切换；网页发现与下载通过，但网页安装不能宣称成功。测试版 Release 已列明限制：通过启动器“更新”执行切换。
+- 主仓 CI 全绿：<https://github.com/jesongit/gamer/actions/runs/35970508687>（Linux 服务端 702 passed / 6 ignored，平台专属测试数与 Windows 不同）。
+
+## 最终公开结果
+
+- 主仓公开 Pre-release：<https://github.com/jesongit/gamer/releases/tag/v0.2.0-beta.4>，发行提交 `e3677a1e7ad8f10a3a47b461e28ac857254a3a4d`。流水线 <https://github.com/jesongit/gamer/actions/runs/35970510540> 全部成功，13 个发布资产。stable latest 仍为 `v0.1.1`。
+- 下载 CI 实际 MSVC 完整包，确认与草稿 Release digest 相同，再以 `-RemotePlugins -FreshConfig` 通过真实安装、配置生成、本体启动、三插件首次/重复安装及 UI、正常退出，随后放行发布环境。
+- 完整包 SHA256：`a1e211fb8113cf5675adc5b920f9c45ea01bb756ba07fd4696c4879237768362`（131209908 bytes）；独立 EXE：`a677ff9cc81ba7f3bf61823effcf25bff9563bc94a3992ae45f2be4fe29ba75f`（12175360 bytes）。本地 `release/dist/` 的对应完整包与 EXE 已替换为这些实际发布字节。
+- 公开后在 `backups/beta-release/public-beta4-online` 从空目录验收，无清单覆盖、无 seeds、无预置配置：默认 beta 发现通过，公开 EXE 下载及文件哈希通过，真实启动器从公开 Release 下载全部六个组件归档并逐一校验 SHA256；自行生成配置后本体就绪，三插件运行且 UI 可用；网页检查更新得到当前 beta.4，无新版本；认证关闭成功。
+- beta.3 Release 已标明首装问题及 beta.4 修复链接；插件 Release 推荐宿主同步为 beta.4。已发布标签和资产未重写。

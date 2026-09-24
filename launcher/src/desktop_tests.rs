@@ -255,12 +255,17 @@ fn real_desktop_install_repair_restart_update_and_rollback() {
 }
 
 #[test]
-#[ignore = "requires an installed real v0.1.1 full release and signed v0.2.0 seeds"]
+#[ignore = "requires an isolated installed release, candidate seeds and explicit source/target versions"]
 fn real_desktop_upgrade_preserves_data_and_offers_first_plugin_selection() {
     let root =
         std::env::var_os("GAMER_DESKTOP_UPGRADE_ROOT").expect("isolated old release required");
     let layout = InstallLayout::resolve(Some(root.into()));
-    assert_eq!(dist::current(&layout).as_deref(), Some("0.1.1"));
+    let from = std::env::var("GAMER_DESKTOP_UPGRADE_FROM").expect("source version required");
+    let to = std::env::var("GAMER_DESKTOP_UPGRADE_TO").expect("target version required");
+    assert!(dist::compare_versions(&from, &to).is_lt());
+    assert_eq!(dist::current(&layout).as_deref(), Some(from.as_str()));
+    let already_selected = layout.state_dir().join("plugins-choice.json").exists();
+    let config_before = fs::read(layout.config_file()).unwrap();
     let port = crate::supervisor::read_configured_port(&layout.config_file());
     assert_ne!(port, 8443);
     let worker_layout = layout.clone();
@@ -290,13 +295,23 @@ fn real_desktop_upgrade_preserves_data_and_offers_first_plugin_selection() {
     )
     .unwrap();
     harness.job(Job::Inspect(false), Stage::Update);
-    harness.job(Job::Install, Stage::Plugins);
-    assert_eq!(dist::current(&layout).as_deref(), Some("0.2.0"));
+    harness.job(
+        Job::Install,
+        if already_selected {
+            Stage::Running
+        } else {
+            Stage::Plugins
+        },
+    );
+    assert_eq!(dist::current(&layout).as_deref(), Some(to.as_str()));
+    assert_eq!(fs::read(layout.config_file()).unwrap(), config_before);
     assert_eq!(
         fs::read(layout.data_dir().join("preserve-old.txt")).unwrap(),
         b"old personal content"
     );
-    harness.job(Job::Plugins(vec![]), Stage::Running);
+    if !already_selected {
+        harness.job(Job::Plugins(vec![]), Stage::Running);
+    }
     assert!(layout.state_dir().join("plugins-choice.json").is_file());
     drop(harness); // Exit while running must gracefully stop the owned server.
     assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
