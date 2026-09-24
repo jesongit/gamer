@@ -228,6 +228,9 @@ export const api = {
   // 登录/会话/退出见 src/auth.js（阶段 2 Cookie 会话；本封装不持有认证端点）
 
   // 扩展生命周期与动态 UI contribution
+  getSystemSettings: () => req('GET', '/api/system/settings'),
+  saveSystemSettings: (settings, expected_revision) => req('PUT', '/api/system/settings', { settings, expected_revision }),
+  getExtensionCapabilities: id => req('GET', `/api/extensions/${encodeURIComponent(id)}/capabilities`),
   listExtensions: () => req('GET', '/api/extensions'),
   listExtensionUi: () => req('GET', '/api/extensions/ui'),
   // Phase 10 插件管理：归档始终以 application/zip 上传，服务端重新验证
@@ -425,11 +428,12 @@ export const api = {
   getPluginResource: (packageId, plugin, path) => req('GET', pkgResUrl(packageId, plugin, path)),
   putPluginResourceText: (packageId, plugin, path, { content, expected_version, force } = {}) =>
     req('PUT', pkgResUrl(packageId, plugin, path), updateBody({ content, expected_version, force }, path)),
-  putPluginResourceBytes: async (packageId, plugin, path, bytes, { expectedVersion, force = false } = {}) => {
+  putPluginResourceBytes: async (packageId, plugin, path, bytes, { expectedVersion, force = false, newPath } = {}) => {
     const headers = { 'Content-Type': 'application/octet-stream' }
     if (expectedVersion) headers['X-Expected-Version'] = String(expectedVersion)
     if (force) headers['X-Force'] = 'true'
-    const r = await response('PUT', pkgResUrl(packageId, plugin, path), bytes, { rawBody: true, headers })
+    const url = pkgResUrl(packageId, plugin, path) + (newPath ? `?new_path=${encodeURIComponent(newPath)}` : '')
+    const r = await response('PUT', url, bytes, { rawBody: true, headers })
     return readResult(r)
   },
   deletePluginResource: (packageId, plugin, path) => req('DELETE', pkgResUrl(packageId, plugin, path)),
@@ -509,9 +513,14 @@ export const api = {
   deleteTemplate: (name, packageId) =>
     api.deletePluginResource(packageId, GAMER_YAML_PLUGIN_ID, pluginPath(TEMPLATE_DIR, requireId(name, 'name'))),
   // 模板匹配测试 = vision 能力位语义（pkg = Package id，plugin 必填）
-  testTemplate: (name, deviceId, threshold, region, packageId) =>
+  testTemplate: (name, deviceId, threshold, region, packageId, frame = null) =>
     req('POST', '/api/capabilities/vision/test', {
-      device_id: deviceId, threshold, region,
+      ...(frame?.png
+        ? { image_png: frame.png }
+        : frame?.mediaId
+        ? { media_id: frame.mediaId, frame_index: frame.index }
+        : { device_id: deviceId }),
+      threshold, region,
       pkg: requireId(packageId, 'package_id'), plugin: GAMER_YAML_PLUGIN_ID, name,
     }),
   // 模板缩略图/预览 URL（<img :src> 用；GET 二进制返回原始 PNG）
@@ -609,6 +618,8 @@ export const api = {
       payload: payload && typeof payload === 'object' ? payload : {},
     })),
   // 统一运行实例（run_id 主键）：单次查询 RunRecord / 按次取消（终态以查询为准）
+  listRunHistory: (deviceId, entrypoint, before) => req('GET', `/api/runs?${new URLSearchParams({device_id: deviceId, ...(entrypoint ? {entrypoint} : {}), ...(before ? {before} : {})})}`),
+  getRunEvents: (runId, after = 0) => req('GET', `/api/runs/${encodeURIComponent(runId)}/events?after=${after}`),
   getRun: async (runId) => requireRunResponse(await req('GET', `/api/runs/${encodeURIComponent(requireId(runId, 'run_id'))}`)),
   cancelRun: async (runId) => {
     const id = requireId(runId, 'run_id')

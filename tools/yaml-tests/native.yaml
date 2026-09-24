@@ -1,4 +1,4 @@
-name: YAML 全部 18 个内置函数验收（仅限测试设备）
+name: YAML 全部 19 个内置函数验收（仅限测试设备）
 run:
   - launch: {}
   - tap: [0.25, 0.75]
@@ -17,6 +17,7 @@ run:
   - tap: $first.center
   - wait_find:
       template: button.png
+      click: false
       timeout: 2s
       interval: 50ms
       region: [0, 0, 1, 1]
@@ -40,6 +41,7 @@ run:
     as: less
   - le: {a: 2, b: 2}
     as: less_equal
+  - find_any: [button.png]
   - stop_app: {}
   - return:
       center: $first.center

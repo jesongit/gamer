@@ -172,6 +172,17 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     assert_eq!(j["resolved_args"]["fast"], false);
     let run_id = j["run_id"].as_str().unwrap().to_string();
 
+    let denied = get_json(&t, "", "/api/runs?device_id=d1").await;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    let history = json_body(get_json(&t, &sid, "/api/runs?device_id=d1&entrypoint=com.test.app%23login").await).await;
+    assert_eq!(history.as_array().unwrap().len(), 1);
+    assert_eq!(history[0]["run_id"], run_id);
+    let other = json_body(get_json(&t, &sid, "/api/runs?device_id=other").await).await;
+    assert!(other.as_array().unwrap().is_empty());
+    let page = json_body(get_json(&t, &sid, &format!("/api/runs/{run_id}/events?after=0")).await).await;
+    assert_eq!(page["events"], serde_json::json!([]));
+    assert_eq!(page["has_more"], false);
+
     // 设备活动查询：固定使用嵌套 {active:true,run:<RunRecord>}。
     let resp = get_json(&t, &sid, "/api/devices/d1/run").await;
     assert_eq!(resp.status(), StatusCode::OK);

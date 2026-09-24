@@ -819,7 +819,8 @@ impl DeviceManager {
         let mut tick = tokio::time::interval(Duration::from_secs(10));
         loop {
             tick.tick().await;
-            if self.cfg.idle_power_secs == 0 {
+            let idle_power_secs = self.cfg.current_settings().idle_power_secs;
+            if idle_power_secs == 0 {
                 self.idle.lock().unwrap().clear();
                 continue;
             }
@@ -870,7 +871,7 @@ impl DeviceManager {
                     )
                 };
                 // 已关屏 = 镜像低功耗态已就位，等消费者回来（notify_activity 唤醒）
-                if slept || since.elapsed() < Duration::from_secs(self.cfg.idle_power_secs) {
+                if slept || since.elapsed() < Duration::from_secs(idle_power_secs) {
                     continue;
                 }
                 // 空闲超时：按屏幕模式进低功耗
@@ -881,14 +882,14 @@ impl DeviceManager {
                     let serial = device.addr.clone();
                     let dn = device.name.clone();
                     let adb = self.adb.clone();
-                    info!(device = %dn, idle_secs = self.cfg.idle_power_secs, "idle: turn off mirror screen (session kept)");
+                    info!(device = %dn, idle_secs = idle_power_secs, "idle: turn off mirror screen (session kept)");
                     tokio::spawn(async move {
                         let _ = adb
                             .shell(&serial, "input keyevent 223", Duration::from_secs(8))
                             .await;
                     });
                 } else {
-                    info!(device = %device.name, idle_secs = self.cfg.idle_power_secs, "idle: disconnect scrcpy session (low-power, adb kept)");
+                    info!(device = %device.name, idle_secs = idle_power_secs, "idle: disconnect scrcpy session (low-power, adb kept)");
                     self.disconnect_device_with_reason(&id, DeviceDisconnectReason::IdleTimeout)
                         .await;
                 }

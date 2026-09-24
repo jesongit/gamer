@@ -73,7 +73,7 @@ describe('模板资源替换安全性（P1-T）', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.listTemplates.mockResolvedValue([])
-    mocks.getPluginResource.mockResolvedValue({ arrayBuffer: async () => new Uint8Array([79, 76, 68]).buffer })
+    mocks.getPluginResource.mockResolvedValue({ headers: {get: () => '"123456abcdef"'}, arrayBuffer: async () => new Uint8Array([79, 76, 68]).buffer })
     mocks.putPluginResourceBytes.mockResolvedValue({ name: 'hero.png', version: 'v-new' })
   })
 
@@ -133,7 +133,7 @@ describe('模板资源替换安全性（P1-T）', () => {
     wrapper.unmount()
   })
 
-  it('列表缺少二进制模板版本时先读取并计算版本，再执行条件 PUT', async () => {
+  it('列表缺少二进制模板版本时读取服务端版本，再执行条件 PUT', async () => {
     const existing = createTemplate()
     existing.version = null
     mocks.listTemplates.mockResolvedValue([existing])
@@ -155,24 +155,38 @@ describe('模板资源替换安全性（P1-T）', () => {
     wrapper.unmount()
   })
 
-  it('框选区域或颜色标记变化时不把新元数据写进旧模板路径', async () => {
+  it('优先使用服务端 ETag，HTTP 环境无需浏览器计算模板哈希', async () => {
+    const existing = createTemplate()
+    existing.version = null
+    mocks.listTemplates.mockResolvedValue([existing])
+    mocks.getPluginResource.mockResolvedValueOnce({headers: {get: () => '"123456abcdef"'}})
+    const {templates, wrapper} = mountTemplates()
+    await flushPromises()
+    prepareCrop(templates, {name: existing.name, shortName: 'hero.png', version: null})
+    await templates.overwriteTemplate()
+    expect(mocks.putPluginResourceBytes).toHaveBeenCalledWith('pkg-a', 'gamer-yaml', `templates/${existing.name}`, new Uint8Array([65,66,67]), {expectedVersion: '123456abcdef'})
+    expect(templates.crop.active).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('框选区域或颜色变化时通过同一次条件请求更新内容和路径', async () => {
     const existing = createTemplate()
     mocks.listTemplates.mockResolvedValue([existing])
     const { templates, wrapper } = mountTemplates()
     await flushPromises()
     prepareCrop(templates, { name: existing.name, shortName: 'hero.png', version: existing.version })
     templates.crop.baseW = 30
+    templates.crop.preserveColor = true
 
     await templates.overwriteTemplate()
 
-    expect(mocks.putPluginResourceBytes).not.toHaveBeenCalled()
+    expect(mocks.putPluginResourceBytes).toHaveBeenCalledWith(
+      'pkg-a', 'gamer-yaml', `templates/${existing.name}`, new Uint8Array([65, 66, 67]),
+      {expectedVersion: 'v-old', newPath: 'templates/hero#100_200_400_500#1.png'},
+    )
     expect(mocks.deleteTemplate).not.toHaveBeenCalled()
-    expect(templates.crop.active).toBe(true)
-    expect(templates.crop.conflict).toEqual({
-      name: existing.name,
-      shortName: 'hero.png',
-      version: existing.version,
-    })
+    expect(templates.crop.active).toBe(false)
+    expect(templates.crop.conflict).toBeNull()
     wrapper.unmount()
   })
 
@@ -192,6 +206,7 @@ describe('模板资源替换安全性（P1-T）', () => {
       {},
     )
     expect(templates.crop.active).toBe(true)
+    expect(templates.crop.error).toContain('PNG 校验失败')
     expect(templates.crop.preview).toBe('data:image/png;base64,QUJD')
     wrapper.unmount()
   })
@@ -236,6 +251,7 @@ describe('模板资源替换安全性（P1-T）', () => {
       shortName: 'hero.png',
       version: 'v-current',
     })
+    expect(templates.crop.error).toContain('版本冲突')
     wrapper.unmount()
   })
 

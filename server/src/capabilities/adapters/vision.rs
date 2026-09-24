@@ -46,16 +46,18 @@ impl VisionAdapter {
         let frame = self.frames.get(frame)?;
         self.resources.open(query.template()).await?;
         let template_png = self.resources.read(query.template())?;
-        let region = Self::effective_region(
-            query.options().region,
-            self.resources.file_name(query.template()).ok(),
-            frame.dimensions(),
-        );
+        let file_name = self.resources.file_name(query.template())?;
+        // Short template names omit metadata suffixes. Honor the resolved file's
+        // color marker just like the preview API, for all capability callers.
+        let color =
+            query.options().color_check || crate::matcher::template_color_from_name(&file_name);
+        let region =
+            Self::effective_region(query.options().region, Some(file_name), frame.dimensions());
         let request = crate::matcher::DecodedMatchRequest {
             template_png,
             threshold: query.options().threshold,
             region,
-            color: query.options().color_check,
+            color,
         };
         Ok((frame, request))
     }
@@ -97,19 +99,8 @@ impl VisionService for VisionAdapter {
         let frame = self.frames.get(request.frame())?;
         let mut queries = Vec::with_capacity(request.templates().len());
         for query in request.templates() {
-            self.resources.open(query.template()).await?;
-            let template_png = self.resources.read(query.template())?;
-            let region = Self::effective_region(
-                query.options().region,
-                self.resources.file_name(query.template()).ok(),
-                frame.dimensions(),
-            );
-            queries.push(crate::matcher::DecodedMatchRequest {
-                template_png,
-                threshold: query.options().threshold,
-                region,
-                color: query.options().color_check,
-            });
+            let (_, query) = self.request(request.frame(), query).await?;
+            queries.push(query);
         }
         let results = crate::matcher::compute::run(move || {
             crate::matcher::match_decoded_many(&frame, &queries)

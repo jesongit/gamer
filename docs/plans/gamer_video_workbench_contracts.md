@@ -46,6 +46,12 @@
 给了 media_id 就**不要求设备存在**、绝不触达 ADB/设备截图）。返回结构沿用现有，
 附命中坐标（encoded→oriented 后的 oriented 空间）。实现走现有 matcher，不复制 NCC。
 
+交互式“匹配当前画面”使用可选 `image_png`（标准 base64 PNG，解码后最大 10MiB，
+请求体最大 16MiB），与 device_id/media_id/pts_us/frame_index 互斥。浏览器按 videoWidth/
+videoHeight 复制播放器已解码像素，后端只解码一次 PNG 后复用 matcher，不查帧表、
+不抽取视频帧；此来源的响应 `frame: null`，不声明精确帧身份。跳转、播放、换素材后
+丢弃迟到结果。媒体定帧裁切和时间轴标记仍走服务端确定帧。
+
 ### 1.2 Host API（A）
 
 `extensions/permissions.rs` 权限闭集追加：`media.read`、`media.import`、`media.record`、
@@ -63,6 +69,10 @@
 | `GET /api/recording/:id` | - | `RecordingSessionMeta`；404 `{"error":"recording_not_found"}` |
 | `GET /api/recording/active?device_id=` | - | 200 session 或 404 |
 | `GET /api/recording/:id/events` | - | `{"schema_version":1,"events":[InputEventRecord]}`（时间轴升序） |
+| `GET /api/recording` | - | `{sessions:[RecordingSessionMeta + missing_media + events_available]}`；按开始时间倒序，包含无素材的历史；`events_available` 表示非零事件日志文件仍可用 |
+| `DELETE /api/recording/:id` | - | 204；仅清理终态且所有关联媒体已删除的历史/事件，活动录制或仍有媒体为 409；不删除视频、不绕过媒体引用保护 |
+
+历史的完成状态与当前资源可用性分开展示。零事件/事件来源已删除的历史禁用脚本生成；GET events 对曾有事件但日志已丢失的会话明确报错。关联视频先经媒体 API 删除后才能清理历史。事件日志目前位于首段媒体目录，删除该素材会丢失日志，生成脚本必须在此之前完成。
 
 实现要点（计划 §5）：帧源挂 scrcpy 编码帧分发点（WebRTC 节流/重放之前），起录等 IDR +
 参数集；默认收 `.h264` Annex-B，finalize 用 `ffmpeg -c copy` remux MP4（不重编码）；

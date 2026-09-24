@@ -4,7 +4,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -60,6 +60,13 @@ pub fn backup_to_corrupt(path: &Path) -> io::Result<PathBuf> {
 /// 原子写：临时文件写全 + sync_all + 同目录 rename 覆盖。
 /// Windows 上 rename 走 MOVEFILE_REPLACE_EXISTING；被杀毒等短暂占用时有界重试（契约 §5.2）。
 pub fn write_json_atomic<T: Serialize + ?Sized>(path: &Path, value: &T) -> io::Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    write_bytes_atomic(path, &bytes)
+}
+
+/// 原始字节原子写入；保留发行清单的原始内容。
+pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
@@ -67,10 +74,8 @@ pub fn write_json_atomic<T: Serialize + ?Sized>(path: &Path, value: &T) -> io::R
     }
     let tmp = temp_path(path);
     let result = (|| -> io::Result<()> {
-        let mut bytes = serde_json::to_vec_pretty(value)?;
-        bytes.push(b'\n');
         let mut file = fs::File::create(&tmp)?;
-        file.write_all(&bytes)?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         Ok(())
     })();
@@ -101,20 +106,23 @@ fn temp_path(path: &Path) -> PathBuf {
 /// rename 有界重试：仅针对 ERROR_ACCESS_DENIED(5) / ERROR_SHARING_VIOLATION(32) /
 /// ERROR_LOCK_VIOLATION(33) 的短暂占用；重试耗尽返回最后一个错误。
 pub fn rename_with_retry(from: &Path, to: &Path) -> io::Result<()> {
-    let mut last_err: Option<io::Error> = None;
-    for attempt in 0..10u32 {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut delay = Duration::from_millis(25);
+    loop {
         match fs::rename(from, to) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 let retryable = matches!(e.raw_os_error(), Some(5 | 32 | 33))
                     || e.kind() == io::ErrorKind::PermissionDenied;
-                if !retryable || attempt == 9 {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if !retryable || remaining.is_zero() {
+                    tracing::warn!(source = %from.display(), target = %to.display(), error = %e,
+                        "文件或目录切换失败；请检查权限及占用该目录的程序");
                     return Err(e);
                 }
-                last_err = Some(e);
-                std::thread::sleep(Duration::from_millis(25));
+                std::thread::sleep(delay.min(remaining));
+                delay = (delay * 2).min(Duration::from_millis(500));
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| io::Error::other("rename 重试耗尽")))
 }

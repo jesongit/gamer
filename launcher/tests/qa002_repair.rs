@@ -3,7 +3,7 @@
 //! - 修复失败保持上一份 runtime 不被破坏；
 //! - 换装成功后损坏旧目录进 quarantine；
 //! - 并发 repair 只有一个执行者（复用单实例锁，锁被持有时拒绝动作）；
-//! - 端到端：自造签名 manifest（测试专用 Ed25519 key）→ doctor 报缺 →
+//! - 端到端：自造无签名 manifest→ doctor 报缺 →
 //!   repair 离线恢复 → doctor 通过（与 CLI 实跑同一条代码路径）。
 
 mod common;
@@ -11,11 +11,8 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine;
 use clap::Parser as _;
 use common::{build_zip, cleanup, sha256_hex, unique_root, ZipEntrySpec};
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use gamer_launcher::cli::Cli;
 use gamer_launcher::commands;
 use gamer_launcher::inventory::{CheckOptions, ComponentSpec, ComponentStatus};
@@ -258,6 +255,32 @@ fn repair_app_failure_preserves_existing_dir() {
 }
 
 #[test]
+fn repair_restores_changed_web_resources_and_missing_executable() {
+    let layout = setup("repair-all-app-files");
+    let (app, zip) = app_fixture("0.2.0");
+    put_seed(&layout, &zip, &app.artifact_name);
+    repair_with_lock(&layout, &[], Some(&app), &Default::default()).unwrap();
+    let html = app.install_dir(&layout).join("web-dist/index.html");
+    fs::write(&html, b"<html>broken!</html>").unwrap();
+    let report = repair_with_lock(&layout, &[], Some(&app), &Default::default()).unwrap();
+    assert_eq!(report.failed_count(), 0);
+    assert!(matches!(
+        report.app.unwrap().outcome,
+        AppOutcome::Installed { .. }
+    ));
+    assert_eq!(fs::read(&html).unwrap(), b"<html></html>");
+    fs::remove_file(app.install_dir(&layout).join("gamer-server.exe")).unwrap();
+    let report = repair_with_lock(&layout, &[], Some(&app), &Default::default()).unwrap();
+    assert_eq!(report.failed_count(), 0);
+    assert_eq!(
+        fs::read(app.install_dir(&layout).join("gamer-server.exe")).unwrap(),
+        APP_EXE
+    );
+    cleanup(&layout.root);
+    cleanup(zip.parent().unwrap());
+}
+
+#[test]
 fn offline_repair_restores_missing_dll_from_seed() {
     let layout = setup("repair-missing");
     let (spec, zip_path) = component_fixture("adb", "1.0.0");
@@ -442,29 +465,9 @@ fn concurrent_repair_single_executor_via_lock() {
     cleanup(zip_path.parent().unwrap());
 }
 
-// -- 端到端（签名 manifest + CLI 分发） ----------------------------------------
+// -- 端到端（manifest + CLI 分发） ----------------------------------------
 
-const DEMO_KEY_SEED: [u8; 32] = *b"qa002-demo-key-seed-0123456789ab";
-const DEMO_KEY_ID: &str = "qa002-demo-key-1";
-
-/// 构造 Ed25519 SPKI PEM（fixture 专用测试 key；launcher 的 PEM 解析器可直接消费）。
-fn demo_key_pem(verifying: &VerifyingKey) -> String {
-    let raw = verifying.as_bytes();
-    let mut der = vec![
-        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-    ];
-    der.extend_from_slice(raw);
-    let b64 = B64.encode(&der);
-    let mut pem = String::from("-----BEGIN PUBLIC KEY-----\n");
-    for chunk in b64.as_bytes().chunks(64) {
-        pem.push_str(std::str::from_utf8(chunk).unwrap());
-        pem.push('\n');
-    }
-    pem.push_str("-----END PUBLIC KEY-----\n");
-    pem
-}
-
-/// 生成一份已签名的 release manifest（内容指向 component/app fixture 的产物）。
+/// 生成一份release manifest（内容指向 component/app fixture 的产物）。
 fn signed_manifest(layout: &InstallLayout, spec: &ComponentSpec, app: &AppInstallSpec) {
     let app_version = app.version.as_str();
     let component_json = format!(
@@ -540,29 +543,12 @@ fn signed_manifest(layout: &InstallLayout, spec: &ComponentSpec, app: &AppInstal
         app_scrcpy_sha = app.scrcpy_sha256,
     );
 
-    let signing = SigningKey::from_bytes(&DEMO_KEY_SEED);
     let raw = manifest.as_bytes();
-    let signature = signing.sign(raw);
 
     fs::create_dir_all(layout.manifests_dir()).unwrap();
     fs::write(
         layout.manifests_dir().join(format!("{app_version}.json")),
         raw,
-    )
-    .unwrap();
-    let sig_text = format!(
-        "gamebot-manifest-sig-1 {DEMO_KEY_ID}\n{}\n",
-        B64.encode(signature.to_bytes())
-    );
-    fs::write(
-        layout.manifests_dir().join(format!("{app_version}.sig")),
-        sig_text,
-    )
-    .unwrap();
-    fs::create_dir_all(layout.root.join("keys")).unwrap();
-    fs::write(
-        layout.root.join("keys").join(format!("{DEMO_KEY_ID}.pem")),
-        demo_key_pem(&VerifyingKey::from(&signing)),
     )
     .unwrap();
 }
@@ -600,7 +586,7 @@ fn end_to_end_signed_manifest_doctor_reports_missing_then_repair_then_doctor_pas
     );
     assert_eq!(code, 1, "缺 DLL 时 doctor --deep 应失败");
 
-    // repair（不指定 --manifest，走 manifests/ 缓存 + <root>/keys 信任库）：
+    // repair（不指定 --manifest，走 manifests/ 缓存）：
     // 离线恢复 adb + 安装 app + 写版本指针，一步到位
     let code = commands::dispatch(
         &cli(&["gamer-launcher", "--install-root", &root_s, "repair"]),
@@ -711,7 +697,7 @@ fn doctor_reports_fresh_root_as_never_installed_warn_not_fail() {
 
 /// 手工验收材料化（默认跳过；`cargo test -- --ignored` 显式执行）：
 /// 在 GAMER_LAUNCHER_DEMO_ROOT（缺省 <crate>/target/demo-install）物化完整演示
-/// 安装根——签名 manifest + keys/ + seeds/（release/vendor 真实产物重打包）+
+/// 安装根——manifest + seeds/（release/vendor 真实产物重打包）+
 /// 已损坏的 runtime/adb（删除 AdbWinApi.dll）。随后可用真实 CLI 跑：
 /// doctor --deep（报缺）→ repair --probe（离线恢复 + 真实探针）→ doctor --deep（通过）。
 #[test]
@@ -877,26 +863,10 @@ fn materialize_demo_install_root() {
         ffmpeg_hash = hash(&ffmpeg_bytes),
     );
 
-    let signing = SigningKey::from_bytes(&DEMO_KEY_SEED);
     fs::create_dir_all(layout.manifests_dir()).unwrap();
     fs::write(
         layout.manifests_dir().join("0.2.0.json"),
         manifest.as_bytes(),
-    )
-    .unwrap();
-    let signature = signing.sign(manifest.as_bytes());
-    fs::write(
-        layout.manifests_dir().join("0.2.0.sig"),
-        format!(
-            "gamebot-manifest-sig-1 {DEMO_KEY_ID}\n{}\n",
-            B64.encode(signature.to_bytes())
-        ),
-    )
-    .unwrap();
-    fs::create_dir_all(layout.root.join("keys")).unwrap();
-    fs::write(
-        layout.root.join("keys").join(format!("{DEMO_KEY_ID}.pem")),
-        demo_key_pem(&VerifyingKey::from(&signing)),
     )
     .unwrap();
 

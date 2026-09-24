@@ -3,7 +3,7 @@
     <div class="plugin-toolbar">
       <input v-model="query" class="input plugin-search" type="search" aria-label="搜索插件" placeholder="搜索插件名称、ID 或描述" />
       <span class="muted plugin-count">{{ filteredPlugins.length }} 个插件</span>
-      <button class="btn btn-sm" :disabled="busy || loading" @click="refresh">刷新</button>
+      <button class="btn btn-sm" :disabled="busy || loading" @click="refresh(true)">刷新</button>
       <button class="btn btn-sm" :disabled="busy" @click="fileInput?.click()">本地导入</button>
       <button class="btn btn-sm" :aria-expanded="urlOpen" @click="urlOpen = !urlOpen">URL 导入</button>
       <input ref="fileInput" type="file" accept=".gplugin,.zip,application/zip" hidden @change="onLocalFile" />
@@ -14,6 +14,7 @@
     </div>
         <div class="plugin-center-body">
           <div v-if="error" class="plugin-alert error" role="alert">{{ error }}</div>
+          <div v-if="registry.market_status?.warning" class="plugin-alert info" role="status">{{ registry.market_status.warning }}</div>
           <div v-if="operationResult" class="plugin-result" role="status" aria-live="polite">
             <div class="plugin-result-operation">{{ operationResult.operation.text }}</div>
             <div v-if="operationResult.detail" class="plugin-result-detail" :class="`result-${typeof operationResult.detail === 'object' ? operationResult.detail.tone : 'info'}`">
@@ -92,7 +93,7 @@ import { computed, onMounted, ref } from 'vue'
 import { api } from '../../api'
 import UiIcon from '../../components/ui/UiIcon.vue'
 import { useConfirmDialog } from '../../components/ui/useConfirmDialog'
-import { downloadDirectUrl, downloadFixedVersion, fetchRegistry, findRegistryPlugin } from './registry-client'
+import { DEFAULT_REGISTRY_URL, downloadDirectUrl, downloadFixedVersion, fetchRegistry, findRegistryPlugin } from './registry-client'
 import {
   dependencyRefsFor,
   dependencyStatus,
@@ -115,7 +116,7 @@ import {
 
 const props = defineProps({
   apiClient: { type: Object, default: () => api },
-  registryUrl: { type: String, default: '/registry.json' },
+  registryUrl: { type: String, default: DEFAULT_REGISTRY_URL },
 })
 const emit = defineEmits(['changed'])
 const confirmDialog = useConfirmDialog()
@@ -196,14 +197,14 @@ async function loadInstalled() {
 }
 
 let refreshSerial = 0
-async function refresh() {
+async function refresh(force = false) {
   const serial = ++refreshSerial
   installedKnown.value = false
   loading.value = true
   error.value = ''
   const failures = []
   try {
-    registry.value = await fetchRegistry(globalThis.fetch, props.registryUrl)
+    registry.value = await fetchRegistry(globalThis.fetch, props.registryUrl, { refresh: force })
   } catch (errorValue) {
     failures.push(messageFor(errorValue))
   }

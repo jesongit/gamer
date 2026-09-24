@@ -6,7 +6,7 @@
   start / stop / restart / rebuild / status 默认同时作用于前后端：
   - 后端：Rust gamer-server（端口从 server/config.toml 读取，默认 8443）
   - 前端：Vite dev server（端口 5173，代理 /api、/ws 到后端）
-  停止时均通过「端口 + 进程名」定位进程，避免误杀其他程序。
+  仅管理当前仓库路径下的后端与 Vite；端口占用不能作为进程归属依据。
   阶段 2 起后端 REST/WS 需浏览器会话；本脚本走「回环 + X-Admin-Token」本机管理通道
   （令牌优先取环境变量 GAMER_ADMIN_TOKEN，否则自动持久化到
   %LOCALAPPDATA%\gamer\admin-token，启动后端时注入其进程环境）完成优雅停机。
@@ -20,7 +20,7 @@
   .\gamer.ps1 start -Build       # 后端强制重新构建后启动
   .\gamer.ps1 start -BackendOnly # 只启动后端
   .\gamer.ps1 start -FrontendOnly# 只启动前端
-  .\gamer.ps1 stop               # 停止后端 + 前端（端口+进程名定位）
+  .\gamer.ps1 stop               # 仅停止当前仓库的后端 + 前端
   .\gamer.ps1 restart            # 重启前后端
   .\gamer.ps1 rebuild            # 重新编译前后端（cargo build + vite build）并重启
   .\gamer.ps1 status             # 查看前后端运行状态、最近日志
@@ -186,41 +186,62 @@ function Start-BackgroundProcess {
     return $r.ProcessId  # 包装进程 PID（退出很快，仅用于诊断）
 }
 
-# 通过「端口 + 进程名」定位后端 gamer-server 进程
-function Get-BackendProcs {
-    # 1) 先查监听端口的进程，再按名字过滤（端口优先，精确锁定）
-    $portPids = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
-        Select-Object -ExpandProperty OwningProcess -Unique)
-    $found = @()
-    foreach ($procId in $portPids) {
-        $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
-        if ($p -and $p.ProcessName -like "$BackendName*") { $found += $p }
-    }
-    # 2) 再按进程名补充（覆盖端口已释放但仍存活的残留进程）
-    foreach ($p in @(Get-Process -Name "$BackendName*" -ErrorAction SilentlyContinue)) {
-        if ($found.Id -notcontains $p.Id) { $found += $p }
-    }
-    return @($found | Sort-Object Id -Unique)
+# 无法读取路径时不认领进程。支持 Windows 扩展路径前缀及大小写差异。
+function Get-NormalizedProcessPath([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    try {
+        $value = $Path.Replace('/', '\')
+        if ($value.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) {
+            $value = '\\' + $value.Substring(8)
+        } elseif ($value.StartsWith('\\?\')) {
+            $value = $value.Substring(4)
+        }
+        if (-not [IO.Path]::IsPathRooted($value)) { return $null }
+        return [IO.Path]::GetFullPath($value)
+    } catch { return $null }
 }
 
-# 通过「端口 + 名字/命令行」定位前端 vite 进程（node 名太通用，须端口优先）
+function Test-BackendProcess($Process) {
+    try { $path = Get-NormalizedProcessPath $Process.Path } catch { return $false }
+    if (-not $path) { return $false }
+    foreach ($profile in @('debug', 'release')) {
+        $expected = Get-NormalizedProcessPath (Join-Path $ServerDir "target\$profile\$BackendName.exe")
+        if ([string]::Equals($path, $expected, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+# 同时识别本仓库 debug/release，包括尚未监听或已释放端口的残留进程。
+function Get-BackendProcs {
+    Get-Process -Name $BackendName -ErrorAction SilentlyContinue |
+        Where-Object { Test-BackendProcess $_ }
+}
+
+# 管理 HTTP 请求也必须确认该端口属于本仓库，不能只确认本仓库存在进程。
+function Test-BackendPortOwned {
+    $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    if ($listeners.Count -eq 0) { return $false }
+    foreach ($listener in $listeners) {
+        $process = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
+        if (-not $process -or -not (Test-BackendProcess $process)) { return $false }
+    }
+    return $true
+}
+
+# Start-Frontend 使用绝对 Vite 入口；只匹配完整参数，不认领其他项目的 node/Vite。
 function Get-FrontendProcs {
-    $found = @()
-    # 1) 端口 5173 优先：监听进程必须为 node
-    $portPids = @(Get-NetTCPConnection -LocalPort $FrontendPort -State Listen -ErrorAction SilentlyContinue |
-        Select-Object -ExpandProperty OwningProcess -Unique)
-    foreach ($procId in $portPids) {
-        $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
-        if ($p -and $p.ProcessName -eq 'node') { $found += $p }
-    }
-    # 2) 兜底：命令行含 vite / npm/pnpm dev 的残留进程（node 与包管理器包装）
-    $cims = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match 'vite' -or $_.CommandLine -match '(npm|pnpm)( run)? dev' }
+    $expected = Get-NormalizedProcessPath (Join-Path $WebDir 'node_modules\vite\bin\vite.js')
+    $cims = Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue
     foreach ($c in $cims) {
-        $p = Get-Process -Id $c.ProcessId -ErrorAction SilentlyContinue
-        if ($p -and $found.Id -notcontains $p.Id) { $found += $p }
+        $arguments = @([regex]::Matches([string]$c.CommandLine, '"[^"]*"|[^\s"]+'))
+        # 第一个参数是 node 本身，第二个必须是当前仓库的 Vite 入口。
+        if ($arguments.Count -lt 2) { continue }
+        $entry = Get-NormalizedProcessPath ($arguments[1].Value.Trim('"'))
+        if ([string]::Equals($entry, $expected, [StringComparison]::OrdinalIgnoreCase)) {
+            $process = Get-Process -Id $c.ProcessId -ErrorAction SilentlyContinue
+            if ($process -and $process.ProcessName -eq 'node') { $process }
+        }
     }
-    return @($found | Sort-Object Id -Unique)
 }
 
 # ---------- 状态 ----------
@@ -328,14 +349,14 @@ function Reset-AdbServer {
 function Stop-Backend {
     $procs = @(Get-BackendProcs)
     if ($procs.Count -eq 0) {
-        Write-Host "后端: 没有运行中的 gamer-server 进程（端口 $Port 无监听且无匹配进程名）" -ForegroundColor Yellow
+        Write-Host "后端: 当前仓库没有运行中的 gamer-server 进程" -ForegroundColor Yellow
         return $false
     }
     # 优雅停机：先调 /api/shutdown 让服务端拆 scrcpy 会话/清 adb reverse 隧道再退出
     # （硬杀会留孤儿 adb 子进程，曾致 adb 短暂楔死后续连接，见 AGENTS.md 已知坑）。
     # 阶段 2 起该接口要求回环 + X-Admin-Token 头——令牌由 Start-Backend 注入 server
     # 进程环境（同值），此处带上即可优雅停机；服务端令牌不一致时退化为下方兜底硬杀。
-    if (Test-PortListening $Port) {
+    if (Test-BackendPortOwned) {
         Write-Host "后端: 请求优雅停机（POST /api/shutdown + X-Admin-Token）..."
         $prev = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
@@ -366,15 +387,21 @@ function Stop-Backend {
     } else {
         Write-Host "后端: 已停止。" -ForegroundColor Green
     }
-    # 后端已退出：重置 adb server，避免活会话 teardown 把 adb 楔死影响下次连接
-    Reset-AdbServer
+    # ADB daemon 为共享服务；其他安装实例仍运行时不能重置其设备链路。
+    $otherServers = @(Get-Process -Name $BackendName -ErrorAction SilentlyContinue |
+        Where-Object { -not (Test-BackendProcess $_) })
+    if ($otherServers.Count -eq 0) {
+        Reset-AdbServer
+    } else {
+        Write-Host "后端: 其他 Gamer 实例仍在运行，保留共享 adb server" -ForegroundColor Yellow
+    }
     return $true
 }
 
 function Stop-Frontend {
     $procs = @(Get-FrontendProcs)
     if ($procs.Count -eq 0) {
-        Write-Host "前端: 没有运行中的 vite 进程（端口 $FrontendPort 无监听且无匹配进程）" -ForegroundColor Yellow
+        Write-Host "前端: 当前仓库没有运行中的 Vite 进程" -ForegroundColor Yellow
         return $false
     }
     foreach ($p in $procs) {
@@ -512,7 +539,7 @@ function Start-Backend {
         while (-not (Test-PortListening $Port) -and (Get-Date) -lt $deadline) {
             # 启动后 5 秒仍无 gamer-server 进程 → 判定为启动后立即退出
             if ((Get-Date) - $launchTime -gt [TimeSpan]::FromSeconds(5)) {
-                $be = @(Get-Process -Name "$BackendName*" -ErrorAction SilentlyContinue |
+                $be = @(Get-BackendProcs |
                     Where-Object { $_.StartTime -ge $launchTime })
                 if ($be.Count -eq 0) { $exitedEarly = $true; break }
             }
@@ -580,7 +607,7 @@ function Start-Frontend {
     while (-not (Test-PortListening $FrontendPort) -and (Get-Date) -lt $deadline) {
         # 启动后 5 秒仍无 node 进程 → 判定为启动后立即退出
         if ((Get-Date) - $launchTime -gt [TimeSpan]::FromSeconds(5)) {
-            $fe = @(Get-Process -Name 'node' -ErrorAction SilentlyContinue |
+            $fe = @(Get-FrontendProcs |
                 Where-Object { $_.StartTime -ge $launchTime })
             if ($fe.Count -eq 0) {
                 throw "前端: vite 启动后立即退出，请查看日志: $FrontendLog / $FrontendErrLog"

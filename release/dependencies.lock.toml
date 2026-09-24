@@ -18,15 +18,15 @@
 # 更新策略:
 #   - adb: 官方 latest 入口滚动；重新锁定时须核对 zip 内 source.properties 的
 #     Pkg.Revision 与包 sha256，并按 ARC-005 §1 重走许可确认。
-#   - ffmpeg: BtbN `latest` 为滚动 tag，资产会被覆盖；重装/修复一律取已锁定产物
-#     seed，不得反复追 latest。换新构建必须重走 ARC-005 §2.2 全部验收门禁
+#   - ffmpeg: 使用固定月末 autobuild tag 与哈希；重装/修复优先取已锁定 seed，
+#     不得使用滚动 latest。换新构建必须重走 ARC-005 §2.2 全部验收门禁
 #     （buildconf 无 gpl/nonfree、-L 为 LGPL、H.264 stdin→PNG 冒烟）。
 #   - scrcpy-server: 与应用协议版本强绑定，不独立升级；变更须同步
 #     server/src/device/scrcpy.rs 常量与 manifest（tools/check-scrcpy-binding.ps1 强制）。
 # =============================================================================
 
 schema_version = 1
-locked_at = "2026-08-31"
+locked_at = "2026-09-24"
 
 # -----------------------------------------------------------------------------
 # adb —— Android Platform-Tools Windows 三件套裁包
@@ -73,30 +73,35 @@ size = 73368
 # -----------------------------------------------------------------------------
 [[component]]
 id = "ffmpeg"
-description = "FFmpeg Windows x64 静态构建（BtbN/FFmpeg-Builds win64-lgpl，单文件 bin/ffmpeg.exe）"
-version = "N-126335-gb32f8d1c23-20260830"
-version_source = "ffmpeg.exe -version 首行版本串（N-<rev>-g<commit>-<date>，含 FFmpeg commit b32f8d1c23）"
-source_url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip"
-source_artifact_name = "ffmpeg-master-latest-win64-lgpl.zip"
-source_url_note = "latest 为滚动 tag；本条目以锁定时点产物 hash 固化（2026-08-31 下载复核与 ARC-005 记录一致），后续修复/重装从 seed 取该产物，不追 latest"
-source_sha256 = "c55a9c349ef915565c5755473d858c98d80d96feefe693fe6ab38705d29c920e"
-source_size = 148537845
-package_filter = "仅保留 zip 内 */bin/ffmpeg.exe；ffprobe/ffplay/doc/presets 不入包（dependency-licensing.md §2.2 第 4 条）"
+description = "FFmpeg / FFprobe Windows x64 静态构建（BtbN/FFmpeg-Builds win64-lgpl）"
+version = "N-126342-gf88b741dbf-20260831"
+version_source = "ffmpeg.exe -version 首行版本串（N-<rev>-g<commit>-<date>，含 FFmpeg commit f88b741dbf）"
+source_url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-N-126342-gf88b741dbf-win64-lgpl.zip"
+source_artifact_name = "ffmpeg-N-126342-gf88b741dbf-win64-lgpl.zip"
+source_url_note = "固定 autobuild-2026-08-31-13-27 月末保留版本，2026-09-24 重新下载校验；不使用滚动 latest"
+source_sha256 = "7a7d7ad65d5d53aefc57fc3f78e00febe7b65156c03d14d43efc1393ef46a111"
+source_size = 148538010
+package_filter = "原样保留 zip 内 */bin/ffmpeg.exe 与 */bin/ffprobe.exe；ffplay/doc/presets 不入包"
 license = "LGPL-3.0-or-later"
 license_url = "https://www.gnu.org/licenses/lgpl-3.0.html"
 license_note = "构建带 --enable-version3，-L 输出 GNU Lesser General Public License v3+；本项目以 subprocess 管道聚合调用，义务只针对随包分发的 ffmpeg.exe（ARC-005 §2.3）"
-notice = "LGPL 履约: 随包附 LGPL-3.0 全文 + 与 commit b32f8d1c23 精确对应的源码 offer + BUILD-CONFIG.txt（-buildconf 归档）+ 发布页归属声明；严禁 GPL/nonfree 构建冒充分发（红线，见 §5）"
+notice = "LGPL 履约: 随包附 LGPL-3.0 全文 + 与 commit f88b741dbf 精确对应的源码 offer + BUILD-CONFIG.txt（-buildconf 归档）+ 发布页归属声明；严禁 GPL/nonfree 构建冒充分发（红线，见 §5）"
 build_params = "buildconf 关键行: --enable-version3 --disable-libx264 --disable-libx265 --disable-libxvid --disable-libfdk-aac --enable-libopenh264；完整 -buildconf 输出由 fetch-ffmpeg.ps1 归档到 vendor BUILD-CONFIG.txt"
 buildconf_gate = "--enable-gpl 与 --enable-nonfree 不得出现（fetch-ffmpeg.ps1 硬门禁，出现即失败）；-L 必须含 Lesser General Public License"
-source_offer = "https://github.com/FFmpeg/FFmpeg/archive/b32f8d1c23.tar.gz（与版本串 commit 对应；首发随发布资产提供直链）"
+source_offer = "https://github.com/FFmpeg/FFmpeg/archive/f88b741dbf.tar.gz（与版本串 commit 对应；首发随发布资产提供直链）"
 verify_hint = "release/packaging/fetch-ffmpeg.ps1（默认=下载+三道验收+H.264 冒烟，-VerifyOnly=只校验 vendor 与红线）；手动: ffmpeg.exe -version / -hide_banner -buildconf / -L"
 verify_command = "powershell -NoProfile -ExecutionPolicy Bypass -File release/packaging/fetch-ffmpeg.ps1 -VerifyOnly"
-locked_at = "2026-08-31"
+locked_at = "2026-09-24"
 
 [[component.files]]
 path = "ffmpeg.exe"
-sha256 = "140a7e1410159bcca2f2201cb3d0d97648c9689c940715d548ebfeecee346cbe"
+sha256 = "6edd38e1d77799edad273719620adb3a2b587e2deb972bbe864488bdb9921856"
 size = 115390976
+
+[[component.files]]
+path = "ffprobe.exe"
+sha256 = "d3979140f70fb30d0564e1ccf760f25b93fa7c3c3b9271b70f333e385d633c19"
+size = 115178496
 
 # -----------------------------------------------------------------------------
 # scrcpy-server —— 与应用版本强绑定，不独立升级

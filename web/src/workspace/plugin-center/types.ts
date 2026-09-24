@@ -45,6 +45,7 @@ export interface RegistryPluginVersion {
 
 export interface PluginRegistryDocument {
   schema_version: number
+  market_status?: { source: string; warning: string }
   generated_at?: string
   host_api?: string
   plugins: RegistryPluginVersion[]

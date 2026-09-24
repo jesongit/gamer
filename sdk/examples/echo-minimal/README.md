@@ -19,7 +19,7 @@ pwsh ./build.ps1
 ```
 
 原始命令（跨 shell / 仓库外同样适用，`$SIGNER` =
-Gamer 仓库 `tools/plugin-signer/target/release/gamer-plugin-signer.exe`）：
+Gamer 仓库 `tools/plugin-packer/target/release/gamer-plugin-packer.exe`）：
 
 ```sh
 cargo build --release --lib --target wasm32-unknown-unknown

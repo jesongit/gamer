@@ -130,6 +130,9 @@ foreach ($must in @($serverExe, (Join-Path $webDist 'index.html'), (Join-Path $w
 
 # ---------- 组装 staging（versions/<version>/ 内容形态）----------
 $stage = Join-Path $DistDir ('staging-app-' + $productVersion)
+$distBoundary = [IO.Path]::GetFullPath($DistDir).TrimEnd('\') + '\'
+if ($productVersion -notmatch '^[A-Za-z0-9._+-]+$' -or $productVersion.Contains('..')) { Exit-Fail '版本号不能用作目录名' }
+if (-not [IO.Path]::GetFullPath($stage).StartsWith($distBoundary, [StringComparison]::OrdinalIgnoreCase)) { Exit-Fail 'staging 超出输出目录' }
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
@@ -137,6 +140,16 @@ Copy-Item -LiteralPath $serverExe -Destination (Join-Path $stage 'gamer-server.e
 # 必须复制整个 web-dist 目录；对 "web-dist\\*" 使用 PowerShell wildcard 会把
 # 子目录层级压平，导致浏览器请求 /assets/* 时得到 404（REL-003）。
 Copy-Item -LiteralPath $webDist -Destination $stage -Recurse -Force
+# 开发目录可能保留旧 .gplugin；发行只收注册表当前列出的版本。
+$registryPath = Join-Path $stage 'web-dist/registry.json'
+if (Test-Path -LiteralPath $registryPath) {
+    $registry = [IO.File]::ReadAllText($registryPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+    $publishedPlugins = @($registry.plugins | ForEach-Object { "$($_.id)-$($_.version).gplugin" })
+    $pluginAssets = Join-Path $stage 'web-dist/plugins'
+    foreach ($asset in (Get-ChildItem -LiteralPath $pluginAssets -File -Filter '*.gplugin' -ErrorAction SilentlyContinue)) {
+        if ($asset.Name -notin $publishedPlugins) { Remove-Item -LiteralPath $asset.FullName -Force }
+    }
+}
 New-Item -ItemType Directory -Path (Join-Path $stage 'assets') -Force | Out-Null
 Copy-Item -LiteralPath $jarSrc -Destination (Join-Path $stage 'assets\scrcpy-server.jar')
 
@@ -164,6 +177,7 @@ try {
 } finally { $zip.Dispose() }
 
 $verifyDir = Join-Path $DistDir ('verify-app-' + $productVersion)
+if (-not [IO.Path]::GetFullPath($verifyDir).StartsWith($distBoundary, [StringComparison]::OrdinalIgnoreCase)) { Exit-Fail 'verify 超出输出目录' }
 if (Test-Path -LiteralPath $verifyDir) { Remove-Item -LiteralPath $verifyDir -Recurse -Force }
 try {
     Expand-Archive -LiteralPath $zipPath -DestinationPath $verifyDir -Force

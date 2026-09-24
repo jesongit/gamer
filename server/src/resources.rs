@@ -433,7 +433,7 @@ fn mtime_secs(p: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-fn bytes_version(bytes: &[u8]) -> String {
+pub(crate) fn bytes_version(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(bytes);
     let mut version = String::with_capacity(12);
@@ -541,6 +541,10 @@ pub struct PackageNotFound(pub String);
 /// 播种；Android Targets = `*`、零插件依赖）。
 pub const DEFAULT_PACKAGE_ID: &str = "default";
 
+// Shared by store instances, including plugin-owned stores. Rename hooks may
+// write referring resources on the same thread, so this lock is reentrant.
+static RESOURCE_WRITE_LOCK: parking_lot::ReentrantMutex<()> = parking_lot::ReentrantMutex::new(());
+
 /// Core Package 本地包存储。见模块级文档。
 pub struct PackageStore {
     /// 数据根（`<data>/packages`），一级子目录 = package-id。
@@ -579,6 +583,10 @@ impl PackageStore {
 
     /// 包目录（package-id 严格校验，非法 id 直接报错而非映射哨兵——所有
     /// 调用方都应显式处理非法输入）。
+    pub(crate) fn data_root(&self) -> &Path {
+        self.root.parent().expect("package store has a data root")
+    }
+
     pub fn package_dir(&self, pkg: &str) -> anyhow::Result<PathBuf> {
         validate_scope_id("package id", pkg)?;
         Ok(self.root.join(pkg))
@@ -822,6 +830,7 @@ impl PackageStore {
         expected_version: Option<&str>,
         force: bool,
     ) -> anyhow::Result<ResourceEntry> {
+        let _guard = RESOURCE_WRITE_LOCK.lock();
         let normalized = normalize_written_path(path)?;
         let disk = self.resource_path(pkg, plugin, &normalized)?;
         if disk.is_file() {
@@ -897,6 +906,7 @@ impl PackageStore {
         expected_version: Option<&str>,
         force: bool,
     ) -> anyhow::Result<ListEntry> {
+        let _guard = RESOURCE_WRITE_LOCK.lock();
         let normalized = normalize_written_path(path)?;
         let disk = self.resource_path(pkg, plugin, &normalized)?;
         if disk.is_file() {
@@ -932,9 +942,67 @@ impl PackageStore {
         })
     }
 
+    /// Replace bytes and move the resource in one conditional operation. Bytes
+    /// have already passed the target path's content hook. Stage before moving
+    /// the original; if publishing fails, restore its name and references.
+    pub fn replace_binary(
+        &self,
+        pkg: &str,
+        plugin: &str,
+        old_path: &str,
+        new_path: &str,
+        bytes: &[u8],
+        expected_version: &str,
+    ) -> anyhow::Result<ListEntry> {
+        let _guard = RESOURCE_WRITE_LOCK.lock();
+        let old_path = normalize_written_path(old_path)?;
+        let new_path = normalize_written_path(new_path)?;
+        if old_path == new_path {
+            return self.write_binary(pkg, plugin, &old_path, bytes, Some(expected_version), false);
+        }
+        let old_disk = self.resource_path(pkg, plugin, &old_path)?;
+        let new_disk = self.resource_path(pkg, plugin, &new_path)?;
+        let original = std::fs::read(&old_disk)
+            .map_err(|_| anyhow::anyhow!("version_conflict: 原资源不存在或不可读"))?;
+        anyhow::ensure!(
+            bytes_version(&original) == expected_version,
+            "version_conflict: 资源已被其他页面修改，请重新确认覆盖"
+        );
+        anyhow::ensure!(!new_disk.exists(), "version_conflict: 目标资源已存在");
+        let staged = new_disk.with_file_name(format!(".replace-{}.tmp", uuid::Uuid::new_v4()));
+        atomic_write(&staged, bytes)?;
+        if let Err(error) = self.rename_resource(pkg, plugin, &old_path, &new_path) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(error);
+        }
+        if let Err(error) = std::fs::rename(&staged, &new_disk) {
+            let rollback = self.rename_resource(pkg, plugin, &new_path, &old_path);
+            let _ = std::fs::remove_file(&staged);
+            if let Err(rollback) = rollback {
+                anyhow::bail!(
+                    "替换失败: {error}；恢复名称失败: {rollback}；原内容仍保留在 {new_path}"
+                );
+            }
+            anyhow::bail!("替换失败，原模板已恢复: {error}");
+        }
+        Ok(ListEntry {
+            package: pkg.into(),
+            plugin: plugin.into(),
+            path: new_path,
+            size: bytes.len() as u64,
+            mtime: mtime_secs(&new_disk),
+            updated_at: fmt_mtime(&new_disk),
+            text: false,
+            content: None,
+            version: Some(bytes_version(bytes)),
+            meta: serde_json::Map::new(),
+        })
+    }
+
     /// 删除资源文件（不存在 → 报错）；返回被删磁盘路径。删除后向上清理
     /// 空目录（不超过插件目录本身）。
     pub fn delete_resource(&self, pkg: &str, plugin: &str, path: &str) -> anyhow::Result<PathBuf> {
+        let _guard = RESOURCE_WRITE_LOCK.lock();
         let disk = self.resource_path(pkg, plugin, path)?;
         if !disk.is_file() {
             anyhow::bail!("资源不存在: {pkg}/{plugin}/{path}");
@@ -967,6 +1035,7 @@ impl PackageStore {
         old_path: &str,
         new_path: &str,
     ) -> anyhow::Result<()> {
+        let _guard = RESOURCE_WRITE_LOCK.lock();
         let old_normalized = normalize_written_path(old_path)?;
         let new_normalized = normalize_written_path(new_path)?;
         if old_normalized == new_normalized {
@@ -1280,6 +1349,75 @@ mod tests {
             id: id.to_string(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn replace_binary_restores_original_when_publishing_staged_bytes_fails() {
+        struct RemoveStaged;
+        impl ResourceHandler for RemoveStaged {
+            fn before_rename(
+                &self,
+                store: &PackageStore,
+                pkg: &str,
+                plugin: &str,
+                old: &str,
+                new: &str,
+            ) -> anyhow::Result<()> {
+                store.write_text(pkg, plugin, "references.txt", new, None, true)?;
+                if old == "old.bin" {
+                    for entry in std::fs::read_dir(store.plugin_dir(pkg, plugin)?)? {
+                        let entry = entry?;
+                        if entry.file_name().to_string_lossy().starts_with(".replace-") {
+                            std::fs::remove_file(entry.path())?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+        let (store, _) = temp_store("replace-rollback");
+        store.create_package(input("replace.test")).unwrap();
+        let old = store
+            .write_binary(
+                "replace.test",
+                "test.plugin",
+                "old.bin",
+                b"original",
+                None,
+                false,
+            )
+            .unwrap();
+        store.register_handler("test.plugin", Arc::new(RemoveStaged));
+        let error = store
+            .replace_binary(
+                "replace.test",
+                "test.plugin",
+                "old.bin",
+                "new.bin",
+                b"replacement",
+                old.version.as_deref().unwrap(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("已恢复"));
+        assert_eq!(
+            store
+                .read_binary("replace.test", "test.plugin", "old.bin")
+                .unwrap()
+                .unwrap(),
+            b"original"
+        );
+        assert!(store
+            .read_binary("replace.test", "test.plugin", "new.bin")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .read_text("replace.test", "test.plugin", "references.txt")
+                .unwrap()
+                .unwrap()
+                .content,
+            "old.bin"
+        );
     }
 
     // ---------- id / 路径校验 ----------

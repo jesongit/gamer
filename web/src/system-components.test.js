@@ -32,7 +32,7 @@ const res = (status, body) => ({
 const INFO = fix('system-info.success.json').body
 const INFO_DOCKER = fix('system-info.degraded-direct.json').body
 const UPD_STAGED = fix('system-update.success.json').body
-const UPD_FAILED = fix('system-update.failed-signature-invalid.json').body
+const UPD_FAILED = fix('system-update.failed-manifest-invalid.json').body
 const UPD_MANUAL = fix('system-update.manual-recovery.json').body
 
 /** 内联最小 update status（契约 §3 字段；detail 取 §5.2 冻结映射） */
@@ -219,8 +219,8 @@ describe('UpdateStatusCard：11 状态全覆盖（WEB-003）', () => {
 
   it('failed（fixture）：展示错误码 + 无泄露 message', () => {
     const w = mountStatus(UPD_FAILED)
-    expect(w.text()).toContain('signature_invalid')
-    expect(w.text()).toContain('发布清单验签失败')
+    expect(w.text()).toContain('manifest_invalid')
+    expect(w.text()).toContain('发布清单清单校验失败')
   })
 
   it('manual_recovery（fixture）：恢复指引占位 + journal 摘要字段（事务/阶段/最后错误/状态时间）', () => {

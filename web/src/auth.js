@@ -56,13 +56,13 @@ function isOnLoginPage() {
 
 // 登录：返回结构化结果而非抛错，调用方据 code 定制文案
 //   {ok:true,username} | {ok:false,code:'invalid_credentials'|'too_many_attempts'|'forbidden_origin'|'network_error'|http_NNN, retryAfter?}
-export async function login(username, password) {
+export async function login(username, password, remember = false) {
   let r
   try {
     r = await fetch('/api/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password })
+      body: JSON.stringify({ username, password, remember })
     })
   } catch (e) {
     return { ok: false, code: 'network_error' }
@@ -94,13 +94,13 @@ export async function getSetupStatus() {
 }
 
 // 首次设置密码成功后服务端会直接建立 Cookie 会话。
-export async function setupInitialPassword(password, confirmPassword) {
+export async function setupInitialPassword(password, confirmPassword, remember = false) {
   let r
   try {
     r = await fetch('/api/auth/setup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password, confirm_password: confirmPassword })
+      body: JSON.stringify({ password, confirm_password: confirmPassword, remember })
     })
   } catch (e) {
     return { ok: false, code: 'network_error' }

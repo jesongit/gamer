@@ -9,9 +9,9 @@ URL、逐文件 sha256/size 与许可注记以 **release/dependencies.lock.toml*
 | 组件 | 随包形态 | 版本 | 来源 | 许可 | 归属 | 许可全文 |
 |---|---|---|---|---|---|---|
 | Android platform-tools | adb.exe + AdbWinApi.dll + AdbWinUsbApi.dll（原字节裁包） | 37.0.1 | https://dl.google.com/android/repository/platform-tools-latest-windows.zip | Apache-2.0 | Copyright (C) The Android Open Source Project | [android-platform-tools/](./android-platform-tools/) |
-| FFmpeg | ffmpeg.exe（BtbN win64-lgpl 静态构建） | N-126335-gb32f8d1c23-20260830 | https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip | LGPL-3.0-or-later | FFmpeg contributors（构建: BtbN/FFmpeg-Builds） | [ffmpeg/](./ffmpeg/) |
+| FFmpeg / FFprobe | ffmpeg.exe + ffprobe.exe（BtbN win64-lgpl 静态构建） | N-126342-gf88b741dbf-20260831 | https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-N-126342-gf88b741dbf-win64-lgpl.zip | LGPL-3.0-or-later | FFmpeg contributors（构建: BtbN/FFmpeg-Builds） | [ffmpeg/](./ffmpeg/) |
 | scrcpy-server | scrcpy-server.jar（Android 端，原字节分发） | 3.3.3 | https://github.com/Genymobile/scrcpy/releases/download/v3.3.3/scrcpy-server-v3.3.3 | Apache-2.0 | Copyright (C) Genymobile | [scrcpy/](./scrcpy/) |
-| Gamer 本体 | gamer-server.exe / gamer-launcher.exe / web 前端 | 以 server/Cargo.toml 为权威（当前 0.1.1） | 本仓库 | Gamer 自有许可 | Gamer 项目 | — |
+| Gamer 本体 | gamer-server.exe / gamer-launcher.exe / web 前端 | 以 server/Cargo.toml 为权威（当前 0.2.0） | 本仓库 | Gamer 自有许可 | Gamer 项目 | — |
 
 Rust 依赖组件清单（含传递依赖）由 `tools/gen-sbom.ps1` 生成 CycloneDX 1.5
 格式清单（release/sbom/），不入库、随发布产物归档。
@@ -26,7 +26,7 @@ Rust 依赖组件清单（含传递依赖）由 `tools/gen-sbom.ps1` 生成 Cycl
 
 2. **FFmpeg（LGPL-3.0-or-later）**
    - 随附 LGPL-3.0 全文（COPYING.LESSER）、与分发二进制精确对应的源码 offer
-     （SOURCE-OFFER.txt，commit b32f8d1c23 archive 直链）与 -buildconf 归档
+     （SOURCE-OFFER.txt，commit f88b741dbf archive 直链）与 -buildconf 归档
      （BUILD-CONFIG.txt）。
    - 只允许分发 LGPL 构建：buildconf 不得含 --enable-gpl / --enable-nonfree
      （红线）；换构建必须重走验收门禁。

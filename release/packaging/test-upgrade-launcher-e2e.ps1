@@ -18,7 +18,6 @@
 # 与冻结契约的两个边界（详见 docs/evidence/UPDATE_M2_EVIDENCE.md）：
 # - manifest 内 artifact.url 契约强制 https（launcher model 与 JSON Schema 双重门禁），
 #   本机临时 HTTP 服务只承载 manifest 本体（引擎 fetch_remote_manifest 接受 http://
-#   并按 <url>.sig 拉分离签名）；候选 app zip 经 cache/artifacts 种子命中
 #   （seeds→cache→remote 链路的 cache 级；远端下载路径由 QA-002 专项测试覆盖）。
 # - server 侧 install API 的 IPC 链路止于 prepare_install（复验 staging、驻留 staged）；
 #   drain/快照/切换/候选/commit 的接管入口当前只有 `launcher upgrade` CLI（安装锁
@@ -483,7 +482,7 @@ function Invoke-Scenario {
     Write-Step "[$tag] repair 首装（死代理模拟断网，seeds 安装）"
     $repairOut = Join-Path $WorkDir "logs\$tag-repair.log"
     $rp = Start-E2EProcess -FilePath $launcherExe `
-        -ArgumentList @('--install-root', $root, '--keys-dir', (Join-Path $rootFs 'keys'), 'repair', '--manifest', (Join-Path $rootFs "manifests\$BaselineVersion.json")) `
+        -ArgumentList @('--install-root', $root, 'repair', '--manifest', (Join-Path $rootFs "manifests\$BaselineVersion.json")) `
         -EnvMap @{ HTTP_PROXY = 'http://127.0.0.1:9'; HTTPS_PROXY = 'http://127.0.0.1:9'; ALL_PROXY = 'http://127.0.0.1:9' } `
         -WorkingDirectory $launcherCwd -StdoutLog $repairOut -StderrLog "$repairOut.err"
     $rp.WaitForExit(180000) | Out-Null
@@ -730,7 +729,7 @@ function Invoke-IdentityScenario {
     Write-Step "[$tag] repair 首装 + 缓存候选包"
     $repairOut = Join-Path $WorkDir "logs\$tag-repair.log"
     $rp = Start-E2EProcess -FilePath $launcherExe `
-        -ArgumentList @('--install-root', $root, '--keys-dir', (Join-Path $rootFs 'keys'), 'repair', '--manifest', (Join-Path $rootFs "manifests\$BaselineVersion.json")) `
+        -ArgumentList @('--install-root', $root, 'repair', '--manifest', (Join-Path $rootFs "manifests\$BaselineVersion.json")) `
         -EnvMap @{ HTTP_PROXY = 'http://127.0.0.1:9'; HTTPS_PROXY = 'http://127.0.0.1:9'; ALL_PROXY = 'http://127.0.0.1:9' } `
         -WorkingDirectory $launcherCwd -StdoutLog $repairOut -StderrLog "$repairOut.err"
     $rp.WaitForExit(180000) | Out-Null
@@ -772,12 +771,10 @@ function Invoke-IdentityScenario {
     $good.release.version = '0.2.1'
     [System.IO.File]::WriteAllText($wrongManifestPath, ($good | ConvertTo-Json -Depth 12) + "`n", (New-Object System.Text.UTF8Encoding($false)))
     $pack = Join-Path $RepoRoot 'release\packaging'
-    $r = Invoke-Native -FilePath 'node' -Arguments ('"{0}" sign "{1}" --key "{2}" --key-id dev-ed25519-1' -f (Join-Path $pack 'sign-manifest.mjs'), $wrongManifestPath, (Join-Path $WorkDir 'keys\dev-ed25519-1.private.pem')) -TailLines 1
-    if ($r.ExitCode -ne 0) { throw '身份不符 manifest 签名失败' }
-    $r = Invoke-Native -FilePath 'node' -Arguments ('"{0}" check "{1}" --keys-dir "{2}" --expect-current-version 0.1.0 --expect-channel stable' -f (Join-Path $RepoRoot 'release\contracts\validate-manifest.mjs'), $wrongManifestPath, (Join-Path $WorkDir 'keys')) -TailLines 2
+    $r = Invoke-Native -FilePath 'node' -Arguments ('"{0}" check "{1}" --expect-current-version 0.1.0 --expect-channel stable' -f (Join-Path $RepoRoot 'release\contracts\validate-manifest.mjs'), $wrongManifestPath) -TailLines 2
     foreach ($line in $r.Tail) { Write-Note $line }
     if ($r.ExitCode -ne 0) { throw '身份不符 manifest 校验未通过' }
-    Write-Ok '0.2.1-wrongver manifest 签名 + 校验通过（0.2.1 > 0.1.0，候选二进制实际 0.2.0）'
+    Write-Ok '0.2.1-wrongver manifest 校验通过（0.2.1 > 0.1.0，候选二进制实际 0.2.0）'
 
     Write-Step "[$tag] launcher upgrade（身份校验必须在 commit 前拒绝并回滚）"
     $up = Invoke-UpgradeWithJournalTrace -LauncherExe $launcherExe -Root $rootFs `
@@ -889,17 +886,11 @@ function Invoke-BuildAndPackage {
     if ($r.ExitCode -ne 0) { throw "pnpm build 失败（退出码 $($r.ExitCode)）" }
     Write-Ok 'web pnpm build OK'
 
-    Write-Step '打包：M1 full 包（工作区自有 dist/keys/manifests，不触碰主仓 release/dist）'
+    Write-Step '打包：M1 full 包（工作区自有 dist/manifests，不触碰主仓 release/dist）'
     $pack = Join-Path $RepoRoot 'release\packaging'
     $distM1 = Join-Path $WorkDir 'dist-m1'
-    $keys = Join-Path $WorkDir 'keys'
     $manifests = Join-Path $WorkDir 'manifests'
     foreach ($d in @($distM1, $manifests)) { if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null } }
-    if (-not (Test-Path -LiteralPath (Join-Path $keys 'dev-ed25519-1.private.pem'))) {
-        $r = Invoke-Native -FilePath 'node' -Arguments ('"{0}" keygen --id dev-ed25519-1 --out-dir "{1}"' -f (Join-Path $pack 'sign-manifest.mjs'), $keys) -TailLines 1
-        if ($r.ExitCode -ne 0) { throw 'keygen 失败' }
-        Write-Ok '签名密钥对生成（工作区 keys/，私钥不入库）'
-    }
     function Invoke-Pack { param([string]$Script, [string]$Arguments, [string]$Label)
         $r = Invoke-Native -FilePath 'powershell.exe' -Arguments ('-NoProfile -ExecutionPolicy Bypass -File "{0}" {1}' -f $Script, $Arguments) -TailLines 2
         foreach ($line in $r.Tail) { Write-Note $line }
@@ -908,8 +899,8 @@ function Invoke-BuildAndPackage {
     }
     Invoke-Pack (Join-Path $pack 'package-components.ps1') ('-DistDir "{0}"' -f $distM1) 'package-components.ps1（adb/ffmpeg zip，vendor 逐 hash 校验）'
     Invoke-Pack (Join-Path $pack 'package-app.ps1') ('-SkipBuild -DistDir "{0}"' -f $distM1) 'package-app.ps1（gamer-app-0.1.0 zip）'
-    Invoke-Pack (Join-Path $pack 'gen-manifest.ps1') ('-Version 0.1.0 -DistDir "{0}" -OutDir "{1}" -KeysDir "{2}"' -f $distM1, $manifests, $keys) 'gen-manifest.ps1（0.1.0 签名 manifest）'
-    Invoke-Pack (Join-Path $pack 'package-full.ps1') ('-SkipBuild -Version 0.1.0 -DistDir "{0}" -ManifestDir "{1}" -KeysDir "{2}" -KeyId dev-ed25519-1' -f $distM1, $manifests, $keys) 'package-full.ps1（full ZIP + SHA256SUMS + 包内验签）'
+    Invoke-Pack (Join-Path $pack 'gen-manifest.ps1') ('-Version 0.1.0 -DistDir "{0}" -OutDir "{1}"' -f $distM1, $manifests) 'gen-manifest.ps1（0.1.0 manifest）'
+    Invoke-Pack (Join-Path $pack 'package-full.ps1') ('-SkipBuild -Version 0.1.0 -DistDir "{0}" -ManifestDir "{1}"' -f $distM1, $manifests) 'package-full.ps1（full ZIP + SHA256SUMS + 包内校验）'
 
     Write-Step '候选构建：隔离副本（排除 .git/target/node_modules）+ 版本 0.2.0'
     $copy = Join-Path $WorkDir 'candidate-copy'
@@ -932,12 +923,8 @@ function Invoke-BuildAndPackage {
     foreach ($n in @('gamer-adb-37.0.1-windows-x64.zip', 'gamer-ffmpeg-N-126335-gb32f8d1c23-20260830-windows-x64.zip')) {
         Copy-Item -LiteralPath (Join-Path $distM1 $n) -Destination (Join-Path $distM2 $n) -Force
     }
-    Invoke-Pack (Join-Path $copy 'release\packaging\gen-manifest.ps1') ('-Version 0.2.0 -DistDir "{0}" -OutDir "{1}" -KeysDir "{2}"' -f $distM2, $manifests, $keys) 'gen-manifest.ps1（0.2.0 签名 manifest，dev-ed25519-1）'
-    # HTTP 分离签名约定 URL+.sig（fetch_remote_manifest）；gen-manifest 落盘名是
-    # <v>.sig，HTTP 服务侧补一份 <v>.json.sig（每次重签后同步，防陈旧签名）
-    foreach ($v in @('0.2.0')) {
-        Copy-Item -LiteralPath (Join-Path $manifests "$v.sig") -Destination (Join-Path $manifests "$v.json.sig") -Force
-    }
+    Invoke-Pack (Join-Path $copy 'release\packaging\gen-manifest.ps1') ('-Version 0.2.0 -DistDir "{0}" -OutDir "{1}"' -f $distM2, $manifests) 'gen-manifest.ps1（0.2.0 manifest）'
+
 
     Write-Step '故障候选构建（场景 B）：main.rs 注入「启动即退出」缺陷（仅副本）'
     $mainRs = Join-Path $copy 'server\src\main.rs'
@@ -987,7 +974,7 @@ function Invoke-BuildAndPackage {
     Remove-Item -LiteralPath $stageBroken -Recurse -Force
     $brokenExeSha = Get-Sha256 -Path (Join-Path $copy 'server\target\release\gamer-server.exe')
     Write-Ok "gamer-app-0.2.0-broken-windows-x64.zip（故障 exe sha256=$($brokenExeSha.Substring(0, 16))…）"
-    # 故障 manifest（0.2.0 版本号不变，app.artifact 指向 broken zip，重签名 + 校验）
+    # 故障 manifest（0.2.0 版本号不变，app.artifact 指向 broken zip，重新校验）
     $goodManifest = Get-Content -LiteralPath (Join-Path $manifests '0.2.0.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $goodManifest.platforms.'windows-x86_64'.app.artifact.name = 'gamer-app-0.2.0-broken-windows-x64.zip'
     $goodManifest.platforms.'windows-x86_64'.app.artifact.url = 'https://mirror.e2e.invalid/gamer-app-0.2.0-broken-windows-x64.zip'
@@ -995,14 +982,10 @@ function Invoke-BuildAndPackage {
     $goodManifest.platforms.'windows-x86_64'.app.artifact.sha256 = Get-Sha256 -Path $brokenZip
     $brokenManifestPath = Join-Path $manifests '0.2.0-broken.json'
     [System.IO.File]::WriteAllText($brokenManifestPath, ($goodManifest | ConvertTo-Json -Depth 12) + "`n", (New-Object System.Text.UTF8Encoding($false)))
-    $r = Invoke-Native -FilePath 'node' -Arguments ('"{0}" sign "{1}" --key "{2}" --key-id dev-ed25519-1' -f (Join-Path $pack 'sign-manifest.mjs'), $brokenManifestPath, (Join-Path $keys 'dev-ed25519-1.private.pem')) -TailLines 1
-    if ($r.ExitCode -ne 0) { throw '故障 manifest 签名失败' }
-    $r = Invoke-Native -FilePath 'node' -Arguments ('"{0}" check "{1}" --keys-dir "{2}" --expect-current-version 0.1.0 --expect-channel stable' -f (Join-Path $RepoRoot 'release\contracts\validate-manifest.mjs'), $brokenManifestPath, $keys) -TailLines 2
+    $r = Invoke-Native -FilePath 'node' -Arguments ('"{0}" check "{1}" --expect-current-version 0.1.0 --expect-channel stable' -f (Join-Path $RepoRoot 'release\contracts\validate-manifest.mjs'), $brokenManifestPath) -TailLines 2
     foreach ($line in $r.Tail) { Write-Note $line }
     if ($r.ExitCode -ne 0) { throw '故障 manifest 校验未通过' }
-    # HTTP 分离签名约定 URL+.sig：broken manifest 的签名同步补 <名>.json.sig
-    Copy-Item -LiteralPath (Join-Path $manifests '0.2.0-broken.sig') -Destination (Join-Path $manifests '0.2.0-broken.json.sig') -Force
-    Write-Ok '0.2.0-broken manifest 签名 + 校验通过（0.2.0 > 0.1.0，严格升级语义成立）'
+    Write-Ok '0.2.0-broken manifest 校验通过（0.2.0 > 0.1.0，严格升级语义成立）'
 }
 
 # ===========================================================================
@@ -1039,10 +1022,10 @@ foreach ($attempt in @(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)) {
     } catch { Start-Sleep -Seconds 1 }
 }
 Assert-True $probeOk "manifest HTTP 服务就绪（python http.server 绑定 127.0.0.1:$HttpPort）"
-foreach ($f in @('0.2.0.json.sig', '0.2.0-broken.json', '0.2.0-broken.json.sig')) {
+foreach ($f in @('0.2.0.json', '0.2.0-broken.json')) {
     $ok = $false
     try { $ok = ((Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$HttpPort/$f" -TimeoutSec 5).StatusCode -eq 200) } catch { }
-    Assert-True $ok "manifest HTTP 服务可取 /$f（fetch_remote_manifest 按 URL 与 URL+.sig 成对获取）"
+    Assert-True $ok "manifest HTTP 服务可取 /$f"
 }
 
 try {

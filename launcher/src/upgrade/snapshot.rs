@@ -437,30 +437,17 @@ fn create_with_inspector(
     write_json_atomic(&root.join(SNAPSHOT_MANIFEST), &manifest)
         .map_err(|e| format!("写快照清单失败: {e}"))?;
 
-    // 整体验证（不通过绝不返回成功——快照验证不全不进入 migrating）
-    verify_with_inspector(layout, update_id, candidate_exe, true, inspector)?;
-
-    // 清理 inspect 在副本旁留下的临时旁车文件（WAL 库读写兜底打开的副作用），
-    // 让快照目录与清单精确一致；清理失败不影响快照有效性（验证已按忽略语义容忍）。
-    let data_root = root.join("data");
-    let listed: BTreeSet<String> = manifest
-        .files
-        .iter()
-        .map(|file| file.path.to_lowercase())
-        .collect();
-    for path in walk_files(&data_root).unwrap_or_default() {
-        let rel = rel_forward(&root, &path);
-        if is_unlisted_sqlite_sidecar(&rel, &listed) {
-            let _ = fs::remove_file(&path);
-        }
-    }
+    // 先验证封存字节，再在临时副本内打开 SQLite。即使只读查询也可能改写
+    // WAL 的共享内存文件，不能对将用于回滚的备份直接执行 inspect。
+    verify_with_inspector(layout, update_id, candidate_exe, false, inspector)?;
+    let schema_after = inspect_snapshot_copy(layout, &root, &manifest, candidate_exe, inspector)?;
 
     Ok(SnapshotReport {
         id: update_id.to_string(),
         path: root.to_string_lossy().into_owned(),
         file_count: manifest.file_count,
         total_bytes: manifest.total_bytes,
-        schema_after: candidate_exe.and_then(|exe| inspector.inspect(exe, &root.join("data"))),
+        schema_after,
     })
 }
 
@@ -494,27 +481,67 @@ fn verify_with_inspector(
     let actual = listed_snapshot_files(&root)?;
     verify_file_map(&actual, &manifest, "快照")?;
     if check_db {
-        let data_copy = root.join("data");
-        let has_db = walk_files(&data_copy)
-            .map(|files| {
-                files.iter().any(|p| {
-                    p.extension()
-                        .and_then(|e| e.to_str())
-                        .is_some_and(|e| e.eq_ignore_ascii_case("db"))
-                })
-            })
-            .unwrap_or(false);
-        if has_db {
-            let exe = candidate_exe.ok_or_else(|| {
-                "快照含 SQLite 数据但未提供候选 exe，不能校验副本完整性（不进入 migrating）"
-                    .to_string()
-            })?;
-            inspector.inspect(exe, &data_copy).ok_or_else(|| {
-                "候选 exe inspect 校验快照失败（退出码非 0 或输出非 JSON）".to_string()
-            })?;
-        }
+        inspect_snapshot_copy(layout, &root, &manifest, candidate_exe, inspector)?;
     }
     Ok(manifest)
+}
+
+/// SQLite 可能在读取 WAL 时修改或重建旁车文件。只复制数据库及已封存的
+/// WAL/SHM 到独立目录执行诊断，避免复制视频等大文件，也不允许诊断改动备份。
+fn inspect_snapshot_copy(
+    layout: &InstallLayout,
+    root: &Path,
+    manifest: &SnapshotManifest,
+    candidate_exe: Option<&Path>,
+    inspector: &dyn SchemaInspector,
+) -> Result<Option<u32>, String> {
+    let databases: BTreeSet<String> = manifest
+        .files
+        .iter()
+        .filter(|file| file.path.starts_with("data/") && file.path.to_lowercase().ends_with(".db"))
+        .map(|file| file.path.to_lowercase())
+        .collect();
+    if databases.is_empty() {
+        return Ok(None);
+    }
+    let exe = candidate_exe.ok_or_else(|| {
+        "快照含 SQLite 数据但未提供候选 exe，不能校验副本完整性（不进入 migrating）".to_string()
+    })?;
+    fs::create_dir_all(layout.staging_dir()).map_err(|e| format!("创建诊断 staging 失败: {e}"))?;
+    let scratch = layout.staging_dir().join(format!(
+        "inspect-{}-{}-{}",
+        manifest.update_id,
+        std::process::id(),
+        now_unix_millis()
+    ));
+    // 必须独占创建；失败时不能清理不属于本次诊断的目录。
+    fs::create_dir(&scratch).map_err(|e| format!("创建快照诊断副本失败: {e}"))?;
+    let result = (|| {
+        for file in &manifest.files {
+            let lower = file.path.to_lowercase();
+            let is_sidecar = ["-wal", "-shm"].iter().any(|suffix| {
+                lower
+                    .strip_suffix(suffix)
+                    .is_some_and(|db| databases.contains(db))
+            });
+            if !databases.contains(&lower) && !is_sidecar {
+                continue;
+            }
+            let dest = scratch.join(&file.path);
+            fs::create_dir_all(dest.parent().expect("data file has parent"))
+                .map_err(|e| format!("创建诊断子目录失败: {e}"))?;
+            fs::copy(root.join(&file.path), &dest)
+                .map_err(|e| format!("复制快照诊断文件 {} 失败: {e}", file.path))?;
+        }
+        inspector
+            .inspect(exe, &scratch.join("data"))
+            .map(Some)
+            .ok_or_else(|| "候选 exe inspect 校验快照失败（退出码非 0 或输出非 JSON）".to_string())
+    })();
+    if let Err(error) = fs::remove_dir_all(&scratch) {
+        tracing::warn!(path = %scratch.display(), %error, "清理快照诊断副本失败");
+    }
+    result
 }
 
 /// 恢复快照：先验证（字节级 hash 复验；db 完整性已在创建时门禁）→ 现网 data/
@@ -835,6 +862,79 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("SQLite") || err.contains("inspect"), "{err}");
 
+        let _ = fs::remove_dir_all(&layout.root);
+    }
+
+    #[test]
+    fn sqlite_inspection_cannot_mutate_sealed_wal_snapshot_even_on_failure() {
+        struct MutatingInspector {
+            succeeds: bool,
+        }
+        impl SchemaInspector for MutatingInspector {
+            fn inspect(&self, _exe: &Path, data: &Path) -> Option<u32> {
+                assert_eq!(
+                    fs::read(data.join("gamer.db-wal")).unwrap(),
+                    b"original-wal"
+                );
+                assert_eq!(
+                    fs::read(data.join("gamer.db-shm")).unwrap(),
+                    b"original-shm"
+                );
+                assert!(!data.join("large-video.mp4").exists());
+                fs::write(data.join("gamer.db-shm"), b"modified-shm").unwrap();
+                fs::write(data.join("gamer.db-wal"), b"modified-wal").unwrap();
+                self.succeeds.then_some(5)
+            }
+        }
+        let layout = temp_layout("sealed-wal");
+        for (name, bytes) in [
+            ("gamer.db", b"original-db".as_slice()),
+            ("gamer.db-wal", b"original-wal".as_slice()),
+            ("gamer.db-shm", b"original-shm".as_slice()),
+            ("large-video.mp4", b"video".as_slice()),
+        ] {
+            write(&layout.data_dir(), name, bytes);
+        }
+        let exe = Some(Path::new("candidate"));
+        let report = create_with_inspector(
+            &layout,
+            "upd-wal",
+            exe,
+            &MutatingInspector { succeeds: true },
+        )
+        .unwrap();
+        assert_eq!(report.schema_after, Some(5));
+        verify_with_inspector(
+            &layout,
+            "upd-wal",
+            exe,
+            true,
+            &MutatingInspector { succeeds: true },
+        )
+        .unwrap();
+        assert!(verify_with_inspector(
+            &layout,
+            "upd-wal",
+            exe,
+            true,
+            &MutatingInspector { succeeds: false }
+        )
+        .is_err());
+        assert_eq!(fs::read_dir(layout.staging_dir()).unwrap().count(), 0);
+        write(&layout.data_dir(), "gamer.db", b"candidate-data");
+        restore(&layout, "upd-wal").unwrap();
+        assert_eq!(
+            fs::read(layout.data_dir().join("gamer.db")).unwrap(),
+            b"original-db"
+        );
+        assert_eq!(
+            fs::read(layout.data_dir().join("gamer.db-wal")).unwrap(),
+            b"original-wal"
+        );
+        assert_eq!(
+            fs::read(layout.data_dir().join("gamer.db-shm")).unwrap(),
+            b"original-shm"
+        );
         let _ = fs::remove_dir_all(&layout.root);
     }
 

@@ -4,7 +4,7 @@
 
 官方插件源码统一在 `plugins/gamer-yaml`、`plugins/gamer-keymap`、`plugins/gamer-video`，每个目录都有 README 与 `build.ps1`。新增插件使用 `gamer-` 前缀；旧官方 `gamer.*` ID 通过仓库的一次性离线转换工具改名，运行时没有别名。
 
-从仓库根运行 `plugins/<id>/build.ps1` 只构建该插件的 WASM（如果有）与 UI 并生成 `.gplugin`，不会编译主程序，也不会删除其他插件的市场条目。UI 是独立 Vite 工程，`pnpm --dir plugins/<id>/ui test` 运行插件测试，`node sdk/ui/build-modules.mjs <id>` 构建并同步开发静态资源。工作台的面板实现来自插件模块，不再直接导入插件源码。
+官方源码由独立 gamer-plugins 仓库提供，主仓 `plugins/` 为固定提交的 submodule，先运行 `git submodule update --init --recursive`。从主仓运行 `tools/build-plugins.ps1 -Plugin <id>` 构建并更新本地市场；从插件仓运行 `<id>/build.ps1` 则输出到插件仓的 dist/，无需主仓。UI 是独立 Vite 工程，联合工作区中 `pnpm --dir plugins/<id>/ui test` 运行插件测试，`node tools/build-plugin-ui.mjs <id>` 构建并同步开发静态资源。宿主壳的 `pnpm build` 只构建壳，正式插件产物由独立构建步骤提供。
 
 `ui/entry.js` 导出 `sdkVersion = 1`、`panels`（按 component 键索引的 Vue 组件描述）及需要的 Console 接入函数。构建器使用 `sdk/ui/host-modules.json` 中的 SDK 清单共享 Vue、工作区状态及通用 UI，避免重复 Vue 实例和互不相通的 store。宿主 UI 的 `runtime="core"` 可声明 `entry="ui/plugin.js"`；此模式必须同时声明 `permissions=["ui.host", ...]` 与 `[host_api] ui="^1.0"`，安装确认明确说明它与主页面同源运行、可访问当前会话。组件解析同时绑定插件 ID，不能仅凭同名组件键借用另一插件的面板。
 
@@ -24,7 +24,7 @@
 | 工具 | 用途 | 安装 |
 | --- | --- | --- |
 | Rust (stable) + `wasm32-unknown-unknown` target | 编写并编译 guest | `rustup target add wasm32-unknown-unknown` |
-| `plugin-signer`（Gamer 仓库 `tools/plugin-signer`） | 打包/校验 `.gplugin`（`pack`/`inspect`/`verify`，免签名） | `cargo build --release --manifest-path tools/plugin-signer/Cargo.toml` |
+| `plugin-packer`（Gamer 仓库 `tools/plugin-packer`） | 打包/校验 `.gplugin`（`pack`/`inspect`/`verify`，免签名） | `cargo build --release --manifest-path tools/plugin-packer/Cargo.toml` |
 | 运行中的 Gamer 服务端（8443） | inspect / install / call | `GAMER_ADMIN_PASSWORD=...` 环境变量（开发模式口令）或 `[auth].password_hash` |
 
 不需要：签名密钥、GitHub 仓库、市场登记、修改 Gamer 源码。
@@ -47,7 +47,7 @@ cargo run --release --bin componentize -- \
   target/wasm32-unknown-unknown/release/my_plugin_guest.wasm \
   target/plugin.component.wasm
 
-# 3) 打包 + 自检（SIGNER 指向 tools/plugin-signer/target/release/gamer-plugin-signer.exe）
+# 3) 打包 + 自检（SIGNER 指向 tools/plugin-packer/target/release/gamer-plugin-packer.exe）
 $SIGNER inspect --manifest manifest.toml          # id=com.example.xxx version=… kind=wasm
 $SIGNER pack --manifest manifest.toml --wasm target/plugin.component.wasm \
   --out dist/my-plugin-1.0.0.gplugin              # 输出 sha256=/size=
@@ -268,7 +268,7 @@ capability 边界收到 `kind=denied`。
 
 ## 8. 调试与常见错误对照表
 
-调试顺序建议：`signer inspect/verify`（包级）→ `POST /api/extensions/inspect`
+调试顺序建议：`packer inspect/verify`（包级）→ `POST /api/extensions/inspect`
 （安装预览）→ 安装 → `GET /api/extensions`（state/last_error）→
 `POST .../call`（guest 逐动作）。
 
@@ -276,11 +276,11 @@ capability 边界收到 `kind=denied`。
 | --- | --- | --- |
 | `插件 manifest 无效: manifest_version=1 已不受支持…` | 旧 v1 manifest | 升级到 `manifest_version = 2` |
 | `插件 manifest 无效: manifest_version=3 不受支持…（需要升级 Gamer 宿主）` | manifest 比宿主新 | 用宿主支持的版本号 |
-| `插件 manifest 无效: wasm 执行类型需要 entry…` / `归档缺少 entry plugin.wasm` / `entry 不是 WASM 二进制` | entry 缺失/改名/不是真实组件 | manifest `entry` 与实际文件一致；用 `signer pack --wasm` 打包 |
+| `插件 manifest 无效: wasm 执行类型需要 entry…` / `归档缺少 entry plugin.wasm` / `entry 不是 WASM 二进制` | entry 缺失/改名/不是真实组件 | manifest `entry` 与实际文件一致；用 `packer pack --wasm` 打包 |
 | `插件权限错误: 插件权限默认拒绝且不可授予: filesystem.*` 等 | 声明了禁区权限 | 删掉；插件没有任意文件系统/网络/shell 通道（见 §9） |
 | `插件权限错误: 未知插件权限: xxx` | 权限名拼错 | 对照 §5 的 19 项闭集 |
 | `插件权限变更需要用户确认: 新增权限: …`（409） | 权限增量未确认 | 安装请求加 `x-gamer-permission-confirm: true` |
-| `宿主归档 sha256 校验失败: 期望 … 实际 …` | `x-expected-sha256` 钉住的哈希不符 | 用 `signer pack` 输出的实际 sha256 |
+| `宿主归档 sha256 校验失败: 期望 … 实际 …` | `x-expected-sha256` 钉住的哈希不符 | 用 `packer pack` 输出的实际 sha256 |
 | `宿主 API 不兼容`（`unsupported_host_api`：required/supported） | `[host_api]` 版本要求高于宿主（宿主全域 1.0.0） | 放宽为 `"^1.0"` 或升级宿主 |
 | `host_feature_unavailable` | manifest 声明 `kind="builtin"` 但 `builtin_id` 不在服务端注册表 | 第三方插件用 `kind="wasm"`；builtin 是宿主预置实现专用，不可伪装 |
 | `插件 … 已安装`（409） | 同 id 同版本重复安装 | bump version（更新语义见 §7） |

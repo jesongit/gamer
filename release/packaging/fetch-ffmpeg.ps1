@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     从 release/dependencies.lock.toml 读取 ffmpeg 条目，下载 BtbN win64-lgpl
-    构建 zip 并校验 sha256（锁定时点），解包仅保留 bin/ffmpeg.exe 到
+    构建 zip 并校验 sha256（锁定时点），解包保留 bin/ffmpeg.exe 和 bin/ffprobe.exe 到
     release/vendor/ffmpeg/<version>/。验收门禁（任一失败即整体失败）:
       1) ffmpeg.exe -version  版本串必须与锁一致
       2) ffmpeg.exe -buildconf 不得出现 --enable-gpl / --enable-nonfree（许可红线）
@@ -54,6 +54,7 @@ function Invoke-ProcessCapture {
     $psi.FileName = $FilePath
     $psi.Arguments = $Arguments
     $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.RedirectStandardInput = ($null -ne $StdInBytes)
@@ -89,6 +90,17 @@ function Exit-Fail {
     param([string]$Message)
     Write-Host "[fetch-ffmpeg] FAIL: $Message" -ForegroundColor Red
     exit 1
+}
+
+function Test-FFprobe {
+    param([string]$Dir, [string]$Version)
+    $exe = Join-Path $Dir 'ffprobe.exe'
+    $result = Invoke-ProcessCapture -FilePath $exe -Arguments '-version'
+    $match = [regex]::Match(($result.StdOut + $result.StdErr), 'ffprobe version (\S+)')
+    if ($result.ExitCode -ne 0 -or -not $match.Success -or $match.Groups[1].Value -ne $Version) {
+        throw 'ffprobe 版本与 FFmpeg 锁定版本不一致'
+    }
+    Test-LicenseGates -Exe $exe | Out-Null
 }
 
 # 许可红线: buildconf 不得出现 gpl/nonfree；-L 必须为 LGPL
@@ -142,6 +154,7 @@ try {
         }
         Write-Host "  [版本OK] $($vMatch.Groups[1].Value)"
         Test-LicenseGates -Exe $exe | Out-Null
+        Test-FFprobe -Dir $destDir -Version $version
         Write-Host "[fetch-ffmpeg] PASS（VerifyOnly）" -ForegroundColor Green
         exit 0
     }
@@ -167,9 +180,15 @@ try {
         Invoke-VerifiedDownload -Url $url -DestFile $zipPath -ExpectedSha256 $expectedZipSha -ExpectedSize $expectedZipSize -Proxy $Proxy
     }
 
-    # 解包: 只取 */bin/ffmpeg.exe（原字节）
+    # 解包: 仅取锁定的 FFmpeg / FFprobe 原字节
     Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
     $staging = Join-Path $VendorRoot "ffmpeg\$version.staging"
+    $vendorBoundary = [IO.Path]::GetFullPath($VendorRoot).TrimEnd('\') + '\'
+    foreach ($target in @($staging, $destDir)) {
+        if (-not [IO.Path]::GetFullPath($target).StartsWith($vendorBoundary, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "目标超出 vendor 目录: $target"
+        }
+    }
     if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
     New-Item -ItemType Directory -Path $staging -Force | Out-Null
 
@@ -177,16 +196,20 @@ try {
         $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
         if ($null -eq $zip) { throw "zip 打开失败: $zipPath" }
         try {
-            $entries = @($zip.Entries | Where-Object {
-                    $_.FullName -notmatch '(\.\.|^/)' -and $_.FullName -match '/bin/ffmpeg\.exe$'
+            foreach ($binary in @('ffmpeg.exe', 'ffprobe.exe')) {
+                $suffix = '/bin/' + [regex]::Escape($binary) + '$'
+                $entries = @($zip.Entries | Where-Object {
+                    $_.FullName -notmatch '(\.\.|^/)' -and $_.FullName -match $suffix
                 })
-            if ($entries.Count -ne 1) { throw "zip 内未找到唯一 bin/ffmpeg.exe（匹配数: $($entries.Count)）" }
-            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], (Join-Path $staging 'ffmpeg.exe'), $true)
+                if ($entries.Count -ne 1) { throw "zip 内未找到唯一 bin/$binary" }
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], (Join-Path $staging $binary), $true)
+            }
         } finally {
             $zip.Dispose()
         }
 
         $exe = Join-Path $staging 'ffmpeg.exe'
+        Test-FFprobe -Dir $staging -Version $version
 
         # 门禁 1: 版本串与锁一致
         $ver = Invoke-ProcessCapture -FilePath $exe -Arguments '-version'

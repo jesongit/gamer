@@ -1,57 +1,21 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-09-20T02:44:03Z",
+  "generated_at": "2026-09-24T06:36:49Z",
   "host_api": "1.0.0",
+  "provenance": {
+    "plugin_commit": "5c88d10f6f0c4358a551b7eb2b4a71c0daf8d9ed",
+    "sdk_host_commit": "00ac834cd2fcc5181094faa47a6d0b37f79022ac"
+  },
   "plugins": [
     {
-      "id": "gamer-video",
-      "version": "1.0.0",
-      "name": "视频工作台",
-      "description": "视频工作台：媒体素材库、设备录制与操作草稿生成",
-      "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-video-1.0.0.gplugin",
-      "sha256": "0b01e6abff98e3403548a11e274b0ea6402874fb6aa76820db9d03cfd1e5cc4c",
-      "size": 61011,
-      "permissions": [
-        "ui.host",
-        "media.read",
-        "media.import",
-        "media.record",
-        "media.write",
-        "media.events.read"
-      ],
-      "host_api": {
-        "ui": "^1.0"
-      },
-      "ui": {
-        "contributions": [
-          {
-            "component": "VideoWorkbench",
-            "entry": "ui/plugin.js",
-            "icon": "🎬",
-            "location": "console.right",
-            "order": 28,
-            "panel_id": "video",
-            "preferred_width": 440,
-            "requires_device": false,
-            "runtime": "core",
-            "title": "视频"
-          }
-        ]
-      },
-      "execution": {
-        "kind": "builtin"
-      }
-    },
-    {
       "id": "gamer-keymap",
-      "version": "1.0.1",
+      "version": "0.1.0-beta.1",
       "name": "键盘映射",
       "description": "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-keymap-1.0.1.gplugin",
-      "sha256": "5b1d542dc366158e0289baa5961d7e5d0220246a312a6850a68b431dedb0a09a",
-      "size": 131780,
+      "download_url": "/plugins/gamer-keymap-0.1.0-beta.1.gplugin",
+      "sha256": "6b3c2c8ac98bd2b8fcfb72a2738cd5659c60398c7b92642ae6b3bfb6c219724c",
+      "size": 131745,
       "permissions": [
         "ui.host",
         "input.tap",
@@ -85,14 +49,54 @@
       }
     },
     {
+      "id": "gamer-video",
+      "version": "0.1.0-beta.1",
+      "name": "视频工作台",
+      "description": "视频工作台：媒体素材库、设备录制与操作草稿生成",
+      "publisher": "gamer.dev",
+      "download_url": "/plugins/gamer-video-0.1.0-beta.1.gplugin",
+      "sha256": "b89ad4442ae84e050b7a3fe775f6431392fd8756d3e290568c96beac748e4257",
+      "size": 63292,
+      "permissions": [
+        "ui.host",
+        "media.read",
+        "media.import",
+        "media.record",
+        "media.write",
+        "media.events.read"
+      ],
+      "host_api": {
+        "ui": "^1.0"
+      },
+      "ui": {
+        "contributions": [
+          {
+            "component": "VideoWorkbench",
+            "entry": "ui/plugin.js",
+            "icon": "🎬",
+            "location": "console.right",
+            "order": 28,
+            "panel_id": "video",
+            "preferred_width": 440,
+            "requires_device": false,
+            "runtime": "core",
+            "title": "视频"
+          }
+        ]
+      },
+      "execution": {
+        "kind": "builtin"
+      }
+    },
+    {
       "id": "gamer-yaml",
-      "version": "3.1.2",
+      "version": "0.1.0-beta.1",
       "name": "自动化",
       "description": "自动化：YAML V1 脚本、函数库与模板的制作与运行",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-yaml-3.1.2.gplugin",
-      "sha256": "5a9f2cea74455dcc79864006633bc20db7776700978b8aad0df1fe531c3eeb6c",
-      "size": 414620,
+      "download_url": "/plugins/gamer-yaml-0.1.0-beta.1.gplugin",
+      "sha256": "81c9d089c8d9ab84eabdbb376211e42b264f1a628bc7dc00606634dda3bd4fc3",
+      "size": 450304,
       "permissions": [
         "ui.host",
         "device.read",

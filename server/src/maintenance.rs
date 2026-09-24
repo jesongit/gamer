@@ -242,8 +242,8 @@ fn schema_constants() -> serde_json::Value {
     })
 }
 
-/// 只读诊断（契约 §7）：任何情况下不写数据；DB 不存在 → missing 且不创建
-/// 数据库文件（只读打开 + 缺席预判双重保证）。
+/// 只读诊断（契约 §7）：不执行业务写入或迁移；DB 不存在 → missing 且不创建。
+/// SQLite 仍可能重建或改写 WAL/SHM，字节级封存的备份必须先复制再诊断。
 pub(crate) fn inspect(data_dir: &Path) -> serde_json::Value {
     let db_path = crate::store::db_path(data_dir);
     let missing_report = |db_exists: bool, error: Option<String>| {
@@ -563,7 +563,7 @@ mod tests {
         let dir = temp_dir("too-new");
         let db_path = crate::store::db_path(&dir);
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute_batch("CREATE TABLE future (x TEXT); PRAGMA user_version = 5;")
+        conn.execute_batch("CREATE TABLE future (x TEXT); PRAGMA user_version = 6;")
             .unwrap();
         drop(conn);
         let report = inspect(&dir);
@@ -572,12 +572,12 @@ mod tests {
         assert_eq!(report["status"], "too_new");
         assert_eq!(report["ok"], false);
         let err = report["error"].as_str().unwrap();
-        assert!(err.contains("supported range [1, 4]"), "{err}");
+        assert!(err.contains("supported range [1, 5]"), "{err}");
         let version: i64 = rusqlite::Connection::open(&db_path)
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 5, "too_new 拒绝后不得改写数据");
+        assert_eq!(version, 6, "too_new 拒绝后不得改写数据");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

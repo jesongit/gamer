@@ -24,6 +24,43 @@ fn cleanup(dir: &Path) {
     let _ = fs::remove_dir_all(dir);
 }
 
+#[test]
+fn directory_rename_waits_for_a_short_lived_watcher_handle() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::time::Duration;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    let root = unique_root("directory-watcher");
+    let source = root.join("staging");
+    let target = root.join("installed");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("content"), b"verified content").unwrap();
+    let handle = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(&source)
+        .unwrap();
+    assert!(
+        fs::rename(&source, &target).is_err(),
+        "handle must block rename"
+    );
+    let release = std::thread::spawn(move || {
+        // Longer than the previous 225 ms retry window.
+        std::thread::sleep(Duration::from_millis(400));
+        drop(handle);
+    });
+    let result = gamer_launcher::state::atomic::rename_with_retry(&source, &target);
+    release.join().unwrap();
+    result.unwrap();
+    assert_eq!(
+        fs::read(target.join("content")).unwrap(),
+        b"verified content"
+    );
+    cleanup(&root);
+}
+
 fn sample_current() -> CurrentState {
     CurrentState::new("0.2.0", Some("0.1.0".to_string()))
 }

@@ -98,9 +98,9 @@
 | operation | payload（冻结） | 语义 | 同步/长操作 |
 |---|---|---|---|
 | `status` | `{}` | 查询升级状态机/journal 快照、当前/上一版本、schema、依赖健康（§4.1） | 同步 |
-| `check` | `{}` | 检查远端 release（通道来自 launcher 配置，不接受请求指定），验签 manifest | 长操作 |
+| `check` | `{}` | 检查远端 release（通道来自 launcher 配置，不接受请求指定），校验 manifest | 长操作 |
 | `download` | `{}` | 下载当前候选的应用/组件包至 cache→staging 并校验 | 长操作 |
-| `prepare_install` | `{}` | 对最近下载的候选做安装前整备（复验 staging 完整性、标记可切换） | 长操作 |
+| `prepare_install` | `{}` | 接管最近已下载候选的安装：复验 staging 后优雅停机、快照、切换、验证并启动；失败自动回滚。使用已确认候选，不重新发现其他版本 | 长操作 |
 | `rollback` | `{}` | 触发 committed 之前的自动回滚（恢复 previous + 已验证快照） | 长操作 |
 | `repair_dependency` | `{ "dependency": "adb" \| "ffmpeg" }` | 依赖修复编排（inventory→seed/cache→remote→probe）；`scrcpy` 不可修（随应用版本整体更换） | 长操作 |
 
@@ -170,7 +170,7 @@
 
 ### 6.1 业务错误码（与 HTTP API 共享，11 个）
 
-`update_not_managed`、`update_busy`、`update_not_available`、`update_not_ready`、`signature_invalid`、`artifact_invalid`、`insufficient_space`、`schema_incompatible`、`launcher_unreachable`、`rollback_unavailable`、`manual_recovery_required`——触发条件见 `system-api-v1.md` §7；launcher 侧产生、经错误帧回传后由 server 1:1 映射为 HTTP 错误或 `last_error`。
+`update_not_managed`、`update_busy`、`update_not_available`、`update_not_ready`、`manifest_invalid`、`artifact_invalid`、`insufficient_space`、`schema_incompatible`、`launcher_unreachable`、`rollback_unavailable`、`manual_recovery_required`——触发条件见 `system-api-v1.md` §7；launcher 侧产生、经错误帧回传后由 server 1:1 映射为 HTTP 错误或 `last_error`。
 
 ### 6.2 协议级错误码（仅 IPC，冻结）
 
@@ -197,7 +197,7 @@
 | `prepare_install.json` | `prepare_install` 请求帧 + 受理响应帧 |
 | `rollback.json` | `rollback` 请求帧 + 受理响应帧 |
 | `repair_dependency.json` | `repair_dependency`（枚举 payload）请求帧 + 受理响应帧 |
-| `error-frame.json` | 一个业务错误帧示例（`signature_invalid`） |
+| `error-frame.json` | 一个业务错误帧示例（`manifest_invalid`） |
 | `error-frames-protocol.json` | 协议级错误帧示例集（`unsupported_protocol_version` / `unknown_operation` / `invalid_payload` / `unauthorized` / `internal_error`） |
 
 ## 9. 建议值汇总（变更需 bump protocol/contract 版本）

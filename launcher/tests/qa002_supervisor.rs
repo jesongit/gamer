@@ -75,6 +75,7 @@ fn child_env_injects_contract_vars_with_minimal_path() {
         "GB_CONFIG",
         "GB_LOG",
         "GAMER_ADMIN_PASSWORD",  // 仅父进程显式设置时透传（登录链路）
+        "GAMER_LOCAL_ONLY",      // 显式本机测试开关透传
         "GAMER_DEPLOYMENT_MODE", // 默认注入 launcher（用户显式设置不覆盖）
     ];
     for key in env.keys() {
@@ -371,6 +372,7 @@ fn start_full_chain_with_fake_server_probe_ready_then_waits_exit() {
         "@echo off\r\nping -n 2 127.0.0.1 >nul\r\nexit /b 0\r\n",
     )
     .unwrap();
+    start_fixture(&layout, "fake-server.bat");
 
     let root_s = layout.root.to_string_lossy().into_owned();
     let cli = Cli::parse_from(["gamer-launcher", "--install-root", &root_s, "start"]);
@@ -408,9 +410,21 @@ fn start_reports_nonzero_when_fake_server_fails() {
         "@echo off\r\nexit /b 3\r\n",
     )
     .unwrap();
+    start_fixture(&layout, "failing-server.bat");
 
     let root_s = layout.root.to_string_lossy().into_owned();
     let cli = Cli::parse_from(["gamer-launcher", "--install-root", &root_s, "start"]);
     assert_eq!(commands::dispatch(&cli, &layout), 3, "子进程退出码应透传");
     cleanup(&layout.root);
+}
+
+fn start_fixture(layout: &InstallLayout, entrypoint: &str) {
+    let mut model: serde_json::Value = serde_json::from_str(include_str!(
+        "../../release/contracts/fixtures/manifest/valid/manifest-valid-basic.json"
+    ))
+    .unwrap();
+    model["release"]["version"] = "0.2.0".into();
+    model["platforms"]["windows-x86_64"]["app"]["entrypoint"] = entrypoint.into();
+    let raw = serde_json::to_vec(&model).unwrap();
+    fs::write(layout.manifests_dir().join("0.2.0.json"), raw).unwrap();
 }

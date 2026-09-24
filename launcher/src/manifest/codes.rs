@@ -1,10 +1,6 @@
 //! 错误码常量：与 release/contracts/validate-manifest.mjs / manifest-v1.md 保持一致。
 
 pub const IO_ERROR: &str = "io-error";
-pub const UNSIGNED_MANIFEST: &str = "unsigned-manifest";
-pub const SIG_FORMAT_INVALID: &str = "sig-format-invalid";
-pub const UNKNOWN_KEY_ID: &str = "unknown-key-id";
-pub const SIGNATURE_INVALID: &str = "signature-invalid";
 pub const JSON_PARSE_FAILED: &str = "json-parse-failed";
 pub const SCHEMA_INVALID: &str = "schema-invalid";
 

@@ -4,17 +4,16 @@
 #   gamer-launcher.exe                  cargo build --release（launcher crate 独立工作区）
 #   config/config.toml                  模板（launcher 托管模式：路径留空由注入，
 #                                       password_hash 占位，字段按 server/src/config.rs 写全）
-#   data/<应用包名>/{yaml,func,tmpl,keymap}/ 仓库内置的脚本、函数、模板和映射种子
-#   manifests/<version>.json + .sig     gen-manifest.ps1 产物
-#   keys/<key_id>.pem                   dev 公钥（生产改为内置信任库）
-#   seeds/                              gamer-app zip、adb zip、ffmpeg zip、scrcpy-server jar
+#   data/                              空目录，不携带个人配置或运行数据
+#   manifests/<version>.json     gen-manifest.ps1 产物
+#   seeds/                              发行清单锁定的本体、运行依赖、启动器、官方插件 ZIP
 #   SHA256SUMS.txt                      包内全部文件哈希清单
 #   INSTALL.md                          解压即用说明
 #   licenses/                           DEP-005 第三方声明（NOTICE + 各许可全文 + FFmpeg
 #                                       源码 offer + BUILD-CONFIG，履约 dependencies.lock.toml）
 #
 # 组包后自动结构校验：解压到临时目录 → 文件齐全 → SHA256SUMS 逐条对 →
-# manifest 用包内公钥验签。可选 -SkipSmoke 跳过 gamer-launcher.exe doctor 冒烟。
+# manifest 结构与语义校验。可选 -SkipSmoke 跳过 gamer-launcher.exe doctor 冒烟。
 # 兼容 Windows PowerShell 5.1 与 pwsh。
 
 [CmdletBinding()]
@@ -25,12 +24,11 @@ param(
     [switch]$SkipSmoke,
     # 产品版本（默认读 server/Cargo.toml）
     [string]$Version = '',
-    # 签名 key_id（默认 dev-ed25519-1）
-    [string]$KeyId = 'dev-ed25519-1',
+    [ValidateSet('stable', 'beta')]
+    [string]$Channel = 'stable',
     [string]$DistDir = '',
     # manifest 目录（gen-manifest.ps1 输出，默认 <repo>/release/manifests）
-    [string]$ManifestDir = '',
-    [string]$KeysDir = ''
+    [string]$ManifestDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -77,74 +75,7 @@ function New-ZipFromDirectory {
 }
 
 function Get-ConfigTemplate {
-    $s = @'
-# =============================================================================
-# Gamer 配置模板（launcher 托管模式 / REL-002 Full 包）
-# =============================================================================
-# 本文件由 Gamer 便携包携带，运行时由 gamer-launcher.exe 管理：
-# GAMER_APP_DIR / GAMER_DATA_DIR / GAMER_ADB_PATH / GAMER_FFMPEG_PATH /
-# GAMER_SCRCPY_SERVER 等绝对路径由 launcher 启动 server 时注入环境变量，
-# 优先级高于本文件同名字段——标注「launcher 注入」的条目留空即可，无需手改。
-# 字段与 server/src/config.rs 一一对应；文件解析失败 / 校验不过进程直接退出。
-# 完整字段说明见仓库 server/config.example.toml 与 server/src/config.rs。
-
-# HTTP 监听端口 [1, 65535]
-port = 8443
-
-# 数据目录（SQLite、模板图片、脚本按应用分区存放于其下）。
-# 相对路径相对本配置文件所在目录解析；launcher 托管模式会注入绝对路径覆盖。
-data_dir = "./data"
-
-# 应用资产根目录（jar / web-dist 解析基准）——launcher 注入，无需配置
-# app_dir = ""
-
-# 外部工具路径：留空 = 由 launcher 注入绝对路径（runtime/ 下的 adb、ffmpeg 与
-# 版本目录内 assets/scrcpy-server.jar）。脱离 launcher 独立运行时才手填：
-#   adb_path / ffmpeg_path: PATH 内命令名或绝对路径；可执行性启动探测只告警不阻断
-#   scrcpy_server: 启动必检，指向的 jar 缺失直接退出
-adb_path = ""
-ffmpeg_path = ""
-scrcpy_server = ""
-
-# 脚本引擎默认参数（可被脚本内 config: 段覆盖）
-interval = "500ms"        # 轮询与点击后等待间隔，带单位 ms/s/m/min/h/d；裸数字非法
-threshold = 0.85          # 模板匹配阈值，(0, 1]
-log_level = "info"        # debug / info / warn / error
-judge_delay_ms = 200      # 判断类步骤命中后延迟毫秒，0 = 关闭，上限 60000
-decode_frames = true      # 视频流软解码（模板匹配取帧）
-max_size = 0              # scrcpy 最大分辨率，0 = 原始；非 0 须为 8 的倍数 [16, 4096]
-bitrate_mbps = 12         # 码率上限 [1, 50]
-fps = 15                  # 帧率上限，0 = 设备默认，≤120
-encoder_name = ""         # scrcpy 编码器名，空 = 设备默认
-probe_encoder = false     # 编码器质量探针（纯诊断，默认关闭）
-
-# 空闲低功耗秒数：无 viewer 且无脚本运行持续 N 秒后拆会话/关屏；0 = 关闭
-idle_power_secs = 300
-
-# 服务端文件日志按天轮转的保留天数（GB_LOG 指向文件时生效）；0 = 永不清理
-log_retain_days = 14
-
-# 专用计算池并发上限（NCC 匹配/PNG 解码等）：0 = 按 CPU 核数自动，显式值 ≤256
-compute_max_concurrency = 0
-
-# WebRTC ICE 外部宣告（容器 / NAT 1-to-1 部署才需要；缺省 = host candidate 直连）。
-# rtc_udp_port 必须与 rtc_external_ip 成对配置（启动校验强制），rtc_external_port
-# 依赖 rtc_udp_port。本机/局域网使用保持全零即可。
-rtc_external_ip = ""
-rtc_udp_port = 0
-rtc_external_port = 0
-
-# 鉴权与会话治理。password_hash 初始留空：首次打开登录页即可设置管理员密码，
-# 服务端会把密码转换为 Argon2id PHC 并保存；GAMER_ADMIN_PASSWORD 仍可供开发/自动化
-# 场景使用（仅进程内生效，不落盘）。
-[auth]
-session_abs_secs = 43200   # 会话绝对有效期秒 [60, 2592000]
-session_idle_secs = 7200   # 会话空闲有效期秒 [60, 604800]
-login_max_fails = 10       # 登录限流失败次数上限 [1, 1000]
-login_window_secs = 300    # 限流滑动窗口秒 [1, 86400]
-password_hash = ""         # Argon2id PHC（launcher 托管模式：首次启动后设置）
-'@
-    return $s
+    return [IO.File]::ReadAllText((Join-Path $PSScriptRoot '../config.default.toml'), [Text.Encoding]::UTF8)
 }
 
 function Get-InstallTemplate {
@@ -155,14 +86,16 @@ function Get-InstallTemplate {
 
 把 `Gamer-__VERSION__-windows-x64-full.zip` 解压到本地目录（建议路径不含中文与
 空格，例如 `D:\Gamer`）。**必须保持解压出的相对布局**：`gamer-launcher.exe`
-与 `config\`、`data\`、`manifests\`、`keys\`、`seeds\`、`licenses\`、`SHA256SUMS.txt` 在
+与 `config\`、`data\`、`manifests\`、`seeds\`、`licenses\`、`SHA256SUMS.txt` 在
 同一目录，不要单独把 exe 拖出去运行。
 
 ## 第 2 步：双击启动
 
-双击解压目录中的 `gamer-launcher.exe` 即可。启动器会自动从包内 `seeds\` 安装
-或修复 adb、ffmpeg、scrcpy-server 和 Gamer 本体，首次运行不需要打开命令行，
-也不需要手动执行 `repair` 或 `start`；依赖已经完整时会自动跳过。
+双击解压目录中的 `gamer-launcher.exe`，首次在小窗口点击“安装”，再从包内
+`seeds\` 安装 ADB、FFmpeg/FFprobe、scrcpy-server 与 Gamer 本体。安装支持暂停
+和恢复；已校验且未改变的文件不会重复计算哈希。有可用更新时显示启动器，
+其余情况下在后台检查后直接启动并留在托盘，不先弹出窗口。更新窗口只提供“更新 / 取消”。
+关闭窗口保留托盘，右键仅“打开 Gamer / 退出 Gamer”；双击托盘或再次双击 EXE，运行时打开网页，安装或更新时显示窗口。检查更新在工作台“设置”里，文件在启动时自动校验修复。
 
 启动成功后浏览器会打开（或手动打开）`http://127.0.0.1:8443`。
 
@@ -172,8 +105,9 @@ function Get-InstallTemplate {
 密码只以 Argon2id 不可逆哈希保存到 `config\config.toml`，设置成功后会自动登录。
 以后双击 `gamer-launcher.exe` 启动，再用该管理员密码登录即可。
 
-包内已带入仓库中的脚本、函数库、模板图片和按应用分区的按键映射，首次启动即可使用；
-运行过程中新增或修改的资源会继续保存在 `data\`，升级时不会由 launcher 自动覆盖。
+包内携带自动化、键盘映射、视频工作台三个官方插件安装包，首次启动展示权限并
+选择安装（点“继续”，也可“跳过”）。包内没有个人脚本、配置、媒体或数据库；需要的配置包可在软件中导入。
+运行数据保存在 `data\`，更新时由启动器备份与保护。
 
 ## 其他
 
@@ -182,8 +116,14 @@ function Get-InstallTemplate {
 - 高级维护仍可在命令行运行 `gamer-launcher.exe doctor`、`repair` 或 `upgrade`，
   日常使用不需要这些命令。
 - 第三方组件许可声明见 `licenses\NOTICE.md`（Apache-2.0 / LGPL-3.0 履约文本）。
-- 升级：`gamer-launcher.exe upgrade`（检查 manifest 并原子升级；离线环境把新版
-  full 包解压覆盖即可，数据目录不受影响）。
+- 日常升级使用启动器的“更新”或工作台“设置 → 软件更新”。beta.4 及更早启动器
+  先通过启动器升级，旧版网页安装入口只校验下载内容。
+- 离线升级先退出并备份 `config/` 与 `data/`，将新包的 `seeds/`、`manifests/`
+  合并到原安装目录，并替换根目录的 `gamer-launcher.exe`，再运行
+  `gamer-launcher.exe upgrade --manifest manifests/<新版本>.json`。
+  不要直接覆盖原有 `config/` 或 `data/`，新包配置模板仅供首次安装。
+- 仅本机使用可在配置顶层设置 `local_only = true`，HTTP 与 WebRTC 都限制为回环地址；
+  USB ADB 仍可用，其他电脑无法访问，不能与非默认 NAT 配置同时使用。
 '@
     return $s
 }
@@ -191,7 +131,6 @@ function Get-InstallTemplate {
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not $DistDir)     { $DistDir     = Join-Path $repoRoot 'release\dist' }
 if (-not $ManifestDir) { $ManifestDir = Join-Path $repoRoot 'release\manifests' }
-if (-not $KeysDir)     { $KeysDir     = Join-Path $repoRoot 'release\keys' }
 
 Import-Module (Join-Path $PSScriptRoot 'LockFile.psm1') -Force
 
@@ -210,20 +149,14 @@ if (-not $Version) { Exit-Fail "无法确定产品版本" }
 
 # ---------- 输入清单 ----------
 $launcherExe    = Join-Path $repoRoot 'launcher\target\release\gamer-launcher.exe'
-$jarSrc         = Join-Path $repoRoot 'server\assets\scrcpy-server.jar'
-$dataSeedDir    = Join-Path $repoRoot 'server\data'
 $manifestJson   = Join-Path $ManifestDir ('{0}.json' -f $Version)
-$manifestSig    = Join-Path $ManifestDir ('{0}.sig' -f $Version)
-$pubKey         = Join-Path $KeysDir ('{0}.pem' -f $KeyId)
 $licensesDir    = Join-Path $repoRoot 'licenses'
 
 $components = Import-LockComponents -Path (Join-Path $repoRoot 'release\dependencies.lock.toml')
 $adb    = Get-LockComponent -Components $components -Id 'adb'
 $ffmpeg = Get-LockComponent -Components $components -Id 'ffmpeg'
-$scrcpy = Get-LockComponent -Components $components -Id 'scrcpy-server'
 $adbVersion    = [string]$adb['version']
 $ffmpegVersion = [string]$ffmpeg['version']
-$jarSeedName   = [string]$scrcpy['source_artifact_name']   # scrcpy-server-v3.3.3
 
 $appZipName    = 'gamer-app-{0}-windows-x64.zip' -f $Version
 $adbZipName    = 'gamer-adb-{0}-windows-x64.zip' -f $adbVersion
@@ -237,39 +170,37 @@ if (-not $SkipBuild) {
 }
 
 foreach ($must in @(
-    $launcherExe, $jarSrc, $dataSeedDir, $manifestJson, $manifestSig, $pubKey,
+    $launcherExe, $manifestJson,
     (Join-Path $DistDir $appZipName), (Join-Path $DistDir $adbZipName), (Join-Path $DistDir $ffmpegZipName),
     (Join-Path $licensesDir 'NOTICE.md')
 )) {
     if (-not (Test-Path -LiteralPath $must)) {
-        Exit-Fail "缺少输入: $must（按需运行 package-app.ps1 / package-components.ps1 / gen-manifest.ps1；公钥缺失时由 gen-manifest.ps1 自动 keygen）"
+        Exit-Fail "缺少输入: $must（按需运行 package-app.ps1 / package-components.ps1 / gen-manifest.ps1）"
     }
 }
 
-Write-Host "[package-full] 版本 $Version，key_id=$KeyId"
+Write-Host "[package-full] 版本 $Version"
 
 # ---------- 组装 staging ----------
 $stage = Join-Path $DistDir ('staging-full-' + $Version)
+$distBoundary = [IO.Path]::GetFullPath($DistDir).TrimEnd('\') + '\'
+if ($Version -notmatch '^[A-Za-z0-9._+-]+$' -or $Version.Contains('..')) { Exit-Fail '版本号不能用作目录名' }
+if (-not [IO.Path]::GetFullPath($stage).StartsWith($distBoundary, [StringComparison]::OrdinalIgnoreCase)) { Exit-Fail 'staging 超出输出目录' }
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
-foreach ($d in @('config', 'data', 'manifests', 'keys', 'seeds')) {
+foreach ($d in @('config', 'data', 'manifests', 'seeds')) {
     New-Item -ItemType Directory -Path (Join-Path $stage $d) -Force | Out-Null
 }
 try {
     Copy-Item -LiteralPath $launcherExe -Destination (Join-Path $stage 'gamer-launcher.exe')
     Write-Utf8BomFile -Path (Join-Path $stage 'config\config.toml') -Text (Get-ConfigTemplate)
 
-    # 初始业务资源随 Full 包分发，但只复制分区目录，不复制 server/data 根下的
-    # gamer.db / -shm / -wal 等开发机运行时数据库文件。
-    foreach ($partition in (Get-ChildItem -LiteralPath $dataSeedDir -Directory | Sort-Object Name)) {
-        Copy-Item -LiteralPath $partition.FullName -Destination (Join-Path $stage 'data') -Recurse -Force
-    }
+    # 数据目录留空，首次启动由 Core 播种默认配置包。
     Copy-Item -LiteralPath $manifestJson -Destination (Join-Path $stage ('manifests\{0}.json' -f $Version))
-    Copy-Item -LiteralPath $manifestSig  -Destination (Join-Path $stage ('manifests\{0}.sig' -f $Version))
-    Copy-Item -LiteralPath $pubKey       -Destination (Join-Path $stage ('keys\{0}.pem' -f $KeyId))
-    foreach ($n in @($appZipName, $adbZipName, $ffmpegZipName)) {
+    $releaseModel = Get-Content -LiteralPath $manifestJson -Raw | ConvertFrom-Json
+    $seedNames = @($releaseModel.platforms.'windows-x86_64'.app.artifact.name) + @($releaseModel.platforms.'windows-x86_64'.components | ForEach-Object { $_.artifact.name })
+    foreach ($n in $seedNames) {
         Copy-Item -LiteralPath (Join-Path $DistDir $n) -Destination (Join-Path $stage ('seeds\' + $n))
     }
-    Copy-Item -LiteralPath $jarSrc -Destination (Join-Path $stage ('seeds\' + $jarSeedName))
 
     # licenses/（DEP-005 履约：随 full 包附第三方声明与全文）
     New-Item -ItemType Directory -Path (Join-Path $stage 'licenses\android-platform-tools') -Force | Out-Null
@@ -312,7 +243,7 @@ try {
 }
 Remove-Item -LiteralPath $stage -Recurse -Force
 
-# ---------- 结构校验：解压 → 文件齐全 → SHA256SUMS → manifest 验签 ----------
+# ---------- 结构校验：解压 → 文件齐全 → SHA256SUMS → manifest 校验 ----------
 Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
 $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
 if ($null -eq $zip) { Exit-Fail "zip 打开失败: $zipPath" }
@@ -323,6 +254,7 @@ try {
 } finally { $zip.Dispose() }
 
 $verify = Join-Path $DistDir ('verify-full-' + $Version)
+if (-not [IO.Path]::GetFullPath($verify).StartsWith($distBoundary, [StringComparison]::OrdinalIgnoreCase)) { Exit-Fail 'verify 超出输出目录' }
 if (Test-Path -LiteralPath $verify) { Remove-Item -LiteralPath $verify -Recurse -Force }
 try {
     Expand-Archive -LiteralPath $zipPath -DestinationPath $verify -Force
@@ -330,9 +262,8 @@ try {
     foreach ($rel in @(
         'gamer-launcher.exe',
         'config\config.toml',
-        ('manifests\{0}.json' -f $Version), ('manifests\{0}.sig' -f $Version),
-        ('keys\{0}.pem' -f $KeyId),
-        ('seeds\' + $appZipName), ('seeds\' + $adbZipName), ('seeds\' + $ffmpegZipName), ('seeds\' + $jarSeedName),
+        ('manifests\{0}.json' -f $Version),
+        ('seeds\' + $appZipName), ('seeds\' + $adbZipName), ('seeds\' + $ffmpegZipName),
         'SHA256SUMS.txt', 'INSTALL.md',
         'licenses\NOTICE.md',
         'licenses\android-platform-tools\LICENSE.txt', 'licenses\android-platform-tools\NOTICE.txt',
@@ -341,20 +272,12 @@ try {
     )) {
         if (-not (Test-Path -LiteralPath (Join-Path $verify $rel))) { Exit-Fail "解压后缺失: $rel" }
     }
+    foreach ($seed in $seedNames) {
+        if (-not (Test-Path -LiteralPath (Join-Path $verify ('seeds\' + $seed)))) { Exit-Fail "解压后缺少清单种子: $seed" }
+    }
 
-    # 每个仓库内置资源分区及其中的文件都必须进入 Full 包；数据库等运行时文件不属于种子。
-    foreach ($partition in (Get-ChildItem -LiteralPath $dataSeedDir -Directory | Sort-Object Name)) {
-        $expectedPartition = Join-Path $verify ('data\' + $partition.Name)
-        if (-not (Test-Path -LiteralPath $expectedPartition -PathType Container)) {
-            Exit-Fail "解压后缺失数据分区: data/$($partition.Name)"
-        }
-        foreach ($seedFile in (Get-ChildItem -LiteralPath $partition.FullName -Recurse -File)) {
-            $relative = $seedFile.FullName.Substring($dataSeedDir.Length + 1) -replace '\\', '/'
-            $expectedFile = Join-Path $verify ('data\' + ($relative -replace '/', '\'))
-            if (-not (Test-Path -LiteralPath $expectedFile -PathType Leaf)) {
-                Exit-Fail "解压后缺失种子文件: data/$relative"
-            }
-        }
+    if (Get-ChildItem -LiteralPath (Join-Path $verify 'data') -File -Recurse -ErrorAction SilentlyContinue) {
+        Exit-Fail '发行包禁止携带个人数据'
     }
 
     # SHA256SUMS 逐条核对 + 完备性（除自身外每个文件都在清单里）
@@ -379,12 +302,12 @@ try {
     }
     Write-Host "[package-full] SHA256SUMS 校验通过（$($expected.Count) 条）"
 
-    # manifest 验签（包内公钥 = 信任锚）
+    # manifest 结构与语义校验
     $extractedManifest = Join-Path $verify ('manifests\{0}.json' -f $Version)
-    & node (Join-Path $repoRoot 'release\contracts\validate-manifest.mjs') check $extractedManifest --keys-dir (Join-Path $verify 'keys') --expect-current-version $Version --expect-channel stable
-    if ($LASTEXITCODE -ne 0) { Exit-Fail "包内 manifest 验签未通过（退出码 $LASTEXITCODE）" }
+    & node (Join-Path $repoRoot 'release\contracts\validate-manifest.mjs') check $extractedManifest --expect-current-version $Version --expect-channel $Channel
+    if ($LASTEXITCODE -ne 0) { Exit-Fail "包内 manifest 校验未通过（退出码 $LASTEXITCODE）" }
 
-    # launcher doctor 冒烟（另一轨道在扩展 launcher；失败只报告不阻断组包）
+    # launcher doctor 冒烟失败必须阻断组包。
     if (-not $SkipSmoke) {
         Write-Host '[package-full] launcher doctor 冒烟...'
         $prevEap = $ErrorActionPreference
@@ -395,7 +318,7 @@ try {
         } finally { $ErrorActionPreference = $prevEap }
         foreach ($l in ($out.Trim() -split "`r?`n")) { Write-Host "  | $l" }
         if ($code -eq 0) { Write-Host '[package-full] doctor 冒烟: 退出码 0' -ForegroundColor Green }
-        else { Write-Host "[package-full] doctor 冒烟: 退出码 $code（smoke 仅报告，不阻断）" -ForegroundColor Yellow }
+        else { Exit-Fail "doctor 冒烟失败，退出码 $code" }
     }
 
     $zipSize = (Get-Item -LiteralPath $zipPath).Length

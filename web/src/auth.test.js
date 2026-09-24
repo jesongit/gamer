@@ -138,11 +138,11 @@ describe('probeSession（GET /api/session 探测）', () => {
 })
 
 describe('login（POST /api/login）', () => {
-  it('请求体符合契约 {username,password}；成功回包记录用户名', async () => {
+  it('请求体符合契约 {username,password,remember}；成功回包记录用户名', async () => {
     vi.mocked(fetch).mockResolvedValueOnce(jsonRes(200, { ok: true, username: 'root' }))
     const r = await auth.login('root', 'pw123')
     expect(r).toEqual({ ok: true, username: 'root' })
-    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ username: 'root', password: 'pw123' })
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ username: 'root', password: 'pw123', remember: false })
     expect(fetch.mock.calls[0][1].method).toBe('POST')
     expect(fetch.mock.calls[0][0]).toBe('/api/login')
     expect(auth.session.username).toBe('root')
@@ -202,7 +202,7 @@ describe('首次设置密码（GET/POST /api/auth/setup）', () => {
       .resolves.toEqual({ ok: true, username: 'admin' })
     const [, options] = fetch.mock.calls[0]
     expect(options.method).toBe('POST')
-    expect(JSON.parse(options.body)).toEqual({ password: 'strong-pass', confirm_password: 'strong-pass' })
+    expect(JSON.parse(options.body)).toEqual({ password: 'strong-pass', confirm_password: 'strong-pass', remember: false })
     expect(auth.session.username).toBe('admin')
   })
 
@@ -294,7 +294,7 @@ describe('Cookie 会话唯一认证来源', () => {
     vi.mocked(fetch).mockResolvedValueOnce(jsonRes(200, { ok: true, username: 'cookie-user' }))
     await expect(auth.login('cookie-user', 'pw')).resolves.toEqual({ ok: true, username: 'cookie-user' })
     const [, options] = fetch.mock.calls[0]
-    expect(JSON.parse(options.body)).toEqual({ username: 'cookie-user', password: 'pw' })
+    expect(JSON.parse(options.body)).toEqual({ username: 'cookie-user', password: 'pw', remember: false })
     expect(options.headers.Authorization).toBeUndefined()
     expect(localStorage.getItem('gb_sidebar_collapsed')).toBe('1')
     expect(auth.session.username).toBe('cookie-user')

@@ -2,8 +2,8 @@
   <div class="system-panel">
     <div class="sp-head">
       <div>
-        <div class="sp-title">系统与更新</div>
-        <div class="sp-sub">系统信息、软件更新与更新策略；数据与操作均对接服务端真实 API（/api/system/*，更新策略持久化在服务端数据目录）</div>
+        <div class="sp-title">设置</div>
+        <div class="sp-sub">通用设置、自动化与软件更新；各项生效时机在设置旁标注。</div>
       </div>
       <button class="btn btn-primary" :disabled="st.loading" @click="ctl.refresh()">
         <UiIcon name="refresh" />{{ st.loading ? '读取中…' : '刷新' }}
@@ -19,6 +19,8 @@
     </div>
 
     <template v-else>
+      <SystemSettings />
+      <ExtensionSettings />
       <SystemInfoCard class="stack-gap" :info="st.info" :error="infoErrorText"
         @check="onCheck" @install="requestInstall" />
 
@@ -105,6 +107,8 @@ import { computed, inject, reactive, ref, watch } from 'vue'
 import { OPERATION_FEEDBACK_KEY, operationReporter } from '../workspace/operation-feedback'
 import UiIcon from './ui/UiIcon.vue'
 import SystemInfoCard from './SystemInfoCard.vue'
+import SystemSettings from './SystemSettings.vue'
+import ExtensionSettings from './ExtensionSettings.vue'
 import UpdateStatusCard from './UpdateStatusCard.vue'
 import UpdateConfirmModal from './UpdateConfirmModal.vue'
 import { useToast } from '../store'

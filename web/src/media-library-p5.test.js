@@ -13,6 +13,7 @@ vi.mock('../../plugins/gamer-video/ui/src/components/video/videoApi', () => ({
     recordingEvents: vi.fn(async () => []),
     importMedia: vi.fn(async () => ({})),
     deleteMedia: vi.fn(async () => null),
+    deleteRecording: vi.fn(async () => null),
   },
 }))
 
@@ -40,6 +41,41 @@ beforeEach(() => {
 })
 
 describe('P5-MEDIA 素材库与录制历史', () => {
+  it('孤立历史说明视频和事件缺失，确认后才能清理，失败保留条目', async () => {
+    videoApi.recordingHistory.mockResolvedValue([{id: 'orphan', state: 'completed', event_count: 0, events_available: false, segments: [{media_id: 'gone', duration_us: 10e6}], missing_media: ['gone']}])
+    const wrapper = mount(MediaLibrary)
+    await flushPromises()
+    expect(wrapper.text()).toContain('视频已不存在或未生成')
+    expect(wrapper.text()).toContain('无操作记录')
+    expect(wrapper.find('[data-testid="recording-history-draft"]').element.disabled).toBe(true)
+    const remove = () => wrapper.find('[data-testid="recording-history-delete"]')
+    await remove().trigger('click')
+    expect(videoApi.deleteRecording).not.toHaveBeenCalled()
+    videoApi.deleteRecording.mockRejectedValueOnce(new Error('正在录制，无法删除'))
+    await remove().trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="recording-history-row"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="media-error"]').text()).toContain('正在录制')
+    videoApi.recordingHistory.mockResolvedValue([])
+    await remove().trigger('click')
+    await flushPromises()
+    expect(videoApi.deleteRecording).toHaveBeenCalledWith('orphan')
+    expect(wrapper.find('[data-testid="recording-history-empty"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('丢失事件的录制不能生成脚本；仍有关联视频时不能删除历史', async () => {
+    videoApi.recordingHistory.mockResolvedValue([{id: 'lost-events', state: 'completed', event_count: 3, events_available: false, segments: [{media_id: 'recording-a', duration_us: 10e6}], missing_media: []}])
+    const wrapper = mount(MediaLibrary, {props: {mediaList: MEDIA}})
+    await flushPromises()
+    expect(wrapper.text()).toContain('操作记录已丢失')
+    expect(wrapper.find('[data-testid="recording-history-draft"]').element.disabled).toBe(true)
+    expect(wrapper.find('[data-testid="recording-history-delete"]').element.disabled).toBe(true)
+    await wrapper.find('[data-testid="recording-history-select"]').trigger('click')
+    expect(videoApi.recordingEvents).not.toHaveBeenCalled()
+    expect(wrapper.emitted('recording-selected')).toBeUndefined()
+    wrapper.unmount()
+  })
   it('历史使用真实会话查询，并可按名称/时间/设备/时长/状态筛选', async () => {
     const wrapper = mount(MediaLibrary, { props: { mediaList: MEDIA } })
     await flushPromises()
@@ -63,7 +99,9 @@ describe('P5-MEDIA 素材库与录制历史', () => {
     await flushPromises()
     await wrapper.findAll('[data-testid="recording-history-row"]')[0].trigger('click')
     expect(wrapper.emitted('select')).toEqual([['recording-a']])
-    expect(wrapper.emitted('recording-selected')[0][0].id).toBe('session-0')
+    expect(wrapper.emitted('recording-selected')).toBeUndefined()
+    expect(wrapper.find('[data-testid="recording-detail"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="recording-history-draft"]').element.disabled).toBe(true)
     expect(wrapper.find('[data-testid="recording-id-input"]').exists()).toBe(false)
     wrapper.unmount()
   })

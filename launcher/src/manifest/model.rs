@@ -86,7 +86,7 @@ pub struct ScrcpyServer {
 }
 
 impl Manifest {
-    /// 从已验签的 manifest JSON 反序列化模型（调用方必须先完成验签与全部校验，
+    /// 从已校验的 manifest JSON 反序列化模型（调用方必须先完成结构与语义校验，
     /// 本函数只负责类型化，不再做任何放宽）。
     pub fn parse(raw: &serde_json::Value) -> Result<Manifest, String> {
         serde_json::from_value(raw.clone()).map_err(|e| format!("manifest 模型解析失败: {e}"))

@@ -1,5 +1,5 @@
 ﻿#requires -Version 5.1
-# Verify downloaded Release hashes, signatures, SBOM and launcher.
+# Verify downloaded Release hashes, manifests, SBOM and launcher.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Repository,
@@ -16,7 +16,6 @@ Set-StrictMode -Version 2.0
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $validator = Join-Path $repoRoot 'release\contracts\validate-manifest.mjs'
 $sbomVerifier = Join-Path $repoRoot 'release\packaging\verify-sbom.ps1'
-$keysDir = Join-Path $repoRoot 'release\keys'
 $temporaryRoot = $null
 $partial = $false
 
@@ -234,7 +233,6 @@ try {
 
     Require-File -Path $validator -Label 'manifest validator'
     Require-File -Path $sbomVerifier -Label 'SBOM verifier'
-    Require-Directory -Path $keysDir -Label 'repository trust anchor directory'
     $gh = Resolve-Tool @('gh')
     $node = Resolve-Tool @('node')
     if (-not $gh) { Fail 'gh not found; authenticate GitHub CLI before running the external smoke' }
@@ -269,15 +267,14 @@ try {
         Fail "Release download directory contains unexpected directories: $($downloadDirectories.Name -join ', ')"
     }
     $downloadedNames = @($downloadItems | ForEach-Object { $_.Name })
-    if ($downloadedNames.Count -ne 9) {
-        Fail "Release download must contain exactly 9 files (8 assets + SHA256SUMS.txt); got $($downloadedNames.Count)"
+    if ($downloadedNames.Count -ne 13) {
+        Fail "Release download must contain exactly 13 files (12 assets + SHA256SUMS.txt); got $($downloadedNames.Count)"
     }
 
     $releaseSums = Read-Sha256Sums -SumsPath (Join-Path $DownloadDir 'SHA256SUMS.txt') -BaseDir $DownloadDir -FlatOnly
-    if ($releaseSums.Count -ne 8) { Fail "Release SHA256SUMS must contain exactly 8 assets; got $($releaseSums.Count)" }
+    if ($releaseSums.Count -ne 12) { Fail "Release SHA256SUMS must contain exactly 12 assets; got $($releaseSums.Count)" }
 
     $manifestPath = Join-Path $DownloadDir "$Version.json"
-    $signaturePath = Join-Path $DownloadDir "$Version.sig"
     $manifest = Get-JsonFile -Path $manifestPath -Label 'downloaded release manifest'
     $manifestRelease = Get-ManifestProperty -Object $manifest -Name 'release' -Label 'manifest'
     $manifestVersion = [string](Get-ManifestProperty -Object $manifestRelease -Name 'version' -Label 'manifest.release')
@@ -298,7 +295,8 @@ try {
         $appName,
         "Gamer-$Version-licenses.zip",
         "$Version.json",
-        "$Version.sig",
+        "gamer-release.json",
+        "gamer-launcher.exe",
         "gamer-sbom-$Version-windows-x64.cdx.json"
     )
     foreach ($component in $components) {
@@ -307,6 +305,13 @@ try {
     }
     Assert-ExactNames -Actual @($releaseSums.Keys) -Expected $expectedAssets -Label 'Release SHA256SUMS'
     Assert-ExactNames -Actual $downloadedNames -Expected @($expectedAssets + 'SHA256SUMS.txt') -Label 'download directory'
+    Assert-BytesEqual -Left $manifestPath -Right (Join-Path $DownloadDir 'gamer-release.json') -Label 'versioned and discovery manifests'
+    foreach ($artifact in @($appArtifact) + @($components | ForEach-Object { $_.artifact })) {
+        $asset = Get-Item -LiteralPath (Join-Path $DownloadDir $artifact.name)
+        if ($asset.Length -ne $artifact.size -or (Get-Sha256Path $asset.FullName) -cne $artifact.sha256) {
+            Fail "artifact does not match manifest: $($artifact.name)"
+        }
+    }
 
     $appPath = Join-Path $DownloadDir $appName
     $declaredAppHash = [string](Get-ManifestProperty -Object $appArtifact -Name 'sha256' -Label 'manifest app artifact')
@@ -327,7 +332,7 @@ try {
     Expand-Archive -LiteralPath $fullPath -DestinationPath $fullRoot
     Test-PackageSums -Root $fullRoot -Label 'full package'
 
-    foreach ($extension in @('json', 'sig')) {
+    foreach ($extension in @('json')) {
         Assert-BytesEqual -Left (Join-Path $DownloadDir "$Version.$extension") `
             -Right (Join-Path $fullRoot "manifests\$Version.$extension") `
             -Label "release/package manifest .$extension"
@@ -335,17 +340,15 @@ try {
     Write-Host '[release] release manifest and package manifest bytes are identical' -ForegroundColor Green
 
     Invoke-NativeChecked -FilePath $node -Arguments @(
-        $validator, 'check', $manifestPath, '--sig', $signaturePath,
-        '--keys-dir', $keysDir, '--expect-current-version', $Version,
+        $validator, 'check', $manifestPath,
+        '--expect-current-version', $Version,
         '--expect-channel', $Channel
-    ) -Label 'repository trust-anchor manifest verification' | Out-Null
+    ) -Label 'release manifest verification' | Out-Null
     Invoke-NativeChecked -FilePath $node -Arguments @(
         $validator, 'check', (Join-Path $fullRoot "manifests\$Version.json"),
-        '--sig', (Join-Path $fullRoot "manifests\$Version.sig"),
-        '--keys-dir', (Join-Path $fullRoot 'keys'),
         '--expect-current-version', $Version, '--expect-channel', $Channel
-    ) -Label 'package trust-anchor manifest verification' | Out-Null
-    Write-Host '[release] manifest verification passed with repository and package trust anchors' -ForegroundColor Green
+    ) -Label 'package manifest verification' | Out-Null
+    Write-Host '[release] manifest verification passed for release and package copies' -ForegroundColor Green
 
     $sbomPath = Join-Path $DownloadDir "gamer-sbom-$Version-windows-x64.cdx.json"
     Invoke-NativeChecked -FilePath $powerShell -Arguments @(

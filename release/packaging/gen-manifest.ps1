@@ -1,34 +1,21 @@
-﻿# REL-003: 按 release/contracts/manifest-v1.schema.json 生成发布 manifest
-# （release/manifests/<version>.json），并完成签名 + 结构/语义校验：
-#   1) 从 release/dependencies.lock.toml 取 adb/ffmpeg 版本与逐文件清单；
-#   2) 从 release/dist/ 取 app/组件 zip 实算 size+sha256（须先跑
-#      package-app.ps1 与 package-components.ps1）；
-#   3) jar 实算 sha256 并与锁 scrcpy-server 条目核对（强绑定门禁）；
-#   4) dev key 缺失时自动 keygen，调用 sign-manifest.mjs 出 .sig；
-#   5) 调 release/contracts/validate-manifest.mjs check 全量校验（验签→语义→结构）。
-#
-# 兼容 Windows PowerShell 5.1 与 pwsh。
-
+﻿# 生成发行清单，实算 SHA256/size 并完成结构与语义校验。
 [CmdletBinding()]
 param(
     # 产品版本（默认读 server/Cargo.toml [package].version）
     [string]$Version = '',
     [ValidateSet('stable', 'beta')]
     [string]$Channel = 'stable',
-    # 依赖锁文件 / dist / 输出 / 密钥目录
+    # 依赖锁文件 / dist / 输出
     [string]$LockPath = '',
     [string]$DistDir = '',
     [string]$OutDir = '',
-    [string]$KeysDir = '',
     # 下载基地址（https）；GitHub Release 资产使用扁平名称，不支持目录前缀
     [string]$DownloadBaseUrl = '',
     # 发布说明 URL（https）
     [string]$ReleaseNotesUrl = '',
     # 最低 launcher / 升级起点版本（批次基线 0.1.0）
-    [string]$MinLauncherVersion = '0.1.0',
-    [string]$MinUpgradeVersion = '0.1.0',
-    # 只生成 manifest，不签名不校验
-    [switch]$SkipSign
+    [string]$MinLauncherVersion = '0.2.0-beta.1',
+    [string]$MinUpgradeVersion = '0.1.0'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,7 +25,6 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not $LockPath) { $LockPath = Join-Path $repoRoot 'release\dependencies.lock.toml' }
 if (-not $DistDir)  { $DistDir  = Join-Path $repoRoot 'release\dist' }
 if (-not $OutDir)   { $OutDir   = Join-Path $repoRoot 'release\manifests' }
-if (-not $KeysDir)  { $KeysDir  = Join-Path $repoRoot 'release\keys' }
 
 Import-Module (Join-Path $PSScriptRoot 'LockFile.psm1') -Force
 
@@ -115,6 +101,34 @@ $jarVersion    = [string]$scrcpy['version']
 $appZipName   = 'gamer-app-{0}-windows-x64.zip' -f $Version
 $adbZipName   = 'gamer-adb-{0}-windows-x64.zip' -f $adbVersion
 $ffmpegZipName = 'gamer-ffmpeg-{0}-windows-x64.zip' -f $ffmpegVersion
+$scrcpyZipName = 'gamer-scrcpy-server-{0}-windows-x64.zip' -f $jarVersion
+$launcherVersion = [regex]::Match([IO.File]::ReadAllText((Join-Path $repoRoot 'launcher/Cargo.toml')), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+
+# 通用组件字段保持 v1；新启动器独占解释 launcher / official-plugins 的产品行为。
+function New-ZipComponent {
+    param([string]$Id, [string]$ComponentVersion)
+    $name = "gamer-$Id-$ComponentVersion-windows-x64.zip"
+    Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+    $zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $DistDir $name))
+    try {
+        $files = @()
+        foreach ($entry in $zip.Entries) {
+            if ($entry.FullName.EndsWith('/')) { continue }
+            $stream = $entry.Open()
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try { $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+            finally { $stream.Dispose(); $sha.Dispose() }
+            $files += [ordered]@{path=$entry.FullName;size=[long]$entry.Length;sha256=$hash}
+        }
+        $url = "$DownloadBaseUrl/$name"
+        if ($Id -eq 'official-plugins') {
+            $source = Get-Content (Join-Path $repoRoot 'release/plugins.lock.json') -Raw | ConvertFrom-Json
+            $url = $source.bundle.url
+            if ((Get-Sha256Path (Join-Path $DistDir $name)) -ne $source.bundle.sha256) { Exit-Fail '插件合集与已发布锁不一致' }
+        }
+        return [ordered]@{id=$Id;version=$ComponentVersion;artifact=(New-Artifact -Name $name -Url $url);required_files=$files}
+    } finally { $zip.Dispose() }
+}
 
 # ---------- jar 强绑定门禁 ----------
 $jarPath = Join-Path $repoRoot ('server\assets\scrcpy-server.jar')
@@ -135,7 +149,7 @@ $manifest = [ordered]@{
         published_at             = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         minimum_launcher_version = $MinLauncherVersion
         minimum_upgrade_version  = $MinUpgradeVersion
-        data_schema              = 1
+        data_schema              = [int]([regex]::Match([IO.File]::ReadAllText((Join-Path $repoRoot 'server/src/migrations.rs')), 'TARGET_SCHEMA:\s*i64\s*=\s*(\d+)').Groups[1].Value)
         rollback_floor           = 1
         release_notes_url        = $ReleaseNotesUrl
     }
@@ -157,7 +171,15 @@ $manifest = [ordered]@{
                     version        = $ffmpegVersion
                     artifact       = New-Artifact -Name $ffmpegZipName -Url ('{0}/{1}' -f $DownloadBaseUrl, $ffmpegZipName)
                     required_files = New-RequiredFiles -Files $ffmpeg.files
-                }
+                },
+                [ordered]@{
+                    id = 'scrcpy-server'
+                    version = $jarVersion
+                    artifact = New-Artifact -Name $scrcpyZipName -Url "$DownloadBaseUrl/$scrcpyZipName"
+                    required_files = New-RequiredFiles -Files $scrcpy.files
+                },
+                (New-ZipComponent -Id 'launcher' -ComponentVersion $launcherVersion),
+                (New-ZipComponent -Id 'official-plugins' -ComponentVersion $Version)
             )
             resources = [ordered]@{
                 scrcpy_server = [ordered]@{
@@ -171,35 +193,14 @@ $manifest = [ordered]@{
     }
 }
 
-# ---------- 写 JSON（UTF-8 无 BOM；签名覆盖原始字节，BOM 会破坏校验）----------
+# ---------- 写 JSON（UTF-8 无 BOM）----------
 if (-not (Test-Path -LiteralPath $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
 $manifestPath = Join-Path $OutDir ('{0}.json' -f $Version)
 $jsonText = ConvertTo-Json -InputObject $manifest -Depth 12
 [System.IO.File]::WriteAllText($manifestPath, $jsonText + "`n", (New-Object System.Text.UTF8Encoding($false)))
 Write-Host "[gen-manifest] 生成: $manifestPath"
 
-if ($SkipSign) {
-    Write-Host "[gen-manifest] -SkipSign: 未签名未校验（仅供检视）"
-    exit 0
-}
-
-# ---------- dev key（缺则自动生成）----------
-$KeyId = 'dev-ed25519-1'
-$privKey = Join-Path $KeysDir ('{0}.private.pem' -f $KeyId)
-$pubKey  = Join-Path $KeysDir ('{0}.pem' -f $KeyId)
-if (-not (Test-Path -LiteralPath $privKey) -or -not (Test-Path -LiteralPath $pubKey)) {
-    Write-Host "[gen-manifest] dev 密钥缺失，自动 keygen（$KeysDir）..."
-    & node (Join-Path $PSScriptRoot 'sign-manifest.mjs') keygen --id $KeyId --out-dir $KeysDir
-    if ($LASTEXITCODE -ne 0) { Exit-Fail "keygen 失败（退出码 $LASTEXITCODE）" }
-}
-
-# ---------- 签名 + 全量校验（验签 → 语义 → 结构）----------
-& node (Join-Path $PSScriptRoot 'sign-manifest.mjs') sign $manifestPath --key $privKey --key-id $KeyId
-if ($LASTEXITCODE -ne 0) { Exit-Fail "sign 失败（退出码 $LASTEXITCODE）" }
-
-$sigPath = Join-Path $OutDir ('{0}.sig' -f $Version)
-& node (Join-Path $repoRoot 'release\contracts\validate-manifest.mjs') check $manifestPath --sig $sigPath --keys-dir $KeysDir --expect-current-version $Version --expect-channel $Channel
+& node (Join-Path $repoRoot 'release\contracts\validate-manifest.mjs') check $manifestPath --expect-current-version $Version --expect-channel $Channel
 if ($LASTEXITCODE -ne 0) { Exit-Fail "manifest 校验未通过（退出码 $LASTEXITCODE）" }
-
-Write-Host "[gen-manifest] PASS: $manifestPath + $sigPath（key_id=$KeyId）"
+Write-Host "[gen-manifest] PASS: $manifestPath"
 exit 0

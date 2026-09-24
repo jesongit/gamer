@@ -164,10 +164,9 @@ function Copy-E2EAssets {
         'dist-m1\Gamer-0.1.0-windows-x64-full.zip',
         'dist-m2\gamer-app-0.2.0-windows-x64.zip',
         'dist-m2\gamer-app-0.2.0-broken-windows-x64.zip',
-        'manifests\0.1.0.json', 'manifests\0.1.0.sig',
-        'manifests\0.2.0.json', 'manifests\0.2.0.json.sig',
-        'manifests\0.2.0-broken.json', 'manifests\0.2.0-broken.json.sig',
-        'keys\dev-ed25519-1.pem', 'keys\dev-ed25519-1.private.pem'
+        'manifests\0.1.0.json',
+        'manifests\0.2.0.json',
+        'manifests\0.2.0-broken.json'
     )
     $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $SourceAssets $_)) })
     if ($missing.Count -gt 0) {
@@ -348,7 +347,6 @@ function Invoke-LockAndJournalCases {
     $journal = Join-Path $rootA 'state\update-journal.json'
     $current = Join-Path $rootA 'state\current.json'
     $exe = Join-Path $rootA 'versions\0.2.0\gamer-server.exe'
-    $keysA = Join-Path $rootA 'keys'
     if (-not (Test-Path -LiteralPath $launcherA)) {
         Add-Result -Id 'QA-005-file-lock-and-force-kill' -Status FAIL -Detail 'standard E2E root A is missing; run phase e2e first' -EvidencePath $RunDir
         return
@@ -398,7 +396,7 @@ function Invoke-LockAndJournalCases {
     Write-Evidence 'force-kill-fixture.txt' "root=$rootB`nblob=$blob`nbytes=$((Get-Item -LiteralPath $blob).Length)"
     $launcherB = Join-Path $rootB 'gamer-launcher.exe'
     $manifestB = Join-Path $RunDir 'manifests\0.2.0-broken.json'
-    $background = Start-BackgroundLauncher -Root $rootB -Arguments @('--install-root', $rootB, '--keys-dir', (Join-Path $rootB 'keys'), 'upgrade', '--manifest', $manifestB) -Tag 'qa005-mid-upgrade'
+    $background = Start-BackgroundLauncher -Root $rootB -Arguments @('--install-root', $rootB, 'upgrade', '--manifest', $manifestB) -Tag 'qa005-mid-upgrade'
     $seen = New-Object System.Collections.Generic.List[string]
     $killedAt = ''
     $deadline = (Get-Date).AddSeconds(180)

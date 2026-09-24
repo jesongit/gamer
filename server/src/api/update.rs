@@ -172,13 +172,13 @@ mod contract_tests {
         assert_eq!(body["last_error"], serde_json::Value::Null);
     }
 
-    /// GET 200 failed + signature_invalid / artifact_invalid（异步失败形态）
+    /// GET 200 failed + manifest_invalid / artifact_invalid（异步失败形态）
     #[test]
     fn get_body_matches_failed_fixtures_field_sets() {
         for (name, code) in [
             (
-                "system-update.failed-signature-invalid.json",
-                "signature_invalid",
+                "system-update.failed-manifest-invalid.json",
+                "manifest_invalid",
             ),
             (
                 "system-update.failed-artifact-invalid.json",

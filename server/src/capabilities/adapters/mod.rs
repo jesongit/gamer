@@ -254,6 +254,98 @@ mod tests {
         assert_eq!((color.red, color.green, color.blue), (20, 80, 140));
     }
 
+    #[tokio::test]
+    async fn vision_adapter_honors_resolved_color_marker_for_single_and_batch_matching() {
+        let (_dir, store) = template_store();
+        let mut screen = RgbImage::from_pixel(200, 200, Rgb([40, 40, 40]));
+        for y in 70..130 {
+            for x in 80..120 {
+                screen.put_pixel(x, y, Rgb([220, 30, 40]));
+            }
+        }
+        let template = image::imageops::crop_imm(&screen, 75, 65, 50, 50).to_image();
+        seed_template(
+            &store,
+            "com.test.game",
+            "test.plugin",
+            "templates/icon#a#1.png",
+            &png(&template),
+        );
+        store
+            .write_binary(
+                "com.test.game",
+                "test.plugin",
+                "templates/plain.png",
+                &png(&template),
+                None,
+                false,
+            )
+            .unwrap();
+        let frames = Arc::new(FrameStore::new());
+        let same = frames
+            .insert(crate::matcher::DecodedFrame::from_rgb(screen.clone()))
+            .unwrap();
+        for y in 70..130 {
+            for x in 80..120 {
+                screen.put_pixel(x, y, Rgb([30, 125, 30]));
+            }
+        }
+        let different = frames
+            .insert(crate::matcher::DecodedFrame::from_rgb(screen))
+            .unwrap();
+        let resources = Arc::new(ResourceAdapter::new(store));
+        // Scripts use the short name; the marker only exists on the resolved file.
+        let marked = resources
+            .resolve(
+                &ResourceId::new("com.test.game", "test.plugin", "templates/icon.png").unwrap(),
+            )
+            .await
+            .unwrap();
+        let plain = resources
+            .resolve(
+                &ResourceId::new("com.test.game", "test.plugin", "templates/plain.png").unwrap(),
+            )
+            .await
+            .unwrap();
+        let vision = VisionAdapter::new(frames, resources);
+        let options = MatchOptions {
+            threshold: Some(0.9),
+            ..Default::default()
+        };
+        for (resource, force_color, should_hit) in [
+            (marked, false, false),
+            (plain, false, true),
+            (plain, true, false),
+        ] {
+            let query = TemplateQuery::new(
+                resource,
+                MatchOptions {
+                    color_check: force_color,
+                    ..options
+                },
+            );
+            assert!(matches!(
+                vision.match_template(same, query).await.unwrap(),
+                MatchOutcome::Found(_)
+            ));
+            let outcome = vision.match_template(different, query).await.unwrap();
+            assert_eq!(
+                matches!(outcome, MatchOutcome::Found(_)),
+                should_hit,
+                "single match must respect the color marker or explicit color check"
+            );
+            let batch = vision
+                .match_many(&MatchManyRequest::new(different).with_template(query))
+                .await
+                .unwrap();
+            assert_eq!(
+                matches!(batch[0].outcome, MatchOutcome::Found(_)),
+                should_hit,
+                "batch must use the same color policy"
+            );
+        }
+    }
+
     #[test]
     fn frame_store_evicts_old_handles_after_short_retention_window() {
         let frames = FrameStore::new();

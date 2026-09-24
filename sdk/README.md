@@ -23,7 +23,7 @@
 examples/hello/
 ├── manifest.toml          # 插件清单（manifest v2）：id/版本/entry/权限/UI/执行形态
 ├── Cargo.toml             # guest crate（独立，不属于任何 workspace）
-├── build.ps1              # 一键：wasm32 构建 → componentize → signer pack → verify
+├── build.ps1              # 一键：wasm32 构建 → componentize → packer pack → verify
 ├── wit/gamer/host.wit     # gamer:host@1.0.0 契约快照（随示例走，仓库外可用）
 ├── src/lib.rs             # guest：实现 run + call（业务全在这里，约 200 行）
 ├── src/bin/componentize.rs# core module → WASM Component 的后处理（可直接照抄）
@@ -44,13 +44,15 @@ pwsh ./build.ps1                             # 产物 dist/gamer-echo-1.0.0.gplu
 把任一示例目录整体复制到任意位置即可：
 
 ```sh
-pwsh ./build.ps1 -Signer <gamer 仓库>/tools/plugin-signer/target/release/gamer-plugin-signer.exe
+pwsh ./build.ps1 -Packer <gamer 仓库>/tools/plugin-packer/target/release/gamer-plugin-packer.exe
 ```
 
-`plugin-signer` 是 Gamer 仓库自带的打包/校验 CLI（`pack` / `inspect` /
+`plugin-packer` 是 Gamer 仓库自带的打包/校验 CLI（`pack` / `inspect` /
 `verify`，免签名，无需密钥）；除此之外不依赖 Gamer 源码树的任何部分。
 
 ## 文档
+
+官方插件独立构建使用 `tools/export-plugin-sdk.ps1 -Destination <插件仓>/sdk` 导出的固定快照：WIT、UI 构建桥、打包工具及逐文件 SHA256。`plugins/sdk/lock.json` 记录确切宿主提交；`node tools/check-plugin-sdk.mjs` 检查主仓与快照一致。SDK 本身不触发官方插件构建，主仓联调入口在 `tools/build-plugin-ui.mjs`。
 
 - 可选 iframe 主题、紧凑控件与通信示例：[ui/README.md](ui/README.md)。
 

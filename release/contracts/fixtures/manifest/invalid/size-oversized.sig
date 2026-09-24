@@ -1,2 +1,0 @@
-gamebot-manifest-sig-1 test-ed25519-public-1
-MQCBs89UaWXhbNhJfLCNCN3xzAFpCTSitgz2Hn6UvQnLodFLCSo1/msZChVIrcRV2ZqFAVcp0e9dICyG49z/DA==

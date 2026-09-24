@@ -66,7 +66,8 @@ function mountDraft(props = {}) {
 
 async function load(wrapper, events = EVENTS) {
   videoApi.recordingEvents.mockResolvedValueOnce(events)
-  await wrapper.find('[data-testid="draft-load"]').trigger('click')
+  await flushPromises()
+    await wrapper.find('[data-testid="draft-load"]').trigger('click')
   await flushPromises()
 }
 
@@ -143,7 +144,7 @@ describe('P5-VDRAFT 录制历史事件 UI 工作流', () => {
     await wrapper.find('[data-testid="draft-generate"]').trigger('click')
     await flushPromises()
 
-    expect(wrapper.find('[data-testid="draft-context"]').text()).toContain('Package：pkg-a')
+    expect(wrapper.find('[data-testid="draft-context"]').text()).toContain('配置：pkg-a')
     expect(wrapper.find('[data-testid="draft-context"]').text()).toContain('设备：device-a')
     expect(wrapper.find('[data-testid="draft-bound-device"]').text()).toBe('device-a')
 
@@ -174,6 +175,7 @@ describe('P5-VDRAFT 录制历史事件 UI 工作流', () => {
       .mockImplementationOnce(() => oldRequest.promise)
       .mockImplementationOnce(() => newRequest.promise)
     const wrapper = mountDraft()
+    await flushPromises()
     await wrapper.find('[data-testid="draft-load"]').trigger('click')
     await wrapper.setProps({ recordingId: 'rec-b' })
 

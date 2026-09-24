@@ -18,7 +18,7 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Windows CREATE_NO_WINDOW：探针子进程不弹窗。
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// 组件规格（从已验签 manifest 组件构建；安装/修复/复验共用）。
+/// 组件规格（从已校验 manifest 组件构建；安装/修复/复验共用）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComponentSpec {
     pub id: String,

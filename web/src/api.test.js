@@ -20,7 +20,29 @@ beforeEach(() => {
 
 afterEach(() => vi.unstubAllGlobals())
 
+it('loads device-wide run history and encodes the earlier-page cursor independently of an entrypoint', async () => {
+  fetch.mockResolvedValue(jsonRes(200, []))
+  await api.listRunHistory('device:5555')
+  let query = new URL(fetch.mock.calls[0][0], 'http://localhost').searchParams
+  expect(query.get('device_id')).toBe('device:5555')
+  expect(query.has('entrypoint')).toBe(false)
+  await api.listRunHistory('device:5555', undefined, 'run#older')
+  query = new URL(fetch.mock.calls[1][0], 'http://localhost').searchParams
+  expect(query.get('before')).toBe('run#older')
+  expect(query.has('entrypoint')).toBe(false)
+})
+
 describe('Package 插件资源 API surface（plan §12-§14）', () => {
+  it('替换并改名保持版本头，并编码新资源路径中的中文和井号', async () => {
+    fetch.mockResolvedValueOnce(jsonRes(200, {ok: true}))
+    await api.putPluginResourceBytes('pkg', 'gamer-yaml', 'templates/挑战.png', new Uint8Array([1]), {
+      expectedVersion: 'abc', newPath: 'templates/挑战#100_200_500_500#1.png',
+    })
+    const [url, options] = fetch.mock.calls[0]
+    expect(url).toContain(`?new_path=${encodeURIComponent('templates/挑战#100_200_500_500#1.png')}`)
+    expect(options.headers['X-Expected-Version']).toBe('abc')
+    expect(options.headers['X-Force']).toBeUndefined()
+  })
   it('只公开当前 create/update/replace 资源方法，不保留旧 save/upload/脚本级运行方法', () => {
     expect(api).toHaveProperty('createScript')
     expect(api).toHaveProperty('updateScript')
@@ -163,6 +185,22 @@ describe('Package 插件资源 API surface（plan §12-§14）', () => {
     expect(bodyOf()).toMatchObject({
       device_id: 'dev-1', pkg: 'com.demo', plugin: 'gamer-yaml', name: 'shot.png',
     })
+  })
+
+  it('当前画面匹配上传 PNG，不混入设备或媒体取帧目标', async () => {
+    fetch.mockResolvedValueOnce(jsonRes(200, {hit: true}))
+    await api.testTemplate('shot.png', 'must-not-use', 0.9, null, 'com.demo', {png: 'cG5n', mediaId: 'clip', index: 29})
+    expect(bodyOf()).toMatchObject({image_png: 'cG5n', pkg: 'com.demo'})
+    expect(bodyOf()).not.toHaveProperty('device_id')
+    expect(bodyOf()).not.toHaveProperty('media_id')
+    expect(bodyOf()).not.toHaveProperty('frame_index')
+  })
+
+  it('视频模板匹配仅发送媒体帧身份，不混入设备目标', async () => {
+    fetch.mockResolvedValueOnce(jsonRes(200, {hit: true}))
+    await api.testTemplate('shot.png', 'must-not-use', 0.9, null, 'com.demo', {mediaId: 'clip', index: 29, ptsUs: 966666})
+    expect(bodyOf()).toMatchObject({media_id: 'clip', frame_index: 29, pkg: 'com.demo'})
+    expect(bodyOf()).not.toHaveProperty('device_id')
   })
 })
 

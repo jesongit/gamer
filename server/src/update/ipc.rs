@@ -624,12 +624,12 @@ mod tests {
             "protocol_version": 1,
             "request_id": "rid-1",
             "ok": false,
-            "code": "signature_invalid",
-            "message": "验签失败",
+            "code": "manifest_invalid",
+            "message": "清单校验失败",
         });
         let err = parse_response(err, "rid-1").unwrap().unwrap_err();
-        assert_eq!(err.code, "signature_invalid");
-        assert_eq!(map_ipc_err(err), UpdateErrorCode::SignatureInvalid);
+        assert_eq!(err.code, "manifest_invalid");
+        assert_eq!(map_ipc_err(err), UpdateErrorCode::ManifestInvalid);
     }
 
     #[test]

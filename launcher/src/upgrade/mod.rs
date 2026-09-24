@@ -22,7 +22,7 @@ pub mod codes {
     pub const UPDATE_BUSY: &str = "update_busy";
     pub const UPDATE_NOT_AVAILABLE: &str = "update_not_available";
     pub const UPDATE_NOT_READY: &str = "update_not_ready";
-    pub const SIGNATURE_INVALID: &str = "signature_invalid";
+    pub const MANIFEST_INVALID: &str = "manifest_invalid";
     pub const ARTIFACT_INVALID: &str = "artifact_invalid";
     pub const INSUFFICIENT_SPACE: &str = "insufficient_space";
     pub const SCHEMA_INCOMPATIBLE: &str = "schema_incompatible";
@@ -50,7 +50,7 @@ impl BusinessError {
 
 /// 当前 launcher 是否满足 release manifest 声明的最低版本。
 ///
-/// manifest 在签名和结构校验阶段已经验证过版本格式；这里仍然对格式错误
+/// manifest 在结构校验阶段已经验证过版本格式；这里仍然对格式错误
 /// fail closed，供升级引擎和 trampoline 入口共用同一门禁语义。
 pub fn check_minimum_launcher_version(minimum: &str) -> Result<(), BusinessError> {
     let current = env!("CARGO_PKG_VERSION");

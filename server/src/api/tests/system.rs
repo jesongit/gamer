@@ -1,12 +1,83 @@
 use super::*;
 
 #[tokio::test]
-async fn readiness_is_public_structured_and_does_not_leak_paths() {
-    let t = build_app(
-        "ready",
-        test_credential("admin123"),
-        Default::default(),
+async fn system_settings_require_auth_preserve_secrets_and_apply_only_valid_saves() {
+    let dir = tmp_dir("system-settings");
+    let cfg = Config {
+        data_dir: dir.clone(),
+        source_path: Some(dir.join("config.toml")),
+        ..Default::default()
+    };
+    std::fs::write(
+        cfg.source_path.as_ref().unwrap(),
+        toml::to_string(&cfg).unwrap(),
+    )
+    .unwrap();
+    let t = build_app_with_config(cfg.clone(), test_credential("admin123"), cfg.auth.clone());
+    assert_eq!(
+        send(&t.app, req("GET", "/api/system/settings", None, &[], None))
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
     );
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    let headers = vec![
+        (header::COOKIE.to_string(), sid),
+        (header::CONTENT_TYPE.to_string(), JSON_CT.into()),
+    ];
+    let result = send(
+        &t.app,
+        req("GET", "/api/system/settings", None, &headers, None),
+    )
+    .await;
+    assert_eq!(result.status(), StatusCode::OK);
+    let original = json_body(result).await;
+    assert!(!original.to_string().contains("password"));
+    let mut values = original["saved"].clone();
+    values["idle_power_secs"] = serde_json::json!(60);
+    values["compute_max_concurrency"] = serde_json::json!(2);
+    let body =
+        serde_json::json!({"settings":values,"expected_revision":original["revision"]}).to_string();
+    let result = send(
+        &t.app,
+        req(
+            "PUT",
+            "/api/system/settings",
+            None,
+            &headers,
+            Some(body.clone()),
+        ),
+    )
+    .await;
+    assert_eq!(result.status(), StatusCode::OK);
+    let saved = json_body(result).await;
+    assert_eq!(saved["restart_required"], true);
+    assert_eq!(cfg.current_settings().idle_power_secs, 60);
+    assert_eq!(
+        send(
+            &t.app,
+            req("PUT", "/api/system/settings", None, &headers, Some(body))
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    values["auth"]["password_hash"] = serde_json::json!("must-not-be-accepted");
+    let invalid =
+        serde_json::json!({"settings":values,"expected_revision":saved["revision"]}).to_string();
+    assert!(send(
+        &t.app,
+        req("PUT", "/api/system/settings", None, &headers, Some(invalid))
+    )
+    .await
+    .status()
+    .is_client_error());
+    assert_eq!(cfg.current_settings().idle_power_secs, 60);
+}
+
+#[tokio::test]
+async fn readiness_is_public_structured_and_does_not_leak_paths() {
+    let t = build_app("ready", test_credential("admin123"), Default::default());
     let resp = send(&t.app, req("GET", "/health/ready", None, &[], None)).await;
     assert!(matches!(
         resp.status(),
@@ -62,7 +133,10 @@ async fn system_info_is_protected_structured_and_does_not_leak_paths() {
     ] {
         assert!(body[group].is_object(), "missing contract group {group}");
     }
-    assert!(body.get("readiness").is_none(), "readiness 以 /health/ready 为准");
+    assert!(
+        body.get("readiness").is_none(),
+        "readiness 以 /health/ready 为准"
+    );
     assert!(body.get("timezone").is_none());
     assert!(body.get("schema_version").is_none());
     // app 组接 build_info（SYS-001）
@@ -124,11 +198,7 @@ async fn shutdown_state_endpoint_tracks_coordinator_anonymously() {
 
 #[tokio::test]
 async fn metrics_is_public_prometheus_text_with_low_cardinality() {
-    let t = build_app(
-        "metrics",
-        test_credential("admin123"),
-        Default::default(),
-    );
+    let t = build_app("metrics", test_credential("admin123"), Default::default());
     let resp = send(&t.app, req("GET", "/metrics", None, &[], None)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
@@ -380,7 +450,6 @@ fn session_affecting_change_only_detects_casting_fields() {
         30
     ));
 
-
     // fps None 跟随全局配置：全局值不同则生效值不同 → 重建
     assert!(session_affecting_change(
         &base,
@@ -432,5 +501,4 @@ fn route_validation_bounds_run_and_task_requests() {
     let mut bad_task = task;
     bad_task.name.clear();
     assert!(build_task(&ScheduleRegistry::new(), "t1".into(), bad_task, None).is_err());
-
 }

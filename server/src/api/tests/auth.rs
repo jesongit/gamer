@@ -12,6 +12,63 @@ async fn login(app: &Router) -> HttpResponse<Body> {
 }
 
 #[tokio::test]
+async fn login_remember_cookie_and_revocation_survive_router_restart() {
+    for remember in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let credential = test_credential(TEST_PASSWORD);
+        let open = || {
+            build_app_with_config(
+                Config {
+                    data_dir: dir.path().to_path_buf(),
+                    ..Default::default()
+                },
+                credential.clone(),
+                Default::default(),
+            )
+        };
+        let t = open();
+        let response = send_json_login(
+            &t.app,
+            None,
+            &serde_json::json!({
+                "username":"admin", "password":TEST_PASSWORD, "remember":remember,
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = cookie_of(&response);
+        assert_eq!(cookie.contains("Max-Age="), remember);
+        let headers = [(header::COOKIE.to_string(), first_cookie_pair(&cookie))];
+        drop(t);
+
+        let restarted = open();
+        let response = send(
+            &restarted.app,
+            req("GET", "/api/session", None, &headers, None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["username"], "admin");
+        let response = send(
+            &restarted.app,
+            req("POST", "/api/logout", None, &headers, None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        drop(restarted);
+
+        let restarted = open();
+        let response = send(
+            &restarted.app,
+            req("GET", "/api/session", None, &headers, None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[tokio::test]
 async fn unauthenticated_devices_list_is_401() {
     let t = build_app(
         "401devs",
@@ -58,7 +115,10 @@ async fn unauthenticated_high_risk_endpoints_are_all_401() {
         ("POST", "/api/shutdown"),
         ("POST", "/api/devices/missing/control"),
         ("POST", "/api/runs"),
-        ("DELETE", "/api/packages/com.test.app/plugins/gamer-yaml/resources/templates/missing"),
+        (
+            "DELETE",
+            "/api/packages/com.test.app/plugins/gamer-yaml/resources/templates/missing",
+        ),
         ("POST", "/api/packages/import"),
     ];
     for (method, uri) in cases {
@@ -589,14 +649,16 @@ async fn cross_origin_high_risk_endpoints_are_all_403_after_authentication() {
         (
             "POST",
             "/api/runs",
-            Some(r#"{"runner_id":"gamer-yaml","entrypoint":"com.test.app/missing.yaml","device_id":"d1"}"#),
+            Some(
+                r#"{"runner_id":"gamer-yaml","entrypoint":"com.test.app/missing.yaml","device_id":"d1"}"#,
+            ),
         ),
-        ("DELETE", "/api/packages/com.test.app/plugins/gamer-yaml/resources/templates/missing", None),
         (
-            "POST",
-            "/api/packages/import",
-            Some("not-a-zip"),
+            "DELETE",
+            "/api/packages/com.test.app/plugins/gamer-yaml/resources/templates/missing",
+            None,
         ),
+        ("POST", "/api/packages/import", Some("not-a-zip")),
     ];
     for (method, uri, body) in cases {
         let mut headers = vec![

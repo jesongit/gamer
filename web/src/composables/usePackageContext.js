@@ -1,3 +1,4 @@
+import { inspectPackageExport } from '../package-export-preview'
 import { operationReporter } from '../workspace/operation-feedback'
 // Package 上下文条（右侧顶部，plan §28）的逻辑收敛：当前 Package 下拉 +
 // 导入/导出/新建/复制/删除。动作全部作用于 PackageStore（§38：Current Package
@@ -197,78 +198,68 @@ export function usePackageContext({
     }
   }
 
-  // ---------- 导出（当前 Local Package → .gamerpkg；媒体素材可选携带） ----------
-  //
-  // Phase 8 §11.1：默认导出不含原始大视频（归档只带 media/index.json 引用
-  // 登记）；存在被引用素材时弹确认框——列出素材与总大小 + 隐私提示，由用户
-  // 勾选「包含媒体素材」后带 ?include_media=true 导出。
+  // ---------- 导出：先准备归档并展示实际清单，确认后下载同一份文件 ----------
   const exportModal = reactive({
-    open: false, submitting: false, error: '',
-    packageId: '',
-    entries: [],       // [{id,name,size,plugin_id,kind,state}]
-    totalBytes: 0,
-    includeMedia: false,
+    open: false, loading: false, ready: false, submitting: false, error: '',
+    packageId: '', filename: '', files: [], groups: [], entries: [],
+    totalBytes: 0, archiveBytes: 0, includeMedia: false,
   })
+  let exportGeneration = 0
+  let preparedExport = null
 
-  async function doExport(id, includeMedia) {
-    const toast = beginReport()
-    const { blob, filename, sha256 } = await api.exportPackageArchive(id, { includeMedia })
-    const name = filename || `${id}.gamerpkg`
-    saveBlob(blob, name)
-    const mediaNote = includeMedia ? '含媒体素材' : '不含媒体素材'
-    toast(`已导出 ${name}（${mediaNote}${sha256 ? `，SHA-256 ${sha256.slice(0, 12)}…` : ''}）`, 'success')
-  }
-
-  /** 导出入口：先查媒体引用——无素材直接导出；有素材弹确认框。 */
-  async function exportPackage() {
-    const toast = beginReport()
-    const id = currentId.value
-    if (!id || busy.value) return
-    busy.value = true
+  async function refreshExport() {
+    if (!exportModal.open || exportModal.submitting) return
+    const generation = ++exportGeneration
+    const id = exportModal.packageId
+    const includeMedia = exportModal.includeMedia
+    preparedExport = null
+    exportModal.loading = true
+    exportModal.ready = false
+    exportModal.error = ''
     try {
-      let entries = []
-      let totalBytes = 0
-      try {
-        // 查询面：GET /api/packages/:pkg 的 media_refs / media_total_bytes
-        //（refs_for_package）；查询失败视为无素材引用，直接按默认导出。
-        const detail = await api.getPackage(id)
-        entries = Array.isArray(detail?.media_refs) ? detail.media_refs : []
-        totalBytes = Number(detail?.media_total_bytes) || 0
-      } catch { /* 查询失败不阻塞导出 */ }
-      if (!entries.length) {
-        await doExport(id, false)
-      } else {
-        exportModal.packageId = id
-        exportModal.entries = entries
-        exportModal.totalBytes = totalBytes
-          || entries.reduce((sum, e) => sum + (Number(e?.size) || 0), 0)
-        exportModal.includeMedia = false
-        exportModal.error = ''
-        exportModal.open = true
-      }
+      const archive = await api.exportPackageArchive(id, { includeMedia })
+      const preview = await inspectPackageExport(archive.blob)
+      if (generation !== exportGeneration || !exportModal.open) return
+      preparedExport = { ...archive, includeMedia }
+      Object.assign(exportModal, preview, { filename: archive.filename || `${id}.gamerpkg`, ready: true })
     } catch (e) {
-      toast(`导出失败：${e?.message || '请重试'}`, 'error')
+      if (generation === exportGeneration) exportModal.error = e?.message || '准备导出失败，请重试'
     } finally {
-      busy.value = false
+      if (generation === exportGeneration) exportModal.loading = false
     }
   }
 
+  async function exportPackage() {
+    const id = currentId.value
+    if (!id || busy.value || exportModal.open) return
+    Object.assign(exportModal, {
+      open: true, packageId: id, filename: '', includeMedia: false,
+      files: [], groups: [], entries: [], totalBytes: 0, archiveBytes: 0,
+    })
+    await refreshExport()
+  }
+
   function closeExport() {
-    exportModal.open = false
-    exportModal.error = ''
+    if (exportModal.submitting) return
+    ++exportGeneration
+    preparedExport = null
+    Object.assign(exportModal, { open: false, loading: false, ready: false, error: '', files: [], groups: [], entries: [] })
   }
 
   async function confirmExport() {
-    if (exportModal.submitting) return
-    const id = exportModal.packageId
-    const includeMedia = exportModal.includeMedia
+    if (!exportModal.open || !exportModal.ready || exportModal.loading || exportModal.submitting
+      || !preparedExport || preparedExport.includeMedia !== exportModal.includeMedia) return
+    const toast = beginReport()
     exportModal.submitting = true
     exportModal.error = ''
     try {
-      await doExport(id, includeMedia)
-      exportModal.open = false
+      const { blob, sha256 } = preparedExport
+      await saveBlob(blob, exportModal.filename)
+      toast(`已导出 ${exportModal.filename}（${sha256 ? `SHA-256 ${sha256.slice(0, 12)}…` : '下载已开始'}）`, 'success')
+      exportModal.submitting = false
+      closeExport()
     } catch (e) {
-      exportModal.error = e?.message || '导出失败'
+      exportModal.error = e?.message || '下载失败，请重试'
     } finally {
       exportModal.submitting = false
     }
@@ -604,7 +595,7 @@ export function usePackageContext({
     busy, packages, pkgOptions, currentId, optionLabel, onPackageChange,
     loadPackages, refreshPackages,
     pickImportFile, onImportPicked, importPackage,
-    exportPackage, exportModal, confirmExport, closeExport,
+    exportPackage, exportModal, refreshExport, confirmExport, closeExport,
     formModal, openCreate, openDuplicate, fillCurrentApp, submitForm, closeForm,
     overwriteModal, confirmOverwrite, closeOverwrite,
     deleteModal, openDelete, confirmDelete, closeDelete,

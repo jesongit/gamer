@@ -99,33 +99,62 @@
     </div>
   </div>
 
-  <!-- 导出确认（存在被引用素材时；plan §11.1：默认不含原始大视频，
-       勾选后 ?include_media=true 携带素材字节，列出大小 + 隐私提示） -->
+  <!-- 清单来自待下载的实际归档；取消只关闭预览，不触发下载。 -->
   <div v-if="ctx.exportModal.open" class="modal-mask" @click.self="ctx.closeExport">
-    <div class="modal">
-      <h3>导出配置</h3>
-      <p class="overwrite-warning">
-        配置 <b class="mono">{{ ctx.exportModal.packageId }}</b> 引用了
-        {{ ctx.exportModal.entries.length }} 项媒体素材。默认导出<b>不含原始素材</b>
-        （归档仅记录引用，接收端显示素材缺失）；勾选后归档将携带素材文件。
-      </p>
-      <ul class="media-list">
-        <li v-for="entry in ctx.exportModal.entries" :key="entry.id + entry.plugin_id + entry.kind" class="media-item">
-          <span class="mono media-name">{{ entry.name || entry.id }}</span>
-          <span class="media-meta">{{ formatBytes(entry.size) }} · {{ entry.plugin_id }} · {{ entry.kind }}</span>
-        </li>
-      </ul>
-      <p class="media-total">素材合计：<b>{{ formatBytes(ctx.exportModal.totalBytes) }}</b></p>
-      <p class="privacy-note">⚠ 媒体素材为原始录屏画面，可能包含账号界面等敏感信息；分享前请确认接收方与用途。</p>
-      <label class="include-media">
-        <input v-model="ctx.exportModal.includeMedia" type="checkbox" />
-        包含媒体素材（{{ formatBytes(ctx.exportModal.totalBytes) }}）
-      </label>
-      <p v-if="ctx.exportModal.error" class="form-error">{{ ctx.exportModal.error }}</p>
+    <div class="modal export-modal" role="dialog" aria-modal="true" aria-labelledby="package-export-title" :aria-busy="ctx.exportModal.loading">
+      <h3 id="package-export-title">导出配置包</h3>
+      <p class="export-subtitle">{{ ctx.exportModal.packageId }} · 仅包含已保存的内容</p>
+      <p v-if="ctx.exportModal.loading" class="export-loading" role="status">正在准备导出文件与内容清单…</p>
+      <template v-if="ctx.exportModal.ready">
+        <div class="export-overview">
+          <strong>{{ ctx.exportModal.files.length }} 个文件</strong>
+          <span>下载大小 {{ formatBytes(ctx.exportModal.archiveBytes) }}</span>
+        </div>
+        <div class="export-groups">
+          <span v-for="group in ctx.exportModal.groups" :key="group.label">{{ group.label }} <b>{{ group.count }}</b></span>
+        </div>
+        <div class="export-list-heading">
+          <h4>本次包含</h4>
+          <input v-model="exportSearch" class="input" type="search" placeholder="搜索文件名或类型" aria-label="搜索导出文件" />
+        </div>
+        <div class="export-files">
+          <table>
+            <thead><tr><th>文件</th><th>类型</th><th>大小</th></tr></thead>
+            <tbody>
+              <tr v-for="file in exportFiles" :key="file.path">
+                <td class="export-path">{{ file.path }}</td><td>{{ file.category }}</td><td>{{ formatBytes(file.size) }}</td>
+              </tr>
+              <tr v-if="!exportFiles.length"><td colspan="3">没有符合搜索条件的文件</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="export-note">列表大小为文件原始大小，下载大小为压缩后的大小。函数库按文件计数，一个文件可包含多个函数。</p>
+      </template>
+      <section v-if="ctx.exportModal.entries.length" class="export-media">
+        <label class="include-media">
+          <input v-model="ctx.exportModal.includeMedia" type="checkbox" :disabled="ctx.exportModal.loading || ctx.exportModal.submitting" @change="ctx.refreshExport" />
+          包含媒体原文件（{{ formatBytes(ctx.exportModal.totalBytes) }}）
+        </label>
+        <p class="export-note">{{ ctx.exportModal.includeMedia ? '素材随包携带，方便在其他电脑使用。' : '当前只包含素材引用；接收端若没有对应素材，将显示素材缺失。模板图片始终包含。' }}</p>
+        <ul v-if="ctx.exportModal.ready" class="media-list">
+          <li v-for="entry in ctx.exportModal.entries" :key="entry.id + entry.plugin_id + entry.kind" class="media-item">
+            <span class="media-name">{{ entry.name || entry.id }}</span>
+            <span class="media-meta">{{ formatBytes(entry.size) }} · {{ entry.included ? '已包含原文件' : '仅引用' }}</span>
+          </li>
+        </ul>
+        <p v-if="ctx.exportModal.includeMedia && ctx.exportModal.ready && ctx.exportModal.entries.some(entry => !entry.included)" class="form-error">部分素材不可用，原文件未能包含在内，见上方“仅引用”条目。</p>
+        <p v-if="ctx.exportModal.includeMedia" class="export-note">媒体可能含有账号等画面，分享前请检查内容。</p>
+      </section>
+      <div class="export-excluded">
+        <h4>不包含</h4>
+        <p>未保存的修改、设备配置、系统设置、任务列表中的定时任务、运行记录和日志、插件程序。包内预设文件会随资源导出。</p>
+      </div>
+      <p v-if="ctx.exportModal.error" class="form-error" role="alert">{{ ctx.exportModal.error }}</p>
       <div class="modal-actions">
-        <button class="btn" @click="ctx.closeExport">取消</button>
-        <button class="btn btn-primary" :disabled="ctx.exportModal.submitting" @click="ctx.confirmExport">
-          {{ ctx.exportModal.submitting ? '导出中…' : (ctx.exportModal.includeMedia ? '导出（含素材）' : '导出（仅引用）') }}
+        <button v-if="ctx.exportModal.error && !ctx.exportModal.ready" class="btn" :disabled="ctx.exportModal.loading" @click="ctx.refreshExport">重新准备</button>
+        <button class="btn" :disabled="ctx.exportModal.submitting" @click="ctx.closeExport">取消</button>
+        <button class="btn btn-primary" :disabled="!ctx.exportModal.ready || ctx.exportModal.loading || ctx.exportModal.submitting" @click="ctx.confirmExport">
+          {{ ctx.exportModal.submitting ? '下载中…' : '确认导出' }}
         </button>
       </div>
     </div>
@@ -147,7 +176,7 @@
  * （§38 Current Package 由 Core Store 统一管理），本组件只做呈现与文件
  * input 承载；详情弹窗（§18/§37）同样消费注入的 ctx。
  */
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useToast, devicesData } from '../store'
 import { usePackageContext, formatBytes } from '../composables/usePackageContext'
 import UiIcon from '../components/ui/UiIcon.vue'
@@ -165,6 +194,13 @@ function closeMenu(event) {
 // context 由 Console 装配（注入 refreshAll 全量刷新）；缺省自建（测试/独立使用）。
 // reactive() 解包对象内的 ref/computed（模板 ctx.busy/ctx.currentId 直接可用）。
 const ctx = reactive(props.context || usePackageContext({ toast }))
+const exportSearch = ref('')
+watch(() => ctx.exportModal.open, () => { exportSearch.value = '' })
+const exportFiles = computed(() => {
+  const search = exportSearch.value.trim().toLocaleLowerCase()
+  return (ctx.exportModal.files || []).filter(file => !search || `${file.path} ${file.category}`.toLocaleLowerCase().includes(search))
+})
+
 
 // 兼容性检查候选（§17）：设备配置的 Android 包名注入 datalist，缺省手输。
 const androidCandidates = computed(() => {
@@ -195,7 +231,28 @@ const androidCandidates = computed(() => {
 .media-item { display:flex; justify-content:space-between; gap:8px; font-size:12px; }
 .media-name { word-break:break-all; }
 .media-meta { color:var(--text-2); white-space:nowrap; }
-.media-total { margin:0; font-size:12px; }
+.export-modal { width:min(720px, 94vw); gap:12px; }
+.export-modal h4 { margin:0; font-size:13px; }
+.export-subtitle, .export-note { margin:0; font-size:12px; line-height:1.6; color:var(--text-2); overflow-wrap:anywhere; }
+.export-overview { display:flex; align-items:baseline; flex-wrap:wrap; gap:8px 16px; font-size:13px; }
+.export-overview strong { font-size:18px; }
+.export-groups { display:flex; flex-wrap:wrap; gap:6px; }
+.export-groups span { padding:5px 8px; background:var(--bg-2); border:1px solid var(--border); border-radius:var(--radius-sm); font-size:12px; }
+.export-groups b { margin-left:5px; color:var(--accent); }
+.export-list-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.export-list-heading .input { min-width:0; width:210px; max-width:65%; font-size:12px; }
+.export-files { max-height:260px; overflow:auto; flex-shrink:0; border:1px solid var(--border); border-radius:var(--radius-sm); }
+.export-files table { width:100%; border-collapse:collapse; font-size:12px; }
+.export-files th, .export-files td { padding:8px 10px; text-align:left; border-bottom:1px solid var(--border); }
+.export-files th { position:sticky; top:0; background:var(--bg-2); color:var(--text-2); font-weight:500; }
+.export-files td:last-child { white-space:nowrap; text-align:right; }
+.export-files tr:last-child td { border-bottom:0; }
+.export-path { overflow-wrap:anywhere; }
+.export-media, .export-excluded { display:flex; flex-direction:column; gap:8px; padding:12px; background:var(--bg-2); border-radius:var(--radius-sm); }
+.export-excluded p { margin:0; font-size:12px; line-height:1.6; color:var(--text-2); }
+.export-loading { padding:20px 0; text-align:center; color:var(--text-2); font-size:13px; }
+.export-modal .modal-actions { position:sticky; bottom:-16px; padding:12px 0; background:var(--bg-1); }
+
 .privacy-note { margin:0; font-size:12px; line-height:1.5; color:var(--warn, #fbbf24); border:1px solid rgba(251,191,36,.35); background:rgba(251,191,36,.08); border-radius: var(--radius-sm); padding:8px 10px; }
 .include-media { display:flex; align-items:center; gap:6px; font-size:13px; }
 .missing-required-warning { margin:0; font-size:12px; line-height:1.5; color:var(--warn, #fbbf24); border:1px solid rgba(251,191,36,.35); background:rgba(251,191,36,.08); border-radius: var(--radius-sm); padding:8px 10px; }

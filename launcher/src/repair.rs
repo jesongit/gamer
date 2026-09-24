@@ -26,7 +26,7 @@ pub struct RepairOptions {
     pub probe: bool,
 }
 
-/// 应用组件安装规格（来自已验签 manifest `platforms.<plat>.app` +
+/// 应用组件安装规格（来自已校验 manifest `platforms.<plat>.app` +
 /// `resources.scrcpy_server`；安装位 = `versions/<release.version>/`）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppInstallSpec {
@@ -44,7 +44,7 @@ pub struct AppInstallSpec {
 }
 
 impl AppInstallSpec {
-    /// 从已验签 manifest 模型构建（version 用作目录名、entrypoint/path 用作拼接，
+    /// 从已校验 manifest 模型构建（version 用作目录名、entrypoint/path 用作拼接，
     /// 全部先过 manifest 同源路径安全检查，防目录逃逸）。
     pub fn from_model(platform: &Platform, release_version: &str) -> Result<Self, String> {
         if let Some(reason) = crate::manifest::pathsafe::check_single_path(release_version) {
@@ -232,7 +232,21 @@ pub fn repair_components(
     for spec in specs {
         out.push(repair_one(layout, spec, opts));
     }
-    let app_repair = app.map(|a| repair_app(layout, a, opts));
+    let failed = out
+        .iter()
+        .any(|c| matches!(c.outcome, ComponentOutcome::Failed { .. }));
+    let app_repair = app.map(|a| {
+        if failed {
+            AppRepair {
+                version: a.version.clone(),
+                outcome: AppOutcome::Failed {
+                    reason: "依赖安装未完成，尚未切换应用版本".into(),
+                },
+            }
+        } else {
+            repair_app(layout, a, opts)
+        }
+    });
     RepairReport {
         components: out,
         app: app_repair,
@@ -253,7 +267,28 @@ fn repair_one(
     spec: &ComponentSpec,
     opts: &RepairOptions,
 ) -> ComponentRepair {
+    if opts.fetch.control.is_paused() {
+        return ComponentRepair {
+            id: spec.id.clone(),
+            version: spec.version.clone(),
+            outcome: ComponentOutcome::Failed {
+                reason: "安装已暂停".into(),
+            },
+        };
+    }
     let dir = spec.install_dir(layout);
+    if !opts.probe
+        && !spec.files.is_empty()
+        && spec.files.iter().all(|f| {
+            crate::verification::verify(layout, &dir.join(&f.path), &f.sha256, f.size).is_ok()
+        })
+    {
+        return ComponentRepair {
+            id: spec.id.clone(),
+            version: spec.version.clone(),
+            outcome: ComponentOutcome::Healthy,
+        };
+    }
     let finding = inventory::check_component(
         &dir,
         spec,
@@ -383,14 +418,7 @@ fn repair_one(
             id: spec.id.clone(),
             version: spec.version.clone(),
             outcome: ComponentOutcome::Failed {
-                reason: format!(
-                    "新组件目录 rename 到位失败: {e}（{}）",
-                    if moved_back {
-                        "旧目录已恢复原位"
-                    } else {
-                        "旧目录在 quarantine，需人工恢复"
-                    }
-                ),
+                reason: install_move_error("组件", &dir, &e, quarantined.is_some(), moved_back),
             },
         };
     }
@@ -435,9 +463,12 @@ fn repair_app(layout: &InstallLayout, app: &AppInstallSpec, opts: &RepairOptions
         version: app.version.clone(),
         outcome: AppOutcome::Failed { reason },
     };
+    if opts.fetch.control.is_paused() {
+        return failed("安装已暂停".into());
+    }
     let dir = app.install_dir(layout);
     if dir.is_dir() {
-        if verify_app_dir(&dir, app).is_ok() {
+        if crate::app_inventory::verify(layout, app, &dir, opts.probe).is_ok() {
             tracing::info!(version = %app.version, "app 版本目录已安装且校验通过");
             if let Err(e) = ensure_current_pointer(layout, &app.version) {
                 return failed(e);
@@ -472,6 +503,8 @@ fn repair_app(layout: &InstallLayout, app: &AppInstallSpec, opts: &RepairOptions
     let staged = (|| -> Result<(), String> {
         archive::extract_app_zip(artifact.path(), &staging, &ExtractOptions::default())
             .map_err(|e| e.to_string())?;
+        crate::app_inventory::record(layout, app, artifact.path())?;
+        crate::app_inventory::verify(layout, app, &staging, false)?;
         verify_app_dir(&staging, app)
     })();
     if let Err(reason) = staged {
@@ -510,13 +543,12 @@ fn repair_app(layout: &InstallLayout, app: &AppInstallSpec, opts: &RepairOptions
             );
         }
         cleanup_dir(&staging);
-        return failed(format!(
-            "新版本目录 rename 到位失败: {e}（{}）",
-            if moved_back {
-                "旧目录已恢复原位"
-            } else {
-                "旧目录在 quarantine，需人工恢复"
-            }
+        return failed(install_move_error(
+            "软件",
+            &dir,
+            &e,
+            quarantined.is_some(),
+            moved_back,
         ));
     }
 
@@ -617,6 +649,26 @@ fn broken_summary(finding: &ComponentFinding) -> String {
     }
 }
 
+fn install_move_error(
+    kind: &str,
+    target: &Path,
+    error: &std::io::Error,
+    had_previous: bool,
+    restored: bool,
+) -> String {
+    let recovery = if !had_previous {
+        "本次安装未完成，可以重试"
+    } else if restored {
+        "旧目录已恢复原位"
+    } else {
+        "旧目录保留在 quarantine，需人工恢复"
+    };
+    format!(
+        "{kind}目录切换失败：{error}。请关闭占用安装目录的程序（如开发预览或文件监听器），并确认目录可写后重试。目标：{}（{recovery}）",
+        target.display()
+    )
+}
+
 fn cleanup_dir(path: &PathBuf) {
     if path.exists() {
         let _ = fs::remove_dir_all(path);
@@ -626,4 +678,20 @@ fn cleanup_dir(path: &PathBuf) {
 /// 取产物来源标签暴露给测试（seed/cache/remote）。
 pub fn obtained_source(obtained: &Obtained) -> &'static str {
     obtained.source_label()
+}
+
+#[cfg(test)]
+mod move_error_tests {
+    use super::*;
+
+    #[test]
+    fn first_install_does_not_claim_a_previous_directory_was_restored() {
+        let error = std::io::Error::from_raw_os_error(5);
+        let target = Path::new("versions/0.2.0");
+        let fresh = install_move_error("软件", target, &error, false, true);
+        assert!(fresh.contains("本次安装未完成"));
+        assert!(!fresh.contains("旧目录"));
+        assert!(install_move_error("软件", target, &error, true, true).contains("已恢复原位"));
+        assert!(install_move_error("软件", target, &error, true, false).contains("需人工恢复"));
+    }
 }

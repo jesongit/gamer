@@ -28,7 +28,7 @@ export const SYSTEM_ERRORS = Object.freeze({
   update_busy:              { status: 409, retryable: true,  hint: '已有升级/回滚事务进行中，请等待其结束后再试' },
   update_not_available:     { status: 409, retryable: false, hint: '当前没有已验签的更新候选，请先执行检查更新' },
   update_not_ready:         { status: 409, retryable: true,  hint: '安装条件未满足（详见 blocking 门禁列表），满足后可重试' },
-  signature_invalid:        { status: 422, retryable: false, hint: '发布清单验签失败，已拒绝该候选版本；等待新的正式版本后重新检查' },
+  manifest_invalid:        { status: 422, retryable: false, hint: '发布清单清单校验失败，已拒绝该候选版本；等待新的正式版本后重新检查' },
   artifact_invalid:         { status: 422, retryable: true,  hint: '下载产物完整性校验失败，可重新下载修复传输损坏' },
   insufficient_space:       { status: 507, retryable: true,  hint: '磁盘空间不足，清理空间后重试' },
   schema_incompatible:      { status: 422, retryable: false, hint: '候选版本的数据 schema 超出当前程序可升级范围，需等待兼容的新版本' },

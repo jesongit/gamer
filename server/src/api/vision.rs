@@ -12,11 +12,13 @@
 //! `frame_index`（展示序帧索引，Phase 5 真实展示帧映射）；响应携带帧身份
 //! （media_id/帧索引/该帧真实 PTS）。抽帧 PNG 经 ffmpeg autorotate，命中
 //! 坐标即 oriented 展示空间。
+//! 交互预览支持互斥的 image_png（标准 base64 PNG）：直接匹配浏览器已解码像素，
+//! 不访问媒体/设备，不声明服务端帧身份；PNG 解码与 NCC 在同一计算池内完成。
 
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use image::GenericImageView;
+use base64::Engine as _;
 use serde::Deserialize;
 
 use super::common::run_blocking_api;
@@ -42,10 +44,14 @@ pub(super) struct VisionTestReq {
     pts_us: Option<u64>,
     /// 离线路径：展示序帧索引（Phase 5；与 pts_us 互斥）。
     frame_index: Option<u32>,
+    /// 浏览器当前画面 PNG（标准 base64）；与设备/媒体寻址互斥，不声明精确帧身份。
+    image_png: Option<String>,
 }
 
 /// 目标帧解析产物（互斥裁决的唯一实现，handler 与测试共用）。
 pub(super) enum VisionTarget {
+    /// 浏览器已经解码的画面，不访问设备或媒体库。
+    Image(String),
     /// 在线：设备截图路径。
     Device(String),
     /// 离线：媒体库确定帧 + 帧请求。
@@ -62,7 +68,17 @@ pub(super) fn resolve_vision_target(
     device_id: Option<&str>,
     pts_us: Option<u64>,
     frame_index: Option<u32>,
+    image_png: Option<String>,
 ) -> Result<VisionTarget, ApiError> {
+    if let Some(png) = image_png {
+        if media_id.is_some() || device_id.is_some() || pts_us.is_some() || frame_index.is_some() {
+            return Err(ApiError::bad_request("image_png 与设备/媒体帧寻址互斥"));
+        }
+        if png.is_empty() || png.len() > MAX_PREVIEW_PNG_BYTES.div_ceil(3) * 4 {
+            return Err(ApiError::bad_request("当前画面 PNG 为空或超过 10MiB"));
+        }
+        return Ok(VisionTarget::Image(png));
+    }
     match (media_id, device_id) {
         (Some(_), Some(_)) => {
             return Err(ApiError::bad_request(
@@ -97,6 +113,18 @@ pub(super) fn resolve_vision_target(
     Ok(VisionTarget::Device(
         device_id.expect("互斥校验保证 device_id 存在").to_string(),
     ))
+}
+
+const MAX_PREVIEW_PNG_BYTES: usize = 10 * 1024 * 1024;
+
+fn decode_preview_png(encoded: &str) -> Result<Vec<u8>, ApiError> {
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| ApiError::bad_request("image_png 必须为 PNG 的标准 base64"))?;
+    if png.len() > MAX_PREVIEW_PNG_BYTES || !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Err(ApiError::bad_request("当前画面必须为 PNG，且不超过 10MiB"));
+    }
+    Ok(png)
 }
 
 /// 离线目标帧提取：签名只依赖 `MediaService`——**没有 DeviceManager 入口**，
@@ -138,7 +166,13 @@ pub(super) async fn api_vision_test_template(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let target = match resolve_vision_target(media_id, device_id, req.pts_us, req.frame_index) {
+    let target = match resolve_vision_target(
+        media_id,
+        device_id,
+        req.pts_us,
+        req.frame_index,
+        req.image_png,
+    ) {
         Ok(target) => target,
         Err(err) => return err.into_response(),
     };
@@ -159,8 +193,10 @@ pub(super) async fn api_vision_test_template(
         Ok(result) => result,
         Err(err) => return err.into_response(),
     };
-    // 目标帧：离线 = 媒体库精确抽帧（media_id 路径绝不触达设备）；在线 = 设备截图
-    let (screen, screen_w, screen_h, frame_identity) = match target {
+    // 浏览器当前画面直接进入计算池；设备和确定帧入口仍保留原有来源语义。
+    let uploaded = matches!(&target, VisionTarget::Image(_));
+    let (screen, encoded, frame_identity) = match target {
+        VisionTarget::Image(encoded) => (Vec::new(), Some(encoded), None),
         VisionTarget::Offline { media_id, frame } => {
             let cfg = st.cfg.clone();
             let (png, descriptor) = match run_blocking_api(move || {
@@ -172,53 +208,46 @@ pub(super) async fn api_vision_test_template(
                 Ok(v) => v,
                 Err(err) => return err.into_response(),
             };
-            // 抽帧 PNG 的像素空间即 oriented 展示空间（ffmpeg autorotate）
-            match image::load_from_memory(&png) {
-                Ok(image) => (
-                    png,
-                    image.width(),
-                    image.height(),
-                    Some((descriptor.media_id.0, descriptor.index, descriptor.pts_us)),
-                ),
-                Err(e) => {
-                    return ApiError::internal(format!("抽帧 PNG 解码失败: {e}")).into_response();
-                }
-            }
+            (
+                png,
+                None,
+                Some((descriptor.media_id.0, descriptor.index, descriptor.pts_us)),
+            )
         }
         VisionTarget::Device(device_id) => {
             let screen = match st.devices.screenshot(&device_id).await {
                 Ok(s) => s,
                 Err(e) => return ApiError::bad_gateway(format!("截图失败: {}", e)).into_response(),
             };
-            let (w, h) = st
-                .devices
-                .session(&device_id)
-                .map(|session| session.video_size())
-                .filter(|(w, h)| *w > 0 && *h > 0)
-                .unwrap_or_else(|| {
-                    image::load_from_memory(&screen)
-                        .map(|image| image.dimensions())
-                        .unwrap_or((0, 0))
-                });
-            (screen, w, h, None)
+            (screen, None, None)
         }
     };
-    let mr = matcher::MatchRequest {
-        screen_png: screen,
-        template_png: tpl_bytes,
-        // 缺省阈值与函数/脚本实际运行的服务端默认值一致；脚本编辑态会显式传
-        // 当前脚本 config.threshold 覆盖它。
-        threshold: req.threshold.or(Some(st.cfg.threshold)),
-        region: req
-            .region
-            .or_else(|| matcher::template_region_from_name(&resolved_name, screen_w, screen_h)),
-        color: matcher::template_color_from_name(&resolved_name),
-    };
-    let miss_region = mr.region;
-    // NCC 匹配（含截图/模板 PNG 解码）走专用计算池（PERF-003），与引擎同一条
-    // CPU 预算通道，不再占用 API blocking 池名额
+    let threshold = req.threshold.or(Some(st.cfg.threshold));
+    // PNG 只解码一次；尺寸从实际像素读取，解码预算和 NCC 均复用 matcher。
     let outcome = matcher::compute::run(move || {
-        matcher::match_template(&mr).map_err(|e| ApiError::internal(e.to_string()))
+        let screen = match encoded {
+            Some(encoded) => decode_preview_png(&encoded)?,
+            None => screen,
+        };
+        let frame = matcher::DecodedFrame::from_png(&screen).map_err(|e| {
+            if uploaded {
+                ApiError::bad_request(format!("当前画面 PNG 无效: {e}"))
+            } else {
+                ApiError::internal(e.to_string())
+            }
+        })?;
+        let (screen_w, screen_h) = frame.dimensions();
+        let mr = matcher::DecodedMatchRequest {
+            template_png: tpl_bytes,
+            threshold,
+            region: req
+                .region
+                .or_else(|| matcher::template_region_from_name(&resolved_name, screen_w, screen_h)),
+            color: matcher::template_color_from_name(&resolved_name),
+        };
+        let matched = matcher::match_decoded_frame(&frame, &mr)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        Ok((matched, mr.region))
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))
@@ -233,8 +262,8 @@ pub(super) async fn api_vision_test_template(
         None => serde_json::Value::Null,
     };
     match outcome {
-        Ok(Some(m)) => Json(serde_json::json!({"hit": true, "x": m.x, "y": m.y, "width": m.width, "height": m.height, "score": m.score, "frame": identity})).into_response(),
-        Ok(None) => Json(serde_json::json!({"hit": false, "region": miss_region, "frame": identity})).into_response(),
+        Ok((Some(m), _)) => Json(serde_json::json!({"hit": true, "x": m.x, "y": m.y, "width": m.width, "height": m.height, "score": m.score, "frame": identity})).into_response(),
+        Ok((None, miss_region)) => Json(serde_json::json!({"hit": false, "region": miss_region, "frame": identity})).into_response(),
         Err(e) => e.into_response(),
     }
 }
@@ -252,13 +281,52 @@ mod tests {
         pts: Option<u64>,
         index: Option<u32>,
     ) -> Result<VisionTarget, ApiError> {
-        resolve_vision_target(media, device, pts, index)
+        resolve_vision_target(media, device, pts, index, None)
     }
 
     fn bad_request_on(result: Result<VisionTarget, ApiError>) {
         let err = result.err().expect("必须被拒绝");
         let status = err.clone().into_response().status();
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn browser_preview_target_rejects_ambiguous_sources_and_invalid_images() {
+        let image = Some("cG5n".to_string());
+        assert!(matches!(
+            resolve_vision_target(None, None, None, None, image.clone()).unwrap(),
+            VisionTarget::Image(_)
+        ));
+        for (media, device, pts, index) in [
+            (Some("m"), None, None, None),
+            (None, Some("d"), None, None),
+            (None, None, Some(0), None),
+            (None, None, None, Some(0)),
+        ] {
+            bad_request_on(resolve_vision_target(
+                media,
+                device,
+                pts,
+                index,
+                image.clone(),
+            ));
+        }
+        bad_request_on(resolve_vision_target(
+            None,
+            None,
+            None,
+            None,
+            Some(String::new()),
+        ));
+        bad_request_on(resolve_vision_target(
+            None,
+            None,
+            None,
+            None,
+            Some("a".repeat(MAX_PREVIEW_PNG_BYTES.div_ceil(3) * 4 + 1)),
+        ));
+        assert!(decode_preview_png("invalid!").is_err());
+        assert!(decode_preview_png("cG5n").is_err());
     }
 
     /// 互斥语义（离线/在线、pts/index）集中裁决：
@@ -277,7 +345,7 @@ mod tests {
                 assert_eq!(frame.pts_us, Some(0));
                 assert_eq!(frame.index, None);
             }
-            VisionTarget::Device(_) => panic!("必须是离线目标"),
+            _ => panic!("必须是离线目标"),
         }
         // pts 寻址
         match target(Some("m1"), None, Some(1500), None).unwrap() {

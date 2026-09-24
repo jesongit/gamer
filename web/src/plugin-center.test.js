@@ -5,6 +5,10 @@ import {
   isProductionRemoteUi,
   normalizeRegistry,
   REGISTRY_SCHEMA_VERSION,
+  compareVersions,
+  findRegistryPlugin,
+  fetchRegistry,
+  DEFAULT_REGISTRY_URL,
 } from './workspace/plugin-center/registry-client'
 import {
   dependencyStatus,
@@ -36,6 +40,28 @@ function archiveResponse(bytes) {
     arrayBuffer: async () => bytes.buffer,
   }
 }
+
+describe('official plugin release discovery', () => {
+  it('orders numeric prerelease identifiers and ignores build metadata', () => {
+    expect(compareVersions('0.1.0-beta.10', '0.1.0-beta.2')).toBeGreaterThan(0)
+    expect(compareVersions('0.1.0-beta', '0.1.0-beta.1')).toBeLessThan(0)
+    expect(compareVersions('0.1.0-beta-2', '0.1.0-beta-1')).toBeGreaterThan(0)
+    expect(compareVersions('0.1.0', '0.1.0-beta.10')).toBeGreaterThan(0)
+    expect(compareVersions('0.1.0+build.2', '0.1.0+build.9')).toBe(0)
+    expect(findRegistryPlugin({ plugins: [{ id: 'demo', version: '0.1.0-beta.2' }, { id: 'demo', version: '0.1.0-beta.10' }] }, 'demo').version).toBe('0.1.0-beta.10')
+  })
+
+  it('uses the authenticated same-origin catalog and explicitly refreshes its remote cache', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(200, { schema_version: 2, plugins: [], market_status: { source: 'bundled', warning: '暂时无法检查新版本' } }))
+    const registry = await fetchRegistry(fetchImpl)
+    expect(fetchImpl).toHaveBeenLastCalledWith(DEFAULT_REGISTRY_URL, expect.any(Object))
+    expect(registry.market_status.warning).toBe('暂时无法检查新版本')
+    await fetchRegistry(fetchImpl, DEFAULT_REGISTRY_URL, { refresh: true })
+    expect(fetchImpl).toHaveBeenLastCalledWith(`${DEFAULT_REGISTRY_URL}?refresh=true`, expect.any(Object))
+    await fetchRegistry(fetchImpl, '/custom.json', { refresh: true })
+    expect(fetchImpl).toHaveBeenLastCalledWith('/custom.json', expect.any(Object))
+  })
+})
 
 // Phase 1 契约（计划 §4）：registry schema_version=2，条目带 execution{kind}、无 signature；
 // 读端容忍 v1（无 execution 视为 wasm、有 signature 忽略）；官方市场安装不再做签名/proof 门禁，

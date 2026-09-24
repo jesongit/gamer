@@ -1,5 +1,5 @@
 {
-  "scenario": "无已验签候选（未检查或检查无新版本）时请求下载 → 409 update_not_available",
+  "scenario": "无已校验候选（未检查或检查无新版本）时请求下载 → 409 update_not_available",
   "endpoint": "POST /api/system/update/download",
   "request": {
     "method": "POST",

@@ -70,8 +70,6 @@ impl Progress {
 /// 升级引擎参数。
 #[derive(Debug, Clone)]
 pub struct UpgradeOptions {
-    /// 可信公钥目录（manifest 验签）。
-    pub keys_dir: PathBuf,
     pub fetch: FetchOptions,
     pub probe: ReadyProbe,
     /// 优雅停机等待上限；超时按契约默认取消升级（准确 PID 未退出不硬杀）。
@@ -89,7 +87,6 @@ pub struct UpgradeOptions {
 impl Default for UpgradeOptions {
     fn default() -> Self {
         Self {
-            keys_dir: PathBuf::from("keys"),
             fetch: FetchOptions::default(),
             probe: ReadyProbe::default(),
             shutdown_timeout: Duration::from_secs(90),
@@ -105,11 +102,55 @@ impl Default for UpgradeOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManifestSource {
     None,
+    /// Use the same official stable/beta discovery as desktop startup.
+    Official,
     Path(PathBuf),
     Url(String),
 }
 
-/// check 阶段产物（已验签候选）。
+impl ManifestSource {
+    pub fn configured() -> Self {
+        Self::from_override(
+            std::env::var("GAMER_LAUNCHER_RELEASE_MANIFEST")
+                .ok()
+                .as_deref(),
+        )
+    }
+
+    fn from_override(value: Option<&str>) -> Self {
+        match value.map(str::trim).filter(|v| !v.is_empty()) {
+            None => Self::Official,
+            Some(v) if v.starts_with("https://") || v.starts_with("http://") => Self::Url(v.into()),
+            Some(v) => Self::Path(v.into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::ManifestSource;
+    #[test]
+    fn default_and_empty_source_use_official_discovery_with_explicit_overrides_preserved() {
+        assert_eq!(
+            ManifestSource::from_override(None),
+            ManifestSource::Official
+        );
+        assert_eq!(
+            ManifestSource::from_override(Some("  ")),
+            ManifestSource::Official
+        );
+        assert_eq!(
+            ManifestSource::from_override(Some("https://example.com/release.json")),
+            ManifestSource::Url("https://example.com/release.json".into())
+        );
+        assert_eq!(
+            ManifestSource::from_override(Some("test.json")),
+            ManifestSource::Path("test.json".into())
+        );
+    }
+}
+
+/// check 阶段产物（已校验候选）。
 #[derive(Debug)]
 pub struct Checked {
     pub version: String,
@@ -142,6 +183,7 @@ pub struct Engine {
     pub layout: InstallLayout,
     pub opts: UpgradeOptions,
     pub progress: Arc<Progress>,
+    managed_child: std::sync::Mutex<Option<Child>>,
     pid_ops: Arc<dyn PidOps>,
     available_space: Arc<dyn AvailableSpaceProvider>,
 }
@@ -186,6 +228,7 @@ impl Engine {
             layout,
             opts,
             progress: Arc::new(Progress::default()),
+            managed_child: Default::default(),
             pid_ops: Arc::new(NativePidOps),
             available_space: Arc::new(NativeAvailableSpaceProvider),
         }
@@ -197,6 +240,7 @@ impl Engine {
             layout,
             opts,
             progress: Arc::new(Progress::default()),
+            managed_child: Default::default(),
             pid_ops,
             available_space: Arc::new(NativeAvailableSpaceProvider),
         }
@@ -212,6 +256,7 @@ impl Engine {
             layout,
             opts,
             progress: Arc::new(Progress::default()),
+            managed_child: Default::default(),
             pid_ops: Arc::new(NativePidOps),
             available_space,
         }
@@ -219,6 +264,14 @@ impl Engine {
 
     fn store(&self) -> StateStore {
         StateStore::new(&self.layout.root)
+    }
+
+    /// 常驻桌面启动器接管升级后的子进程句柄；CLI 保持既有提交后退出行为。
+    pub fn take_managed_child(&self) -> Option<Child> {
+        self.managed_child
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
     fn load_journal(&self) -> Result<UpdateJournal, BusinessError> {
@@ -341,7 +394,7 @@ impl Engine {
         }
     }
 
-    /// manifest 获取 + 验签 + 语义门禁 + 空间预估 + 缓存。
+    /// manifest 获取 + 结构 + 语义门禁 + 空间预估 + 缓存。
     fn load_candidate(
         &self,
         source: &ManifestSource,
@@ -356,9 +409,13 @@ impl Engine {
             }
             ManifestSource::Path(p) => (p.clone(), false),
             ManifestSource::Url(url) => (self.fetch_remote_manifest(url)?, true),
+            ManifestSource::Official => {
+                let (path, _) = crate::distribution::discover(&self.layout)
+                    .map_err(|error| BusinessError::new(codes::UPDATE_NOT_AVAILABLE, error))?;
+                (path, false)
+            }
         };
         let opts = ValidateOptions {
-            keys_dir: Some(self.opts.keys_dir.clone()),
             expect_current_version: Some(current.to_string()),
             launcher_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             ..ValidateOptions::default()
@@ -371,7 +428,7 @@ impl Engine {
                 .map(|e| format!("[{}] {}", e.code, e.detail))
                 .collect::<Vec<_>>()
                 .join("; ");
-            // 版本不高于当前 = 没有可用更新；其余 manifest 故障按验签/清单无效 fail closed
+            // 版本不高于当前 = 没有可用更新；其余 manifest 故障按结构/清单无效 fail closed
             let downgrade = outcome
                 .errors
                 .iter()
@@ -385,7 +442,7 @@ impl Engine {
             } else if launcher_too_old {
                 codes::LAUNCHER_TOO_OLD
             } else {
-                codes::SIGNATURE_INVALID
+                codes::MANIFEST_INVALID
             };
             return Err(BusinessError::new(
                 code,
@@ -393,21 +450,21 @@ impl Engine {
             ));
         }
         let raw = fs::read(&path).map_err(|e| {
-            BusinessError::new(codes::SIGNATURE_INVALID, format!("读取 manifest 失败: {e}"))
+            BusinessError::new(codes::MANIFEST_INVALID, format!("读取 manifest 失败: {e}"))
         })?;
         let value: Value = serde_json::from_slice(&raw).map_err(|e| {
             BusinessError::new(
-                codes::SIGNATURE_INVALID,
+                codes::MANIFEST_INVALID,
                 format!("manifest 不是合法 JSON: {e}"),
             )
         })?;
         let manifest = Manifest::parse(&value).map_err(|e| {
             BusinessError::new(
-                codes::SIGNATURE_INVALID,
+                codes::MANIFEST_INVALID,
                 format!("manifest 模型解析失败: {e}"),
             )
         })?;
-        // validate_manifest_file 已完成签名/结构门禁；这里再显式调用同一最低
+        // validate_manifest_file 已完成结构/语义门禁；这里再显式调用同一最低
         // launcher 版本规则，避免未来新增 manifest 消费入口时绕过门禁。
         super::check_minimum_launcher_version(&manifest.release.minimum_launcher_version)?;
         let version = manifest.release.version.clone();
@@ -449,10 +506,7 @@ impl Engine {
 
         // 空间预估：产物声明总量 + 现网数据体积（快照副本）+ 64 MiB 余量
         let platform = manifest.platforms.get("windows-x86_64").ok_or_else(|| {
-            BusinessError::new(
-                codes::SIGNATURE_INVALID,
-                "manifest 缺少 windows-x86_64 平台",
-            )
+            BusinessError::new(codes::MANIFEST_INVALID, "manifest 缺少 windows-x86_64 平台")
         })?;
         let mut required: u64 = u64::try_from(platform.app.artifact.size).unwrap_or(0);
         for comp in &platform.components {
@@ -473,16 +527,16 @@ impl Engine {
             ));
         }
 
-        // 缓存已验签 manifest（download/prepare/入口解析复用）
+        // 缓存已校验 manifest（download/prepare/入口解析复用）
         let cached = self.layout.manifests_dir().join(format!("{version}.json"));
         fs::create_dir_all(self.layout.manifests_dir()).map_err(|e| {
             BusinessError::new(
-                codes::SIGNATURE_INVALID,
+                codes::MANIFEST_INVALID,
                 format!("创建 manifests/ 失败: {e}"),
             )
         })?;
-        crate::state::atomic::write_json_atomic(&cached, &value).map_err(|e| {
-            BusinessError::new(codes::SIGNATURE_INVALID, format!("缓存 manifest 失败: {e}"))
+        crate::state::atomic::write_bytes_atomic(&cached, &raw).map_err(|e| {
+            BusinessError::new(codes::MANIFEST_INVALID, format!("缓存 manifest 失败: {e}"))
         })?;
         if temporary {
             let _ = fs::remove_file(&path);
@@ -497,48 +551,12 @@ impl Engine {
                 format!("manifest URL 非法: {url:?}"),
             ));
         }
-        let staging = self.layout.staging_dir().join("remote-manifest");
-        fs::create_dir_all(&staging).map_err(|e| {
-            BusinessError::new(codes::ARTIFACT_INVALID, format!("创建 staging 失败: {e}"))
-        })?;
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(self.opts.fetch.connect_timeout)
-            .timeout_read(self.opts.fetch.read_timeout)
-            .user_agent(concat!("gamer-launcher/", env!("CARGO_PKG_VERSION")))
-            .build();
-        let dest = staging.join("manifest.json");
-        let response = agent.get(url).call().map_err(|e| match e {
-            ureq::Error::Status(code, _) => BusinessError::new(
-                codes::UPDATE_NOT_AVAILABLE,
-                format!("远端 manifest 获取失败（HTTP {code}）"),
-            ),
-            other => BusinessError::new(
-                codes::UPDATE_NOT_AVAILABLE,
-                format!("远端 manifest 获取失败: {other}"),
-            ),
-        })?;
-        let mut file = fs::File::create(&dest).map_err(|e| {
-            BusinessError::new(
-                codes::ARTIFACT_INVALID,
-                format!("写远端 manifest 失败: {e}"),
-            )
-        })?;
-        std::io::copy(&mut response.into_reader(), &mut file).map_err(|e| {
-            BusinessError::new(
-                codes::ARTIFACT_INVALID,
-                format!("下载远端 manifest 失败: {e}"),
-            )
-        })?;
-        drop(file);
-        // 分离签名：约定 URL + ".sig"
-        let sig_dest = staging.join("manifest.sig");
-        let sig_url = format!("{url}.sig");
-        if let Ok(sig_resp) = agent.get(&sig_url).call() {
-            if let Ok(mut f) = fs::File::create(&sig_dest) {
-                let _ = std::io::copy(&mut sig_resp.into_reader(), &mut f);
-            }
-        }
-        Ok(dest)
+        crate::distribution::download_manifest(
+            &self.layout,
+            url,
+            self.opts.fetch.connect_timeout + self.opts.fetch.read_timeout,
+        )
+        .map_err(|e| BusinessError::new(codes::UPDATE_NOT_AVAILABLE, e))
     }
 
     /// 旧 exe 对现网数据 inspect（尽力而为，不可用 = None）。
@@ -651,6 +669,9 @@ impl Engine {
                     format!("app staging 复验失败: {e}"),
                 )
             })?;
+            crate::app_inventory::record(&self.layout, &app, artifact.path())
+                .and_then(|_| crate::app_inventory::verify(&self.layout, &app, &app_staging, false))
+                .map_err(|e| BusinessError::new(codes::ARTIFACT_INVALID, e))?;
             Ok(())
         };
         if let Err(err) = run() {
@@ -834,7 +855,6 @@ impl Engine {
 
     /// §6.6 全链路：check → … → cleaning → idle。任一步失败按契约分支恢复。
     pub fn run_full(&self, source: &ManifestSource) -> UpgradeOutcome {
-        let port = read_configured_port(&self.layout.config_file());
         // 1) check
         let checked = match self.phase_check(source) {
             Ok(c) => c,
@@ -846,6 +866,30 @@ impl Engine {
         if let Err(err) = self.phase_download() {
             return UpgradeOutcome::FailedOldHealthy { error: err };
         }
+        self.install_downloaded(to, &checked.manifest)
+    }
+
+    /// Web/IPC installation consumes the exact staged candidate the user accepted;
+    /// never rediscover a newer release between download and version switching.
+    pub fn install_staged(&self) -> UpgradeOutcome {
+        if let Err(error) = self.phase_prepare_install() {
+            return UpgradeOutcome::FailedOldHealthy { error };
+        }
+        let candidate = self.load_journal().and_then(|journal| {
+            let version = journal
+                .to_version
+                .ok_or_else(|| BusinessError::new(codes::UPDATE_NOT_READY, "无已下载的候选版本"))?;
+            let manifest = self.load_cached_manifest(&version)?;
+            Ok((version, manifest))
+        });
+        match candidate {
+            Ok((version, manifest)) => self.install_downloaded(version, &manifest),
+            Err(error) => UpgradeOutcome::FailedOldHealthy { error },
+        }
+    }
+
+    fn install_downloaded(&self, to: String, manifest: &Manifest) -> UpgradeOutcome {
+        let port = read_configured_port(&self.layout.config_file());
         // 3) waiting_idle（手动 CLI 语义 = 立即安装；批次 3 无策略引擎）
         if let Err(err) = self.mutate_journal(|j| {
             j.state = UpdateState::WaitingIdle;
@@ -960,7 +1004,7 @@ impl Engine {
         }) {
             return self.fail_candidate(err, &mut child, was_running, port);
         }
-        let expected_schema = u32::try_from(checked.manifest.release.data_schema).ok();
+        let expected_schema = u32::try_from(manifest.release.data_schema).ok();
         if let Err(err) = self.wait_candidate_ready(
             port,
             old_boot_id.as_deref(),
@@ -1008,6 +1052,7 @@ impl Engine {
             return UpgradeOutcome::ManualRecovery { error: err };
         }
         tracing::info!(%from, %to, "升级 committed 并清理完成");
+        *self.managed_child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
         UpgradeOutcome::Committed { from, to }
     }
 
@@ -1167,7 +1212,9 @@ impl Engine {
             return false;
         };
         let app_dir = self.layout.versions_dir().join(&current.current);
-        let plan = self.launch_plan_for(&current.current, exe, app_dir);
+        let Ok(plan) = self.launch_plan_for(&current.current, exe, app_dir) else {
+            return false;
+        };
         // 重启的旧版本同样注入回环管理令牌，保证后续 drain/再次升级可用
         let extras = LaunchExtras::default()
             .with_admin_token(self.opts.admin_token.clone())
@@ -1182,18 +1229,12 @@ impl Engine {
                 match supervisor::wait_for_ready(port, &probe) {
                     Ok(()) => {
                         tracing::info!(pid = child.id(), "旧版本已重启且就绪");
-                        std::thread::spawn(move || {
-                            let mut child = child;
-                            let _ = child.wait();
-                        });
+                        *self.managed_child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
                         true
                     }
                     Err(reason) => {
                         tracing::error!(%reason, "旧版本重启后就绪探测未通过（保留进程，状态以 journal 为准）");
-                        std::thread::spawn(move || {
-                            let mut child = child;
-                            let _ = child.wait();
-                        });
+                        *self.managed_child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
                         false
                     }
                 }
@@ -1205,23 +1246,15 @@ impl Engine {
         }
     }
 
-    fn launch_plan_for(&self, version: &str, exe: PathBuf, app_dir: PathBuf) -> LaunchPlan {
-        LaunchPlan {
-            exe,
-            cwd: app_dir.clone(),
-            app_dir,
-            data_dir: self.layout.data_dir(),
-            adb_path: supervisor::latest_component_exe(&self.layout, "adb", "adb.exe"),
-            ffmpeg_path: supervisor::latest_component_exe(&self.layout, "ffmpeg", "ffmpeg.exe"),
-            scrcpy_server: self
-                .layout
-                .versions_dir()
-                .join(version)
-                .join("assets")
-                .join("scrcpy-server.jar"),
-            config_path: self.layout.config_file(),
-            log_path: self.layout.logs_dir().join("gamer-server.log"),
-        }
+    fn launch_plan_for(
+        &self,
+        version: &str,
+        _exe: PathBuf,
+        _app_dir: PathBuf,
+    ) -> Result<LaunchPlan, BusinessError> {
+        let manifest = self.load_cached_manifest(version)?;
+        crate::distribution::plan(&self.layout, &manifest)
+            .map_err(|e| BusinessError::new(codes::ARTIFACT_INVALID, e))
     }
 
     // -- 候选启动 / 探测 / activate -----------------------------------------------------
@@ -1271,7 +1304,7 @@ impl Engine {
         let exe = resolve_entrypoint(&self.layout, version)
             .map_err(|e| BusinessError::new(codes::ARTIFACT_INVALID, e))?;
         let app_dir = self.layout.versions_dir().join(version);
-        let plan = self.launch_plan_for(version, exe, app_dir);
+        let plan = self.launch_plan_for(version, exe, app_dir)?;
         let extras = match &self.opts.ipc {
             Some((pipe, token)) => LaunchExtras::candidate(pipe.clone(), token.clone()),
             None => LaunchExtras {
@@ -2350,15 +2383,7 @@ mod tests {
     fn qa007_insufficient_space_is_rejected_before_current_data_or_snapshot_changes() {
         let root = temp_root("qa007-insufficient-space");
         let layout = InstallLayout { root: root.clone() };
-        let opts = UpgradeOptions {
-            keys_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
-                .join("release")
-                .join("contracts")
-                .join("fixtures")
-                .join("keys"),
-            ..UpgradeOptions::default()
-        };
+        let opts = UpgradeOptions::default();
         let engine = Engine::with_available_space_provider(
             layout.clone(),
             opts,

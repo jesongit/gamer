@@ -30,7 +30,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/recording/active", get(api_active))
         .route("/api/recording/:id/stop", post(api_stop))
         .route("/api/recording/:id/cancel", post(api_cancel))
-        .route("/api/recording/:id", get(api_status))
+        .route("/api/recording/:id", get(api_status).delete(api_delete))
         .route("/api/recording/:id/events", get(api_events))
 }
 
@@ -38,6 +38,16 @@ async fn api_history(State(st): State<AppState>) -> Response {
     let service = service(&st.cfg);
     match tokio::task::spawn_blocking(move || service.history()).await {
         Ok(Ok(sessions)) => Json(json!({ "sessions": sessions })).into_response(),
+        Ok(Err(error)) => map_failure(error),
+        Err(error) => ApiError::internal(error.to_string()).into_response(),
+    }
+}
+
+/// 只清理已结束且关联素材已删除的历史，不隐式删除视频或项目引用。
+async fn api_delete(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    let service = service(&st.cfg);
+    match tokio::task::spawn_blocking(move || service.delete_history(&RecordingId(id))).await {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
         Ok(Err(error)) => map_failure(error),
         Err(error) => ApiError::internal(error.to_string()).into_response(),
     }

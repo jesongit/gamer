@@ -1,0 +1,12 @@
+[package]
+name = "gamer-plugin-packer"
+version = "0.2.0"
+edition = "2021"
+description = "官方插件打包工具：pack（无签名 .gplugin）/ inspect（manifest 元数据）/ verify（归档自检）。"
+
+[dependencies]
+sha2 = "0.10"
+zip = "2"
+serde_json = "1"
+# manifest.toml 解析（manifest v2：[execution] kind=wasm|builtin + 元数据收敛的唯一权威源）
+toml = "0.8"

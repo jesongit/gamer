@@ -100,7 +100,7 @@ pub enum UpdateErrorCode {
     UpdateBusy,
     UpdateNotAvailable,
     UpdateNotReady,
-    SignatureInvalid,
+    ManifestInvalid,
     ArtifactInvalid,
     InsufficientSpace,
     SchemaIncompatible,
@@ -116,7 +116,7 @@ impl UpdateErrorCode {
             UpdateErrorCode::UpdateBusy => "update_busy",
             UpdateErrorCode::UpdateNotAvailable => "update_not_available",
             UpdateErrorCode::UpdateNotReady => "update_not_ready",
-            UpdateErrorCode::SignatureInvalid => "signature_invalid",
+            UpdateErrorCode::ManifestInvalid => "manifest_invalid",
             UpdateErrorCode::ArtifactInvalid => "artifact_invalid",
             UpdateErrorCode::InsufficientSpace => "insufficient_space",
             UpdateErrorCode::SchemaIncompatible => "schema_incompatible",
@@ -132,7 +132,7 @@ impl UpdateErrorCode {
             "update_busy" => UpdateErrorCode::UpdateBusy,
             "update_not_available" => UpdateErrorCode::UpdateNotAvailable,
             "update_not_ready" => UpdateErrorCode::UpdateNotReady,
-            "signature_invalid" => UpdateErrorCode::SignatureInvalid,
+            "manifest_invalid" => UpdateErrorCode::ManifestInvalid,
             "artifact_invalid" => UpdateErrorCode::ArtifactInvalid,
             "insufficient_space" => UpdateErrorCode::InsufficientSpace,
             "schema_incompatible" => UpdateErrorCode::SchemaIncompatible,
@@ -146,7 +146,7 @@ impl UpdateErrorCode {
     /// HTTP 状态码映射（§7 冻结列）
     pub fn http_status(self) -> u16 {
         match self {
-            UpdateErrorCode::SignatureInvalid
+            UpdateErrorCode::ManifestInvalid
             | UpdateErrorCode::ArtifactInvalid
             | UpdateErrorCode::SchemaIncompatible => 422,
             UpdateErrorCode::InsufficientSpace => 507,
@@ -287,7 +287,7 @@ mod tests {
         assert_eq!(UpdateErrorCode::UpdateBusy.http_status(), 409);
         assert_eq!(UpdateErrorCode::UpdateNotAvailable.http_status(), 409);
         assert_eq!(UpdateErrorCode::UpdateNotReady.http_status(), 409);
-        assert_eq!(UpdateErrorCode::SignatureInvalid.http_status(), 422);
+        assert_eq!(UpdateErrorCode::ManifestInvalid.http_status(), 422);
         assert_eq!(UpdateErrorCode::ArtifactInvalid.http_status(), 422);
         assert_eq!(UpdateErrorCode::SchemaIncompatible.http_status(), 422);
         assert_eq!(UpdateErrorCode::InsufficientSpace.http_status(), 507);

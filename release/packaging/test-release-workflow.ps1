@@ -75,8 +75,7 @@ $workflow = Get-Content -LiteralPath $workflowPath -Raw
 
 foreach ($scriptName in @(
     'check-immutable-release.ps1',
-    'verify-sbom.ps1',
-    'verify-key-rotation.ps1'
+    'verify-sbom.ps1'
 )) {
     $scriptPath = Join-Path $PSScriptRoot $scriptName
     if (-not (Test-Path -LiteralPath $scriptPath)) { Fail "校验脚本不存在: $scriptPath" }
@@ -89,13 +88,14 @@ Assert-Text $workflow '(?ms)^\s*push:\s*$.*?tags:\s*\[.v\*.' 'workflow 必须只
 Assert-Text $workflow 'gh release create "\$TAG" --repo "\$GH_REPO" --draft --verify-tag' 'draft Release 创建必须带 --draft 且绑定明确 repo'
 Assert-Text $workflow 'gh release edit "\$TAG" --repo "\$GH_REPO" --draft=false' 'publish 必须把 draft 转正式且绑定明确 repo'
 Assert-Text $workflow 'check-immutable-release\.ps1\s+-Mode\s+GitHub' 'verify 必须执行 GitHub immutable preflight'
-Assert-Text $workflow '\$keyId -notmatch.*prod-ed25519-\[1-9\]' '生产签名必须拒绝 dev/fixture key，只允许 prod-ed25519-N'
 Assert-True ($workflow -notmatch 'check-immutable-release\.ps1[^\r\n]*stable') 'stable 滚动别名不得走 immutable version preflight'
 Assert-Text $workflow '"channel=\$channel"\s*>>\s*\$env:GITHUB_OUTPUT' 'Windows 构建必须从 tag 派生并输出 channel'
 Assert-Text $workflow 'package-app\.ps1\s+-Channel \$env:CHANNEL' 'app 包构建必须消费派生 channel'
-Assert-Text $workflow 'gen-manifest\.ps1\s+-SkipSign\s+-Channel \$env:CHANNEL' 'manifest 必须消费派生 channel'
-Assert-Text $workflow '--expect-current-version \$env:VERSION --expect-channel \$env:CHANNEL' '签名后的 manifest 验签必须绑定派生 channel'
-Assert-Text $workflow 'release/keys.*\*\.private\.pem' '生产签名必须拒绝仓库内私钥文件'
+Assert-Text $workflow 'gen-manifest\.ps1\s+-Channel \$env:CHANNEL' 'manifest 必须消费派生 channel'
+
+Assert-True ($workflow -notmatch 'sign-manifest|verify-key-rotation|RELEASE_MANIFEST_PRIVATE_KEY|RELEASE_MANIFEST_KEY_ID|release-sign|\.sig') '发行流程不应依赖签名、密钥或签名文件'
+Assert-Text $workflow 'sha256sum \*\.zip \*\.exe \*\.json' '全部发行资产必须生成 SHA256SUMS'
+Assert-Text $workflow 'validate-manifest\.mjs check' '重新下载的发行清单必须校验结构与语义'
 
 $draftPos = $workflow.IndexOf("`n  draft-release:")
 $uploadPos = $workflow.IndexOf("`n  upload-assets:")
@@ -117,7 +117,6 @@ New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 try {
     $immutable = Join-Path $PSScriptRoot 'check-immutable-release.ps1'
     $sbomVerifier = Join-Path $PSScriptRoot 'verify-sbom.ps1'
-    $rotationVerifier = Join-Path $PSScriptRoot 'verify-key-rotation.ps1'
     $commit = 'a' * 40
     $digest = 'sha256:' + ('b' * 64)
     $otherDigest = 'sha256:' + ('c' * 64)
@@ -184,10 +183,9 @@ try {
     Write-Json $sbomPath $bom
     Invoke-Child -Path $sbomVerifier -Arguments @('-SbomPath', $sbomPath, '-ExpectedVersion', '0.2.0', '-RepoRoot', $RepoRoot, '-LockPath', (Join-Path $RepoRoot 'release/dependencies.lock.toml'))
 
-    Invoke-Child -Path $rotationVerifier -Arguments @('-FixtureDir', (Join-Path $RepoRoot 'release/contracts/fixtures/key-rotation'))
 } finally {
     if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
 }
 
-Write-Host '[release-workflow-test] PASS: workflow contract + immutable/SBOM/key-rotation offline behavior'
+Write-Host '[release-workflow-test] PASS: workflow contract + immutable/SBOM offline behavior'
 exit 0

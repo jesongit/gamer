@@ -1,6 +1,6 @@
 [package]
 name = "gamer-server"
-version = "0.1.1"
+version = "0.2.0-beta.6"
 edition = "2021"
 description = "Gamer 游戏自动化助手服务端：scrcpy 设备控制 + WebRTC 推流 + 模板匹配 + YAML 自动化 + 定时任务"
 
@@ -20,8 +20,10 @@ tower-http = { version = "0.5", features = ["fs", "cors", "trace"] }
 tower = { version = "0.4", features = ["util"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
 serde_yaml = "0.9"
 toml = "0.8"
+toml_edit = "0.22"
 semver = { version = "1", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -50,6 +52,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 sha2 = "0.10"
+ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
 argon2 = "0.5"
 rand = "0.8"
 futures-util = "0.3"

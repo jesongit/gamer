@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## 2026-09-24 官方插件分仓
+
+`plugins/` 是 `jesongit/gamer-plugins` 的固定提交 submodule；更新源码需 `git submodule update --init --recursive`，不得默认跟随远端最新提交。插件改动在插件仓提交，再更新主仓 gitlink。独立构建消费插件仓 sdk/ 固定快照，来源与哈希在 sdk/lock.json；主仓 `node tools/check-plugin-sdk.mjs` 保证接口一致。主仓 `tools/build-plugins.ps1` 为本地市场包装入口，开发 UI 联调使用 `tools/build-plugin-ui.mjs`；`web` 的普通 build 仅构建壳，发行流水线显式构建插件。host/ 仍参加宿主编译，变更仍需要宿主发布。
+
 ## 项目
 
 Gamer 游戏自动化助手：Rust 服务端（axum + webrtc-rs）+ Vue3/Vite 前端。
@@ -35,7 +39,7 @@ Enabled + last_error；必需依赖循环拒绝启动）；可选依赖 = 降级
 - `server/data/gamer.db` — SQLite（设备/任务/预设/运行/日志）；业务数据一级作用域 = **Package ID**，文件存储 `server/data/packages/<package-id>/`：`package.toml`（manifest）+ `shared/`（跨插件保留区）+ `plugins/<plugin-id>/`（插件数据，**目录语义归插件**——gamer-yaml：`automations/`（自动化脚本 + `_function*.yaml` 函数库：文件名以 `_function` 开头且 `.yaml` 结尾 = 函数库（functions: 包装），其余 = 自动化；默认库 `_function.yaml`，旧 `functions/` 专属目录已删除、保存钩子报 `yaml.functions.dir.removed`）/`templates/`（模板）[/`presets/`（任务预设）]，gamer-keymap：`mappings/`，gamer-video：`projects/`（视频项目 JSON，Core 存储不解释内容）；Core 不解释插件目录内部结构）；资源寻址三元组 **(package_id, plugin_id, path)**（实现在 `server/src/resources.rs` 的 PackageStore）。package-id / plugin-id 语法 `[a-z0-9][a-z0-9._-]*`（`validate_scope_id`，**禁大写**——Android 包名原样不能当 Package id，原名可写进 manifest 的 `[targets.android].packages`）
 - package.toml：`id`/`name`/`version`/`author` + `[targets.android].packages`（0..n；`*` 或 0 个 = 通用 Package，匹配语义统一在 `resources::android_targets_match`；仅做兼容性提示不阻断）+ `[plugins."<plugin-id>"] required`（插件依赖声明，允许声明当前未安装的插件）。**默认配置包**：包存储为空时服务端启动播种 `default`（`resources::DEFAULT_PACKAGE_ID`，Android Targets = `*`、零插件依赖；`ensure_default_package` 在组合根调用，播种失败只 warn 不阻断；存储再度清空后下次启动重新播种）
 - 认证：配置只接受 Argon2id PHC `[auth].password_hash`；开发登录密码只用 `GAMER_ADMIN_PASSWORD`，无默认账号/密码。WebRTC 不内置 STUN/TURN，默认 host candidate 直连；NAT 需配置 `rtc_external_ip/rtc_udp_port/rtc_external_port` 并发布 UDP。
-- 数据基线：SQLite schema v4（表：timer_tasks/task_presets/scheduled_runs/logs/devices；schedule JSON 为 `{provider_id,config}` 形态；v1→v2 Timer Core 泛化、v2→v3 Task 模型收口（legacy `tasks` 表 DROP）逐级静态迁移，注册表在 `server/src/migrations.rs`）；`user_version=0`/无版本号数据库不自动迁移，高于目标的库拒绝启动。
+- 数据基线：SQLite schema v5（表：run_records/run_events/timer_tasks/task_presets/scheduled_runs/logs/devices；schedule JSON 为 `{provider_id,config}` 形态；v1→v2 Timer Core 泛化、v2→v3 Task 模型收口（legacy `tasks` 表 DROP）逐级静态迁移，注册表在 `server/src/migrations.rs`）；`user_version=0`/无版本号数据库不自动迁移，高于目标的库拒绝启动。
 - 资源发行：**默认发行零业务资源**——`server/data/packages/` 不进 git。Package 经导入分发：`POST /api/packages/import`（zip/.gamerpkg，可选 `X-Expected-Sha256` 校验头；目标已存在 409 附 manifest 摘要，`?overwrite=true` 校验后原子替换）与 `POST /api/packages/:pkg/export`（可复现打包）。**dormant 插件数据保留**（plan §5-§6）：包内未安装插件的数据目录原样保留、不解释不修改，后续安装该插件即恢复对应能力。**Installed/Editable 双层模型、`data/app-packages/`、`/api/workspace`、`/api/apps/:app/resources`、六目录 kind 已全部删除，不做兼容，旧数据手动迁移**（迁移示例见 `server/data/_migration_backup` 与本仓库 2026-09 迁移提交）。
 
 ## 架构分层（ADR-11~14，`docs/reference/adr/`）
@@ -116,7 +120,7 @@ cd web && pnpm dev                      # 单起前端
 | `web/src/components/console/` | Console 域组合式函数与面板实现：use{ConsolePanelResize,ConsoleDeviceManager,ConsoleTemplates,ConsoleBridgeOverlays,ConsoleScriptRunner,ConsoleKeymap,ConsoleWorkspacePanels,RunEvents,ConsoleStage}*.js、ScriptRunner.vue（脚本 + 函数双面板上下文 + RunEventsPanel 运行事件 feed + ScriptSummary 步骤高亮；**函数面板函数个体化（简化计划 Phase 1）**：Package 函数库 = automations/ 内 `_function*.yaml`（默认只有 `_function.yaml`），用户只见一个个函数——摘要区平铺全部函数（`console/function-list.js` 构建视图，顶部模糊搜索框按 名称/来源文件/拼音首字母 过滤），每组带来源徽标（默认库=「默认」，手动拆分文件只读展示）+ 运行/编辑/原文/删除按函数视图寻址（编辑类操作仅默认库开放）；运行寻址 = `<pkg>#<函数名>`（统一命名空间，与定义文件无关）；「新建函数」直接进默认库编辑态（无弹窗、无分类概念，编辑态顶部 = 只读文件徽标 + 函数名输入框；默认库删光函数即删文件，下次新建自动重建）、TemplateCapture.vue（模板列表；上传支持多选图片/zip 压缩包——zip 经 `console/template-upload.js` 浏览器端解压逐张入库（已存在同名跳过、zip 内同名消歧），压缩包字节不上传服务端）、TemplateCropModal.vue（指定帧裁切：live=同步冻结 / media=服务端确定帧+generation 校验）、KeymapPanel.vue |
 | `web/src/components/video/` | 视频工作台面板（`VideoWorkbench.vue` 宿主组件 = 素材库/项目/时间轴/草稿区；`VideoProjects` 项目 CRUD、时间轴标记+事件叠加、`TemplateStudio.vue` 定帧框选建模板+离线匹配、`VideoDraft.vue` 草稿工作流）+ `videoApi.js`（媒体/录制 REST + gamer-yaml 动作缝 `callGamerYamlAction` 封装）；`core-component-registry.ts` 注册名 `VideoWorkbench`，安装 gamer-video 即出现 |
 | `web/src/components/LogsPanel.vue` / `TaskBoard.vue` / `SystemPanel.vue` | Core 自有面板（`gamer.core:logs/tasks/settings`），经 registry 注册 |
-| `tools/build-plugins.ps1` + `tools/plugin-signer/` | 官方插件产物链（**免签名**）：guest→Component→pack（manifest 元数据单源、零密钥，builtin 包零占位 WASM）→ sha/size 自检 → `.gplugin`（web/public/plugins/）+ registry v2 原子替换（无 signature 字段）+ `sha256sums.txt`；打包 manifest 源在 `plugins/<id>/manifest.toml`（与 Rust 常量 include_str! 锁同步）；signer 的 keygen/sign 仅存量签名包应急保留，默认链不调用 |
+| `tools/build-plugins.ps1` + `tools/plugin-packer/` | 官方插件产物链（**免签名**）：guest→Component→pack（manifest 元数据单源、零密钥，builtin 包零占位 WASM）→ sha/size 自检 → `.gplugin`（web/public/plugins/）+ registry v2 原子替换（无 signature 字段）+ `sha256sums.txt`；打包 manifest 源在 `plugins/<id>/manifest.toml`（与 Rust 常量 include_str! 锁同步）；packer 只提供 pack/inspect/verify，不包含签名命令 |
 | `sdk/` + `docs/guides/plugin-dev.md` + `docs/reference/PLUGIN_API.md` | 第三方插件 SDK：`sdk/examples/{echo-minimal,hello,vision-probe}` 三示例（独立 crate + WIT 快照 + build.ps1，免签名 pack/inspect/verify）与从零开发教程/Host API 参考（WIT world、9 域权限映射、19 项权限闭集） |
 
 ## 规则
@@ -140,6 +144,18 @@ cd web && pnpm dev                      # 单起前端
 
 ## 2026-09-20 ADB 与插件目录收口（覆盖旧路径说明）
 
+**2026-09-22 循环中断**：gamer-yaml 3.3.0 新增 `break: {}`（也接受无值 `break:`），仅退出当前脚本/函数内最近一层 `repeat`，经 if/模板分支传播，不跨函数调用边界。循环外报 `yaml.break.outside_loop`，带参数或子步骤报 `yaml.break.shape`；前端添加步骤提供「跳出循环」，前后端作用域校验同步。V1 现有六类步骤：函数调用/if/repeat/return/match_templates/break。
+
+**2026-09-22 模板分支扩展**：YAML V1 新增插件内置复合步骤 `match_templates`（与函数调用/if/repeat/return 并列），内容为 `cases: [{template, as?, do}]`、可选 `threshold`（0.8）和 `else`。同轮共用一帧，按顺序仅执行首个命中分支，不自动点击或循环；case `as` 仅在该分支有效，动作由权威解释器执行，return/取消/预算不变。底层原生 `find_any` 返回首个命中对象附 index/template 或 null，原生函数共 19 个。surface 子模块在 `plugins/gamer-yaml/host/syntax/match_templates.rs`，解释器同步支持同名 wire 节点；编辑器提供模板分支卡片，路径为 `run[n].cases[i].do[j]`，分支增删排序通过保留子步骤身份的专用命令支持撤销重做。官方 gamer-yaml 版本更新为 3.2.0。
+
 设备没有 kind：使用完整 ADB serial 或 host:port，扫描严格按 serial 去重；虚拟屏是 screen_mode/vd_res/vd_dpi 独立设置。Docker 构建、部署模式和发布链已删除，保留通用 NAT 设置与既有用户数据。SQLite schema v4 删除 devices.kind。
 
 官方插件源在 plugins/gamer-yaml、plugins/gamer-keymap、plugins/gamer-video；manifest、host/、guest/（若有）、ui/、README.md 与 build.ps1 同属插件目录。host/ 为随服务端编译的适配层，独立交付的是现有契约内的 WASM 和 UI，新增原生能力仍需宿主更新。UI 模块打包进 .gplugin，runtime=core + entry=ui/plugin.js 必须显式声明 ui.host 与 host_api.ui；sandbox iframe 不使用该加载器。UI 单次页面固定实例，更新后保存并刷新。旧 gamer.* 身份只通过 tools/convert-plugin-ids.py 离线转换，不加运行时别名。
+
+## 2026-09-24 网页更新与独立插件市场
+
+本机验收使用 `GAMER_LOCAL_ONLY=1`（或配置 `local_only=true`），同时限制 HTTP 与 WebRTC ICE 为 IPv4 回环地址；启动器显式透传该环境变量。默认仍支持局域网；本机模式与 rtc_external_ip/rtc_udp_port/rtc_external_port 互斥。固定 UDP 端口测试在 Windows 需显式 `--ignored` 运行，避免日常测试触发防火墙提示；Linux 正常覆盖。
+
+网页更新的 IPC `prepare_install` 已执行完整的快照、切换、候选验证和失败回滚，使用已下载清单，不重新发现候选。常驻启动器接管新/回滚子进程，保留 IPC 会话。SQLite 快照诊断只能在临时副本上执行，不能打开封存备份。
+
+默认插件目录为认证 API `GET /api/extensions/market/registry.json`（`?refresh=true` 强制刷新），由宿主发现 `jesongit/gamer-plugins` 最近公开的完整目录；beta 宿主允许预发布，正式宿主过滤预发布。目录缓存五分钟，网络失败保留进程内缓存并回退发行附带快照。归档经同源 `/api/extensions/market/:id/:version/archive` 下载、size/SHA256 校验，再走现有 inspect/权限确认/安装流程，不自动更新已安装插件。首装种子仍由 `release/plugins.lock.json` 固定；新增原生 host 能力仍须发布本体。

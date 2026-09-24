@@ -209,11 +209,6 @@ const BOUNDARY_ALLOWS: &[Allow] = &[
         reason: "api 测试装配：与生产等价预注册 gamer-yaml runner（HTTP 集成夹具）",
     },
     Allow {
-        file: "api/tests.rs",
-        snippet: "YamlTimerRunner::functions_describer(),",
-        reason: "api 测试装配：gamer-yaml 原生函数目录描述器（与生产 start 生命周期同构）",
-    },
-    Allow {
         file: "api/tests/update.rs",
         snippet: "YamlTimerRunner::new(",
         reason: "update API 测试装配：gamer-yaml runner 夹具",
@@ -226,6 +221,8 @@ const BOUNDARY_ALLOWS: &[Allow] = &[
 /// legacy 表 SQL 字符串。**schema v1 日志列名，更名属数据迁移另案**；除此之外
 /// 新增的任何 `script_id` 出现都会被本测试拦下复核。
 const SCRIPT_ID_ALLOWS: &[Allow] = &[
+    Allow { file: "store/journal.rs", snippet: "script_id: \"p/example\".into()", reason: "journal test constructs RunRecord compatibility display field" },
+    Allow { file: "store/journal.rs", snippet: "INSERT INTO logs(time,device_id,script_id,level,msg)", reason: "v4 migration test verifies historical log rows are preserved" },
     // —— run_manager.rs：RunRecord 兼容展示字段 + busy/日志映射 + 测试 ——
     Allow {
         file: "run_manager.rs",
@@ -495,11 +492,6 @@ const DEPENDENCY_ALLOWS: &[Allow] = &[
         file: "api/tests.rs",
         snippet: "gamer_yaml::timer_yaml::YamlTimerRunner::new",
         reason: "api 测试装配：预注册 gamer-yaml runner",
-    },
-    Allow {
-        file: "api/tests.rs",
-        snippet: "gamer_yaml::timer_yaml::YamlTimerRunner::functions_describer",
-        reason: "api 测试装配：gamer-yaml 原生函数目录描述器（与生产 start 生命周期同构）",
     },
     Allow {
         file: "api/tests.rs",

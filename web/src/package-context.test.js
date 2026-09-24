@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
+import { zipSync, strToU8 } from 'fflate'
 import { ApiError } from './api'
 import {
   isValidPackageId, normalizePackageId, usePackageContext,
@@ -133,55 +134,107 @@ describe('usePackageContext（plan §28：导入/导出/新建/复制/删除）'
     expect(refreshAll).toHaveBeenCalledTimes(1)
   })
 
-  it('导出（无媒体引用）：直接下载 blob + 文件名（无响应头文件名时回退 <id>.gamerpkg）', async () => {
+  function archive(entries = [], extra = {}) {
+    return { blob: new Blob([zipSync({
+      'package.toml': strToU8('id = "com.demo"'),
+      'plugins/gamer-yaml/automations/main.yaml': strToU8('run: []'),
+      'plugins/gamer-yaml/automations/_function.yaml': strToU8('functions: {}'),
+      'plugins/gamer-yaml/templates/首页.png': new Uint8Array([1, 2]),
+      'shared/readme.txt': strToU8('notes'),
+      'plugins/uninstalled/custom.dat': new Uint8Array([3]),
+      'media/index.json': strToU8(JSON.stringify({ schema_version: 1, entries })),
+      ...extra,
+    })]), filename: '', sha256: 'b'.repeat(64) }
+  }
+
+  it('无媒体也预览实际清单，确认下载同一份文件并绑定打开时的包', async () => {
     const { api, toast, download } = setup()
-    api.getPackage.mockResolvedValue({ media_refs: [], media_total_bytes: 0 })
-    api.exportPackageArchive.mockResolvedValue({
-      blob: new Blob(['archive']), filename: '', sha256: 'b'.repeat(64),
-    })
+    const exported = archive()
+    api.exportPackageArchive.mockResolvedValue(exported)
     const ctx = usePackageContext({ api, toast, download })
     await ctx.exportPackage()
+    expect(download).not.toHaveBeenCalled()
+    expect(ctx.exportModal.ready).toBe(true)
+    expect(ctx.exportModal.files).toHaveLength(7)
+    expect(ctx.exportModal.groups).toEqual(expect.arrayContaining([
+      { label: '自动化脚本', count: 1 }, { label: '函数库文件', count: 1 },
+      { label: '模板图片', count: 1 }, { label: '共享文件', count: 1 },
+      { label: '插件资源 · uninstalled', count: 1 },
+    ]))
+    expect(ctx.exportModal.archiveBytes).toBe(exported.blob.size)
+    selectPackage('user.other')
+    await ctx.confirmExport()
+    expect(api.exportPackageArchive).toHaveBeenCalledTimes(1)
     expect(api.exportPackageArchive).toHaveBeenCalledWith('com.demo', { includeMedia: false })
-    expect(download).toHaveBeenCalledWith(expect.any(Blob), 'com.demo.gamerpkg')
+    expect(download).toHaveBeenCalledWith(exported.blob, 'com.demo.gamerpkg')
     expect(ctx.exportModal.open).toBe(false)
+    await ctx.confirmExport()
+    expect(download).toHaveBeenCalledTimes(1)
   })
 
-  it('导出（有媒体引用）：弹确认框；确认后按勾选带 includeMedia 导出', async () => {
-    const { api, toast, download } = setup()
-    api.getPackage.mockResolvedValue({
-      media_refs: [
-        { id: 'clip01', name: 'clip.mp4', size: 2048, plugin_id: 'gamer-video', kind: 'project', state: 'ready' },
-      ],
-      media_total_bytes: 2048,
-    })
-    api.exportPackageArchive.mockResolvedValue({
-      blob: new Blob(['archive']), filename: 'com.demo-1.0.0.gamerpkg', sha256: 'b'.repeat(64),
-    })
-    const ctx = usePackageContext({ api, toast, download })
+  it('切换媒体选项重新准备清单，按内容去重统计且保留缺失标注', async () => {
+    const { api, download } = setup()
+    const media = { id: 'clip01', name: 'clip.mp4', size: 2048, sha256: 'a'.repeat(64), plugin_id: 'gamer-video', kind: 'project', included: false }
+    api.exportPackageArchive.mockResolvedValueOnce(archive([media, { ...media, kind: 'other' }]))
+    const ctx = usePackageContext({ api, download })
     await ctx.exportPackage()
-    // 有引用素材：不直接导出，弹确认框并列出素材与大小
-    expect(api.exportPackageArchive).not.toHaveBeenCalled()
-    expect(ctx.exportModal.open).toBe(true)
-    expect(ctx.exportModal.entries).toHaveLength(1)
     expect(ctx.exportModal.totalBytes).toBe(2048)
-    expect(ctx.exportModal.includeMedia).toBe(false)
-
-    // 默认（仅引用）导出
-    await ctx.confirmExport()
-    expect(api.exportPackageArchive).toHaveBeenCalledWith('com.demo', { includeMedia: false })
-    expect(download).toHaveBeenCalledWith(expect.any(Blob), 'com.demo-1.0.0.gamerpkg')
-    expect(ctx.exportModal.open).toBe(false)
-
-    // 勾选「包含媒体素材」再导出 → includeMedia=true
-    await ctx.exportPackage()
-    expect(ctx.exportModal.open).toBe(true)
     ctx.exportModal.includeMedia = true
     await ctx.confirmExport()
+    expect(download).not.toHaveBeenCalled()
+    const included = archive([{ ...media, included: true }, { ...media, id: 'missing', sha256: 'b'.repeat(64) }], {
+      ['media/files/' + media.sha256]: new Uint8Array(2048),
+    })
+    api.exportPackageArchive.mockResolvedValueOnce(included)
+    await ctx.refreshExport()
     expect(api.exportPackageArchive).toHaveBeenLastCalledWith('com.demo', { includeMedia: true })
-    // 素材查询失败不阻塞导出（退化为直接导出）
-    api.getPackage.mockRejectedValue(new Error('query failed'))
+    expect(ctx.exportModal.entries.map(e => e.included)).toEqual([true, false])
+    expect(ctx.exportModal.files.some(file => file.category === '媒体原文件')).toBe(true)
+    await ctx.confirmExport()
+    expect(download).toHaveBeenCalledWith(included.blob, 'com.demo.gamerpkg')
+  })
+
+  it('关闭加载中的预览后，旧请求不覆盖新包、不触发下载', async () => {
+    const { api, download } = setup()
+    let resolveOld
+    api.exportPackageArchive.mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve }))
+    const ctx = usePackageContext({ api, download })
+    const pending = ctx.exportPackage()
+    expect(ctx.exportModal.loading).toBe(true)
+    await ctx.confirmExport()
+    ctx.closeExport()
+    selectPackage('user.other')
+    api.exportPackageArchive.mockResolvedValueOnce({ ...archive(), filename: 'other.gamerpkg' })
     await ctx.exportPackage()
-    expect(api.exportPackageArchive).toHaveBeenCalledTimes(3)
+    resolveOld({ ...archive(), filename: 'old.gamerpkg' })
+    await pending
+    expect(ctx.exportModal.packageId).toBe('user.other')
+    expect(ctx.exportModal.filename).toBe('other.gamerpkg')
+    expect(download).not.toHaveBeenCalled()
+    ctx.closeExport()
+    expect(ctx.exportModal.files).toEqual([])
+  })
+
+  it('准备失败或归档非法时禁止下载并允许重试，下载失败保留清单', async () => {
+    const { api, download } = setup()
+    api.exportPackageArchive.mockRejectedValueOnce(new Error('network failed'))
+    const ctx = usePackageContext({ api, download })
+    await ctx.exportPackage()
+    expect(ctx.exportModal.error).toBe('network failed')
+    await ctx.confirmExport()
+    expect(download).not.toHaveBeenCalled()
+    api.exportPackageArchive.mockResolvedValueOnce({ blob: new Blob(['invalid']) })
+    await ctx.refreshExport()
+    expect(ctx.exportModal.ready).toBe(false)
+    api.exportPackageArchive.mockResolvedValueOnce(archive())
+    await ctx.refreshExport()
+    expect(ctx.exportModal.ready).toBe(true)
+    download.mockRejectedValueOnce(new Error('download failed'))
+    await ctx.confirmExport()
+    expect(ctx.exportModal.open).toBe(true)
+    expect(ctx.exportModal.error).toBe('download failed')
+    await ctx.confirmExport()
+    expect(ctx.exportModal.open).toBe(false)
   })
 
   it('新建：非法 id 客户端拒绝；合法 id 走 createPackage 并选中', async () => {

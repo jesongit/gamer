@@ -4,7 +4,7 @@ import type { PluginExecution, PluginRegistryDocument, RegistryPluginVersion } f
 export const REGISTRY_SCHEMA_VERSION = 2
 /** 读端容忍的历史 schema：v1 条目无 execution 视为 wasm、有 signature 忽略。 */
 const SUPPORTED_REGISTRY_SCHEMA_VERSIONS = [1, 2]
-export const DEFAULT_REGISTRY_URL = '/registry.json'
+export const DEFAULT_REGISTRY_URL = '/api/extensions/market/registry.json'
 export const MAX_PLUGIN_ARCHIVE_BYTES = 20 * 1024 * 1024
 
 const VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
@@ -82,6 +82,9 @@ export function normalizeRegistry(input: unknown): PluginRegistryDocument {
   })
   return {
     schema_version: schemaVersion,
+    ...(raw.market_status && typeof raw.market_status === 'object'
+      ? { market_status: { source: String((raw.market_status as Record<string, unknown>).source || ''), warning: String((raw.market_status as Record<string, unknown>).warning || '') } }
+      : {}),
     ...(raw.generated_at ? { generated_at: String(raw.generated_at) } : {}),
     ...(raw.host_api ? { host_api: String(raw.host_api) } : {}),
     plugins,
@@ -100,10 +103,12 @@ export function isDownloadUrl(value: string): boolean {
 export async function fetchRegistry(
   fetchImpl: typeof fetch = globalThis.fetch,
   url = DEFAULT_REGISTRY_URL,
+  options: { refresh?: boolean } = {},
 ): Promise<PluginRegistryDocument> {
   let response: Response
   try {
-    response = await fetchImpl(url, { headers: { Accept: 'application/json' } })
+    const requestUrl = options.refresh && url === DEFAULT_REGISTRY_URL ? `${url}?refresh=true` : url
+    response = await fetchImpl(requestUrl, { headers: { Accept: 'application/json' } })
   } catch (error) {
     throw new RegistryError('registry_network_error', `插件市场不可用：${String((error as Error)?.message || error)}`)
   }
@@ -121,17 +126,32 @@ export function findRegistryPlugin(registry: PluginRegistryDocument, id: string,
 
 export function compareVersions(left: string, right: string): number {
   const parse = (value: string) => {
-    const [core, pre = ''] = String(value).split('-', 2)
-    return { core: core.split('.').map(Number), pre }
+    const withoutBuild = String(value).split('+')[0]
+    const separator = withoutBuild.indexOf('-')
+    const core = separator < 0 ? withoutBuild : withoutBuild.slice(0, separator)
+    const pre = separator < 0 ? [] : withoutBuild.slice(separator + 1).split('.')
+    return { core: core.split('.'), pre }
   }
+  const numeric = (a: string, b: string) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0)
   const a = parse(left)
   const b = parse(right)
   for (let index = 0; index < 3; index += 1) {
-    if ((a.core[index] || 0) !== (b.core[index] || 0)) return (a.core[index] || 0) - (b.core[index] || 0)
+    const difference = numeric(a.core[index] || '0', b.core[index] || '0')
+    if (difference) return difference
   }
-  if (!a.pre && b.pre) return 1
-  if (a.pre && !b.pre) return -1
-  return a.pre.localeCompare(b.pre)
+  if (!a.pre.length && b.pre.length) return 1
+  if (a.pre.length && !b.pre.length) return -1
+  for (let i = 0; i < Math.max(a.pre.length, b.pre.length); i += 1) {
+    if (a.pre[i] === undefined) return -1
+    if (b.pre[i] === undefined) return 1
+    const x = a.pre[i], y = b.pre[i]
+    if (x === y) continue
+    const xn = /^\d+$/.test(x), yn = /^\d+$/.test(y)
+    if (xn && yn) return numeric(x, y)
+    if (xn !== yn) return xn ? -1 : 1
+    return x < y ? -1 : 1
+  }
+  return 0
 }
 
 async function archiveBytes(response: Response): Promise<Uint8Array> {

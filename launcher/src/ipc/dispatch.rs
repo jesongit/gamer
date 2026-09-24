@@ -34,8 +34,20 @@ struct CachedReply {
 
 #[derive(Default)]
 struct Inner {
+    desktop_active: bool,
     active: Option<ActiveOp>,
     cache: HashMap<String, CachedReply>,
+}
+
+pub struct DesktopOperation(Arc<Dispatcher>);
+impl Drop for DesktopOperation {
+    fn drop(&mut self) {
+        self.0
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .desktop_active = false;
+    }
 }
 
 /// IPC 分派器（server 持一个；handle 由 tokio 客户端任务调用）。
@@ -46,7 +58,6 @@ pub struct Dispatcher {
     pub engine: Arc<Engine>,
     /// check 操作的候选来源（通道配置；IPC 请求不接受来源指定）。
     pub check_source: ManifestSource,
-    pub keys_dir: PathBuf,
     /// 测试/CLI 内联执行长操作（不另起线程）。
     pub run_inline: bool,
     inner: Mutex<Inner>,
@@ -60,11 +71,27 @@ pub struct Reply {
 }
 
 impl Dispatcher {
+    /// Keep the owning supervisor alive while IPC may replace its child process.
+    pub fn has_active_operation(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .active
+            .is_some()
+    }
+
+    pub fn begin_desktop(self: &Arc<Self>) -> Result<DesktopOperation, String> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.active.is_some() || inner.desktop_active {
+            return Err("另一项安装或更新正在执行，请稍后再试".into());
+        }
+        inner.desktop_active = true;
+        Ok(DesktopOperation(self.clone()))
+    }
     pub fn new(
         layout: InstallLayout,
         installation_id: String,
         check_source: ManifestSource,
-        keys_dir: PathBuf,
         engine_opts: UpgradeOptions,
         run_inline: bool,
     ) -> Arc<Self> {
@@ -74,7 +101,6 @@ impl Dispatcher {
             installation_id,
             launcher_version: env!("CARGO_PKG_VERSION").to_string(),
             check_source,
-            keys_dir,
             run_inline,
             inner: Mutex::new(Inner::default()),
         })
@@ -130,6 +156,12 @@ impl Dispatcher {
             Err(poisoned) => poisoned.into_inner(),
         };
         let now = Instant::now();
+        if inner.desktop_active {
+            return Reply {
+                frame: error_frame(request_id, codes::UPDATE_BUSY, "启动器正在处理安装或更新"),
+                disconnect: false,
+            };
+        }
         inner.cache.retain(|_, c| c.expires > now);
         if let Some(cached) = inner.cache.get(request_id) {
             return Reply {
@@ -330,9 +362,8 @@ impl Dispatcher {
                 }
             }
             Operation::PrepareInstall => {
-                if let Err(e) = self.engine.phase_prepare_install() {
-                    tracing::warn!(code = %e.code, %e.message, "IPC prepare_install 失败");
-                }
+                let outcome = self.engine.install_staged();
+                tracing::info!(?outcome, "IPC 安装更新完成");
             }
             Operation::Rollback => {
                 if let Err(e) = self.engine.phase_rollback() {
@@ -356,7 +387,7 @@ impl Dispatcher {
         let manifest = match self.load_repair_manifest() {
             Ok(m) => m,
             Err(msg) => {
-                tracing::error!("repair_dependency 无法装载已验签 manifest: {msg}");
+                tracing::error!("repair_dependency 无法装载已校验 manifest: {msg}");
                 return;
             }
         };
@@ -402,7 +433,6 @@ impl Dispatcher {
             .collect();
         candidates.sort();
         let opts = crate::manifest::ValidateOptions {
-            keys_dir: Some(self.keys_dir.clone()),
             launcher_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             ..crate::manifest::ValidateOptions::default()
         };
