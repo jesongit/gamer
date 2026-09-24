@@ -256,7 +256,8 @@ node tools/build-plugin-ui.mjs gamer-yaml
 # 前端主界面与各插件 UI 测试
 pnpm --dir web test:run
 
-# 服务端测试和静态检查
+# 服务端测试和静态检查（先准备发行锁指定的市场测试夹具）
+.\release\packaging\fetch-plugins.ps1 -TestFixturesOnly
 cargo test --manifest-path server/Cargo.toml
 cargo clippy --manifest-path server/Cargo.toml --all-targets -- -D warnings
 
