@@ -151,3 +151,9 @@ cd web && pnpm dev                      # 单起前端
 设备没有 kind：使用完整 ADB serial 或 host:port，扫描严格按 serial 去重；虚拟屏是 screen_mode/vd_res/vd_dpi 独立设置。Docker 构建、部署模式和发布链已删除，保留通用 NAT 设置与既有用户数据。SQLite schema v4 删除 devices.kind。
 
 官方插件源在 plugins/gamer-yaml、plugins/gamer-keymap、plugins/gamer-video；manifest、host/、guest/（若有）、ui/、README.md 与 build.ps1 同属插件目录。host/ 为随服务端编译的适配层，独立交付的是现有契约内的 WASM 和 UI，新增原生能力仍需宿主更新。UI 模块打包进 .gplugin，runtime=core + entry=ui/plugin.js 必须显式声明 ui.host 与 host_api.ui；sandbox iframe 不使用该加载器。UI 单次页面固定实例，更新后保存并刷新。旧 gamer.* 身份只通过 tools/convert-plugin-ids.py 离线转换，不加运行时别名。
+
+## 2026-09-24 网页更新与独立插件市场
+
+网页更新的 IPC `prepare_install` 已执行完整的快照、切换、候选验证和失败回滚，使用已下载清单，不重新发现候选。常驻启动器接管新/回滚子进程，保留 IPC 会话。SQLite 快照诊断只能在临时副本上执行，不能打开封存备份。
+
+默认插件目录为认证 API `GET /api/extensions/market/registry.json`（`?refresh=true` 强制刷新），由宿主发现 `jesongit/gamer-plugins` 最近公开的完整目录；beta 宿主允许预发布，正式宿主过滤预发布。目录缓存五分钟，网络失败保留进程内缓存并回退发行附带快照。归档经同源 `/api/extensions/market/:id/:version/archive` 下载、size/SHA256 校验，再走现有 inspect/权限确认/安装流程，不自动更新已安装插件。首装种子仍由 `release/plugins.lock.json` 固定；新增原生 host 能力仍须发布本体。
