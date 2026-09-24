@@ -18,7 +18,7 @@ Gamer 可以从源码运行，也支持使用 Windows x64 完整包。设备连�
 .\gamer-launcher.exe doctor
 ```
 
-缺失依赖时使用 `gamer-launcher.exe repair --probe`。完整包中的更新与恢复说明以随包文档为准。
+缺失依赖时使用 `gamer-launcher.exe repair --probe`。已有版本随包说明的修正以对应 Release 勘误和当前更新指南为准。
 
 beta.6 支持在“设置 → 软件更新”完成下载和实际版本切换，失败时回滚；beta.4 及更早版本先用启动器完成升级。保留已有安装的 `config/` 和 `data/`，不要用新包默认配置直接覆盖。详细离线升级步骤见[更新指南](https://github.com/jesongit/gamer/blob/main/docs/guides/UPDATE.md)。
 

@@ -4,7 +4,7 @@
 > 首次真实 tag 演练 checklist。
 > 事实依据：`.github/workflows/release.yml`（发布 workflow）、`docs/guides/UPDATE_CONTRACT.md`（安装目录契约）、
 > `release/contracts/`（manifest / system-api / IPC 契约）、`launcher/` 与 `release/packaging/`（当前实现）。
-> 计划文档仅作背景，不作为“已完成”依据；最终用户以完整包内生成的 `INSTALL.md` 和 launcher CLI 为准。
+> 计划文档仅作背景，不作为“已完成”依据；最终用户按[更新指南](UPDATE.md)、对应 Release 勘误和 launcher CLI 操作，历史完整包的 `INSTALL.md` 可能早于文档修正。
 > 当前已公开 beta.6 测试版，实际产物与公开在线安装的验收范围见 [beta.6 发行记录](../evidence/BETA6_RELEASE_2026_09_24.md)；不能将其等同于全部生产环境验收。
 
 ## 1. 版本单一来源与发布链路总览
