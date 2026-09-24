@@ -64,6 +64,24 @@ function Check-Data {
 try {
     Wait-For '旧版真实服务就绪' {try {(Invoke-RestMethod "$base/health/ready" -TimeoutSec 1).ready} catch {$false}}
     $headers=@{'X-Admin-Token'=(Get-Content "$root/state/admin-token" -Raw|ConvertFrom-Json).token}
+    # beta.7's YAML package requires input 1.1. Prove beta.6 rejects it
+    # before touching the installation, then install it normally after upgrade.
+    if ($oldVersion -eq '0.2.0-beta.6' -and $targetVersion -eq '0.2.0-beta.7') {
+        $pluginComponent=$manifest.platforms.'windows-x86_64'.components | Where-Object id -EQ 'official-plugins'
+        $compatDir=Join-Path $root 'qa-compatibility'
+        Expand-Archive -LiteralPath (Join-Path $AssetDir $pluginComponent.artifact.name) -DestinationPath $compatDir
+        $incoming=Get-ChildItem -LiteralPath $compatDir -Filter 'gamer-yaml-*.gplugin' | Select-Object -First 1
+        $rejectHeaders=@{'X-Admin-Token'=$headers['X-Admin-Token'];'X-Gamer-Permission-Confirm'='1'}
+        try {
+            $null=Invoke-RestMethod -Method Post "$base/api/extensions" -Headers $rejectHeaders -InFile $incoming.FullName -ContentType application/zip
+            throw '旧本体错误接受了需要 input 1.1 的插件'
+        } catch {
+            if (-not $_.Exception.Response -or [int]$_.Exception.Response.StatusCode -ne 400 -or $_.ErrorDetails.Message -notmatch 'Host API input') { throw }
+        }
+        $before=Invoke-RestMethod "$base/api/extensions" -Headers $headers
+        if (@($before.extensions).Count -ne 0) { throw '拒绝不兼容插件后产生了安装残留' }
+        Write-Host 'PASS: beta.6 rejects input 1.1 plugin without installing it'
+    }
     Action check
     Wait-For '网页发现目标版本' { $s=Status; $s.state -eq 'available' -and $s.candidate.version -eq $targetVersion }
     Action download
