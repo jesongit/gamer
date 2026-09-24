@@ -92,6 +92,20 @@ describe('P2-UI M02/M03 插件中心回归', () => {
     vi.unstubAllGlobals()
   })
 
+  it('刷新读取插件仓新版本并显示更新，离线提示不遮住已安装列表', async () => {
+    const { wrapper } = await mountCenter([entry('demo.beta', '0.1.0-beta.2')], [installed('demo.beta', '0.1.0-beta.2')])
+    try {
+      expect(wrapper.text()).toContain('已是最新')
+      globalThis.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ schema_version: 2, plugins: [entry('demo.beta', '0.1.0-beta.10')], market_status: { source: 'cache', warning: '显示已缓存的插件列表' } }) })
+      await wrapper.findAll('button').find(button => button.text() === '刷新').trigger('click')
+      await flushPromises()
+      expect(globalThis.fetch).toHaveBeenLastCalledWith('/api/extensions/market/registry.json?refresh=true', expect.any(Object))
+      expect(wrapper.text()).toContain('更新到 0.1.0-beta.10')
+      expect(wrapper.text()).toContain('显示已缓存的插件列表')
+      expect(wrapper.findAll('.plugin-card')).toHaveLength(1)
+    } finally { wrapper.unmount() }
+  })
+
   it('用明确关系区分更新、已是最新、已安装更高版本和执行形态不兼容', () => {
     const same = installed('demo.same', '1.0.0')
     const newer = installed('demo.newer', '2.0.0')

@@ -25,6 +25,7 @@ mod host_api;
 #[path = "../../../plugins/gamer-keymap/host/mod.rs"]
 mod keymap;
 mod manifest;
+pub(crate) mod market;
 mod model;
 mod permissions;
 mod service;

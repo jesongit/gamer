@@ -21,6 +21,7 @@ mod devices;
 mod error;
 mod extensions;
 mod extensions_management;
+mod extensions_market;
 pub(crate) mod gate;
 mod logs;
 mod media;
@@ -83,6 +84,7 @@ pub struct AppState {
     pub update: Arc<crate::update::service::UpdateService>,
     /// 已安装扩展与其 Host/UI 生命周期。
     pub extensions: Arc<crate::extensions::ExtensionService>,
+    pub plugin_market: Arc<crate::extensions::market::PluginMarket>,
 }
 
 /// 测试专用兼容入口：自建 capabilities registry / ExtensionService / AppState
@@ -150,6 +152,9 @@ pub(crate) fn build_router_with_extensions(
         auth,
         update,
         extensions,
+        plugin_market: Arc::new(crate::extensions::market::PluginMarket::new(
+            cfg.web_dist_dir(),
+        )),
     };
 
     // ---- 公开豁免组：登录三端点自身实现契约语义；health/metrics 探针匿名；
@@ -181,6 +186,14 @@ pub(crate) fn build_router_with_extensions(
     //      高风险接口标注（专项测试见文件尾 tests）：shutdown、设备控制
     //      （devices::api_control）、运行分发、资源删除。
     let protected_json: Router<()> = Router::new()
+        .route(
+            "/api/extensions/market/registry.json",
+            get(extensions_market::registry),
+        )
+        .route(
+            "/api/extensions/market/:id/:version/archive",
+            get(extensions_market::archive),
+        )
         .route(
             "/api/system/settings",
             get(settings::get_settings).put(settings::save_settings),
