@@ -196,7 +196,7 @@ run:
         - template: 关闭公告.png
           as: hit
           do:
-            - tap: $hit.center
+            - tap: $hit
         - template: 登录按钮.png
           do:
             - log: 已进入登录页
@@ -207,6 +207,18 @@ run:
 `find_any` 可独立调用，参数 `templates`（模板列表或引用，1..64 项）、`threshold`（默认 0.8）
 和通用 `name`；返回匹配对象附 `index`（零基索引）和输入的 `template`，未命中为 `null`。
 无点击权限要求；模板各用自己的文件名区域。
+
+`tap` 接受相对坐标，也可直接接收匹配结果：`tap: $hit` 或
+`tap: {position: $hit}` 自动点击 `center`，不重新匹配。显式 `$hit.center`
+仍有效；匹配结果内的 `x/y` 是像素边框位置，不作为点击坐标。未命中的 `null`
+或非法中心坐标会报错且不点击，因此 `find` / `wait_find` 的结果应先用 `if` 判断。
+`tap_template` 仍接收模板名称并重新匹配，引用模板名使用 `$hit.template`。
+
+保存时校验能确定的引用类型：参数声明、字面量变量、原生函数匹配结果及模板分支局部结果。
+例如把 `$hit` 传给 `tap_template.template` 会报告 `yaml.args.ref_type` 并定位参数；
+可视化编辑与服务端保存接口均检查。未知自定义返回值、分支或循环改写后不能确定的值，
+继续由运行时校验。直接点击匹配结果及保存期引用类型校验需要包含这些改动的本体，
+从 Gamer 0.2.0-beta.7 与自动化插件 0.1.0-beta.2 起支持；beta.6 尚不支持，仅更新插件 UI 不会更新宿主能力。
 
 ## 4. 函数库文件（当前 Package 函数）
 

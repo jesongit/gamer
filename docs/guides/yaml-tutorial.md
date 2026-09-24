@@ -247,7 +247,7 @@ run:
         - template: 指南.png
           as: hit
           do:
-            - tap: $hit.center
+            - tap: $hit          # 直接点击匹配结果中心（Gamer beta.7 + 插件 beta.2；旧版使用 $hit.center）
       else:
         - log: 未识别到页面
 ```

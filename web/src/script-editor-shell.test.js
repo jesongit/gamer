@@ -32,6 +32,26 @@ const FN_YAML = `functions:
       - return: true
 `
 
+it('保存前拦截匹配结果传给模板参数，改用 tap 后保留整个结果引用', async () => {
+  const { api } = makeApi({ scriptConflict: false })
+  api.getScript.mockResolvedValue({ id: 'com.demo/main.yaml', name: 'main.yaml', package: 'com.demo', version: 'v1',
+    content: 'run:\n  - match_templates:\n      cases:\n        - template: reward.png\n          as: hit\n          do:\n            - tap_template: $hit\n',
+  })
+  const shell = useScriptEditorShell({ api, getContext: () => ({ resolveParams: name =>
+    name === 'tap' ? [{ name: 'position', type: 'point' }]
+      : name === 'tap_template' ? [{ name: 'template', type: 'template' }] : null,
+  }) })
+  await shell.loadScript('com.demo/main.yaml')
+  const failed = await shell.save({ force: true })
+  expect(failed).toMatchObject({ ok: false, reason: 'invalid' })
+  expect(failed.diagnostics[0]).toMatchObject({ code: 'yaml.args.ref_type', step_path: 'run[0].cases[0].do[0]', field: 'template' })
+  expect(api.saveScript).not.toHaveBeenCalled()
+  shell.stack.apply({ type: 'update_step', path: ['run', 0, 'cases[0].do', 0], fields: { fn: 'tap' } })
+  expect((await shell.save()).ok).toBe(true)
+  expect(serialize(shell.model)).toContain('tap: $hit')
+  expect(api.saveScript).toHaveBeenCalledTimes(1)
+})
+
 /** 可变磁盘 + 可编程保存：expected_version 不符 → 409 {code:"version_conflict"}。 */
 function makeApi({ scriptConflict = true, fnConflict = false } = {}) {
   const calls = { saveScript: [], updateFunction: [] }

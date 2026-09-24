@@ -1,11 +1,11 @@
 [
   {
-    "description": "点击相对坐标（0..1；可传 match 的 center）",
+    "description": "点击坐标或匹配结果；匹配结果自动点击中心，不重新识别",
     "name": "tap",
     "params": [
       {
         "default": null,
-        "desc": "目标点 [x, y] 或 {x, y}",
+        "desc": "坐标 [x, y] / {x, y}，或匹配结果（自动取 center）",
         "name": "position",
         "required": true,
         "type": "point"

@@ -75,6 +75,7 @@ if (-not $SkipRust) {
     # 的 runtime 测试复用同一份源码现场构建（yaml_extension.rs guest 构建链）。
     $gates.Add([pscustomobject]@{ Group = 'rust'; Name = 'guest: build gamer-yaml-guest (wasm32)'; Exe = 'cargo'; ArgList = @('build', '--locked', '--release', '--lib', '--target', 'wasm32-unknown-unknown', '--manifest-path', '../plugins/gamer-yaml/guest/Cargo.toml', '--target-dir', 'target/yaml-guest'); Dir = $serverDir })
     $gates.Add([pscustomobject]@{ Group = 'rust'; Name = 'guest: validate Component (componentize)'; Exe = 'cargo'; ArgList = @('run', '--locked', '--release', '--manifest-path', '../plugins/gamer-yaml/guest/Cargo.toml', '--bin', 'componentize', '--target-dir', 'target/yaml-guest', '--', 'target/yaml-guest/wasm32-unknown-unknown/release/gamer_yaml_guest.wasm', 'target/yaml-guest/plugin.component.wasm'); Dir = $serverDir })
+    $gates.Add([pscustomobject]@{ Group = 'rust'; Name = 'fetch pinned plugin test fixtures'; Exe = (Get-Process -Id $PID).Path; ArgList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'release/packaging/fetch-plugins.ps1', '-TestFixturesOnly'); Dir = $RepoRoot })
     $gates.Add([pscustomobject]@{ Group = 'rust'; Name = 'cargo test';               Exe = 'cargo'; ArgList = @('test');                                                Dir = $serverDir })
     $gates.Add([pscustomobject]@{ Group = 'rust'; Name = 'cargo build --release';    Exe = 'cargo'; ArgList = @('build', '--release');                                  Dir = $serverDir })
 }

@@ -108,6 +108,11 @@ jobs:
       - name: Validate gamer-yaml guest Component (componentize)
         run: cargo run --locked --release --manifest-path ../plugins/gamer-yaml/guest/Cargo.toml --bin componentize --target-dir target/yaml-guest -- target/yaml-guest/wasm32-unknown-unknown/release/gamer_yaml_guest.wasm target/yaml-guest/plugin.component.wasm
 
+      - name: Fetch pinned published plugins for market integration tests
+        working-directory: .
+        shell: pwsh
+        run: ./release/packaging/fetch-plugins.ps1 -TestFixturesOnly
+
       - name: cargo test
         run: cargo test
 
