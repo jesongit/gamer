@@ -51,3 +51,5 @@
 `0.2.0-beta.6` 起可在安装目录的 `config/config.toml` 顶层设置 `local_only = true`，或启动前临时设置 `$env:GAMER_LOCAL_ONLY = '1'`。HTTP 和 WebRTC 都仅使用回环地址，本机浏览器与 USB ADB 仍可使用；其他电脑不能访问该实例。该选项不能与 `rtc_external_ip`、`rtc_udp_port`、`rtc_external_port` 的非默认值同时使用。
 
 发行验收脚本默认临时开启此选项，启动器会将它传递给普通、升级及回滚服务。Windows 按 EXE 完整路径匹配程序规则，反复解压到新测试目录会产生新程序提示；仅本机测试无需对局域网开放监听，也无需关闭系统防火墙通知。旧版本尚不支持此开关，跨版本回归仍可能触发旧 EXE 的一次提示。
+
+ADB 的 mDNS 无线自动发现是独立的网络服务，不受 `GAMER_LOCAL_ONLY` 控制。本机/USB 验收在首次运行 ADB 前设置 `$env:ADB_MDNS = '0'`，或用仓库的 `tools/prepare-test-adb.ps1 -AdbPath <adb.exe绝对路径>` 预启动并检查；USB 和显式 IP 连接仍可用，但不自动发现无线设备。已有 ADB 服务不会因客户端环境变量变化而重新配置，应先确认没有用户会话再安全重启。beta.6 启动器尚不透传此变量，测试旧包需预启动已禁用 mDNS 的同版本 ADB；后续启动器会保留显式 `ADB_MDNS` 设置。

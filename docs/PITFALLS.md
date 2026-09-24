@@ -464,3 +464,5 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - `cargo test` 的固定 UDP mux 测试直接构造配置并监听所有网卡，不读取 `GAMER_LOCAL_ONLY`，同样会触发防火墙提示；Windows 默认忽略该项，需验证局域网绑定时显式 `--ignored` 运行，Linux CI 保留自动覆盖。
 
 - 启动器发行变更容易遗漏官网包装页和完整包 `INSTALL.md` 模板，导致文档仍使用旧命令或建议覆盖个人配置；同步检查 README、docs/site、安装/发行指南和 package-full 模板，已发布归档不改字节，以 Release 勘误说明更正。
+
+- `adb devices` 自举的守护进程会启用 mDNS，无论 Gamer 是否使用回环监听仍可能弹防火墙；本机测试首次启动 ADB 前设 `ADB_MDNS=0`，确认 `adb mdns check` 为 disabled 且无 UDP 监听，启动器最小环境需透传该变量，旧包测试预启动同版本 ADB；不要以 `ADB_MDNS_OPENSCREEN=0` 代替（那只是更换发现后端）。
