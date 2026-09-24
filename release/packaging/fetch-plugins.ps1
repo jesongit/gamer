@@ -1,13 +1,15 @@
 # 发行只消费已公开发布且固定 SHA256 的插件，不重新构建另一份字节。
 [CmdletBinding()]
-param([string]$DistDir = '', [string]$Version = '')
+param([string]$DistDir = '', [string]$Version = '', [switch]$TestFixturesOnly)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not $DistDir) { $DistDir = Join-Path $repo 'release/dist' }
 if (-not $Version) { $Version = [regex]::Match([IO.File]::ReadAllText((Join-Path $repo 'server/Cargo.toml')), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value }
 $lock = Get-Content (Join-Path $repo 'release/plugins.lock.json') -Raw | ConvertFrom-Json
 $commit = (& git -C (Join-Path $repo 'plugins') rev-parse HEAD | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $commit -ne $lock.plugin_commit) { throw '插件源码提交与发布锁不一致' }
+if ($LASTEXITCODE -ne 0 -or (-not $TestFixturesOnly -and $commit -ne $lock.plugin_commit)) { throw '插件源码提交与发布锁不一致' }
+# Tests exercise the new host against the pinned published baseline, even when
+# plugin source is under development. Release packaging keeps strict binding.
 $base = "https://github.com/jesongit/gamer-plugins/releases/download/$($lock.tag)/"
 $cache = Join-Path $repo 'release/cache/published-plugins'
 New-Item -ItemType Directory -Force -Path $cache, $DistDir | Out-Null
