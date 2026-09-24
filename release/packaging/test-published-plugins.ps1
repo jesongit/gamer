@@ -66,7 +66,7 @@ try {
     $extensions = Invoke-RestMethod "http://127.0.0.1:$port/api/extensions" -Headers $headers
     if (@($extensions.extensions).Count -ne 3) { throw '已安装插件数量不符' }
     foreach ($p in $extensions.extensions) {
-        if ($p.state -ne 'running' -or $p.active_version -ne '0.1.0-beta.1') { throw "插件未正常运行: $($p.id) $($p.state) $($p.active_version)" }
+        if ($p.state -ne 'running' -or (@($component.required_files.path) -notcontains "$($p.id)-$($p.active_version).gplugin")) { throw "插件未正常运行: $($p.id) $($p.state) $($p.active_version)" }
         $ui = Invoke-WebRequest "http://127.0.0.1:$port/api/extensions/$($p.id)/ui/plugin.js" -Headers $headers
         if ($ui.StatusCode -ne 200 -or $ui.RawContentLength -eq 0) { throw "插件 UI 不可用: $($p.id)" }
     }
