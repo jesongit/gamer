@@ -763,7 +763,7 @@ pub(crate) fn open_browser(port: u16) {
 
 /// 拉起 IPC named pipe 服务端（独立线程 + 独立 tokio runtime）。
 pub(crate) fn spawn_ipc_server(layout: InstallLayout, installation_id: String, token: String) {
-    let check_source = check_source_from_env();
+    let check_source = ManifestSource::configured();
     let store = StateStore::new(&layout.root);
     let admin_token = installation::load_or_create_admin_token(&store)
         .map_err(|e| tracing::warn!("admin-token 生成失败（{e}），IPC 回滚 drain 将为匿名请求"))
@@ -806,24 +806,6 @@ pub(crate) fn spawn_ipc_server(layout: InstallLayout, installation_id: String, t
     match spawned {
         Ok(_) => tracing::info!("IPC server 线程已启动"),
         Err(e) => tracing::error!("IPC server 线程启动失败: {e}"),
-    }
-}
-
-/// check 的候选来源（通道配置；IPC 请求不接受来源指定）。
-/// `GAMER_LAUNCHER_RELEASE_MANIFEST`：URL 或本地路径；未设置 = 无远端源
-/// （check 按 update_not_available 拒绝）。
-fn check_source_from_env() -> ManifestSource {
-    let raw = std::env::var("GAMER_LAUNCHER_RELEASE_MANIFEST")
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if raw.is_empty() {
-        return ManifestSource::None;
-    }
-    if raw.starts_with("http://") || raw.starts_with("https://") {
-        ManifestSource::Url(raw)
-    } else {
-        ManifestSource::Path(PathBuf::from(raw))
     }
 }
 

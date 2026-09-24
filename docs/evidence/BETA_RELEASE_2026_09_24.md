@@ -32,3 +32,10 @@
 - `fetch-ffmpeg.ps1` 版本/LGPL/buildconf/H.264 stdin→PNG 探针全部通过；重新构建 `0.2.0-beta.2` 本体、启动器和完整包，校验和与 doctor 通过。
 - `test-published-plugins.ps1 -RemotePlugins` 在 `backups/beta-release/beta2-verified` 重跑通过：真实公开插件下载、首次安装和重复选择、三插件 Running/UI、本体版本、正常退出全部成功。
 - beta.2 仅变更版本元数据和锁定依赖来源/字节，不改业务逻辑；beta.1 的全量回归记录继续适用，新依赖另外走上述实际安装和媒体探针。
+
+## beta.3 最终候选
+
+- 启动器启动检查、桌面后台 IPC 和 CLI 托管服务的网页“检查更新”统一使用 `ManifestSource::configured()`；缺省走同一官方 stable/beta 发现逻辑，显式测试源仍可覆盖。每次检查重新发现，避免把启动时版本 URL 永久冻结。
+- 启动器全量 202 passed，静态检查通过；新增默认官方源/空覆盖/显式 URL 与路径覆盖回归。
+- 完整包 hash、清单、doctor 通过；真实桌面后台测试在 `backups/beta-release/beta3-desktop` 通过，包含暂停续装、首次选择两款插件、损坏前端文件自动修复、校验缓存复用、显式 repair 保留用户数据、发现候选时不自动启动、故意错误版本候选的自动回滚、恢复原服务和正常退出。
+- beta.2 不公开，保留为候选记录；最终发布使用 v0.2.0-beta.3。

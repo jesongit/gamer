@@ -102,8 +102,52 @@ impl Default for UpgradeOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManifestSource {
     None,
+    /// Use the same official stable/beta discovery as desktop startup.
+    Official,
     Path(PathBuf),
     Url(String),
+}
+
+impl ManifestSource {
+    pub fn configured() -> Self {
+        Self::from_override(
+            std::env::var("GAMER_LAUNCHER_RELEASE_MANIFEST")
+                .ok()
+                .as_deref(),
+        )
+    }
+
+    fn from_override(value: Option<&str>) -> Self {
+        match value.map(str::trim).filter(|v| !v.is_empty()) {
+            None => Self::Official,
+            Some(v) if v.starts_with("https://") || v.starts_with("http://") => Self::Url(v.into()),
+            Some(v) => Self::Path(v.into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::ManifestSource;
+    #[test]
+    fn default_and_empty_source_use_official_discovery_with_explicit_overrides_preserved() {
+        assert_eq!(
+            ManifestSource::from_override(None),
+            ManifestSource::Official
+        );
+        assert_eq!(
+            ManifestSource::from_override(Some("  ")),
+            ManifestSource::Official
+        );
+        assert_eq!(
+            ManifestSource::from_override(Some("https://example.com/release.json")),
+            ManifestSource::Url("https://example.com/release.json".into())
+        );
+        assert_eq!(
+            ManifestSource::from_override(Some("test.json")),
+            ManifestSource::Path("test.json".into())
+        );
+    }
 }
 
 /// check 阶段产物（已校验候选）。
@@ -365,6 +409,11 @@ impl Engine {
             }
             ManifestSource::Path(p) => (p.clone(), false),
             ManifestSource::Url(url) => (self.fetch_remote_manifest(url)?, true),
+            ManifestSource::Official => {
+                let (path, _) = crate::distribution::discover(&self.layout)
+                    .map_err(|error| BusinessError::new(codes::UPDATE_NOT_AVAILABLE, error))?;
+                (path, false)
+            }
         };
         let opts = ValidateOptions {
             expect_current_version: Some(current.to_string()),

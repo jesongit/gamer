@@ -602,13 +602,7 @@ impl Worker {
                 ipc: Some((pipe.clone(), token.clone())),
                 ..Default::default()
             };
-            let source = std::env::var("GAMER_LAUNCHER_RELEASE_MANIFEST")
-                .unwrap_or_else(|_| dist::RELEASE_URL.into());
-            let source = if source.starts_with("http") {
-                crate::upgrade::engine::ManifestSource::Url(source)
-            } else {
-                crate::upgrade::engine::ManifestSource::Path(source.into())
-            };
+            let source = crate::upgrade::engine::ManifestSource::configured();
             let dispatcher =
                 crate::ipc::Dispatcher::new(layout.clone(), id, source, options, false);
             let engine = dispatcher.engine.clone();

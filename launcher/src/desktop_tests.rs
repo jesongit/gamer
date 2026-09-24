@@ -124,6 +124,7 @@ fn real_desktop_install_repair_restart_update_and_rollback() {
         !layout.state_dir().join("current.json").exists(),
         "fresh install required"
     );
+    let version = dist::cached(&layout, None).unwrap().1.release.version;
     let port = crate::supervisor::read_configured_port(&layout.config_file());
     assert_ne!(port, 8443, "do not test against developer data");
     assert!(
@@ -176,7 +177,10 @@ fn real_desktop_install_repair_restart_update_and_rollback() {
         .all(|p| p["state"] == "running"));
     harness.job(Job::Stop, Stage::Stopped);
 
-    let page = layout.versions_dir().join("0.2.0/web-dist/index.html");
+    let page = layout
+        .versions_dir()
+        .join(&version)
+        .join("web-dist/index.html");
     let original = fs::read(&page).unwrap();
     fs::write(&page, b"damaged frontend").unwrap();
     fs::write(
@@ -214,21 +218,22 @@ fn real_desktop_install_repair_restart_update_and_rollback() {
         b"personal data must survive"
     );
 
-    let base: serde_json::Value =
-        serde_json::from_slice(&fs::read(layout.manifests_dir().join("0.2.0.json")).unwrap())
-            .unwrap();
+    let base: serde_json::Value = serde_json::from_slice(
+        &fs::read(layout.manifests_dir().join(format!("{version}.json"))).unwrap(),
+    )
+    .unwrap();
     write_candidate(&layout, base);
     harness.job(Job::Inspect(true), Stage::Update);
     assert!(
         std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
         "cached update must block automatic startup even offline"
     );
-    // The signed candidate deliberately claims 0.2.1 while containing the real 0.2.0 server.
+    // The candidate deliberately claims 0.2.1 while containing the current beta server.
     // This must fail the candidate identity gate and restore the existing installation.
     harness.job(Job::Start, Stage::Running); // explicit "start existing version"
     harness.job(Job::Inspect(false), Stage::Update);
     harness.job(Job::Install, Stage::Error);
-    assert_eq!(dist::current(&layout).as_deref(), Some("0.2.0"));
+    assert_eq!(dist::current(&layout).as_deref(), Some(version.as_str()));
     assert_eq!(
         fs::read(layout.data_dir().join("qa-preserve.txt")).unwrap(),
         b"personal data must survive"
