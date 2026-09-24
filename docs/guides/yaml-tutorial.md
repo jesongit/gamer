@@ -247,7 +247,7 @@ run:
         - template: 指南.png
           as: hit
           do:
-            - tap: $hit.center
+            - tap: $hit          # 直接点击匹配结果中心（开发版；beta.6 使用 $hit.center）
       else:
         - log: 未识别到页面
 ```

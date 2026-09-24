@@ -15,6 +15,10 @@
 
 ## 在脚本中使用
 
+开发版 `tap` 支持直接引用匹配结果（`tap: $button`），自动点击其中心；
+已发布 beta.6 使用下面的 `$button.center` 写法。开发版也会在保存时拒绝把匹配结果
+误传给需要模板名称的参数，并提示使用 `.template` 或改为 `tap`。
+
 ```yaml
 run:
   - wait_find:

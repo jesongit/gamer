@@ -466,3 +466,5 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - 启动器发行变更容易遗漏官网包装页和完整包 `INSTALL.md` 模板，导致文档仍使用旧命令或建议覆盖个人配置；同步检查 README、docs/site、安装/发行指南和 package-full 模板，已发布归档不改字节，以 Release 勘误说明更正。
 
 - `adb devices` 自举的守护进程会启用 mDNS，无论 Gamer 是否使用回环监听仍可能弹防火墙；本机测试首次启动 ADB 前设 `ADB_MDNS=0`，确认 `adb mdns check` 为 disabled 且无 UDP 监听，启动器最小环境需透传该变量，旧包测试预启动同版本 ADB；不要以 `ADB_MDNS_OPENSCREEN=0` 代替（那只是更换发现后端）。
+
+- 模板分支 as 保存完整匹配对象，传给 tap_template.template 会到运行时才报类型错；tap 显式适配 center（优先于像素 x/y），编辑器与资源保存钩子同步检查可确定的引用类型，动态值仍由运行时验证。
