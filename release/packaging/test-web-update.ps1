@@ -34,8 +34,13 @@ $config="$root/config/config.toml"
 $configHash=(Get-FileHash -LiteralPath $config).Hash
 New-Item -ItemType Directory -Path "$root/data" -Force | Out-Null
 [IO.File]::WriteAllText("$root/data/qa-preserve.txt",'existing user content')
+$oldManifest=Get-Content "$root/manifests/$oldVersion.json" -Raw | ConvertFrom-Json
+$adbVersion=($oldManifest.platforms.'windows-x86_64'.components | Where-Object id -EQ 'adb').version
+& (Join-Path $PSScriptRoot '../../tools/prepare-test-adb.ps1') -AdbPath (Join-Path $root "runtime/adb/$adbVersion/adb.exe")
 $previousLocalOnly=$env:GAMER_LOCAL_ONLY
 $env:GAMER_LOCAL_ONLY='1'
+$previousAdbMdns=$env:ADB_MDNS
+$env:ADB_MDNS='0'
 $previousSource=$env:GAMER_LAUNCHER_RELEASE_MANIFEST
 $env:GAMER_LAUNCHER_RELEASE_MANIFEST=$sourceFile
 $proc=Start-Process -FilePath $exe -ArgumentList @('--install-root',$root,'start') -WorkingDirectory $root -WindowStyle Hidden -PassThru -RedirectStandardOutput "$root/start.log" -RedirectStandardError "$root/start.err.log"
@@ -121,6 +126,7 @@ try {
 } finally {
     $env:GAMER_LAUNCHER_RELEASE_MANIFEST=$previousSource
     $env:GAMER_LOCAL_ONLY=$previousLocalOnly
+    $env:ADB_MDNS=$previousAdbMdns
     if ($headers['X-Admin-Token']) {
         try {$null=Invoke-RestMethod -Method Post "$base/api/shutdown" -Headers $headers -TimeoutSec 95} catch {Write-Warning "隔离服务关闭失败：$_"}
     }

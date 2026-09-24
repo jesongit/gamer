@@ -125,6 +125,8 @@ cd web && pnpm dev                      # 单起前端
 
 ## 规则
 
+- 本机/USB 验收首次调用 ADB 前必须设置 `ADB_MDNS=0`，或调用 `tools/prepare-test-adb.ps1 -AdbPath <已安装 adb.exe>`；仅设置 `GAMER_LOCAL_ONLY=1` 不会关闭 ADB 的无线自动发现，仍可能触发防火墙提示。不要在测试中关闭系统防火墙、自动放行或反复裸跑新路径的 `adb devices`；已有 mDNS 服务需先确认归属再安全停止，不打断用户设备会话。
+
 - 开发/运行中踩到的坑（环境、构建、部署、已知限制）必须记入 [docs/PITFALLS.md](docs/PITFALLS.md)；
   每条保持**精简准确**：一句话现象 + 原因 + 解决/规避，不写流水账、不夸大
 - 修改yaml引擎，必须同步检查，前端校验代码，模板代码，yaml 文档

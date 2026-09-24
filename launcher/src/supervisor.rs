@@ -142,6 +142,11 @@ pub fn build_child_env_with_extras(
     if let Some(value) = non_empty(getenv("GAMER_LOCAL_ONLY")) {
         env.insert("GAMER_LOCAL_ONLY".into(), value);
     }
+    // ADB's mDNS daemon is independent of Gamer's HTTP/ICE listener settings.
+    // Preserve an explicit test/user choice, including across daemon restarts.
+    if let Some(value) = non_empty(getenv("ADB_MDNS")) {
+        env.insert("ADB_MDNS".into(), value);
+    }
     // 部署模式：默认注入 launcher 托管（server Mode::detect 认得该枚举值，
     // 使 system/info 的 deployment.mode=managed 链路成立）；用户显式设置不覆盖。
     let mode = non_empty(getenv("GAMER_DEPLOYMENT_MODE")).unwrap_or_else(|| "launcher".to_string());
@@ -245,6 +250,9 @@ pub fn spawn_trampoline(
     // Preserve the user's local-only choice across launcher self-update restart.
     if let Ok(value) = std::env::var("GAMER_LOCAL_ONLY") {
         command.env("GAMER_LOCAL_ONLY", value);
+    }
+    if let Ok(value) = std::env::var("ADB_MDNS") {
+        command.env("ADB_MDNS", value);
     }
     command.spawn()
 }
@@ -565,6 +573,23 @@ mod tests {
         });
         assert_eq!(env.get("GAMER_LOCAL_ONLY").map(String::as_str), Some("1"));
         assert!(!build_child_env_from(&plan(), |_| None).contains_key("GAMER_LOCAL_ONLY"));
+    }
+
+    #[test]
+    fn child_env_preserves_explicit_adb_discovery_choice() {
+        for activation_gate in [false, true] {
+            let extras = LaunchExtras {
+                activation_gate,
+                ..Default::default()
+            };
+            for value in ["0", "1"] {
+                let env = build_child_env_with_extras(&plan(), &extras, |key| {
+                    (key == "ADB_MDNS").then(|| value.to_owned())
+                });
+                assert_eq!(env.get("ADB_MDNS").map(String::as_str), Some(value));
+            }
+        }
+        assert!(!build_child_env_from(&plan(), |_| None).contains_key("ADB_MDNS"));
     }
 
     #[test]
