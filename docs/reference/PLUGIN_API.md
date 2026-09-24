@@ -12,6 +12,8 @@ Core 录制历史查询新增 `GET /api/recording`（需登录），返回 `{ses
 > 宿主 `HOST_API_VERSION = 1.0.0`）。教程见
 > [docs/guides/plugin-dev.md](../guides/plugin-dev.md)。
 
+Gamer 0.2.0-beta.7 的 manifest 能力目录将 `input` 域提升到 `1.1.0`，用于匹配结果中心点击和按当前设备尺寸转换相对输入。新版自动化插件声明 `host_api.input = "^1.1"`，旧宿主会拒绝安装；旧插件的 `^1.0` 仍兼容。WIT 二进制接口保持 `gamer:host@1.0.0`。`execution.host_version` 只作展示提示，不能代替能力版本门禁。
+
 ## 1. WIT world：`extension-host`
 
 ```haskell
