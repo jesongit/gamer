@@ -80,7 +80,16 @@ impl Default for HostApiCatalog {
         Self {
             versions: HostApiDomain::ALL
                 .into_iter()
-                .map(|domain| (domain, version.clone()))
+                .map(|domain| {
+                    // Input 1.1 adds match-center taps and resolves relative input
+                    // against the current device frame on every native call.
+                    let supported = if domain == HostApiDomain::Input {
+                        Version::new(1, 1, 0)
+                    } else {
+                        version.clone()
+                    };
+                    (domain, supported)
+                })
                 .collect(),
         }
     }
@@ -304,6 +313,26 @@ pub(crate) type HostApiRequirement = VersionReq;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_11_requires_updated_host_and_keeps_old_plugins_compatible() {
+        let manifest = crate::extensions::manifest::parse_manifest(
+            b"manifest_version = 2\nid = \"test.input\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\n[host_api]\ninput = \"^1.1\"\n",
+        ).unwrap();
+        let current = HostApiCatalog::default();
+        assert!(current.validate(&manifest).is_ok());
+        let mut old = current.clone();
+        old.versions
+            .insert(HostApiDomain::Input, Version::new(1, 0, 0));
+        assert!(matches!(
+            old.validate(&manifest),
+            Err(ExtensionError::UnsupportedHostApi { .. })
+        ));
+        let old_manifest = crate::extensions::manifest::parse_manifest(
+            b"manifest_version = 2\nid = \"test.input\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\n[host_api]\ninput = \"^1.0\"\n",
+        ).unwrap();
+        assert!(current.validate(&old_manifest).is_ok());
+    }
 
     /// media 域版本化暴露（Phase 5 收口回归）：catalog 九域含 media 且带版本；
     /// 权限闭集逐项校验；media 是 Core 进程级机制域——无适配器注册也必须
