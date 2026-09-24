@@ -664,6 +664,14 @@ impl Worker {
         loop {
             if let Some(child) = worker.engine.take_managed_child() {
                 worker.child = Some(child);
+                worker.state.current = dist::current(&worker.layout);
+                // A desktop update already published its failure. Adopting the
+                // restored server must retain that error until the next user action.
+                if worker.state.stage != Stage::Error {
+                    worker.state.stage = Stage::Running;
+                    worker.state.message = "Gamer 正在运行".into();
+                    worker.publish();
+                }
             }
             if worker
                 .child
@@ -671,8 +679,13 @@ impl Worker {
                 .is_some_and(|c| c.try_wait().ok().flatten().is_some())
             {
                 worker.child = None;
-                worker.state.stage = Stage::Stopped;
-                worker.state.message = "Gamer 已停止".into();
+                if worker.dispatcher.has_active_operation() {
+                    worker.state.stage = Stage::Working;
+                    worker.state.message = "正在切换版本…".into();
+                } else {
+                    worker.state.stage = Stage::Stopped;
+                    worker.state.message = "Gamer 已停止".into();
+                }
                 worker.publish();
             }
             match jobs.recv_timeout(Duration::from_millis(500)) {

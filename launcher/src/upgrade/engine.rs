@@ -855,7 +855,6 @@ impl Engine {
 
     /// §6.6 全链路：check → … → cleaning → idle。任一步失败按契约分支恢复。
     pub fn run_full(&self, source: &ManifestSource) -> UpgradeOutcome {
-        let port = read_configured_port(&self.layout.config_file());
         // 1) check
         let checked = match self.phase_check(source) {
             Ok(c) => c,
@@ -867,6 +866,30 @@ impl Engine {
         if let Err(err) = self.phase_download() {
             return UpgradeOutcome::FailedOldHealthy { error: err };
         }
+        self.install_downloaded(to, &checked.manifest)
+    }
+
+    /// Web/IPC installation consumes the exact staged candidate the user accepted;
+    /// never rediscover a newer release between download and version switching.
+    pub fn install_staged(&self) -> UpgradeOutcome {
+        if let Err(error) = self.phase_prepare_install() {
+            return UpgradeOutcome::FailedOldHealthy { error };
+        }
+        let candidate = self.load_journal().and_then(|journal| {
+            let version = journal
+                .to_version
+                .ok_or_else(|| BusinessError::new(codes::UPDATE_NOT_READY, "无已下载的候选版本"))?;
+            let manifest = self.load_cached_manifest(&version)?;
+            Ok((version, manifest))
+        });
+        match candidate {
+            Ok((version, manifest)) => self.install_downloaded(version, &manifest),
+            Err(error) => UpgradeOutcome::FailedOldHealthy { error },
+        }
+    }
+
+    fn install_downloaded(&self, to: String, manifest: &Manifest) -> UpgradeOutcome {
+        let port = read_configured_port(&self.layout.config_file());
         // 3) waiting_idle（手动 CLI 语义 = 立即安装；批次 3 无策略引擎）
         if let Err(err) = self.mutate_journal(|j| {
             j.state = UpdateState::WaitingIdle;
@@ -981,7 +1004,7 @@ impl Engine {
         }) {
             return self.fail_candidate(err, &mut child, was_running, port);
         }
-        let expected_schema = u32::try_from(checked.manifest.release.data_schema).ok();
+        let expected_schema = u32::try_from(manifest.release.data_schema).ok();
         if let Err(err) = self.wait_candidate_ready(
             port,
             old_boot_id.as_deref(),

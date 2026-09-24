@@ -71,6 +71,15 @@ pub struct Reply {
 }
 
 impl Dispatcher {
+    /// Keep the owning supervisor alive while IPC may replace its child process.
+    pub fn has_active_operation(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .active
+            .is_some()
+    }
+
     pub fn begin_desktop(self: &Arc<Self>) -> Result<DesktopOperation, String> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.active.is_some() || inner.desktop_active {
@@ -353,9 +362,8 @@ impl Dispatcher {
                 }
             }
             Operation::PrepareInstall => {
-                if let Err(e) = self.engine.phase_prepare_install() {
-                    tracing::warn!(code = %e.code, %e.message, "IPC prepare_install 失败");
-                }
+                let outcome = self.engine.install_staged();
+                tracing::info!(?outcome, "IPC 安装更新完成");
             }
             Operation::Rollback => {
                 if let Err(e) = self.engine.phase_rollback() {

@@ -235,7 +235,7 @@ impl UpdateService {
                 if code == UpdateErrorCode::UpdateNotReady {
                     return Err(UpdateError::new(
                         code,
-                        "安装条件未满足：新组件尚未完整下载/验签并就位于 staging",
+                        "安装条件未满足：新组件尚未完整下载、校验并准备就绪",
                     )
                     .with_details(json!({ "blocking": ["staging_not_ready"] })));
                 }
@@ -252,7 +252,7 @@ impl UpdateService {
             .await
             .install_blockings(policy.freeze_minutes);
         // staging 完好性：staged/waiting 才视为就位；failed 态 staging 完整性
-        // 未经验证（失败可能发生在下载/验签），保守要求重新下载
+        // 未经验证（失败可能发生在下载/完整性校验），保守要求重新下载
         if !matches!(state, UpdateState::Staged | UpdateState::Waiting) {
             blocking.push(InstallBlocking::StagingNotReady);
         }

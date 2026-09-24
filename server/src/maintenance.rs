@@ -242,8 +242,8 @@ fn schema_constants() -> serde_json::Value {
     })
 }
 
-/// 只读诊断（契约 §7）：任何情况下不写数据；DB 不存在 → missing 且不创建
-/// 数据库文件（只读打开 + 缺席预判双重保证）。
+/// 只读诊断（契约 §7）：不执行业务写入或迁移；DB 不存在 → missing 且不创建。
+/// SQLite 仍可能重建或改写 WAL/SHM，字节级封存的备份必须先复制再诊断。
 pub(crate) fn inspect(data_dir: &Path) -> serde_json::Value {
     let db_path = crate::store::db_path(data_dir);
     let missing_report = |db_exists: bool, error: Option<String>| {

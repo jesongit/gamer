@@ -100,7 +100,7 @@
 | `status` | `{}` | 查询升级状态机/journal 快照、当前/上一版本、schema、依赖健康（§4.1） | 同步 |
 | `check` | `{}` | 检查远端 release（通道来自 launcher 配置，不接受请求指定），校验 manifest | 长操作 |
 | `download` | `{}` | 下载当前候选的应用/组件包至 cache→staging 并校验 | 长操作 |
-| `prepare_install` | `{}` | 对最近下载的候选做安装前整备（复验 staging 完整性、标记可切换） | 长操作 |
+| `prepare_install` | `{}` | 接管最近已下载候选的安装：复验 staging 后优雅停机、快照、切换、验证并启动；失败自动回滚。使用已确认候选，不重新发现其他版本 | 长操作 |
 | `rollback` | `{}` | 触发 committed 之前的自动回滚（恢复 previous + 已验证快照） | 长操作 |
 | `repair_dependency` | `{ "dependency": "adb" \| "ffmpeg" }` | 依赖修复编排（inventory→seed/cache→remote→probe）；`scrcpy` 不可修（随应用版本整体更换） | 长操作 |
 

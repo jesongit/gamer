@@ -703,9 +703,8 @@ fn cmd_start(layout: &InstallLayout, cli: &Cli) -> i32 {
     println!("server 子进程已启动 (pid={})，等待就绪…", child.id());
 
     // 批次 3：named pipe IPC server（后台线程，进程退出即结束）
-    if ipc_enabled {
-        spawn_ipc_server(layout.clone(), installation_id.clone(), ipc_token);
-    }
+    let dispatcher =
+        ipc_enabled.then(|| spawn_ipc_server(layout.clone(), installation_id.clone(), ipc_token));
 
     match supervisor::wait_for_ready(port, &ReadyProbe::default()) {
         Ok(()) => {
@@ -723,8 +722,44 @@ fn cmd_start(layout: &InstallLayout, cli: &Cli) -> i32 {
         }
     }
 
-    // OPS-003：持有子进程句柄等待退出（不按端口/进程名判定）
-    match child.wait() {
+    // An IPC update deliberately stops the old child. Keep this process (and its
+    // Windows job / IPC server) alive, then adopt the committed or recovered child.
+    loop {
+        if let Some(next) = dispatcher
+            .as_ref()
+            .and_then(|d| d.engine.take_managed_child())
+        {
+            child = next;
+        }
+        let status = match child.try_wait() {
+            Ok(Some(status)) => status,
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+            Err(error) => {
+                tracing::error!(%error, "等待子进程退出失败");
+                return 1;
+            }
+        };
+        if let Some(d) = &dispatcher {
+            if d.has_active_operation() {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+            // The operation may have finished between the first take and the
+            // active check. Its child is stored before the active slot is cleared.
+            if let Some(next) = d.engine.take_managed_child() {
+                child = next;
+                continue;
+            }
+        }
+        return report_child_exit(Ok(status));
+    }
+}
+
+fn report_child_exit(result: std::io::Result<std::process::ExitStatus>) -> i32 {
+    match result {
         Ok(status) => {
             let code = status.code();
             tracing::info!(?code, "server 子进程退出");
@@ -766,7 +801,11 @@ pub(crate) fn open_browser(port: u16) {
 }
 
 /// 拉起 IPC named pipe 服务端（独立线程 + 独立 tokio runtime）。
-pub(crate) fn spawn_ipc_server(layout: InstallLayout, installation_id: String, token: String) {
+pub(crate) fn spawn_ipc_server(
+    layout: InstallLayout,
+    installation_id: String,
+    token: String,
+) -> std::sync::Arc<Dispatcher> {
     let check_source = ManifestSource::configured();
     let store = StateStore::new(&layout.root);
     let admin_token = installation::load_or_create_admin_token(&store)
@@ -778,6 +817,7 @@ pub(crate) fn spawn_ipc_server(layout: InstallLayout, installation_id: String, t
         check_source,
         UpgradeOptions {
             admin_token,
+            ipc: Some((installation::pipe_name_for(&installation_id), token.clone())),
             ..UpgradeOptions::default()
         },
         false,
@@ -787,6 +827,7 @@ pub(crate) fn spawn_ipc_server(layout: InstallLayout, installation_id: String, t
         token,
         ..IpcServerConfig::default()
     };
+    let ipc_dispatcher = dispatcher.clone();
     let spawned = std::thread::Builder::new()
         .name("launcher-ipc".to_string())
         .spawn(move || {
@@ -802,7 +843,7 @@ pub(crate) fn spawn_ipc_server(layout: InstallLayout, installation_id: String, t
                 }
             };
             rt.block_on(async move {
-                if let Err(e) = ipc::run_server(dispatcher, cfg).await {
+                if let Err(e) = ipc::run_server(ipc_dispatcher, cfg).await {
                     tracing::error!(error = %e, "IPC server 退出");
                 }
             });
@@ -811,6 +852,7 @@ pub(crate) fn spawn_ipc_server(layout: InstallLayout, installation_id: String, t
         Ok(_) => tracing::info!("IPC server 线程已启动"),
         Err(e) => tracing::error!("IPC server 线程启动失败: {e}"),
     }
+    dispatcher
 }
 
 /// upgrade（LCH-010/011/012）：§6.6 全链路编排 + 启动恢复 + 自动回滚。
