@@ -5,7 +5,6 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -209,7 +208,10 @@ struct TemplateCache {
 const TEMPLATE_CACHE_CAPACITY: usize = 128;
 const TEMPLATE_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 static TEMPLATE_CACHE: OnceLock<Mutex<TemplateCache>> = OnceLock::new();
-static MATCHER_STATS: AtomicPtr<MatcherStats> = AtomicPtr::new(std::ptr::null_mut());
+#[cfg(test)]
+thread_local! {
+    static TEST_MATCHER_STATS: std::cell::Cell<Option<MatcherStats>> = const { std::cell::Cell::new(None) };
+}
 
 fn default_matcher_stats() -> &'static MatcherStats {
     static DEFAULT: MatcherStats = MatcherStats {
@@ -219,21 +221,21 @@ fn default_matcher_stats() -> &'static MatcherStats {
     &DEFAULT
 }
 
-fn matcher_stats() -> &'static MatcherStats {
-    let ptr = MATCHER_STATS.load(Ordering::Relaxed);
-    if ptr.is_null() {
-        default_matcher_stats()
-    } else {
-        unsafe { &*ptr }
+fn matcher_stats() -> MatcherStats {
+    #[cfg(test)]
+    if let Some(stats) = TEST_MATCHER_STATS.with(|slot| slot.get()) {
+        return stats;
     }
+    *default_matcher_stats()
 }
 
 #[cfg(test)]
 fn install_matcher_stats(stats: MatcherStats) -> MatcherStatsGuard {
-    let boxed = Box::new(stats);
-    let raw = Box::into_raw(boxed);
-    let prev = MATCHER_STATS.swap(raw, Ordering::AcqRel);
-    MatcherStatsGuard { prev, current: raw }
+    let prev = TEST_MATCHER_STATS.with(|slot| slot.replace(Some(stats)));
+    MatcherStatsGuard {
+        prev,
+        _thread_bound: std::marker::PhantomData,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -262,17 +264,14 @@ impl MatcherStats {
 
 #[cfg(test)]
 struct MatcherStatsGuard {
-    prev: *mut MatcherStats,
-    current: *mut MatcherStats,
+    prev: Option<MatcherStats>,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 #[cfg(test)]
 impl Drop for MatcherStatsGuard {
     fn drop(&mut self) {
-        MATCHER_STATS.store(self.prev, Ordering::Release);
-        unsafe {
-            drop(Box::from_raw(self.current));
-        }
+        TEST_MATCHER_STATS.with(|slot| slot.set(self.prev));
     }
 }
 
@@ -956,6 +955,38 @@ mod tests {
     static TEST_REGIONS: AtomicU64 = AtomicU64::new(0);
     static TEST_FULLSCREEN: AtomicU64 = AtomicU64::new(0);
     static TEST_DURATION_MS: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn stats_hooks_are_thread_local_and_restore_nested_scopes() {
+        static OUTER: AtomicU64 = AtomicU64::new(0);
+        static INNER: AtomicU64 = AtomicU64::new(0);
+        fn outer(_: u64, _: bool, _: bool) {
+            OUTER.fetch_add(1, Ordering::Relaxed);
+        }
+        fn inner(_: u64, _: bool, _: bool) {
+            INNER.fetch_add(1, Ordering::Relaxed);
+        }
+        let _guard = install_matcher_stats(test_matcher_stats(Instant::now, outer));
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _guard = install_matcher_stats(test_matcher_stats(Instant::now, inner));
+                barrier.wait();
+                matcher_stats().record_ncc(1, false, false);
+                barrier.wait();
+            });
+            barrier.wait();
+            matcher_stats().record_ncc(1, true, false);
+            barrier.wait();
+        });
+        {
+            let _nested = install_matcher_stats(test_matcher_stats(Instant::now, inner));
+            matcher_stats().record_ncc(1, false, true);
+        }
+        matcher_stats().record_ncc(1, true, true);
+        assert_eq!(OUTER.load(Ordering::Relaxed), 2);
+        assert_eq!(INNER.load(Ordering::Relaxed), 2);
+    }
 
     fn percentile(samples: &[u128], p: f64) -> u128 {
         let mut sorted = samples.to_vec();
@@ -1678,21 +1709,18 @@ mod tests {
         };
         assert!(match_template(&region_req).unwrap().is_some());
 
-        // 命中/全屏只断言下界：无锁并发的计算池测试会额外产生全屏命中，
-        // 精确断言与本测试的窗口存在竞态（偶发 3≠2，2026-08-30 实证）；
-        // 未命中/区域无并发写入者，精确断言保证分类口径不串。
-        assert!(TEST_HITS.load(Ordering::Relaxed) >= 2);
+        // 线程局部钩子只收集本测试的三次匹配，精确验证分类。
+        assert_eq!(TEST_HITS.load(Ordering::Relaxed), 2);
         assert_eq!(TEST_MISSES.load(Ordering::Relaxed), 1);
         assert_eq!(TEST_REGIONS.load(Ordering::Relaxed), 1);
-        assert!(TEST_FULLSCREEN.load(Ordering::Relaxed) >= 2);
+        assert_eq!(TEST_FULLSCREEN.load(Ordering::Relaxed), 2);
         assert!(TEST_DURATION_MS.load(Ordering::Relaxed) > 0);
     }
 
     /// 生产接线（OBS）：不安装测试钩子时，默认统计必须把 NCC 观测写入进程级
     /// 共享 metrics（GET /metrics 的数据源），且命中/未命中与区域/全屏分类
-    /// 口径正确。持 TEST_GUARD 排除本模块其余真实匹配测试；唯一无锁的并发
-    /// 写入者是计算池测试（只产生全屏命中），故未命中与区域分类的增量可
-    /// 精确断言，命中/全屏只断言下界。
+    /// 口径正确。进程级统计也接收 API/计算池等并行测试的匹配，只断言增量下界；
+    /// 分类精确值由上面的隔离钩子测试与 metrics 模块的独立实例测试保证。
     #[test]
     fn production_matches_record_into_global_metrics() {
         let _lock = TEST_GUARD.lock().unwrap();
@@ -1764,15 +1792,13 @@ mod tests {
             delta(after.ncc_hits_total, before.ncc_hits_total) >= 2,
             "两次命中应计入 ncc_hits_total"
         );
-        assert_eq!(
-            delta(after.ncc_misses_total, before.ncc_misses_total),
-            1,
-            "未命中增量应恰为 1（真实匹配测试均持 TEST_GUARD，无锁并发只可能产生命中）"
+        assert!(
+            delta(after.ncc_misses_total, before.ncc_misses_total) >= 1,
+            "本测试的未命中应计入 ncc_misses_total"
         );
-        assert_eq!(
-            delta(after.ncc_region_total, before.ncc_region_total),
-            1,
-            "区域分类增量应恰为 1（其余真实匹配均为全屏）"
+        assert!(
+            delta(after.ncc_region_total, before.ncc_region_total) >= 1,
+            "本测试的区域匹配应计入 ncc_region_total"
         );
         assert!(
             delta(after.ncc_fullscreen_total, before.ncc_fullscreen_total) >= 2,
