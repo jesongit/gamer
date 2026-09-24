@@ -39,8 +39,12 @@ if ($FreshConfig) {
 } else {
     [IO.File]::WriteAllText($config, ([IO.File]::ReadAllText($config) -replace '(?m)^port = 8443', "port = $port"), [Text.UTF8Encoding]::new($false))
 }
+$adbVersion = ($manifest.platforms.'windows-x86_64'.components | Where-Object id -EQ 'adb').version
+& (Join-Path $repo 'tools/prepare-test-adb.ps1') -AdbPath (Join-Path $root "runtime/adb/$adbVersion/adb.exe")
 $oldLocalOnly = $env:GAMER_LOCAL_ONLY
 $env:GAMER_LOCAL_ONLY = '1'
+$oldAdbMdns = $env:ADB_MDNS
+$env:ADB_MDNS = '0'
 $proc = Start-Process -FilePath $exe -ArgumentList @('--install-root', $root, 'start') -WorkingDirectory $root -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $root 'start.log') -RedirectStandardError (Join-Path $root 'start.err.log')
 $oldTestRoot = $env:GAMER_TEST_INSTALL_ROOT
 try {
@@ -72,6 +76,7 @@ try {
 } finally {
     $env:GAMER_TEST_INSTALL_ROOT = $oldTestRoot
     $env:GAMER_LOCAL_ONLY = $oldLocalOnly
+    $env:ADB_MDNS = $oldAdbMdns
     $tokenPath = Join-Path $root 'state/admin-token'
     if ($ready -and (Test-Path -LiteralPath $tokenPath)) {
         $token = (Get-Content -LiteralPath $tokenPath -Raw | ConvertFrom-Json).token
