@@ -28,7 +28,7 @@ push tag v*
   → upload-assets        同名资产 hash 门禁，生成 SHA256SUMS
   → artifact-verify      从 Release 重新下载全量资产核验
   → smoke（win）         environment: release 人工批准后运行安装探针
-  → publish              draft → 正式；纯 semver 才标 latest
+  → publish              draft → 公开；带后缀标 Pre-release，纯 semver 才标 latest
 ```
 
 ## 2. Draft 发布流程
@@ -223,3 +223,11 @@ HTTPS 请求禁止重定向降级到 HTTP。已有安装里的旧签名文件不
 - manifest/API/IPC/schema/许可契约与 fixtures：`release/contracts/`
 - 完整包用户入口：打包生成的 `INSTALL.md`；launcher 参数以 `launcher/src/cli.rs` 为准
 - 踩坑记录：`docs/PITFALLS.md`
+
+## 插件先行发布与 beta 验收
+
+1. 插件仓推送 `gamer-<id>-v<version>` 标签，独立构建和固定宿主测试通过后创建草稿。公开测试版本用 `0.x.y-beta.n` 并标记 Pre-release。
+2. 核对插件包、registry、合集 ZIP 与 SHA256 后公开插件 Release。主仓 `release/plugins.lock.json` 锁定该发布的提交、URL、大小、SHA256。
+3. `fetch-plugins.ps1` 校验 gitlink/来源提交和下载字节，将发布包作为本地市场与离线包种子；主发行清单的官方插件 URL 指向插件仓 Release。
+4. 本地安装、启动和首次插件选择验收通过，再提交并推送主仓版本标签。主仓流水线复用相同插件发布字节。
+5. beta 启动器通过 GitHub 发布列表按 SemVer 选择有清单的已公开版本，跳过草稿；稳定启动器仍用 latest。插件市场目前是固定发行快照，不自动切换到插件最新 Release。

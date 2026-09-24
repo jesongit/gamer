@@ -15,17 +15,6 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'launcher/target/release/gamer-launc
 $launcherZip = Join-Path $DistDir "gamer-launcher-$launcherVersion-windows-x64.zip"
 Compress-Archive -LiteralPath (Join-Path $DistDir 'gamer-launcher.exe') -DestinationPath $launcherZip -Force
 
-$registryPath = Join-Path $repoRoot 'web/public/registry.json'
-$registry = [IO.File]::ReadAllText($registryPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
-$files = @()
-foreach ($plugin in $registry.plugins) {
-    if ($plugin.id -notin @('gamer-yaml', 'gamer-keymap', 'gamer-video')) { continue }
-    $name = "$($plugin.id)-$($plugin.version).gplugin"
-    if ($name -match '[\\/]') { throw '插件安装包名称非法' }
-    $path = Join-Path $repoRoot "web/public/plugins/$name"
-    if ((Get-Item -LiteralPath $path).Length -ne $plugin.size -or (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $plugin.sha256) { throw "插件安装包与注册表不一致: $name" }
-    $files += $path
-}
-if ($files.Count -ne 3) { throw '官方插件安装包必须包含自动化、键盘映射、视频三个插件' }
-Compress-Archive -LiteralPath $files -DestinationPath (Join-Path $DistDir "gamer-official-plugins-$Version-windows-x64.zip") -Force
+# 直接复用插件仓库发布的字节，主发行资产与离线 seed 是同一份已校验副本。
+& (Join-Path $PSScriptRoot 'fetch-plugins.ps1') -DistDir $DistDir -Version $Version
 Write-Host '[package-launcher] 启动器、官方插件种子打包完成'

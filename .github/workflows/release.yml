@@ -197,12 +197,12 @@ jobs:
         shell: pwsh
         run: ./release/packaging/fetch-ffmpeg.ps1
 
-      - name: Build pinned official plugins and verify SDK
+      - name: Fetch pinned published plugins and verify SDK
         shell: pwsh
         run: |
           node tools/check-plugin-sdk.mjs
           if ($LASTEXITCODE -ne 0) { throw "Plugin SDK mismatch" }
-          ./tools/build-plugins.ps1 -KeepStaleArtifacts
+          ./release/packaging/fetch-plugins.ps1
 
       # package-app 自带构建信息注入（GAMER_GIT_COMMIT/BUILD_TIME/CHANNEL/BUILD_TARGET，
       # 取自 git HEAD + rustc host triple），并复核 zip 布局与逐文件 sha256
@@ -561,6 +561,7 @@ jobs:
           if [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             extra+=(--latest)
           else
+            extra+=(--prerelease --latest=false)
             echo "预发布版本（$v），不标记 latest"
           fi
           gh release edit "$TAG" --repo "$GH_REPO" --draft=false "${extra[@]}"

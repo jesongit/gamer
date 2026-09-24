@@ -444,3 +444,5 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - Windows 的 ADB daemon 会继承启动目录；即使 Gamer 已退出，旧 daemon 仍可能占用 `versions/<版本>` 导致修复 rename 报 os error 32。本次验收核对 EXE 属于目标安装、确认无 Gamer 运行后重启该 ADB，并从稳定安装根启动，修复即通过；不能按进程名批量终止其他安装。
 
 - Matcher 的模块测试锁无法隔离其他模块对进程级 metrics 的写入，精确增量断言会偶发失败并毒化锁；测试钩子改为线程局部且复制函数表，全局统计只验证增量下界，分类精确值在隔离钩子和独立 Metrics 实例中验证。
+
+- GitHub 的 latest 不返回 Pre-release，beta 启动器必须从公开发布列表按 SemVer 选择带发行清单的版本，且发布 workflow 要显式设置 prerelease，不能只省略 latest。

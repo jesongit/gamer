@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "tag": "gamer-yaml-v0.1.0-beta.1",
+  "plugin_commit": "5c88d10f6f0c4358a551b7eb2b4a71c0daf8d9ed",
+  "registry": {
+    "name": "registry.json",
+    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-yaml-v0.1.0-beta.1/registry.json",
+    "size": 4855,
+    "sha256": "a893821906bc1494b26bcd0c966485f848b25a99648b43560bf12ea8f167a9cf"
+  },
+  "bundle": {
+    "name": "gamer-official-plugins-0.1.0-beta.1-windows-x64.zip",
+    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-yaml-v0.1.0-beta.1/gamer-official-plugins-0.1.0-beta.1-windows-x64.zip",
+    "size": 644977,
+    "sha256": "6490e380d7b69f57fb45370edbae99a2ed09e1b7a1846130764c01189ec12415"
+  }
+}

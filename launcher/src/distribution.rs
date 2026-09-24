@@ -73,6 +73,7 @@ fn fetch(url: &str, deadline: Instant, limit: u64) -> Result<Vec<u8>, String> {
     };
     let response = crate::fetch::build_agent(url, &opts)
         .get(url)
+        .set("User-Agent", "Gamer-Launcher")
         .call()
         .map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
@@ -87,8 +88,18 @@ fn fetch(url: &str, deadline: Instant, limit: u64) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 pub fn discover(layout: &InstallLayout) -> Result<(PathBuf, Manifest), String> {
-    let source =
-        std::env::var("GAMER_LAUNCHER_RELEASE_MANIFEST").unwrap_or_else(|_| RELEASE_URL.into());
+    let source = match std::env::var("GAMER_LAUNCHER_RELEASE_MANIFEST") {
+        Ok(source) => source,
+        Err(_) if env!("CARGO_PKG_VERSION").contains('-') => {
+            let bytes = fetch(
+                "https://api.github.com/repos/jesongit/gamer/releases?per_page=100",
+                Instant::now() + Duration::from_secs(10),
+                3 * 1024 * 1024,
+            )?;
+            select_beta_manifest(&bytes)?
+        }
+        Err(_) => RELEASE_URL.into(),
+    };
     if !source.starts_with("https://") && !source.starts_with("http://") {
         let path = PathBuf::from(source);
         let model = read(layout, &path)?;
@@ -97,6 +108,31 @@ pub fn discover(layout: &InstallLayout) -> Result<(PathBuf, Manifest), String> {
     let path = download_manifest(layout, &source, Duration::from_secs(3))?;
     let model = read(layout, &path)?;
     cache(layout, &path, model)
+}
+
+// GitHub latest excludes prereleases. Beta launchers choose the greatest SemVer
+// with a published manifest; stable launchers keep using the stable endpoint.
+fn select_beta_manifest(bytes: &[u8]) -> Result<String, String> {
+    let releases: Vec<serde_json::Value> =
+        serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    releases
+        .iter()
+        .filter(|r| r["draft"].as_bool() == Some(false))
+        .filter_map(|r| {
+            let tag = r["tag_name"].as_str()?;
+            let version = tag.strip_prefix('v')?;
+            crate::manifest::semver::parse(version)?;
+            let expected = format!(
+                "https://github.com/jesongit/gamer/releases/download/{tag}/gamer-release.json"
+            );
+            r["assets"].as_array()?.iter().find(|a| {
+                a["name"] == "gamer-release.json" && a["browser_download_url"] == expected
+            })?;
+            Some((version, expected))
+        })
+        .max_by(|(a, _), (b, _)| compare_versions(a, b))
+        .map(|(_, url)| url)
+        .ok_or_else(|| "尚无可用的 Gamer 测试版发行清单".into())
 }
 pub(crate) fn download_manifest(
     layout: &InstallLayout,
@@ -192,6 +228,42 @@ pub fn plan(
 #[cfg(test)]
 mod url_tests {
     use super::validate_manifest_url;
+
+    #[test]
+    fn beta_discovery_uses_semver_and_ignores_drafts_and_missing_assets() {
+        let release = |v: &str, draft: bool| {
+            serde_json::json!({
+                "tag_name": format!("v{v}"), "draft": draft,
+                "assets": [{ "name": "gamer-release.json", "browser_download_url":
+                    format!("https://github.com/jesongit/gamer/releases/download/v{v}/gamer-release.json") }]
+            })
+        };
+        let mut releases = vec![
+            release("0.2.0-beta.2", false),
+            release("0.2.0-beta.10", false),
+            release("0.2.0", true),
+            release("0.1.1", false),
+        ];
+        assert!(
+            super::select_beta_manifest(&serde_json::to_vec(&releases).unwrap())
+                .unwrap()
+                .contains("v0.2.0-beta.10/")
+        );
+        releases.push(release("0.2.0", false));
+        assert!(
+            super::select_beta_manifest(&serde_json::to_vec(&releases).unwrap())
+                .unwrap()
+                .contains("v0.2.0/")
+        );
+        releases[4]["assets"][0]["browser_download_url"] =
+            serde_json::json!("https://example.com/fake.json");
+        assert!(
+            super::select_beta_manifest(&serde_json::to_vec(&releases).unwrap())
+                .unwrap()
+                .contains("v0.2.0-beta.10/")
+        );
+        assert!(super::select_beta_manifest(b"[]").is_err());
+    }
 
     #[test]
     fn remote_manifest_requires_https_but_local_test_server_is_allowed() {

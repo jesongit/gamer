@@ -101,7 +101,7 @@ pub fn install(
                     .or_else(|| value.get("extensions").and_then(|v| v.as_array()));
                 if !list.is_some_and(|list| {
                     list.iter()
-                        .any(|p| p["id"] == choice.id && p["version"] == choice.version)
+                        .any(|p| p["id"] == choice.id && p["active_version"] == choice.version)
                 }) {
                     return Err(format!("{} 已有不同版本，请在插件页处理", choice.name));
                 }

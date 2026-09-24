@@ -14,7 +14,7 @@ param(
     # 发布说明 URL（https）
     [string]$ReleaseNotesUrl = '',
     # 最低 launcher / 升级起点版本（批次基线 0.1.0）
-    [string]$MinLauncherVersion = '0.2.0',
+    [string]$MinLauncherVersion = '0.2.0-beta.1',
     [string]$MinUpgradeVersion = '0.1.0'
 )
 
@@ -120,7 +120,13 @@ function New-ZipComponent {
             finally { $stream.Dispose(); $sha.Dispose() }
             $files += [ordered]@{path=$entry.FullName;size=[long]$entry.Length;sha256=$hash}
         }
-        return [ordered]@{id=$Id;version=$ComponentVersion;artifact=(New-Artifact -Name $name -Url "$DownloadBaseUrl/$name");required_files=$files}
+        $url = "$DownloadBaseUrl/$name"
+        if ($Id -eq 'official-plugins') {
+            $source = Get-Content (Join-Path $repoRoot 'release/plugins.lock.json') -Raw | ConvertFrom-Json
+            $url = $source.bundle.url
+            if ((Get-Sha256Path (Join-Path $DistDir $name)) -ne $source.bundle.sha256) { Exit-Fail '插件合集与已发布锁不一致' }
+        }
+        return [ordered]@{id=$Id;version=$ComponentVersion;artifact=(New-Artifact -Name $name -Url $url);required_files=$files}
     } finally { $zip.Dispose() }
 }
 
