@@ -668,6 +668,10 @@ fn cmd_start(layout: &InstallLayout, cli: &Cli) -> i32 {
             return 1;
         }
     };
+    if let Err(error) = crate::bootstrap::ensure_config(layout) {
+        eprintln!("创建首次启动配置失败: {error}");
+        return 1;
+    }
     let plan = match crate::distribution::plan(layout, &bundle.model) {
         Ok(plan) => plan,
         Err(e) => {

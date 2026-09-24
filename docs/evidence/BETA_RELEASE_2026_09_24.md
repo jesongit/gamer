@@ -39,3 +39,11 @@
 - 启动器全量 202 passed，静态检查通过；新增默认官方源/空覆盖/显式 URL 与路径覆盖回归。
 - 完整包 hash、清单、doctor 通过；真实桌面后台测试在 `backups/beta-release/beta3-desktop` 通过，包含暂停续装、首次选择两款插件、损坏前端文件自动修复、校验缓存复用、显式 repair 保留用户数据、发现候选时不自动启动、故意错误版本候选的自动回滚、恢复原服务和正常退出。
 - beta.2 不公开，保留为候选记录；最终发布使用 v0.2.0-beta.3。
+
+## beta.4 首次安装修订
+
+- beta.3 的 Windows CI 构建和完整包真实验收通过并公开后，追加纯在线空目录验收发现首装只生成 `port`，服务端因缺少 `data_dir` 等必填配置退出；已在 beta.3 Release 显著标明限制，不替换其已发布资产。
+- `release/config.default.toml` 成为完整包与启动器的共同模板；桌面与 CLI 仅在配置不存在时生成，保留已有用户设置。服务端测试直接反序列化该模板，锁定真实必填字段契约。
+- 启动器全量 203 passed，6 ignored；服务端配置 18 项通过，launcher Clippy all-targets / deny warnings、版本一致性及插件 SDK 快照检查通过。
+- `test-published-plugins.ps1 -RemotePlugins -FreshConfig` 使用实际 beta.4 EXE，在隔离目录移出完整包配置和插件种子，验证首次配置生成、实际本体就绪、公开插件下载、三插件首次/重复安装、Running 与 UI 资源及认证退出。
+- 真实桌面后台验收同样移出配置，从无配置状态开始：暂停续装、首装启动和插件选择、损坏修复、缓存复用、用户数据保留、失败候选回滚与退出全部通过（87.69s）。

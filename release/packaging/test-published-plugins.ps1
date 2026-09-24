@@ -1,6 +1,6 @@
 # 真实发行包验收：默认离线；-RemotePlugins 强制启动器从插件 Release 下载。
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$ZipPath, [Parameter(Mandatory)][string]$InstallRoot, [switch]$RemotePlugins)
+param([Parameter(Mandatory)][string]$ZipPath, [Parameter(Mandatory)][string]$InstallRoot, [switch]$RemotePlugins, [switch]$FreshConfig)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $root = [IO.Path]::GetFullPath($InstallRoot)
@@ -28,12 +28,17 @@ if ($RemotePlugins) {
     if ((Get-FileHash -LiteralPath $downloaded -Algorithm SHA256).Hash.ToLowerInvariant() -ne $component.artifact.sha256) { throw '远程插件下载未进入校验缓存' }
     Write-Host 'PASS: plugin bundle downloaded from published GitHub Release'
 }
-$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+$probePort = if ($FreshConfig) { 8443 } else { 0 }
+$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $probePort)
 $listener.Start()
 $port = $listener.LocalEndpoint.Port
 $listener.Stop()
 $config = Join-Path $root 'config/config.toml'
-[IO.File]::WriteAllText($config, ([IO.File]::ReadAllText($config) -replace '(?m)^port = 8443', "port = $port"), [Text.UTF8Encoding]::new($false))
+if ($FreshConfig) {
+    Move-Item -LiteralPath $config -Destination (Join-Path $root 'excluded-full-config.toml')
+} else {
+    [IO.File]::WriteAllText($config, ([IO.File]::ReadAllText($config) -replace '(?m)^port = 8443', "port = $port"), [Text.UTF8Encoding]::new($false))
+}
 $proc = Start-Process -FilePath $exe -ArgumentList @('--install-root', $root, 'start') -WorkingDirectory $root -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $root 'start.log') -RedirectStandardError (Join-Path $root 'start.err.log')
 $oldTestRoot = $env:GAMER_TEST_INSTALL_ROOT
 try {
@@ -43,6 +48,10 @@ try {
         Start-Sleep -Milliseconds 500
     }
     if (-not $ready) { throw '真实服务未就绪' }
+    if ($FreshConfig) {
+        if (-not (Test-Path -LiteralPath $config)) { throw '启动器未生成首装配置' }
+        Write-Host 'PASS: launcher generated complete first-run config and actual server became ready'
+    }
     $token = (Get-Content -LiteralPath (Join-Path $root 'state/admin-token') -Raw | ConvertFrom-Json).token
     $headers = @{'X-Admin-Token'=$token}
     $env:GAMER_TEST_INSTALL_ROOT = $root
@@ -61,7 +70,7 @@ try {
 } finally {
     $env:GAMER_TEST_INSTALL_ROOT = $oldTestRoot
     $tokenPath = Join-Path $root 'state/admin-token'
-    if (Test-Path -LiteralPath $tokenPath) {
+    if ($ready -and (Test-Path -LiteralPath $tokenPath)) {
         $token = (Get-Content -LiteralPath $tokenPath -Raw | ConvertFrom-Json).token
         $null = Invoke-RestMethod -Method Post "http://127.0.0.1:$port/api/shutdown" -Headers @{'X-Admin-Token'=$token} -TimeoutSec 95
     }

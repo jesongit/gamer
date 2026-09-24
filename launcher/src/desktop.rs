@@ -974,10 +974,7 @@ impl Worker {
             return self.first_plugins(&model);
         }
         self.repair_model(&model, false)?;
-        fs::create_dir_all(self.layout.root.join("config")).map_err(|e| e.to_string())?;
-        if !self.layout.config_file().exists() {
-            fs::write(self.layout.config_file(), "port = 8443\n").map_err(|e| e.to_string())?;
-        }
+        crate::bootstrap::ensure_config(&self.layout).map_err(|e| e.to_string())?;
         fs::create_dir_all(self.layout.data_dir()).map_err(|e| e.to_string())?;
         let plan = dist::plan(&self.layout, &model)?;
         let port = crate::supervisor::read_configured_port(&plan.config_path);

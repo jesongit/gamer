@@ -752,6 +752,15 @@ fn probe_tool(name: &'static str, path: &str, args: &[&str]) -> ToolProbe {
 mod tests {
     use super::*;
 
+    #[test]
+    fn launcher_bootstrap_and_full_package_template_contains_all_required_server_fields() {
+        let config: Config =
+            toml::from_str(include_str!("../../release/config.default.toml")).unwrap();
+        assert_eq!(config.port, 8443);
+        assert!(config.auth.password_hash.is_empty());
+        assert!(config.decode_frames);
+    }
+
     /// 最小合法 TOML（必填键齐全）
     fn write_minimal_config(dir: &Path, name: &str) -> PathBuf {
         let path = dir.join(name);

@@ -14,6 +14,7 @@
 
 pub mod app_inventory;
 pub mod archive;
+pub mod bootstrap;
 pub mod cli;
 pub mod commands;
 pub mod desktop;

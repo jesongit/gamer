@@ -126,7 +126,15 @@ fn real_desktop_install_repair_restart_update_and_rollback() {
     );
     let version = dist::cached(&layout, None).unwrap().1.release.version;
     let port = crate::supervisor::read_configured_port(&layout.config_file());
-    assert_ne!(port, 8443, "do not test against developer data");
+    if layout.config_file().exists() {
+        assert_ne!(port, 8443, "do not test against developer data");
+    } else {
+        // Exercise the actual desktop first-run bootstrap, without a full-package
+        // config hiding missing required fields. Refuse an occupied default port.
+        let probe = std::net::TcpListener::bind(("127.0.0.1", port))
+            .expect("standalone first-run port must be free");
+        drop(probe);
+    }
     assert!(
         std::env::var("GAMER_LAUNCHER_RELEASE_MANIFEST").is_ok(),
         "explicit offline discovery source required"
