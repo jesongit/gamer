@@ -297,6 +297,7 @@ async function inspectAndConfirm(file, source, current, providedInspection = nul
     sections: [
       { title: '请求权限', text: requestedPermissions.length ? requestedPermissions.join('、') : '无' },
       ...(requestedPermissions.includes('ui.host') ? [{ title: '宿主界面权限', text: '此插件的界面与 Gamer 页面在同一环境运行，可访问当前会话和工作区。仅安装你信任的插件；更新界面后需刷新页面生效。', tone: 'warn' }] : []),
+      ...(requestedPermissions.includes('package.publish') ? [{ title: '配置发布权限', text: '此插件可导出你选择的配置，并使用运行 Gamer 的电脑上的 gh 登录向 GitHub 仓库上传和公开 Release。请核对发布账号和目标仓库。', tone: 'warn' }] : []),
       ...(current ? [{ title: '权限变化', text: formatPermissionDiff(summary.diff), tone: summary.diff.added.length ? 'warn' : '' }] : []),
       ...(executionChangeLine ? [{ title: '执行方式变化', text: executionChangeLine, tone: 'warn' }] : []),
     ],

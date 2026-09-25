@@ -54,3 +54,13 @@ it('等待确认时卸载插件页取消请求，不在后台继续更新', asyn
   expect(client.updateExtension).not.toHaveBeenCalled()
   expect(document.querySelector('.confirmation-dialog')).toBeNull()
 })
+it('发布权限明确说明将使用本机 gh 上传和公开配置', async () => {
+  const client = await setup()
+  client.inspectExtension.mockResolvedValueOnce({ ...entry, permissions: ['resource.read', 'package.publish'] })
+  await openUpdate()
+  const text = document.querySelector('.confirmation-dialog').textContent
+  expect(text).toContain('配置发布权限')
+  expect(text).toContain('gh 登录')
+  expect(text).toContain('公开 Release')
+  expect(client.updateExtension).not.toHaveBeenCalled()
+})
