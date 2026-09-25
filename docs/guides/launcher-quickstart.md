@@ -50,6 +50,11 @@
 
 `0.2.0-beta.6` 起可在安装目录的 `config/config.toml` 顶层设置 `local_only = true`，或启动前临时设置 `$env:GAMER_LOCAL_ONLY = '1'`。HTTP 和 WebRTC 都仅使用回环地址，本机浏览器与 USB ADB 仍可使用；其他电脑不能访问该实例。该选项不能与 `rtc_external_ip`、`rtc_udp_port`、`rtc_external_port` 的非默认值同时使用。
 
+需要其他电脑通过局域网访问时，保持 `local_only = false`。Windows 可能为 `gamer-server.exe`
+显示网络访问许可提示；在可信的家庭或办公网络上，可仅允许“专用网络”，不要为了消除提示关闭防火墙。
+Gamer 不会自动添加放行规则。当前服务端位于 `versions/<版本>/gamer-server.exe`，升级后程序路径
+变化可能再次触发询问，现阶段不保证跨版本只询问一次。参见 [Microsoft 的防火墙说明](https://support.microsoft.com/en-us/windows/security/windows-security/firewall-and-network-protection-in-the-windows-security-app)。
+
 发行验收脚本默认临时开启此选项，启动器会将它传递给普通、升级及回滚服务。Windows 按 EXE 完整路径匹配程序规则，反复解压到新测试目录会产生新程序提示；仅本机测试无需对局域网开放监听，也无需关闭系统防火墙通知。旧版本尚不支持此开关，跨版本回归仍可能触发旧 EXE 的一次提示。
 
 ADB 的 mDNS 无线自动发现是独立的网络服务，不受 `GAMER_LOCAL_ONLY` 控制。本机/USB 验收在首次运行 ADB 前设置 `$env:ADB_MDNS = '0'`，或用仓库的 `tools/prepare-test-adb.ps1 -AdbPath <adb.exe绝对路径>` 预启动并检查；USB 和显式 IP 连接仍可用，但不自动发现无线设备。已有 ADB 服务不会因客户端环境变量变化而重新配置，应先确认没有用户会话再安全重启。beta.6 启动器尚不透传此变量，测试旧包需预启动已禁用 mDNS 的同版本 ADB；0.2.0 正式版启动器会保留显式 `ADB_MDNS` 设置。

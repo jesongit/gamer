@@ -771,7 +771,10 @@ fn ensure_valid(cfg: &Config) -> anyhow::Result<()> {
 }
 
 fn probe_tool(name: &'static str, path: &str, args: &[&str]) -> ToolProbe {
-    let status = match std::process::Command::new(path.trim()).args(args).output() {
+    let status = match crate::background_process::command(path.trim())
+        .args(args)
+        .output()
+    {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => Err(format!("exited with {}", out.status)),
         Err(e) => Err(e.to_string()),

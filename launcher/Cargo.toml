@@ -43,3 +43,7 @@ path = "src/main.rs"
 
 [dev-dependencies]
 crc32fast = "1"
+
+# Keep hidden startup hidden through eframe's first paint (see vendor/eframe/PATCH.md).
+[patch.crates-io]
+eframe = { path = "vendor/eframe" }

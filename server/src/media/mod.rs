@@ -685,7 +685,7 @@ impl MediaService {
     /// `pts_time`（秒）→ 微秒后按 PTS 升序**稳定排序**得到展示序。
     fn generate_frame_table(&self, path: &Path) -> anyhow::Result<FrameTable> {
         let ffprobe = self.ffprobe_exec();
-        let mut cmd = Command::new(&ffprobe);
+        let mut cmd = crate::background_process::command(&ffprobe);
         cmd.args([
             "-v",
             "quiet",
@@ -1060,7 +1060,7 @@ impl MediaService {
             ));
         }
         let ffprobe = self.ffprobe_exec();
-        let mut cmd = Command::new(&ffprobe);
+        let mut cmd = crate::background_process::command(&ffprobe);
         cmd.args([
             "-v",
             "quiet",
@@ -1138,7 +1138,7 @@ impl MediaService {
     /// index 路径 = `select=eq(n,idx)` 逐帧直通。同一输入同一参数 → 同一帧 →
     /// 同一 PNG 字节（ffmpeg 单帧 PNG 编码确定性）。
     fn ffmpeg_extract(&self, path: &Path, req: &FrameRequest) -> anyhow::Result<Vec<u8>> {
-        let mut cmd = Command::new(&self.ffmpeg_path);
+        let mut cmd = crate::background_process::command(&self.ffmpeg_path);
         cmd.args(["-nostdin", "-v", "error"]);
         if let Some(pts_us) = req.pts_us {
             let secs = format!("{}", pts_us as f64 / 1_000_000.0);
