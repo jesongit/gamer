@@ -6,7 +6,6 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 
 use crate::config::Config;
 
@@ -46,7 +45,7 @@ impl Adb {
 
     /// 运行 adb 命令并返回 stdout（UTF-8）
     pub async fn run(&self, args: &[&str], timeout: Duration) -> anyhow::Result<String> {
-        let mut cmd = Command::new(&self.bin);
+        let mut cmd = crate::background_process::tokio_command(&self.bin);
         cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn()?;
         let (mut so, mut se) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
@@ -82,7 +81,7 @@ impl Adb {
 
     /// 运行 adb 命令并返回原始 stdout 字节（如截图 PNG）
     pub async fn run_bytes(&self, args: &[&str], timeout: Duration) -> anyhow::Result<Vec<u8>> {
-        let mut cmd = Command::new(&self.bin);
+        let mut cmd = crate::background_process::tokio_command(&self.bin);
         cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn()?;
         let (mut so, mut se) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
@@ -152,7 +151,7 @@ impl Adb {
                 .unwrap_or_else(|| "adb".to_string());
             ("pkill".to_string(), vec!["-9".into(), name])
         };
-        match tokio::process::Command::new(&prog)
+        match crate::background_process::tokio_command(&prog)
             .args(&args)
             .output()
             .await
@@ -231,7 +230,7 @@ impl Adb {
         let tag = tag.to_string();
         tokio::spawn(async move {
             use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut child = match tokio::process::Command::new(&bin)
+            let mut child = match crate::background_process::tokio_command(&bin)
                 .args(["-s", &serial, "shell", &cmd])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())

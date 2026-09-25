@@ -24,7 +24,6 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
-use tokio::process::Command;
 
 use crate::config::Config;
 use crate::device::scrcpy::SCRCPY_VERSION;
@@ -251,7 +250,7 @@ fn is_bare_command(path: &str) -> bool {
 /// 外部进程探针：`<program> <args>` + 硬超时。spawn NotFound → missing；
 /// 超时/非零退出/输出异常 → broken；成功 → ready + 解析出的版本号。
 async fn probe_process(program: &str, args: &[&str]) -> (&'static str, Option<String>) {
-    let mut command = Command::new(program.trim());
+    let mut command = crate::background_process::tokio_command(program.trim());
     command
         .args(args)
         .stdin(std::process::Stdio::null())
