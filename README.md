@@ -15,13 +15,17 @@ Gamer 是一个通过浏览器操作 Android 设备的游戏自动化工具。�
 - **分析录制视频**：录制设备画面及操作事件，导入视频、逐帧查看、标记时间轴、提取模板和生成脚本草稿。
 - **复用配置与能力**：通过配置包组织和分发脚本、模板、映射与视频项目，通过插件扩展编辑和执行能力。
 
+- **发布与获取配置**：在配置包页添加公开 GitHub 仓库，下载并导入配置；作者使用配置包发布插件，通过服务电脑上的 gh 登录创建草稿并确认公开。见 [配置包发布指南](docs/guides/package-publishing.md)。
+
 ## 快速开始
 
 ### 下载 Windows 正式版
 
-正式发行版为 [Gamer 0.2.0](https://github.com/jesongit/gamer/releases/tag/v0.2.0)。可选择独立 `gamer-launcher.exe` 在线安装，或下载 `Gamer-0.2.0-windows-x64-full.zip` 离线安装。完整包带齐本体、启动器、ADB、FFmpeg/FFprobe、scrcpy 和首次可选的官方插件，不携带个人数据。文件用 HTTPS + SHA256 校验，不需要签名密钥。
+正式发行版为 [Gamer 0.2.1](https://github.com/jesongit/gamer/releases/tag/v0.2.1)。可选择独立 `gamer-launcher.exe` 在线安装，或下载 `Gamer-0.2.1-windows-x64-full.zip` 离线安装。完整包带齐本体、启动器、ADB、FFmpeg/FFprobe、scrcpy 和首次可选的官方插件，不携带个人数据。文件用 HTTPS + SHA256 校验，不需要签名密钥。
 
-三款官方插件均为 0.1.0，自动化插件修复模板中心点击和相对坐标缩放，保存时检查已知引用类型。请先更新 Gamer 本体，再更新自动化插件；旧本体会拒绝安装要求 input 1.1 的新版插件。
+四款官方插件均为 0.1.0，自动化插件修复模板中心点击和相对坐标缩放，保存时检查已知引用类型。请先更新 Gamer 本体，再更新自动化插件；旧本体会拒绝安装要求 input 1.1 的新版插件。
+
+配置包发布插件要求 Gamer 0.2.1，下载配置不需要 gh 登录。默认配置源为 [gamer-packages](https://github.com/jesongit/gamer-packages)，也可添加自己的公开仓库。
 
 启动器安装在所在目录；已安装且无更新时收起到托盘并打开网页，有更新时显示“更新 / 取消”。完整包解压后仍需点击“安装”，将包内组件展开到运行目录。详细步骤见 [启动器快速上手](docs/guides/launcher-quickstart.md)。
 
@@ -55,7 +59,7 @@ if (-not (Test-Path .\server\config.toml)) {
 
 pnpm --dir web install --frozen-lockfile
 
-# 构建三个官方插件及本地市场索引
+# 构建官方插件及本地市场索引
 .\tools\build-plugins.ps1
 
 # 启动服务端与前端开发服务；首次会编译服务端

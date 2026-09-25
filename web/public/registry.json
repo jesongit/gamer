@@ -1,10 +1,10 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-09-25T08:30:11Z",
+  "generated_at": "2026-09-25T11:10:02Z",
   "host_api": "1.0.0",
   "provenance": {
-    "plugin_commit": "579fa7046357d71ad1d989756799a93b3d2dc3a9",
-    "sdk_host_commit": "c0464eb0fba81b96551e2d1e401d1fe2428db589"
+    "plugin_commit": "cc5bc47c5e7c144f98181a35d5bb1ddea9a02a6c",
+    "sdk_host_commit": "d934edab274c438edbf48708101856a7702c7e9d"
   },
   "plugins": [
     {
@@ -46,6 +46,41 @@
       },
       "execution": {
         "kind": "wasm"
+      }
+    },
+    {
+      "id": "gamer-package-publisher",
+      "version": "0.1.0",
+      "name": "配置包发布",
+      "description": "使用本机 GitHub CLI 将配置包发布到自己的公开仓库",
+      "publisher": "gamer.dev",
+      "download_url": "/plugins/gamer-package-publisher-0.1.0.gplugin",
+      "sha256": "de16d36c1b99c1253992b6d4412b70ce19a9f9dec0d878dc75020c850eb613a9",
+      "size": 5120,
+      "permissions": [
+        "ui.host",
+        "package.publish"
+      ],
+      "host_api": {
+        "resource": "^1.1",
+        "ui": "^1.0"
+      },
+      "ui": {
+        "contributions": [
+          {
+            "component": "PackagePublisher",
+            "entry": "ui/plugin.js",
+            "location": "console.right",
+            "order": 40,
+            "panel_id": "publisher",
+            "requires_device": false,
+            "runtime": "core",
+            "title": "配置包发布"
+          }
+        ]
+      },
+      "execution": {
+        "kind": "builtin"
       }
     },
     {
