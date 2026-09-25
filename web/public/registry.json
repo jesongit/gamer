@@ -1,21 +1,21 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-09-24T22:25:28Z",
+  "generated_at": "2026-09-25T08:30:11Z",
   "host_api": "1.0.0",
   "provenance": {
-    "plugin_commit": "12e243b38a97e56b92a416f8bc29b037ea5e8adb",
+    "plugin_commit": "579fa7046357d71ad1d989756799a93b3d2dc3a9",
     "sdk_host_commit": "c0464eb0fba81b96551e2d1e401d1fe2428db589"
   },
   "plugins": [
     {
       "id": "gamer-keymap",
-      "version": "0.1.0-beta.1",
+      "version": "0.1.0",
       "name": "键盘映射",
       "description": "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-keymap-0.1.0-beta.1.gplugin",
-      "sha256": "6b3c2c8ac98bd2b8fcfb72a2738cd5659c60398c7b92642ae6b3bfb6c219724c",
-      "size": 131745,
+      "download_url": "/plugins/gamer-keymap-0.1.0.gplugin",
+      "sha256": "903a41a68785d936bb0b868cd5792725713bb2f81d7f30f7a8df75c7b00c2945",
+      "size": 131737,
       "permissions": [
         "ui.host",
         "input.tap",
@@ -50,13 +50,13 @@
     },
     {
       "id": "gamer-video",
-      "version": "0.1.0-beta.1",
+      "version": "0.1.0",
       "name": "视频工作台",
       "description": "视频工作台：媒体素材库、设备录制与操作草稿生成",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-video-0.1.0-beta.1.gplugin",
-      "sha256": "b89ad4442ae84e050b7a3fe775f6431392fd8756d3e290568c96beac748e4257",
-      "size": 63292,
+      "download_url": "/plugins/gamer-video-0.1.0.gplugin",
+      "sha256": "9c5d8557dae44bf6a7c41b1f5062b853306381e5a5a90dbcec5868d73bcf8dd6",
+      "size": 63283,
       "permissions": [
         "ui.host",
         "media.read",
@@ -90,13 +90,13 @@
     },
     {
       "id": "gamer-yaml",
-      "version": "0.1.0-beta.2",
+      "version": "0.1.0",
       "name": "自动化",
       "description": "自动化：YAML V1 脚本、函数库与模板的制作与运行",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-yaml-0.1.0-beta.2.gplugin",
-      "sha256": "d70d1ecb7b878c4c4546e40ebb8c2bf84d4a8246e63744195c23ff8cdb3850ba",
-      "size": 451665,
+      "download_url": "/plugins/gamer-yaml-0.1.0.gplugin",
+      "sha256": "60b983fb11b6c5452a7f7116fccc4939e079b399376a399bd145e200f04f4781",
+      "size": 451660,
       "permissions": [
         "ui.host",
         "device.read",

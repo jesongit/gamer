@@ -4,7 +4,7 @@ Gamer 可以从源码运行，也支持使用 Windows x64 完整包。设备连�
 
 ## Windows 启动器与完整包
 
-当前已公开 [0.2.0-beta.6 测试版](https://github.com/jesongit/gamer/releases/tag/v0.2.0-beta.6)。下载独立 `gamer-launcher.exe` 放入专用可写目录可在线安装；也可将 `Gamer-0.2.0-beta.6-windows-x64-full.zip` 全部解压后离线安装。首次双击显示“安装 / 取消”，安装完成后选择官方插件，再打开网页设置密码。
+正式发行版为 [Gamer 0.2.0](https://github.com/jesongit/gamer/releases/tag/v0.2.0)。下载独立 `gamer-launcher.exe` 放入专用可写目录可在线安装；也可将 `Gamer-0.2.0-windows-x64-full.zip` 全部解压后离线安装。首次双击显示“安装 / 取消”，安装完成后选择官方插件，再打开网页设置密码。
 
 完整包带齐本体、启动器、ADB、FFmpeg/FFprobe、scrcpy 和官方插件归档，无需预装 Rust、Node.js 或 pnpm。解开 ZIP 后仍需点击“安装”，把组件展开到运行目录。安装文件使用 HTTPS + SHA256 校验，不要求签名或公钥。
 
@@ -20,7 +20,7 @@ Gamer 可以从源码运行，也支持使用 Windows x64 完整包。设备连�
 
 缺失依赖时使用 `gamer-launcher.exe repair --probe`。已有版本随包说明的修正以对应 Release 勘误和当前更新指南为准。
 
-beta.6 支持在“设置 → 软件更新”完成下载和实际版本切换，失败时回滚；beta.4 及更早版本先用启动器完成升级。保留已有安装的 `config/` 和 `data/`，不要用新包默认配置直接覆盖。详细离线升级步骤见[更新指南](https://github.com/jesongit/gamer/blob/main/docs/guides/UPDATE.md)。
+0.2.0 支持在“设置 → 软件更新”完成下载和实际版本切换，失败时回滚；beta.4 及更早版本先用启动器完成升级。保留已有安装的 `config/` 和 `data/`，不要用新包默认配置直接覆盖。详细离线升级步骤见[更新指南](https://github.com/jesongit/gamer/blob/main/docs/guides/UPDATE.md)。
 
 ## 从源码启动
 
