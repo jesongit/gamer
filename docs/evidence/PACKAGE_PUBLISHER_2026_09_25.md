@@ -21,7 +21,8 @@
 - Rust clippy --all-targets -D warnings 通过。
 - 发布插件独立构建、归档重读与 manifest/size/SHA256 自检通过。
 - 插件发行脚本 3/3 测试通过；前端生产构建、版本一致性与 SDK 快照一致性检查通过。
-- 全量 Rust、CI 与正式发行状态继续补充。
+- Rust 全量：729 passed / 10 ignored，0 failed；Windows 默认跳过的设备/端口/人工远端验收不计为通过。
+- CI 与正式发行状态继续补充。
 
 ## 验收边界
 
