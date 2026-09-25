@@ -164,6 +164,7 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
   `process*` `device.shell*`。
 
 - `ui.host`：受信任的同源插件 UI。
+- `media.stream`：设备音视频的本机素材和 RTMP 输出（media 域）；`live.connect`：直播平台连接与互动事件读取（runtime 域）。均为 builtin 原生动作门禁，不开放任意网络或进程调用，见[直播助手](../guides/live-plugin.md)。
 - `package.publish`：配置包发布插件的原生发布动作，允许导出用户选择的配置并使用宿主 gh 登录管理公开 GitHub 仓库 Release；要求 `resource ^1.1`。它不开放 shell 或任意 gh 参数，也不是公开 WIT 的命令执行接口。参见[配置发布指南](../guides/package-publishing.md)。
 
 授权链：manifest 声明 → 安装时权限增量需用户确认（`x-gamer-permission-confirm`）
