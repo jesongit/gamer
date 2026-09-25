@@ -5,7 +5,7 @@
 > 事实依据：`.github/workflows/release.yml`（发布 workflow）、`docs/guides/UPDATE_CONTRACT.md`（安装目录契约）、
 > `release/contracts/`（manifest / system-api / IPC 契约）、`launcher/` 与 `release/packaging/`（当前实现）。
 > 计划文档仅作背景，不作为“已完成”依据；最终用户按[更新指南](UPDATE.md)、对应 Release 勘误和 launcher CLI 操作，历史完整包的 `INSTALL.md` 可能早于文档修正。
-> 当前正式发行基线为 0.2.0，验收范围见 [0.2.0 发行记录](../evidence/RELEASE_0_2_0_2026_09_25.md)；beta 历史证据见 [beta.7 记录](../evidence/BETA7_RELEASE_2026_09_25.md)，不能将其等同于正式产物的全部生产环境验收。
+> 当前正式发行基线为 0.2.2，验收范围及旧启动器的手动恢复步骤见 [0.2.2 发行记录](../evidence/RELEASE_0_2_2_2026_09_25.md)；初始正式版见 [0.2.0 发行记录](../evidence/RELEASE_0_2_0_2026_09_25.md)，beta 历史证据见 [beta.7 记录](../evidence/BETA7_RELEASE_2026_09_25.md)，不能将历史测试等同于当前产物的全部生产环境验收。
 
 ## 1. 版本单一来源与发布链路总览
 
