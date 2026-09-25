@@ -62,3 +62,21 @@ Remove-Item，仅清理以下自己创建的确切目录，并先验证解析路
 工具展示的命令中段为截断文本（`301 chars truncated`），未给出具体策略原因。
 该清理命令未执行；没有换工具、改包装或拆分重试。后续成功测试自身的临时目录已由测试正常回收，
 此次拒绝只涉及首轮遗留夹具，不影响已完成的测试结论与用户安装入口备份恢复。
+
+## 后续主程序下载超时与离线包补齐
+
+用户重试后，20:31 +08:00 的 update-journal.json 完整错误为：
+`HTTP 传输失败: https://github.com/jesongit/gamer/releases/download/v0.2.1/gamer-app-0.2.1-windows-x64.zip: Connection Failed: Connect error: connection timed out`。
+之前的 seed/cache 不存在只是本地来源未命中，实际失败原因为远端连接超时。
+日志显示 official-plugins 0.2.1 已下载成功；journal 已退回 idle，last_step=failed、
+snapshot=null；主程序指针仍为 0.2.0，没有进入数据快照或迁移阶段。
+
+从之前公开发布验收保留的应用归档补入用户安装根
+`seeds/gamer-app-0.2.1-windows-x64.zip`。补入前后均核对用户安装目录的 0.2.1 发行清单：
+大小 17,016,162 字节，SHA256
+`5c3d9d8a2798cdcda0dfcf9e3f5575e5caf1433775601c6663e31af25f4d5c6a`。
+先写唯一临时文件并校验，再同卷移动到 seed 文件名；未覆盖现有 seed，未改清单、配置、数据或版本指针。
+启动器按 seeds → cache → 远端的既有顺序可直接使用该已校验归档。
+
+用户在错误页面点击“重试”（重新检查）后，再点击“更新”（执行安装）。本次只完成离线包补齐，
+没有代为启动真实服务或点击更新，实际升级提交结果仍待用户后续操作确认。
