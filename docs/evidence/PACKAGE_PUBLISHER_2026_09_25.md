@@ -22,7 +22,7 @@
 - 发布插件独立构建、归档重读与 manifest/size/SHA256 自检通过。
 - 插件发行脚本 3/3 测试通过；前端生产构建、版本一致性与 SDK 快照一致性检查通过。
 - Rust 全量：729 passed / 10 ignored，0 failed；Windows 默认跳过的设备/端口/人工远端验收不计为通过。
-- CI 与正式发行状态继续补充。
+- CI 与正式发行最终结果见下方。
 - 额外本地 `cargo test --no-default-features` 在链接阶段因 D 盘空间不足失败；清理项目 Rust 增量缓存的 exec_command 在创建进程前被拒绝（`blocked by policy`，原因未知）。未换渠道或包装重试，未重复索要授权；此项本地测试未完成，记录见 `backups/package-publisher/no-default-tests.log` 和 `cache-cleanup-denial.md`。
 
 ## 验收边界
@@ -48,3 +48,17 @@
 - registry：5910 bytes，SHA256 `0bb6dc46da51ec79a61818d352ccb7db22df0ddbf36f2280cc2bcca93dc3c04e`。
 - 合集：651425 bytes，SHA256 `753ca576acd4e15010689d1d6142739526469e4ebc012fbbc6e2549cbc1fa470`。
 - 主仓 gitlink 与 release/plugins.lock.json 固定到 cc5bc47c5e7c144f98181a35d5bb1ddea9a02a6c；fetch-plugins 严格提交/哈希校验通过，同源快照现包含四插件。
+
+## Gamer 0.2.1 发行
+
+- 主仓 PR #5 已合并，v0.2.1 指向 5b8e49167e20def01cd86ba5f3dc5a8f51d62498；插件 gitlink 保持 cc5bc47，未跟随插件仓后续 README 提交。
+- 最终 PR CI run 36128373397 与合并后 main CI run 36129327773 全部通过：Rust 727 passed / 9 ignored、fmt/clippy、no-WASM check、release 构建，前端与文档构建通过。
+- 主程序发行流水线 run 36129349542 已通过版本/不可变标签/scrcpy 绑定门禁并创建草稿，Windows 构建、上传、发行资产重新下载校验、启动器 doctor 双跑与公开发行均通过。
+
+- 于 2026-09-25T11:49:32Z [公开 v0.2.1](https://github.com/jesongit/gamer/releases/tag/v0.2.1)，非 draft、非 prerelease，并成为 latest；匿名 API 已复核 latest 和全部 13 个资产的 size/digest 与已校验草稿一致。
+- 本地独立下载 13 个资产，核对 12 条 SHA256、两个 manifest 逐字节一致、app 与组件清单、完整包内校验和、四插件 required_files、网页附带目录及插件字节、主程序/启动器副本、插件锁源码与合集哈希，全部通过；manifest 版本检查与 CycloneDX 1.5 / 三个运行依赖的 SBOM 校验通过。
+- 完整包：131855727 bytes，SHA256 `4d5cdc8d71a4c5c6b2712679d4e10ef88611f688082c9d0177cbb1551f8f9cbc`。
+- gamer-launcher.exe：12195840 bytes，SHA256 `0b56c4af72aae6505d7fa16222070d9a42e4bb933b9919ae477e7338938233e5`。
+- 0.2.1.json：5786 bytes，SHA256 `22253ac4ee6989c741fdc7ca7021b359ea27c382223a0cc85be26ecfb7901e70`。
+- 本轮两仓开发分支已在合并后清理，未创建 worktree。收尾时本地 main 出现另一个直播功能工作的未推送提交；本验收仅对应 v0.2.1 的固定 5b8e491 / cc5bc47，不将直播提交计入本次发布。
+- 未执行新发行包的本机 GUI/服务安装、更新或真机点击，未把此前被平台拒绝的测试改包装重试；旧 0.2.0 标签和资产、release/dist/Gamer-0.2.0-windows-x64-full 保持不变。
