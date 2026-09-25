@@ -25,6 +25,7 @@ mod extensions_market;
 pub(crate) mod gate;
 mod logs;
 mod media;
+mod package_sources;
 mod packages;
 mod packages_rename;
 mod recording;
@@ -85,6 +86,7 @@ pub struct AppState {
     /// 已安装扩展与其 Host/UI 生命周期。
     pub extensions: Arc<crate::extensions::ExtensionService>,
     pub plugin_market: Arc<crate::extensions::market::PluginMarket>,
+    pub package_market: Arc<crate::package_market::PackageMarket>,
 }
 
 /// 测试专用兼容入口：自建 capabilities registry / ExtensionService / AppState
@@ -155,6 +157,9 @@ pub(crate) fn build_router_with_extensions(
         plugin_market: Arc::new(crate::extensions::market::PluginMarket::new(
             cfg.web_dist_dir(),
         )),
+        package_market: Arc::new(crate::package_market::PackageMarket::new(
+            cfg.data_dir.clone(),
+        )),
     };
 
     // ---- 公开豁免组：登录三端点自身实现契约语义；health/metrics 探针匿名；
@@ -186,6 +191,19 @@ pub(crate) fn build_router_with_extensions(
     //      高风险接口标注（专项测试见文件尾 tests）：shutdown、设备控制
     //      （devices::api_control）、运行分发、资源删除。
     let protected_json: Router<()> = Router::new()
+        .route(
+            "/api/package-sources",
+            get(package_sources::list).post(package_sources::save),
+        )
+        .route("/api/package-sources/:id", delete(package_sources::remove))
+        .route(
+            "/api/package-sources/:id/catalog",
+            get(package_sources::catalog),
+        )
+        .route(
+            "/api/package-sources/:source/archives/:id/:version",
+            get(package_sources::archive),
+        )
         .route(
             "/api/extensions/market/registry.json",
             get(extensions_market::registry),

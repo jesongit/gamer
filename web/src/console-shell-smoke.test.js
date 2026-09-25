@@ -11,6 +11,7 @@ vi.mock('./api', () => {
     listDevices: [],
     listScripts: [],
     listTemplates: [],
+    packageSources: [],
   }
   return {
     api: new Proxy({}, {
@@ -106,76 +107,14 @@ describe('Console 壳挂载冒烟（拆分后装配接线）', () => {
   })
 })
 
-describe('Market 页挂载冒烟（T5b：分区渲染 插件市场/配置市场 + Package 远端源）', () => {
-  it('配置市场分区：registry.json 无 packages 段（现网形态）显示空态不抛错', async () => {
+describe('配置市场挂载冒烟', () => {
+  it('未添加仓库时显示空态和添加入口', async () => {
     const { default: MarketView } = await import('./workspace/MarketView.vue')
     const { flushPromises } = await import('@vue/test-utils')
-    const originalFetch = globalThis.fetch
-    globalThis.fetch = async (url) => {
-      if (String(url).includes('registry.json')) {
-        return {
-          ok: true,
-          status: 200,
-          headers: { get: () => 'application/json' },
-          json: async () => ({ schema_version: 1, plugins: [] }),
-        }
-      }
-      return originalFetch(url)
-    }
     const wrapper = mount(MarketView)
-    try {
-      await flushPromises()
-      expect(wrapper.text()).toContain('发现配置')
-      // api stub 返回空集：已装配置为空态提示
-      expect(wrapper.text()).not.toContain('本地已装')
-      // registry.json 无 packages 段 = 「远端源暂无配置」，不抛错不阻塞页面
-      expect(wrapper.text()).toContain('市场暂无可用配置包')
-    } finally {
-      globalThis.fetch = originalFetch
-      wrapper.unmount()
-    }
-  })
-
-  it('配置市场分区：远端源含 packages 段时按 §21 字段渲染卡片并给出安装入口', async () => {
-    const { default: MarketView } = await import('./workspace/MarketView.vue')
-    const { flushPromises } = await import('@vue/test-utils')
-    const originalFetch = globalThis.fetch
-    globalThis.fetch = async (url) => {
-      if (String(url).includes('registry.json')) {
-        return {
-          ok: true,
-          status: 200,
-          headers: { get: () => 'application/json' },
-          json: async () => ({
-            schema_version: 1,
-            plugins: [],
-            packages: [{
-              id: 'official.hsr.daily',
-              name: '星铁日常包',
-              version: '1.2.0',
-              download_url: '/packages/official.hsr.daily-1.2.0.gamerpkg',
-              android_targets: ['com.MiHoYo.hkrpg'],
-              required_plugins: ['gamer-yaml'],
-              author: 'gamer.dev',
-            }],
-          }),
-        }
-      }
-      return originalFetch(url)
-    }
-    const wrapper = mount(MarketView)
-    try {
-      await flushPromises()
-      expect(wrapper.text()).toContain('星铁日常包')
-      expect(wrapper.text()).toContain('official.hsr.daily')
-      expect(wrapper.text()).toContain('v1.2.0')
-      expect(wrapper.text()).toContain('com.MiHoYo.hkrpg')
-      expect(wrapper.text()).toContain('gamer-yaml')
-      expect(wrapper.text()).toContain('gamer.dev')
-      expect(wrapper.text()).toContain('安装')
-    } finally {
-      globalThis.fetch = originalFetch
-      wrapper.unmount()
-    }
+    await flushPromises()
+    expect(wrapper.text()).toContain('市场暂无可用配置包')
+    expect(wrapper.text()).toContain('添加仓库')
+    wrapper.unmount()
   })
 })

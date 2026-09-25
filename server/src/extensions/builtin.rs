@@ -26,13 +26,20 @@ pub(crate) struct BuiltinExtensionDescriptor {
 }
 
 /// 宿主预置扩展注册表（编译期固定；下载包不可扩展）。gamer-video 是首个注册项。
-pub(crate) const BUILTIN_EXTENSIONS: &[BuiltinExtensionDescriptor] =
-    &[BuiltinExtensionDescriptor {
+pub(crate) const BUILTIN_EXTENSIONS: &[BuiltinExtensionDescriptor] = &[
+    BuiltinExtensionDescriptor {
         id: super::video::VIDEO_EXTENSION_ID,
         name: "视频工作台",
         description: "视频工作台：媒体素材库、设备录制与操作草稿生成",
         host_version: ">=0.1.1",
-    }];
+    },
+    BuiltinExtensionDescriptor {
+        id: super::package_publisher::ID,
+        name: "配置包发布",
+        description: "使用本机 GitHub CLI 发布配置包",
+        host_version: ">=0.2.1",
+    },
+];
 
 /// 按 id 查注册表。
 pub(crate) fn builtin_extension(id: &str) -> Option<&'static BuiltinExtensionDescriptor> {

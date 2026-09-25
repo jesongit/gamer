@@ -1,5 +1,22 @@
 use super::*;
 
+#[tokio::test]
+async fn package_sources_are_authenticated_persistent_settings_independent_of_packages() {
+    let t = build_app("package-sources",test_credential("admin123"),Default::default());
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    let response = post_json(&t,&sid,"/api/package-sources",serde_json::json!({"repository":"git@github.com:Owner/Repo.git","enabled":true})).await;
+    assert_eq!(response.status(),StatusCode::OK);
+    let sources=json_body(response).await;
+    let source=sources.as_array().unwrap().iter().find(|s|s["repository"]=="owner/repo").unwrap();
+    let id=source["id"].as_str().unwrap();
+    let bad=post_json(&t,&sid,"/api/package-sources",serde_json::json!({"repository":"https://evil.invalid/o/r","enabled":true})).await;
+    assert_eq!(bad.status(),StatusCode::BAD_REQUEST);
+    let removed=send(&t.app,req("DELETE",&format!("/api/package-sources/{id}"),None,&[("cookie".into(),sid.clone())],None)).await;
+    assert_eq!(removed.status(),StatusCode::OK);
+    let missing=send(&t.app,req("GET",&format!("/api/package-sources/{id}/archives/demo/1.0.0?sha256=abc"),None,&[("cookie".into(),sid)],None)).await;
+    assert_eq!(missing.status(),StatusCode::BAD_GATEWAY);
+}
+
 // Package REST 冒烟（plan §2-§15 / §23 验收链）：建包 → 写资源 → 读资源 →
 // 列表 → 复制 → 导出 → 删除；导入路径覆盖「同 id 二次导入默认 409 +
 // overwrite=true 原子替换」与包内预设发布（id = `<package-id>:<名>`）。

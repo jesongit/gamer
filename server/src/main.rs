@@ -29,6 +29,7 @@ mod media;
 mod metrics;
 mod migrations;
 mod package_archive;
+mod package_market;
 mod recording;
 mod resources;
 mod run_journal;

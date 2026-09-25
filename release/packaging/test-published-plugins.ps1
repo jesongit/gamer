@@ -64,7 +64,7 @@ try {
     & cargo test --locked --manifest-path (Join-Path $repo 'launcher/Cargo.toml') --test published_plugins installs_published_plugins_using_launcher_selection_flow -- --ignored --nocapture
     if ($LASTEXITCODE -ne 0) { throw '启动器真实插件选择安装验收失败' }
     $extensions = Invoke-RestMethod "http://127.0.0.1:$port/api/extensions" -Headers $headers
-    if (@($extensions.extensions).Count -ne 3) { throw '已安装插件数量不符' }
+    if (@($extensions.extensions).Count -ne @($component.required_files).Count) { throw '已安装插件数量不符' }
     foreach ($p in $extensions.extensions) {
         if ($p.state -ne 'running' -or (@($component.required_files.path) -notcontains "$($p.id)-$($p.active_version).gplugin")) { throw "插件未正常运行: $($p.id) $($p.state) $($p.active_version)" }
         $ui = Invoke-WebRequest "http://127.0.0.1:$port/api/extensions/$($p.id)/ui/plugin.js" -Headers $headers

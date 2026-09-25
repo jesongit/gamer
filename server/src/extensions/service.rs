@@ -511,7 +511,7 @@ impl ExtensionService {
             return Err(ExtensionError::CallRejected("action 不能为空".into()));
         }
         let gate = self.call_gate(id);
-        let _call_lease = gate.read().await;
+        let _call_lease = gate.clone().read_owned().await;
         let snapshot = self.snapshot_for(id)?;
         self.require_current_process_running(id, snapshot.state(), "call")?;
 
@@ -530,10 +530,16 @@ impl ExtensionService {
                 host.authorize(*permission)?;
             }
             let permit = NativeDispatchPermit::new();
-            return super::native_call_action(&permit, id, action, &values, self.store.data_root())
-                .ok_or_else(|| {
-                    ExtensionError::CallRejected("native action 分发实现缺失".into())
-                })?;
+            let id = id.clone();
+            let action = action.to_owned();
+            let data_root = self.store.data_root().to_owned();
+            return tokio::task::spawn_blocking(move || {
+                let _call_lease = _call_lease;
+                super::native_call_action(&permit, &id, &action, &values, &data_root)
+            })
+            .await
+            .map_err(|e| ExtensionError::Runtime(e.to_string()))?
+            .ok_or_else(|| ExtensionError::CallRejected("native action 分发实现缺失".into()))?;
         }
 
         let (handle, runtime) = {

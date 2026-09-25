@@ -27,6 +27,8 @@ mod keymap;
 mod manifest;
 pub(crate) mod market;
 mod model;
+#[path = "../../../plugins/gamer-package-publisher/host/mod.rs"]
+pub(crate) mod package_publisher;
 mod permissions;
 mod service;
 mod store;
@@ -94,13 +96,15 @@ pub(crate) fn native_call_action(
     values: &serde_json::Value,
     data_dir: &std::path::Path,
 ) -> Option<ExtensionResult<serde_json::Value>> {
-    gamer_yaml::native_call_action(id.as_str(), action, values, data_dir)
+    package_publisher::call(id.as_str(), action, values, data_dir)
+        .or_else(|| gamer_yaml::native_call_action(id.as_str(), action, values, data_dir))
 }
 
 /// Side-effect-free native action lookup used by the lifecycle gate before
 /// invoking `native_call_action`.
 pub(crate) fn is_public_native_action(id: &ExtensionId, action: &str) -> bool {
-    gamer_yaml::is_public_native_action(id.as_str(), action)
+    package_publisher::accepts(id.as_str(), action)
+        || gamer_yaml::is_public_native_action(id.as_str(), action)
 }
 
 pub(crate) fn native_action_expected_caller(
@@ -118,7 +122,8 @@ pub(crate) fn native_action_required_permissions(
     id: &ExtensionId,
     action: &str,
 ) -> Option<&'static [Permission]> {
-    gamer_yaml::native_action_required_permissions(id.as_str(), action)
+    package_publisher::permissions(id.as_str(), action)
+        .or_else(|| gamer_yaml::native_action_required_permissions(id.as_str(), action))
 }
 
 pub(crate) fn native_action_caller_permissions(
@@ -133,6 +138,9 @@ pub(crate) fn native_action_caller_permissions(
 /// 集合由 `service.rs::declarative_actions` 从 manifest 读出，两条目录在
 /// `service.capability_actions` 合并。
 pub(crate) fn native_public_actions(id: &ExtensionId) -> Vec<serde_json::Value> {
+    if id.as_str() == package_publisher::ID {
+        return package_publisher::ACTIONS.iter().map(|action| serde_json::json!({"action":action,"version":1,"surface":"native","permissions":["package.publish"]})).collect();
+    }
     gamer_yaml::public_action_catalog(id.as_str())
 }
 

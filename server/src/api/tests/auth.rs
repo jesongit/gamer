@@ -120,6 +120,11 @@ async fn unauthenticated_high_risk_endpoints_are_all_401() {
             "/api/packages/com.test.app/plugins/gamer-yaml/resources/templates/missing",
         ),
         ("POST", "/api/packages/import"),
+        ("GET", "/api/package-sources"),
+        ("POST", "/api/package-sources"),
+        ("DELETE", "/api/package-sources/missing"),
+        ("GET", "/api/package-sources/missing/catalog"),
+        ("GET", "/api/package-sources/missing/archives/demo/1.0.0?sha256=abc"),
     ];
     for (method, uri) in cases {
         let resp = send(&t.app, req(method, uri, None, &[], None)).await;

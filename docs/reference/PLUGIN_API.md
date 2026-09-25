@@ -147,7 +147,7 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
   `content_package` 完全一致。当前没有明确 caller 契约的 declarative 动作不
   自动开放。不为此增加分布式 RPC、服务发现或消息总线。
 
-## 3. 权限闭集（19 项，默认拒绝）
+## 3. 权限闭集（21 项，默认拒绝）
 
 来源：`server/src/extensions/permissions.rs`（封闭枚举 + 显式禁区）。
 权限 → Host API 域映射与状态标注见
@@ -162,6 +162,9 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
   `media.record` `media.write` `media.events.read`；
 - 显式禁区（声明即拒，不可授予）：`filesystem*` `network*` `shell*`
   `process*` `device.shell*`。
+
+- `ui.host`：受信任的同源插件 UI。
+- `package.publish`：配置包发布插件的原生发布动作，允许导出用户选择的配置并使用宿主 gh 登录管理公开 GitHub 仓库 Release；要求 `resource ^1.1`。它不开放 shell 或任意 gh 参数，也不是公开 WIT 的命令执行接口。参见[配置发布指南](../guides/package-publishing.md)。
 
 授权链：manifest 声明 → 安装时权限增量需用户确认（`x-gamer-permission-confirm`）
 → 运行时宿主在每次 capability 调用前检查（未声明 → `HostError{kind:denied}`）。

@@ -139,8 +139,8 @@ export!(MyPlugin);
 | `name` | string | ✅ | 显示名，非空 ≤256B、无控制字符 |
 | `description` | string | — | 可选说明 |
 | `entry` | string | wasm ✅ | 包内 `.wasm` 路径（惯例 `plugin.wasm`）；安装时校验存在 + `\0asm` magic。**builtin 执行类型必须缺省** |
-| `permissions` | [string] | — | 权限闭集 19 项（见 §5）；缺省 = 无权限。写 `filesystem.*`/`network`/`shell`/`process`/`device.shell` 直接拒绝 |
-| `[host_api]` | table | — | 声明用到的 Host API 域版本要求：`device`/`vision`/`input`/`touch`/`resource`/`run`/`runtime`/`log`/`media`，值是 SemVer range（如 `"^1.0"`）；宿主当前全域 `1.0.0`，不满足 → 安装期结构化报错。`media` 是 Core Media/Recording 保留域，当前不在公开 third-party `extension-host` world 中；`gamer-video` 由 builtin 宿主实现 |
+| `permissions` | [string] | — | 权限闭集 21 项（见 §5）；缺省 = 无权限。写 `filesystem.*`/`network`/`shell`/`process`/`device.shell` 直接拒绝 |
+| `[host_api]` | table | — | 声明用到的 Host API 域版本要求：`device`/`vision`/`input`/`touch`/`resource`/`run`/`runtime`/`log`/`media`，值是 SemVer range（如 `"^1.0"`）；宿主 input/resource 域为 `1.1.0`，其余域 `1.0.0`，不满足 → 安装期结构化报错。`media` 是 Core Media/Recording 保留域，当前不在公开 third-party `extension-host` world 中；`gamer-video` 由 builtin 宿主实现 |
 | `[targets.android].packages` | [string] | — | 支持的 Android 应用包名列表；`*` = 通用（全部应用），**缺省/空声明等价 `*`**。仅作运行目标声明，宿主不做硬门禁：Console 壳按当前设备应用过滤插件入口（`*` 恒显示，具体包名需命中）。与 package.toml 的 `[targets.android]` 同形 |
 | `[[dependencies]]` | array | — | 插件依赖声明（简化计划 Phase 3）：`id`（目标插件 id，禁自引用/重复）+ `version`（SemVer range，缺省 `*`）+ `required`（缺省 `true`，可选依赖必须显式 `false`）。**必需依赖 = 启动门禁**（缺失/版本不兼容/未启用 → enable 拒绝启动并保留错误；必需依赖循环拒绝启动）；**可选依赖 = 能力降级提示**（缺失不阻止启动，你的基础功能必须可独立工作）。不自动下载/自动启用；依赖声明不授予任何权限。与 package.toml `[plugins]`（Package 依赖）是两个概念。调用其他插件能力走 `GET /api/extensions/:id/capabilities` 能力发现 + `POST /api/extensions/:id/call`（参考 gamer-video 对 gamer-yaml 的可选依赖：缺 YAML 时视频基础功能不受影响，仅模板创建/草稿生成入口降级） |
 | `[[ui.contributions]]` | array | — | 面板贡献，见下 |
@@ -211,6 +211,8 @@ capability 边界收到 `kind=denied`。
 | `input.text` | `input.text` | 稳定 |
 | `touch` | `touch.begin/move/end` | 稳定 |
 | `resource.read` | `resources.resolve` / `open` | 稳定（当前只暴露元数据级读，见 §6） |
+| `package.publish` | 配置导出与公开 GitHub Release 发布 | 原生发布插件专用，resource 1.1；不开放任意 shell |
+| `ui.host` | 同源插件 UI | 显式信任宿主页面权限 |
 | `run.submit` | `run.submit` | 稳定 |
 | `run.control` | `run.cancel` / `status` | 稳定 |
 | `runtime.sleep` | `runtime.sleep`（上限 1h/次，随取消位中断） | 稳定 |
@@ -278,7 +280,7 @@ capability 边界收到 `kind=denied`。
 | `插件 manifest 无效: manifest_version=3 不受支持…（需要升级 Gamer 宿主）` | manifest 比宿主新 | 用宿主支持的版本号 |
 | `插件 manifest 无效: wasm 执行类型需要 entry…` / `归档缺少 entry plugin.wasm` / `entry 不是 WASM 二进制` | entry 缺失/改名/不是真实组件 | manifest `entry` 与实际文件一致；用 `packer pack --wasm` 打包 |
 | `插件权限错误: 插件权限默认拒绝且不可授予: filesystem.*` 等 | 声明了禁区权限 | 删掉；插件没有任意文件系统/网络/shell 通道（见 §9） |
-| `插件权限错误: 未知插件权限: xxx` | 权限名拼错 | 对照 §5 的 19 项闭集 |
+| `插件权限错误: 未知插件权限: xxx` | 权限名拼错 | 对照 §5 的 21 项闭集 |
 | `插件权限变更需要用户确认: 新增权限: …`（409） | 权限增量未确认 | 安装请求加 `x-gamer-permission-confirm: true` |
 | `宿主归档 sha256 校验失败: 期望 … 实际 …` | `x-expected-sha256` 钉住的哈希不符 | 用 `packer pack` 输出的实际 sha256 |
 | `宿主 API 不兼容`（`unsupported_host_api`：required/supported） | `[host_api]` 版本要求高于宿主（宿主全域 1.0.0） | 放宽为 `"^1.0"` 或升级宿主 |

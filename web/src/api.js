@@ -222,6 +222,12 @@ function extensionUploadOptions(options = {}) {
 }
 
 export const api = {
+  packageSources: () => req('GET', '/api/package-sources'),
+  savePackageSource: (repository, enabled = true) => req('POST', '/api/package-sources', { repository, enabled }),
+  removePackageSource: id => req('DELETE', `/api/package-sources/${encodeURIComponent(id)}`),
+  packageSourceCatalog: (id, refresh = false) => req('GET', `/api/package-sources/${encodeURIComponent(id)}/catalog?refresh=${refresh}`),
+  downloadSourcePackage: async (source, entry) => new Uint8Array(await (await response('GET',
+    `/api/package-sources/${encodeURIComponent(source)}/archives/${encodeURIComponent(entry.id)}/${encodeURIComponent(entry.version)}?sha256=${encodeURIComponent(entry.sha256)}`)).arrayBuffer()),
   // Core media frame navigation, also used when the video business plugin is absent.
   mediaFrames: (id, ptsUs) => req('GET', `/api/media/${encodeURIComponent(id)}/frames${ptsUs == null ? '' : `?pts_us=${Math.max(0, Math.round(Number(ptsUs)))}`}`),
   mediaFrameNeighbors: (id, index) => req('GET', `/api/media/${encodeURIComponent(id)}/frames/${Math.max(0, Math.round(Number(index) || 0))}`),

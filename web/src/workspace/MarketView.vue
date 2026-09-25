@@ -3,13 +3,25 @@
     <section class="market-section" aria-label="配置市场">
       <div class="market-section-head">
         <h3>发现配置 <span class="market-hint">{{ remotePackages.length }} 个</span></h3>
-        <div class="market-head-actions"><button class="btn btn-sm" :disabled="remoteLoading" @click="loadRemoteRegistry">刷新</button></div>
+        <div class="market-head-actions"><button class="btn btn-sm" :disabled="remoteLoading || sourceBusy" @click="loadRemoteRegistry(true)">刷新</button></div>
+      </div>
+      <form class="source-add" @submit.prevent="addSource">
+        <input v-model="repositoryUrl" class="input" aria-label="GitHub 配置仓库 URL" placeholder="https://github.com/owner/repo" :disabled="sourceBusy || remoteLoading" />
+        <button class="btn btn-sm" :disabled="sourceBusy || remoteLoading || !repositoryUrl.trim()">添加仓库</button>
+      </form>
+      <p class="market-hint">支持公开 GitHub 仓库。最新正式 Release 需包含发布插件生成的配置目录。</p>
+      <div v-for="source in sources" :key="source.id" class="source-row">
+        <a :href="`https://github.com/${source.repository}`" target="_blank" rel="noopener noreferrer">{{ source.repository }}</a>
+        <span class="market-hint">{{ source.enabled ? '已启用' : '已停用' }}</span>
+        <button class="btn btn-sm" :disabled="sourceBusy || remoteLoading" @click="toggleSource(source)">{{ source.enabled ? '停用' : '启用' }}</button>
+        <button class="btn btn-sm" :disabled="sourceBusy || remoteLoading" @click="removeSource(source)">移除</button>
+        <span v-if="sourceWarnings[source.id]" class="market-error">{{ sourceWarnings[source.id] }}</span>
       </div>
       <p v-if="remoteLoading" class="market-hint">正在读取远端源…</p>
       <p v-else-if="remoteError" class="market-error">配置市场读取失败：{{ remoteError }}</p>
       <p v-else-if="!remotePackages.length" class="market-hint">市场暂无可用配置包。</p>
       <div v-else class="market-remote-list">
-        <article v-for="entry in remotePackages" :key="entry.id" class="market-remote-card">
+        <article v-for="entry in remotePackages" :key="`${entry.source_id}:${entry.id}`" class="market-remote-card">
           <div class="market-remote-main">
             <div class="market-remote-title">
               <strong>{{ entry.name || entry.id }}</strong>
@@ -22,15 +34,15 @@
               <span>必需插件：{{ formatList(entry.required_plugins) }}</span>
               <span v-if="hasList(entry.optional_plugins)">可选插件：{{ formatList(entry.optional_plugins) }}</span>
               <span>作者：{{ entry.author || entry.publisher || '未声明' }}</span>
+              <span>来源：{{ entry.repository }}</span>
             </div>
           </div>
           <div class="market-remote-actions">
             <button
               class="btn btn-sm btn-primary"
-              :disabled="installBusyId === entry.id || !entry.download_url"
-              :title="entry.download_url ? '' : '该条目缺少 download_url，无法安装'"
+              :disabled="!!installBusyId"
               @click="installRemotePackage(entry)"
-            >{{ installBusyId === entry.id ? '安装中…' : (installedPackageVersion(entry.id) ? '覆盖安装' : '安装') }}</button>
+            >{{ installBusyId === `${entry.source_id}:${entry.id}` ? '安装中…' : (installedPackageVersion(entry.id) ? '覆盖安装' : '安装') }}</button>
           </div>
         </article>
       </div>
@@ -53,33 +65,30 @@ const toast = useToast()
 const beginReport = operationReporter(inject(OPERATION_FEEDBACK_KEY, null), '', toast)
 const packages = computed(() => packageStore.packages)
 
-// ---------- 远端 Package 源（registry.json 相对路径裸 fetch；禁改 registry.json 本身） ----------
-const REMOTE_REGISTRY_URL = 'registry.json'
+const sources = ref([])
+const sourceWarnings = ref({})
+const repositoryUrl = ref('')
+const sourceBusy = ref(false)
 const remotePackages = ref([])
 const remoteLoading = ref(false)
 const remoteError = ref('')
 const installBusyId = ref('')
 
-async function loadRemoteRegistry() {
+async function loadRemoteRegistry(force = true) {
   if (remoteLoading.value) return
   remoteLoading.value = true
   remoteError.value = ''
   try {
-    const r = await fetch(REMOTE_REGISTRY_URL, { cache: 'no-store' })
-    // 404 = 无远端源；生产环境 ServeDir 把缺失静态文件 SPA-fallback 成 index.html
-    //（200 + HTML），非 JSON 响应同样按「无远端源」空态处理而非报错
-    if (r.status === 404) {
-      remotePackages.value = []
-      return
-    }
-    if (!r.ok) throw new Error(`HTTP ${r.status}`)
-    const ct = (r.headers.get('content-type') || '').toLowerCase()
-    if (ct && !ct.includes('json')) {
-      remotePackages.value = []
-      return
-    }
-    const data = await r.json()
-    remotePackages.value = Array.isArray(data?.packages) ? data.packages : []
+    sources.value = await api.packageSources()
+    sourceWarnings.value = {}
+    const catalogs = await Promise.all(sources.value.filter(s => s.enabled).map(async source => {
+      try {
+        const data = await api.packageSourceCatalog(source.id, force === true)
+        if (data.warning) sourceWarnings.value[source.id] = `${data.cached ? '显示缓存：' : ''}${data.warning}`
+        return (data.packages || []).map(p => ({ ...p, source_id: source.id, repository: source.repository }))
+      } catch (e) { sourceWarnings.value[source.id] = e.message; return [] }
+    }))
+    remotePackages.value = catalogs.flat()
   } catch (e) {
     remotePackages.value = []
     remoteError.value = e?.message || '请重试'
@@ -87,6 +96,17 @@ async function loadRemoteRegistry() {
     remoteLoading.value = false
   }
 }
+
+async function changeSources(change) {
+  if (sourceBusy.value || remoteLoading.value) return
+  sourceBusy.value = true
+  try { await change(); await loadRemoteRegistry(false) }
+  catch (e) { toast(e.message, 'error') }
+  finally { sourceBusy.value = false }
+}
+const addSource = () => changeSources(async () => { await api.savePackageSource(repositoryUrl.value); repositoryUrl.value = '' })
+const toggleSource = source => changeSources(() => api.savePackageSource(source.repository, !source.enabled))
+const removeSource = source => changeSources(() => api.removePackageSource(source.id))
 
 /** 已装同 id 包版本（卡片上的「已装 vX」标记 + 安装按钮文案切换） */
 function installedPackageVersion(id) {
@@ -99,24 +119,13 @@ function formatList(v) {
   return Array.isArray(v) ? v.join('、') : String(v)
 }
 
-/** 相对 download_url 解析到 registry.json 所在目录（远端源天然支持子目录托管） */
-function resolveRemoteUrl(u) {
-  try {
-    return new URL(String(u), new URL(REMOTE_REGISTRY_URL, window.location.href)).href
-  } catch {
-    return String(u || '')
-  }
-}
-
 async function installRemotePackage(entry) {
   const toast = beginReport()
-  if (installBusyId.value || !entry?.download_url) return
-  installBusyId.value = entry.id
+  if (installBusyId.value || !entry?.source_id) return
+  installBusyId.value = `${entry.source_id}:${entry.id}`
   try {
-    const r = await fetch(resolveRemoteUrl(entry.download_url))
-    if (!r.ok) throw new Error(`归档下载失败：HTTP ${r.status}`)
-    const bytes = new Uint8Array(await r.arrayBuffer())
-    const expectedSha256 = entry.sha256 ? String(entry.sha256) : undefined
+    const bytes = await api.downloadSourcePackage(entry.source_id, entry)
+    const expectedSha256 = entry.sha256
     try {
       await api.importPackageArchive(bytes, { expectedSha256 })
     } catch (e) {
@@ -124,7 +133,7 @@ async function installRemotePackage(entry) {
       if (e?.status !== 409) throw e
       const existing = e?.data?.existing
       const detail = existing?.version ? `（当前 v${existing.version}）` : ''
-      if (!await confirmDialog(`配置 ${entry.id} 已存在${detail}，覆盖安装将替换该配置全部数据（含本地修改）。`, { title: '覆盖配置包', confirmText: '覆盖安装', danger: true })) return
+      if (!await confirmDialog(`来自 ${entry.repository} 的配置 ${entry.id} 与本地同 ID 配置冲突${detail}。覆盖安装将替换全部数据（含本地修改），建议先导出备份。`, { title: '覆盖配置包', confirmText: '覆盖安装', danger: true })) return
       await api.importPackageArchive(bytes, { expectedSha256, overwrite: true })
     }
     toast(`配置已安装：${entry.id}@${entry.version || '?'}`, 'success')
@@ -136,11 +145,14 @@ async function installRemotePackage(entry) {
   }
 }
 
-onMounted(() => { loadPackages(); loadRemoteRegistry() })
+onMounted(() => { loadPackages(); loadRemoteRegistry(false) })
 </script>
 
 <style scoped>
 .market-section { display:flex; flex-direction:column; gap:10px; }
+.source-add,.source-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.source-add .input { flex:1; min-width:220px; }
+.source-row a { overflow-wrap:anywhere; }
 .market-section-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
 .market-section-head h3 { margin:0; font-size:13px; font-weight:600; }.market-section-head h3 span { margin-left:10px; font-weight:400; }.market-head-actions { display:flex; gap:6px; }
 .market-hint { font-size:12px; color:var(--text-2); }.market-error { font-size:12px; color:var(--danger); }

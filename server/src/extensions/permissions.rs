@@ -20,6 +20,8 @@ pub(crate) enum Permission {
     InputText,
     Touch,
     ResourceRead,
+    /// Explicit user-authorized package export and GitHub release publishing.
+    PackagePublish,
     RunSubmit,
     RunControl,
     RuntimeSleep,
@@ -47,6 +49,7 @@ impl Permission {
             "input.text" => Ok(Self::InputText),
             "touch" => Ok(Self::Touch),
             "resource.read" => Ok(Self::ResourceRead),
+            "package.publish" => Ok(Self::PackagePublish),
             "run.submit" => Ok(Self::RunSubmit),
             "run.control" => Ok(Self::RunControl),
             "runtime.sleep" => Ok(Self::RuntimeSleep),
@@ -87,6 +90,7 @@ impl Permission {
             Self::InputText => "input.text",
             Self::Touch => "touch",
             Self::ResourceRead => "resource.read",
+            Self::PackagePublish => "package.publish",
             Self::RunSubmit => "run.submit",
             Self::RunControl => "run.control",
             Self::RuntimeSleep => "runtime.sleep",
@@ -108,7 +112,7 @@ impl Permission {
                 HostApiDomain::Input
             }
             Self::Touch => HostApiDomain::Touch,
-            Self::ResourceRead => HostApiDomain::Resource,
+            Self::ResourceRead | Self::PackagePublish => HostApiDomain::Resource,
             Self::RunSubmit | Self::RunControl => HostApiDomain::Run,
             Self::RuntimeSleep => HostApiDomain::Runtime,
             Self::LogWrite => HostApiDomain::Log,
