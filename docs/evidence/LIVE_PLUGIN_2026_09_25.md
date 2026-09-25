@@ -19,6 +19,7 @@
 | 插件 UI 测试 | 4 passed：无自动开流、显式开始、两种凭据隔离及清除、错误展示 |
 | 前端壳与安装确认回归 | 63 passed |
 | 插件发行工具测试 | 4 passed |
+| 默认 WASM / 无 WASM `cargo check --locked` | 均通过 |
 | Web build / 插件 UI build / SDK 一致性 | 通过 |
 | `.gplugin` 独立构建 | 通过归档、manifest、大小与 SHA256 自检 |
 
