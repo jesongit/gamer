@@ -191,7 +191,12 @@ const mediaKeys = useMediaKeyboard({
   report: gestures.show,
 })
 function focusMediaPlayer(event) {
-  if (props.stage?.kind !== 'media' || event.target?.closest?.('button,input,select,textarea,a,[contenteditable]')) return
+  if (props.stage?.kind !== 'media') return
+  const control = event.target?.closest?.('button,input,select,textarea,a,[contenteditable]')
+  // 鼠标操作播放控件后继续接收快捷键；下拉框和 Tab/键盘激活保留原生焦点。
+  const pointerPlaybackControl = event.detail > 0
+    && control?.matches('button,input[type="range"]') && control.closest('.media-controls')
+  if (control && !pointerPlaybackControl) return
   playerRoot.value?.focus({ preventScroll: true })
   event.stopPropagation()
 }
