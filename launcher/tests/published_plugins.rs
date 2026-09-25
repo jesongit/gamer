@@ -34,7 +34,14 @@ fn installs_published_plugins_using_launcher_selection_flow() {
         serde_json::from_slice(&std::fs::read(layout.state_dir().join("admin-token")).unwrap())
             .unwrap();
     let choices = official_plugins::choices(&layout, &manifest).unwrap();
-    assert_eq!(choices.len(), 3);
+    let expected = manifest.platforms[distribution::PLATFORM]
+        .components
+        .iter()
+        .find(|c| c.id == "official-plugins")
+        .unwrap()
+        .required_files
+        .len();
+    assert_eq!(choices.len(), expected);
     let selected: Vec<_> = choices.iter().map(|c| c.id.clone()).collect();
     official_plugins::install(
         &layout,

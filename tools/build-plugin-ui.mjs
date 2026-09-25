@@ -6,7 +6,7 @@ import { resolve } from 'node:path'
 const repo = fileURLToPath(new URL('../', import.meta.url))
 const installOnly = process.argv.includes('--install-only')
 const requested = process.argv.slice(2).filter(value => value !== '--install-only')
-const ids = requested.length ? requested : ['gamer-yaml', 'gamer-keymap', 'gamer-video']
+const ids = requested.length ? requested : ['gamer-yaml', 'gamer-keymap', 'gamer-video', 'gamer-package-publisher']
 for (const id of ids) {
   if (!/^gamer-[a-z0-9-]+$/.test(id)) throw new Error('Invalid plugin id')
   const plugin = resolve(repo, 'plugins', id)

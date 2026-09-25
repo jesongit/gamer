@@ -30,7 +30,11 @@ $bundlePath = Get-VerifiedAsset $lock.bundle
 $registry = Get-Content -LiteralPath $registryPath -Raw | ConvertFrom-Json
 if ($registry.provenance.plugin_commit -ne $lock.plugin_commit) { throw '插件 registry 来源提交不一致' }
 $plugins = @($registry.plugins)
-if ($plugins.Count -ne 3 -or (@($plugins.id | Sort-Object -Unique) -join ',') -ne 'gamer-keymap,gamer-video,gamer-yaml') { throw '插件目录必须包含三款官方插件各一份' }
+$requiredIds = @('gamer-keymap', 'gamer-video', 'gamer-yaml')
+$allowedIds = $requiredIds + @('gamer-package-publisher')
+if (@($plugins.id | Sort-Object -Unique).Count -ne $plugins.Count -or
+    @($requiredIds | Where-Object { $_ -notin $plugins.id }).Count -gt 0 -or
+    @($plugins.id | Where-Object { $_ -notin $allowedIds }).Count -gt 0) { throw '官方插件目录缺项、重复或含未知插件' }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [IO.Compression.ZipFile]::OpenRead($bundlePath)
 try {
