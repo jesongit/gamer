@@ -56,6 +56,11 @@ ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
 argon2 = "0.5"
 rand = "0.8"
 futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+hmac = "0.12"
+md-5 = "0.10"
+flate2 = "1"
 parking_lot = "0.12"
 bytes = "1"
 async-recursion = "1"

@@ -367,7 +367,10 @@ impl RuntimeServices {
         );
         let extensions = Arc::new(
             extensions::ExtensionService::for_data_root(cfg.data_dir.clone(), capabilities)
-                .with_runner_registrar(runner_registrar),
+                .with_runner_registrar(runner_registrar)
+                .with_builtin_service(Arc::new(extensions::live::LiveService::new(
+                    devices.clone(),
+                ))),
         );
         let ctx = Self {
             packages,
@@ -426,12 +429,16 @@ fn install_drain(slot: &DrainSlot, ctx: &RuntimeServices) {
     let runs = ctx.runs.clone();
     let viewers = ctx.viewers.clone();
     let devices = ctx.devices.clone();
+    let extensions = ctx.extensions.clone();
     *slot.write().unwrap() = Some(Arc::new(move || {
         let runs = runs.clone();
         let viewers = viewers.clone();
         let devices = devices.clone();
-        Box::pin(shutdown::drain_sessions(runs, viewers, devices))
-            as futures_util::future::BoxFuture<'static, ()>
+        let extensions = extensions.clone();
+        Box::pin(async move {
+            extensions.shutdown_builtin_service().await;
+            shutdown::drain_sessions(runs, viewers, devices).await;
+        }) as futures_util::future::BoxFuture<'static, ()>
     }));
 }
 

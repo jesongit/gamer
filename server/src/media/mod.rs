@@ -13,6 +13,9 @@
 //! 所有外部进程调用都带超时并同步执行——调用方（REST/host facade）负责放入
 //! blocking 池（`api::common::run_blocking_api`）。
 
+mod live_decoder;
+pub(crate) mod output;
+pub(crate) mod stream_mux;
 use std::collections::HashSet;
 use std::fs;
 use std::io::Read;

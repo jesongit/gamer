@@ -54,6 +54,18 @@ pub(crate) trait TimerRunnerRegistrar: Send + Sync {
     }
 }
 
+/// Process-owned builtin jobs, called only behind the normal permission and lifecycle gates.
+#[async_trait]
+pub(crate) trait BuiltinService: Send + Sync {
+    fn extension_id(&self) -> &str;
+    async fn call(
+        &self,
+        action: &str,
+        values: serde_json::Value,
+    ) -> ExtensionResult<serde_json::Value>;
+    async fn stop(&self);
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ExtensionSnapshot {
     manifest: ExtensionManifest,
@@ -222,6 +234,8 @@ pub(crate) struct ExtensionService {
     keymap_running: std::sync::Mutex<HashMap<ExtensionId, KeymapWasmInstanceHandle>>,
     ui: UiContributionRegistry,
     runner_registrar: Option<Arc<dyn TimerRunnerRegistrar>>,
+    builtin_service: Option<Arc<dyn BuiltinService>>,
+    shutting_down: std::sync::atomic::AtomicBool,
 }
 
 impl ExtensionService {
@@ -253,6 +267,8 @@ impl ExtensionService {
             keymap_running: std::sync::Mutex::new(HashMap::new()),
             ui: UiContributionRegistry::default(),
             runner_registrar: None,
+            builtin_service: None,
+            shutting_down: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -265,6 +281,23 @@ impl ExtensionService {
     ) -> Self {
         self.runner_registrar = Some(registrar);
         self
+    }
+
+    pub(crate) fn with_builtin_service(mut self, service: Arc<dyn BuiltinService>) -> Self {
+        self.builtin_service = Some(service);
+        self
+    }
+
+    pub(crate) async fn shutdown_builtin_service(&self) {
+        self.shutting_down
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(service) = &self.builtin_service {
+            if let Ok(id) = ExtensionId::parse(service.extension_id()) {
+                let gate = self.call_gate(&id);
+                let _lease = gate.write().await;
+                service.stop().await;
+            }
+        }
     }
 
     pub(crate) fn with_default_runtime(
@@ -512,6 +545,12 @@ impl ExtensionService {
         }
         let gate = self.call_gate(id);
         let _call_lease = gate.clone().read_owned().await;
+        if self
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(ExtensionError::CallRejected("服务正在停止".into()));
+        }
         let snapshot = self.snapshot_for(id)?;
         self.require_current_process_running(id, snapshot.state(), "call")?;
 
@@ -528,6 +567,13 @@ impl ExtensionService {
                 .ok_or_else(|| ExtensionError::CallRejected("native action 权限契约缺失".into()))?;
             for permission in permissions {
                 host.authorize(*permission)?;
+            }
+            if let Some(service) = self
+                .builtin_service
+                .as_ref()
+                .filter(|s| s.extension_id() == id.as_str())
+            {
+                return service.call(action, values).await;
             }
             let permit = NativeDispatchPermit::new();
             let id = id.clone();
@@ -575,6 +621,12 @@ impl ExtensionService {
     ) -> ExtensionResult<PluginCallContext> {
         let gate = self.call_gate(id);
         let _call_lease = gate.read().await;
+        if self
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(ExtensionError::CallRejected("服务正在停止".into()));
+        }
         let snapshot = self.snapshot_for(id)?;
         self.require_current_process_running(id, snapshot.state(), "call")?;
         let (token, app_context) = {
@@ -2112,6 +2164,13 @@ impl ExtensionService {
     /// 执行模型）simply have nothing to stop.
     async fn stop_running_instance(&self, id: &ExtensionId) -> ExtensionResult<()> {
         if self.instance_free(id) {
+            if let Some(service) = self
+                .builtin_service
+                .as_ref()
+                .filter(|s| s.extension_id() == id.as_str())
+            {
+                service.stop().await;
+            }
             self.clear_process_running(id);
             return Ok(());
         }

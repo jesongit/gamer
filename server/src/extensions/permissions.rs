@@ -26,6 +26,8 @@ pub(crate) enum Permission {
     RunControl,
     RuntimeSleep,
     LogWrite,
+    MediaStream,
+    LiveConnect,
     MediaRead,
     MediaImport,
     MediaRecord,
@@ -54,6 +56,8 @@ impl Permission {
             "run.control" => Ok(Self::RunControl),
             "runtime.sleep" => Ok(Self::RuntimeSleep),
             "log.write" => Ok(Self::LogWrite),
+            "media.stream" => Ok(Self::MediaStream),
+            "live.connect" => Ok(Self::LiveConnect),
             "media.read" => Ok(Self::MediaRead),
             "media.import" => Ok(Self::MediaImport),
             "media.record" => Ok(Self::MediaRecord),
@@ -95,6 +99,8 @@ impl Permission {
             Self::RunControl => "run.control",
             Self::RuntimeSleep => "runtime.sleep",
             Self::LogWrite => "log.write",
+            Self::MediaStream => "media.stream",
+            Self::LiveConnect => "live.connect",
             Self::MediaRead => "media.read",
             Self::MediaImport => "media.import",
             Self::MediaRecord => "media.record",
@@ -114,9 +120,10 @@ impl Permission {
             Self::Touch => HostApiDomain::Touch,
             Self::ResourceRead | Self::PackagePublish => HostApiDomain::Resource,
             Self::RunSubmit | Self::RunControl => HostApiDomain::Run,
-            Self::RuntimeSleep => HostApiDomain::Runtime,
+            Self::RuntimeSleep | Self::LiveConnect => HostApiDomain::Runtime,
             Self::LogWrite => HostApiDomain::Log,
-            Self::MediaRead
+            Self::MediaStream
+            | Self::MediaRead
             | Self::MediaImport
             | Self::MediaRecord
             | Self::MediaWrite
