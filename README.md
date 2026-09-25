@@ -17,11 +17,11 @@ Gamer 是一个通过浏览器操作 Android 设备的游戏自动化工具。�
 
 ## 快速开始
 
-### 下载 Windows 测试版
+### 下载 Windows 正式版
 
-本次测试版为 [Gamer 0.2.0-beta.7](https://github.com/jesongit/gamer/releases/tag/v0.2.0-beta.7)，仍为测试版。可选择独立 `gamer-launcher.exe` 在线安装，或下载 `Gamer-0.2.0-beta.7-windows-x64-full.zip` 离线安装。完整包带齐本体、启动器、ADB、FFmpeg/FFprobe、scrcpy 和首次可选的官方插件，不携带个人数据。文件用 HTTPS + SHA256 校验，不需要签名密钥。
+正式发行版为 [Gamer 0.2.0](https://github.com/jesongit/gamer/releases/tag/v0.2.0)。可选择独立 `gamer-launcher.exe` 在线安装，或下载 `Gamer-0.2.0-windows-x64-full.zip` 离线安装。完整包带齐本体、启动器、ADB、FFmpeg/FFprobe、scrcpy 和首次可选的官方插件，不携带个人数据。文件用 HTTPS + SHA256 校验，不需要签名密钥。
 
-本次自动化插件为 0.1.0-beta.2（键盘映射与视频工作台保持 0.1.0-beta.1），修复模板中心点击和相对坐标缩放，保存时检查已知引用类型。请先更新 Gamer 本体，再更新自动化插件；旧本体会拒绝安装要求 input 1.1 的新版插件。
+三款官方插件均为 0.1.0，自动化插件修复模板中心点击和相对坐标缩放，保存时检查已知引用类型。请先更新 Gamer 本体，再更新自动化插件；旧本体会拒绝安装要求 input 1.1 的新版插件。
 
 启动器安装在所在目录；已安装且无更新时收起到托盘并打开网页，有更新时显示“更新 / 取消”。完整包解压后仍需点击“安装”，将包内组件展开到运行目录。详细步骤见 [启动器快速上手](docs/guides/launcher-quickstart.md)。
 
