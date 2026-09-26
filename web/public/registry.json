@@ -1,12 +1,54 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-09-25T11:10:02Z",
+  "generated_at": "2026-09-26T16:34:18Z",
   "host_api": "1.0.0",
   "provenance": {
-    "plugin_commit": "cc5bc47c5e7c144f98181a35d5bb1ddea9a02a6c",
-    "sdk_host_commit": "d934edab274c438edbf48708101856a7702c7e9d"
+    "plugin_commit": "789d0820a3e8d13e5a498cb077508f4477ab5d53",
+    "sdk_host_commit": "77f3684e251e874ec9a34c7d1eb87ae29b4ab666"
   },
   "plugins": [
+    {
+      "id": "gamer-live",
+      "version": "0.2.1",
+      "name": "直播助手",
+      "description": "向直播姬提供设备音视频素材，接收 B 站直播互动；支持手动 RTMP 输出",
+      "publisher": "gamer.dev",
+      "download_url": "/plugins/gamer-live-0.2.1.gplugin",
+      "sha256": "35120f50c6eeb2eb0c1c52199be228dc5c3a0058c94c5abcc55e8e0ddb2a2c95",
+      "size": 16445,
+      "permissions": [
+        "ui.host",
+        "media.stream",
+        "live.connect",
+        "resource.read",
+        "run.submit",
+        "run.control"
+      ],
+      "host_api": {
+        "media": "^1.0",
+        "resource": "^1.0",
+        "run": "^1.0",
+        "runtime": "^1.0",
+        "ui": "^1.0"
+      },
+      "ui": {
+        "contributions": [
+          {
+            "component": "LiveWorkspace",
+            "entry": "ui/plugin.js",
+            "location": "console.right",
+            "order": 50,
+            "panel_id": "live",
+            "requires_device": false,
+            "runtime": "core",
+            "title": "直播助手"
+          }
+        ]
+      },
+      "execution": {
+        "kind": "builtin"
+      }
+    },
     {
       "id": "gamer-keymap",
       "version": "0.1.0",

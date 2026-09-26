@@ -31,7 +31,7 @@ pub(crate) const BUILTIN_EXTENSIONS: &[BuiltinExtensionDescriptor] = &[
         id: super::live::ID,
         name: "直播助手",
         description: "本机音视频素材、RTMP 输出与直播互动",
-        host_version: ">=0.2.1",
+        host_version: ">=0.2.2",
     },
     BuiltinExtensionDescriptor {
         id: super::video::VIDEO_EXTENSION_ID,

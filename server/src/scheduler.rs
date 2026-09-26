@@ -38,6 +38,16 @@ pub trait EntrypointDescriber: Send + Sync {
     /// 返回 entrypoint（资源 id，如 `<分区>/<脚本>.yaml[#<函数>]`）的参数
     /// schema 描述（契约 §7 JSON 形态）。
     fn describe(&self, entrypoint: &str) -> Result<serde_json::Value, EntrypointDescribeError>;
+    /// Strict argument binding stays with the owning runner, including defaults and domain types.
+    fn bind_args(
+        &self,
+        _entrypoint: &str,
+        _args: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, EntrypointDescribeError> {
+        Err(EntrypointDescribeError::Invalid {
+            diagnostics: serde_json::json!([{"message":"此 Runner 不支持参数预绑定"}]),
+        })
+    }
 }
 
 /// Runner 可调用函数目录描述器（runner 私有能力）：列出该 runner 执行环境
@@ -204,6 +214,25 @@ impl Scheduler {
             .ok_or(EntrypointQueryError::UnknownRunner)?;
         describer
             .describe(entrypoint)
+            .map_err(EntrypointQueryError::Describe)
+    }
+
+    /// Bind through the registered runner's own parameter semantics.
+    pub fn bind_entrypoint(
+        &self,
+        runner_id: &str,
+        entrypoint: &str,
+        args: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, EntrypointQueryError> {
+        let describer = self
+            .describers
+            .lock()
+            .expect("entrypoint describer registry lock poisoned")
+            .get(runner_id)
+            .map(|(_, d)| Arc::clone(d))
+            .ok_or(EntrypointQueryError::UnknownRunner)?;
+        describer
+            .bind_args(entrypoint, args)
             .map_err(EntrypointQueryError::Describe)
     }
 
