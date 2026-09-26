@@ -12,16 +12,32 @@ use super::viewer::ViewerMap;
 /// wire envelope remain WebRTC concerns.
 pub struct ViewerEventSink {
     viewers: ViewerMap,
+    browsers: Option<std::sync::Arc<crate::browser::BrowserManager>>,
 }
 
 impl ViewerEventSink {
     pub fn new(viewers: ViewerMap) -> Self {
-        Self { viewers }
+        Self {
+            viewers,
+            browsers: None,
+        }
     }
 }
 
+impl ViewerEventSink {
+    pub fn with_browsers(
+        mut self,
+        browsers: std::sync::Arc<crate::browser::BrowserManager>,
+    ) -> Self {
+        self.browsers = Some(browsers);
+        self
+    }
+}
 impl EventSink for ViewerEventSink {
     fn emit(&self, event: RuntimeEvent) -> BoxFuture<'_, anyhow::Result<()>> {
+        if let Some(browsers) = &self.browsers {
+            let _ = browsers.events.send(event.clone());
+        }
         let dc = {
             let map = self.viewers.lock().unwrap();
             map.get(event.device_id.as_str())

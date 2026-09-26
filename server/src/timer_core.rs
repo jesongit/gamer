@@ -177,7 +177,10 @@ impl Task {
 
     pub(crate) fn from_storage(row: TaskStorage) -> anyhow::Result<Self> {
         let device_id = DeviceId::new(row.device_id)?;
-        let android_package = AndroidPackageName::new(row.android_package)?;
+        let android_package = row
+            .android_package
+            .map(AndroidPackageName::new)
+            .transpose()?;
         let content_package = row.content_package.map(AppPackageId::new).transpose()?;
         let payload = serde_json::from_str(&row.payload_json)?;
         let schedule: TaskSchedule = serde_json::from_str(&row.schedule_json)?;
@@ -191,7 +194,11 @@ impl Task {
         let task = Self {
             id: row.id,
             name: row.name,
-            app: AppContext::new(device_id, android_package, content_package),
+            app: AppContext {
+                device_id,
+                android_package,
+                content_package,
+            },
             runner_id: row.runner_id,
             entrypoint: row.entrypoint,
             payload,
@@ -1299,7 +1306,11 @@ impl TimerCore {
                     .content_package
                     .as_ref()
                     .is_some_and(|value| value.as_str() == package)
-                    || task.app.android_package.as_str() == package
+                    || task
+                        .app
+                        .android_package
+                        .as_ref()
+                        .is_some_and(|p| p.as_str() == package)
             })
             .collect::<Vec<_>>();
         for task in &matching {

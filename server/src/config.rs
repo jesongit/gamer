@@ -196,6 +196,9 @@ pub struct Config {
     pub app_dir: Option<PathBuf>,
     /// adb 可执行文件路径
     pub adb_path: String,
+    /// Optional installed Chromium browser path for CDP targets.
+    #[serde(default)]
+    pub browser_path: String,
     /// ffmpeg 可执行文件路径（帧缓存软解码用）
     pub ffmpeg_path: String,
     /// scrcpy-server jar 路径
@@ -282,6 +285,7 @@ impl Default for Config {
             data_dir: PathBuf::from("./data"),
             app_dir: None,
             adb_path: "adb".into(),
+            browser_path: String::new(),
             ffmpeg_path: "ffmpeg".into(),
             scrcpy_server: PathBuf::from("./assets/scrcpy-server.jar"),
             threshold: default_threshold(),
@@ -656,6 +660,7 @@ impl Config {
 /// 路径字段规范化：字符串型路径去除首尾空白；PathBuf 型仅在确有差异时替换
 fn normalize_paths(cfg: &mut Config) {
     cfg.adb_path = cfg.adb_path.trim().to_string();
+    cfg.browser_path = cfg.browser_path.trim().to_string();
     cfg.ffmpeg_path = cfg.ffmpeg_path.trim().to_string();
     cfg.rtc_external_ip = cfg.rtc_external_ip.trim().to_string();
     for p in [&mut cfg.data_dir, &mut cfg.scrcpy_server] {
@@ -748,6 +753,7 @@ fn resolve_tool_path(base: &Path, tool: &str) -> String {
 fn resolve_stable_paths(cfg: &mut Config, base: &Path) {
     cfg.data_dir = resolve_relative(base, &cfg.data_dir);
     cfg.adb_path = resolve_tool_path(base, &cfg.adb_path);
+    cfg.browser_path = resolve_tool_path(base, &cfg.browser_path);
     cfg.ffmpeg_path = resolve_tool_path(base, &cfg.ffmpeg_path);
     cfg.scrcpy_server = match &cfg.app_dir {
         Some(app) => resolve_relative(app, &cfg.scrcpy_server),

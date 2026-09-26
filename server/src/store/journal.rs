@@ -230,7 +230,7 @@ mod tests {
         conn.execute("INSERT INTO logs(time,device_id,script_id,level,msg) VALUES ('now','d','s','info','keep')", []).unwrap();
         conn.pragma_update(None, "user_version", 4).unwrap();
         crate::migrations::run_migrations(&mut conn, 4, crate::migrations::MIGRATIONS).unwrap();
-        super::super::validate_schema_v5(&conn).unwrap();
+        super::super::validate_schema_v6(&conn).unwrap();
         assert_eq!(
             conn.query_row("SELECT msg FROM logs", [], |r| r.get::<_, String>(0))
                 .unwrap(),
@@ -239,7 +239,7 @@ mod tests {
         assert_eq!(
             conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            5
+            crate::migrations::TARGET_SCHEMA
         );
     }
 

@@ -140,13 +140,14 @@ pub type ContentPackageId = AppPackageId;
 
 /// Runtime Context 四层语义（plan §16 权威定义；本类型承载前三层，第四层见下）：
 ///
-/// 1. **Device Context = `device_id`**——运行目标设备。设备登记
+/// 1. **Device Context = `device_id`**——稳定运行目标（Android 设备或浏览器目标）。设备登记
 ///    （DeviceManager）决定 scrcpy 会话、触控/帧链路；`AppContext` 只携带其
 ///    稳定 id，不携带连接态。
 /// 2. **App Context = `android_package`**——纯运行目标：Android 侧已安装的
 ///    应用包名，`app.start`/`app.stop` 等生命周期操作的缺省目标。权威来源 =
 ///    设备登记配置的 `pkg`（`DeviceManager::snapshot`），不回退、不从
-///    Package id 推导——两个命名空间严格分离。
+///    Package id 推导——两个命名空间严格分离。浏览器目标缺省此字段；
+///    不能用空字符串、URL 或配置包 ID 伪造 Android 身份。
 /// 3. **Package Context = `content_package`**——数据上下文：资源解析域
 ///    （`packages/<package-id>/plugins/<plugin>/`）的 Package id，模板/脚本/
 ///    函数寻址全部落在该域；可缺省（无资源语义的运行）。
@@ -160,7 +161,7 @@ pub type ContentPackageId = AppPackageId;
 /// （Android 安装域 vs 内容寻址域），任何生产代码路径不得互相推导或兜底；
 /// 值可以相等（例如设备 pkg 与数据包同名），但那只是巧合而非约定。
 ///
-/// A device plus the Android application and optional content package in
+/// A logical target plus the optional Android application and content package in
 /// scope for an operation.
 ///
 /// Runtime Context 前三层的承载体（Device/App/Package；四层语义与不变量见
@@ -169,7 +170,8 @@ pub type ContentPackageId = AppPackageId;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppContext {
     pub device_id: DeviceId,
-    pub android_package: AndroidPackageName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub android_package: Option<AndroidPackageName>,
     pub content_package: Option<AppPackageId>,
 }
 
@@ -181,7 +183,7 @@ impl AppContext {
     ) -> Self {
         Self {
             device_id,
-            android_package,
+            android_package: Some(android_package),
             content_package,
         }
     }
@@ -519,13 +521,16 @@ mod tests {
         let context = app();
 
         assert_eq!(context.device_id.as_str(), "device-1");
-        assert_eq!(context.android_package.as_str(), "com.example.game");
+        assert_eq!(
+            context.android_package.as_ref().unwrap().as_str(),
+            "com.example.game"
+        );
         assert_eq!(
             context.content_package.as_ref().unwrap().as_str(),
             "official.example"
         );
         assert_ne!(
-            context.android_package.as_str(),
+            context.android_package.as_ref().unwrap().as_str(),
             context.content_package.unwrap().as_str()
         );
     }
@@ -534,7 +539,10 @@ mod tests {
     fn test_helper_maps_package_to_both_namespaces() {
         let context = AppContext::for_test("device-1", "com.example.game").unwrap();
 
-        assert_eq!(context.android_package.as_str(), "com.example.game");
+        assert_eq!(
+            context.android_package.as_ref().unwrap().as_str(),
+            "com.example.game"
+        );
         assert_eq!(
             context.content_package.as_ref().unwrap().as_str(),
             "com.example.game"

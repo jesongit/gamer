@@ -16,6 +16,7 @@
 //!   CORS 层已整体移除（vite 代理同源不受影响）。
 
 pub mod auth;
+mod browser;
 mod common;
 mod devices;
 mod error;
@@ -191,6 +192,19 @@ pub(crate) fn build_router_with_extensions(
     //      高风险接口标注（专项测试见文件尾 tests）：shutdown、设备控制
     //      （devices::api_control）、运行分发、资源删除。
     let protected_json: Router<()> = Router::new()
+        .route(
+            "/api/browser-targets",
+            get(browser::list).post(browser::save),
+        )
+        .route("/api/browser-targets/:id", delete(browser::remove))
+        .route("/api/browser-targets/:id/connect", post(browser::connect))
+        .route(
+            "/api/browser-targets/:id/disconnect",
+            post(browser::disconnect),
+        )
+        .route("/ws/browser/:id", get(browser::preview))
+        .route("/api/browser-targets/:id/pages", get(browser::pages))
+        .route("/api/browser-targets/:id/bind", post(browser::bind))
         .route(
             "/api/package-sources",
             get(package_sources::list).post(package_sources::save),

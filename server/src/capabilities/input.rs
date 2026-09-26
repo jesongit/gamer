@@ -89,11 +89,73 @@ impl SwipeGesture {
 /// Keyboard and text input boundary.
 #[async_trait]
 pub trait InputService: Send + Sync {
+    async fn tap_from_frame(
+        &self,
+        device: &DeviceHandle,
+        point: TouchPoint,
+        stamp: Option<&super::FrameStamp>,
+    ) -> CapabilityResult<()> {
+        if stamp.is_some() {
+            return Err(super::CapabilityError::InvalidRequest(
+                "此输入来源不支持该画面坐标".into(),
+            ));
+        }
+        self.tap(device, point).await
+    }
+    async fn key_named(
+        &self,
+        device: &DeviceHandle,
+        name: &str,
+        action: KeyAction,
+    ) -> CapabilityResult<()> {
+        let code = android_key_code(name)?;
+        self.key(device, KeyInput::new(KeyCode::new(code), action))
+            .await
+    }
+
     async fn tap(&self, device: &DeviceHandle, point: TouchPoint) -> CapabilityResult<()>;
 
     async fn swipe(&self, device: &DeviceHandle, gesture: SwipeGesture) -> CapabilityResult<()>;
+    async fn swipe_from_frame(
+        &self,
+        device: &DeviceHandle,
+        gesture: SwipeGesture,
+        stamp: Option<&super::FrameStamp>,
+    ) -> CapabilityResult<()> {
+        if stamp.is_some() {
+            return Err(super::CapabilityError::InvalidRequest(
+                "此输入来源不支持该画面坐标".into(),
+            ));
+        }
+        self.swipe(device, gesture).await
+    }
 
     async fn key(&self, device: &DeviceHandle, input: KeyInput) -> CapabilityResult<()>;
 
     async fn text(&self, device: &DeviceHandle, input: TextInput) -> CapabilityResult<()>;
+}
+
+// Existing Android key vocabulary. Browser implementations override key_named.
+pub(super) fn android_key_code(text: &str) -> CapabilityResult<u32> {
+    if let Ok(code) = text.parse::<u32>() {
+        return Ok(code);
+    }
+    Ok(match text.to_ascii_uppercase().as_str() {
+        "HOME" => 3,
+        "BACK" => 4,
+        "MENU" => 82,
+        "APP_SWITCH" | "RECENTS" => 187,
+        "VOL_UP" | "VOLUME_UP" => 24,
+        "VOL_DOWN" | "VOLUME_DOWN" => 25,
+        "ESC" | "ESCAPE" => 111,
+        "ENTER" | "RETURN" => 66,
+        "SPACE" => 62,
+        "TAB" => 61,
+        "BACKSPACE" | "DEL" => 67,
+        other => {
+            return Err(super::CapabilityError::InvalidRequest(format!(
+                "不支持的 Android key: {other}"
+            )))
+        }
+    })
 }

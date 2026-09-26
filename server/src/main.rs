@@ -14,6 +14,7 @@
 //!   路由并置 startup.stage=ready（/health/ready 翻转 200）。
 
 mod api;
+mod browser;
 mod build_info;
 pub(crate) mod capabilities;
 mod config;
@@ -38,6 +39,7 @@ mod scheduler;
 mod settings;
 mod shutdown;
 mod store;
+mod targets;
 mod timer_core;
 mod update;
 mod webrtc;
@@ -391,7 +393,10 @@ impl RuntimeServices {
             Some(Arc::new(run_journal::JournalEventSink {
                 db: db.clone(),
                 runs: ctx.runs.clone(),
-                viewer: Arc::new(webrtc::ViewerEventSink::new(ctx.viewers.clone())),
+                viewer: Arc::new(
+                    webrtc::ViewerEventSink::new(ctx.viewers.clone())
+                        .with_browsers(ctx.devices.browsers.clone()),
+                ),
             })),
         );
         // 后台生命周期统一在组合根启动：视频静默看门狗（devices/viewers/metrics

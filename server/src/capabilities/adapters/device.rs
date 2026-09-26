@@ -46,7 +46,9 @@ impl DeviceAdapter {
 #[async_trait]
 impl DeviceService for DeviceAdapter {
     async fn resolve(&self, id: &DeviceId) -> CapabilityResult<DeviceHandle> {
-        if self.devices.snapshot(id.as_str()).is_some() {
+        if self.devices.snapshot(id.as_str()).is_some()
+            || self.devices.browsers.get(id.as_str()).is_ok()
+        {
             Ok(DeviceHandle::new(id.clone()))
         } else {
             Err(CapabilityError::NotFound(format!("device {}", id.as_str())))

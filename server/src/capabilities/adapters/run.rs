@@ -83,31 +83,10 @@ impl RunAdapter {
         // 必须存在且配置 pkg），Package 上下文 = entry 资源首段（Package id）。
         // 两个命名空间不互相推导——Package id 不再兼任 Android 包名。
         let device_id_str = request.device().id().as_str();
-        let (device, _, _) = self.devices.snapshot(device_id_str).ok_or_else(|| {
-            CapabilityError::InvalidRequest(format!(
-                "设备不存在: {device_id_str}（运行目标必须先登记设备）"
-            ))
-        })?;
-        let pkg = device
-            .pkg
-            .as_deref()
-            .map(str::trim)
-            .filter(|pkg| !pkg.is_empty())
-            .ok_or_else(|| {
-                CapabilityError::InvalidRequest(format!(
-                    "设备 {device_id_str} 未配置 Android 应用包名（pkg）：app.start 的缺省目标来自设备配置，与资源所属配置相互独立"
-                ))
-            })?;
-        let android = AndroidPackageName::new(pkg)
-            .map_err(|error| CapabilityError::InvalidRequest(error.to_string()))?;
         let content = AppPackageId::new(resource.package())
-            .map_err(|error| CapabilityError::InvalidRequest(error.to_string()))?;
-        let app = AppContext::new(
-            DeviceId::new(device_id_str)
-                .map_err(|error| CapabilityError::InvalidRequest(error.to_string()))?,
-            android,
-            Some(content),
-        );
+            .map_err(|e| CapabilityError::InvalidRequest(e.to_string()))?;
+        let app = crate::targets::app_context(&self.devices, device_id_str, Some(content))
+            .map_err(|e| CapabilityError::InvalidRequest(e.to_string()))?;
         // 通用 runner 分发约定（P11.6）：runner_id = 自动化 runner 注册 id，
         // entrypoint = `<package>/<脚本>`，payload 为 runner 私有不透明值
         // （缺省对象 = 默认目标从头跑）。目标/payload 语义由注册该 runner 的

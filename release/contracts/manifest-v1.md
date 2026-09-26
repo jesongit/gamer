@@ -44,7 +44,7 @@ hash 一律 **64 位小写 hex SHA-256**；`size` 一律 ≥0；平台内所有�
 `scrcpy-server` 组件与 `resources.scrcpy_server` 的协议版本和 JAR 哈希必须相同，
 只随整套发行配方切换，不能追随上游最新版独立更新。保留 app 内 JAR 供 v1 资源
 完整性契约校验，实际启动注入受管组件路径。离线 seeds 仅保存清单中的组件归档。
-`data_schema` 由生成脚本读取服务端迁移目标版本，当前为 5。
+`data_schema` 由生成脚本读取服务端迁移目标版本，当前为 6。
 URL 仅接受 `https://`（默认官方 GitHub 发布源；浏览器不得覆盖 URL）。
 
 ## 3. 来源与完整性

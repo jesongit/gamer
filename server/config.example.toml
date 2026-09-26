@@ -19,6 +19,9 @@ data_dir = "./data"
 #   Linux/macOS: "adb"                              或 "/usr/local/bin/adb"
 # adb_path = "<PATH 内命令名或绝对路径>"；可执行性启动时探测记录 warn，不阻断
 adb_path = "adb"
+# CDP 浏览器：空值自动发现已安装的 Edge/Chrome/Chromium，不下载浏览器。
+# 指定时必须为可执行文件路径；每个账号使用 data/browser-profiles 下独立资料目录。
+browser_path = ""
 #   Windows: "ffmpeg"                               或 "D:/Scoop/apps/ffmpeg/current/bin/ffmpeg.exe"
 #   Linux: "/usr/bin/ffmpeg"    macOS(brew): "/opt/homebrew/bin/ffmpeg"
 # ffmpeg_path = "<PATH 内命令名或绝对路径>"；帧缓存软解码用，失效会导致截图/匹配不可用

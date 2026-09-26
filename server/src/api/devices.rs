@@ -114,13 +114,18 @@ pub(super) async fn api_list_devices(State(st): State<AppState>) -> Response {
 
 /// 渲染设备列表视图（带运行时状态/分辨率）。数据库查询走异步 worker RPC，
 /// 数据库失败必须向调用方返回 500，而不是伪装成空列表。
-async fn device_views(st: &AppState) -> Result<Vec<DeviceView>, ApiError> {
+async fn device_views(st: &AppState) -> Result<Vec<serde_json::Value>, ApiError> {
     let devices_snapshot = st
         .db
         .list_devices_async()
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    render_device_views(&devices_snapshot, &st.devices)
+    let mut views = render_device_views(&devices_snapshot, &st.devices)?
+        .into_iter()
+        .map(|v| serde_json::to_value(v).expect("device view is serializable"))
+        .collect::<Vec<_>>();
+    views.extend(super::browser::list(State(st.clone())).await?.0);
+    Ok(views)
 }
 
 fn render_device_views(

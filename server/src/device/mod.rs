@@ -245,6 +245,7 @@ pub struct DeviceManager {
     pub db: Db,
     pub cfg: Config,
     pub adb: Adb,
+    pub browsers: Arc<crate::browser::BrowserManager>,
     pub devices: RwLock<HashMap<String, DeviceRuntime>>,
     /// 普通连接共享读锁；显式重置 ADB 独占写锁，避免重置期间创建新会话。
     pub(crate) connection_gate: tokio::sync::RwLock<()>,
@@ -258,10 +259,12 @@ pub struct DeviceManager {
 impl DeviceManager {
     pub fn new(db: Db, cfg: Config) -> Self {
         let adb = Adb::new(&cfg);
+        let browsers = Arc::new(crate::browser::BrowserManager::new(db.clone(), cfg.clone()));
         Self {
             db,
             cfg,
             adb,
+            browsers,
             activity: Arc::new(DeviceActivity::default()),
             idle: std::sync::Mutex::new(HashMap::new()),
             devices: RwLock::new(HashMap::new()),
@@ -721,6 +724,7 @@ impl DeviceManager {
     /// 设备端 server（cleanup=true）退出、adb shell 子进程正常收尾；硬杀进程则这些
     /// 全变孤儿，曾有孤儿 teardown 期 adb 短暂楔死后续连接的坑（见 AGENTS.md 已知坑）
     pub async fn shutdown_all(&self) {
+        self.browsers.shutdown().await;
         let snap = self.list_snapshot_full();
         for (id, d, status) in &snap {
             if *status != DeviceStatus::Online {
@@ -1004,6 +1008,13 @@ impl DeviceManager {
     /// 的 RGB 帧（无 PNG 编码/解码往返，与 REST 截图共享同一次解码缓存）。
     /// 帧缓存不可用/失败时回退 adb 截图（该边界本身产出 PNG，需一次 PNG 解码）。
     pub async fn screenshot_frame(&self, id: &str) -> anyhow::Result<crate::matcher::DecodedFrame> {
+        if crate::targets::is_browser(id) {
+            let (png, _) = self.browsers.session(id)?.capture().await?;
+            return crate::matcher::compute::run(move || {
+                crate::matcher::DecodedFrame::from_png(&png)
+            })
+            .await?;
+        }
         let (device, cache) = {
             let map = self.devices.read();
             let rt = map
@@ -1035,6 +1046,9 @@ impl DeviceManager {
     /// PNG 编码只发生在此边界），不可用/失败时回退 adb 虚拟屏截图，再失败直接
     /// 报错（不静默回退物理屏）。
     pub async fn screenshot(&self, id: &str) -> anyhow::Result<Vec<u8>> {
+        if crate::targets::is_browser(id) {
+            return Ok(self.browsers.session(id)?.capture().await?.0);
+        }
         let (device, cache) = {
             let map = self.devices.read();
             let rt = map

@@ -443,6 +443,9 @@ mod sec_tests {
         .await
     }
 
+    mod browser_tests {
+        include!("tests/browser.rs");
+    }
     mod auth_tests {
         include!("tests/auth.rs");
     }

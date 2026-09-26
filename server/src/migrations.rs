@@ -3,7 +3,7 @@
 //! 与契约逐条对齐的规则：
 //! - `PRAGMA user_version` 是唯一权威版本标记；**不引入** `schema_migrations` 表，
 //!   不用文件名/旁路标记推断版本；
-//! - v1 是历史基线；当前目标为 v3。v1→v2 为 Timer Core 数据迁移，v2→v3 为
+//! - v1 是历史基线；当前目标为 v6。v1→v2 为 Timer Core 数据迁移，v2→v3 为
 //!   Task 模型收口（P11.1：删 legacy tasks 表 + schedule JSON 改写为
 //!   provider/config），均静态注册于 [`MIGRATIONS`]，禁止运行期动态拼装；
 //! - `user_version=0`（无版本旧库）在进入本模块前即被 [`crate::store`] 明确拒绝
@@ -18,11 +18,11 @@
 //! 兼容常量（契约 §3，DATA-003 常量化）：[`MIN_READ_SCHEMA`] / [`MAX_READ_SCHEMA`] /
 //! [`TARGET_SCHEMA`] 是本 binary 的兼容声明唯一取值源——启动路径（[`crate::store`]）、
 //! maintenance CLI（DATA-005 inspect/migrate）与 `/api/system/info` 的 schema 字段
-//! 全部引用这组常量，禁止各处自抄数字。当前形态 `min = 1, target = max = 2`；
+//! 全部引用这组常量，禁止各处自抄数字。当前形态 `min = 1, target = max = 6`；
 //! 取值变更必须与 release/contracts/schema-policy.md §3 取值表同步提交（§8）。
 //!
 //! 生产路径：[`crate::store`] 的 `apply_schema_migrations` 先跑 [`run_migrations`]
-//! 再做 `validate_schema_v3`。测试可用临时迁移表直接驱动 [`run_migrations`]，
+//! 再做 `validate_schema_v6`。测试可用临时迁移表直接驱动 [`run_migrations`]，
 //! 不触碰对外"无版本库拒绝"行为。
 
 use std::collections::HashSet;
@@ -32,9 +32,9 @@ use rusqlite::{Connection, Transaction};
 /// 本 binary 可打开并继续迁移的最低 user_version（v1 基线；0 永远拒绝）
 pub const MIN_READ_SCHEMA: i64 = 1;
 /// 可打开的最高 user_version；高于此值拒绝启动（schema-policy §3/§4 硬规则）
-pub const MAX_READ_SCHEMA: i64 = 5;
+pub const MAX_READ_SCHEMA: i64 = 6;
 /// 本 binary 迁移完成后的目标 schema 版本
-pub const TARGET_SCHEMA: i64 = 5;
+pub const TARGET_SCHEMA: i64 = 6;
 
 /// 契约 §3 冻结约束 `min_read ≤ target ≤ max_read` 编译期固化：取值漂移在
 /// 编译期即失败，不等运行期诊断
@@ -84,6 +84,12 @@ pub(crate) static MIGRATIONS: &[Migration] = &[
             tx.execute_batch(crate::store::journal::DDL)?;
             Ok(())
         },
+    },
+    Migration {
+        from: 5,
+        to: 6,
+        description: "browser targets and optional Android context",
+        apply: crate::store::migrate_v5_to_v6,
     },
 ];
 

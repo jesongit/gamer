@@ -209,7 +209,7 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     );
     let context = contexts.lock().unwrap()[0].clone();
     assert_eq!(context.content_package.as_ref().unwrap().as_str(), "com.test.app");
-    assert_eq!(context.android_package.as_str(), "com.example.game");
+    assert_eq!(context.android_package.as_ref().unwrap().as_str(), "com.example.game");
     // 执行阶段模板寻址必须能构造合法的资源三元组，不能把 #函数名带进 Package。
     crate::core::ResourceId::new(
         context.content_package.unwrap().as_str(), "gamer-yaml", "templates/指南.png"
