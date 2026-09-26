@@ -76,6 +76,10 @@ automations/ 内其他 .yaml                            → 自动化脚本
 前端「函数」页面按函数展示，默认在 `_function.yaml` 新建；额外拆分的
 `_function*.yaml` 同样可在画布中编辑，并按实际定义文件保存。
 
+浏览器目标沿用这些函数和任务入口，不新增 YAML 关键字。`key` 支持浏览器逻辑键名（如 `W`、`Enter`、`Escape`、`ArrowLeft`、`Control`、`Shift`、`F1`）及 `press/down/up`；Android 数字键码仍只用于 Android。`input_text` 插入文本，`tap/swipe` 使用现有归一化坐标。`launch/stop_app` 为 Android 应用操作，浏览器不支持；浏览器初始网址由目标配置提供，登录、排队、进入游戏由脚本处理。
+
+浏览器 `find/wait_find/find_any` 的命中对象及其 `center` 带内部 `_frame` 来源标记；直接 `tap: $result` 或 `tap: $result.center` 会拒绝导航、改绑或坐标映射变化前的旧结果。不要修改该标记；主动拆为裸 `x/y` 数值会失去来源校验。定时任务选择浏览器目标时不填写 `android_package`，配置包仍独立选择。配置与使用见 [CDP 浏览器目标](../guides/browser-targets.md)。
+
 ## 2. 脚本格式
 
 ```yaml

@@ -488,3 +488,7 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - 直播姬的第三方推流服务器地址不等于「多媒体」素材地址：需要直播姬混音时，使用 Gamer 生成的本机 HLS 拉流地址作为素材，开播仍在直播姬完成。
 - scrcpy 静态画面可能不再出视频帧，直接封装 HLS 会停止更新分片；直播输出应持续解码并按输出时钟重复已解码画面，不重放 P 帧破坏 H.264 参考链。
 - Windows 用户目录下的 worktree 会让 Cargo 读取祖先 `.cargo/config.toml`，旧镜像可能缺少锁定的 wasmtime 版本并诱发无关降级；使用工作树实际盘符路径和独立 CARGO_HOME 连接官方索引，保留既有 Cargo.lock 版本。
+
+- Windows CDP 资料目录重启后 Cookie 丢失：`canonicalize` 的 `\\?\` 路径前缀会影响 Chrome/Edge Cookie 持久化，传给 `--user-data-dir` 前转换为普通绝对路径，并在关闭时等待浏览器刷新资料。
+- 插件固定 gitlink 尚未推送时 worktree 的 submodule 初始化会报找不到提交：从已有本地插件仓获取该精确提交，不能改为远端最新分支以绕过。
+- 本机 Cargo 镜像缺少锁定的 Wasmtime 48.0.1 时无法解析依赖：仅对当前命令覆盖镜像到 crates.io，不修改全局配置或擅自降低锁定版本。
