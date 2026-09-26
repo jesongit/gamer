@@ -16,8 +16,8 @@ export function useConsoleBridgeOverlays({ videoElement, deviceRectStyle }) {
     let y = Number(rect.y || 0)
     let w = Number(rect.w ?? rect.width ?? 0)
     let h = Number(rect.h ?? rect.height ?? 0)
-    const vw = videoElement.value?.videoWidth || 1920
-    const vh = videoElement.value?.videoHeight || 1080
+    const vw = (videoElement.value?.naturalWidth || videoElement.value?.videoWidth) || 1920
+    const vh = (videoElement.value?.naturalHeight || videoElement.value?.videoHeight) || 1080
     if (item.normalized || rect.normalized) {
       x *= vw; y *= vh; w *= vw; h *= vh
     }

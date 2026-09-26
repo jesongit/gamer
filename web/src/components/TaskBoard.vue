@@ -451,7 +451,7 @@ function buildTaskSaveBody() {
     enabled: form.enabled,
     app: {
       device_id: form.device_id,
-      android_package: app?.android_package ?? '',
+      android_package: form.device_id?.startsWith('browser-') ? null : app?.android_package ?? '',
       content_package: app?.content_package ?? null,
     },
     runner: {

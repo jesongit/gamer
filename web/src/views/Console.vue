@@ -44,7 +44,7 @@
           </div>
         </div>
         <div class="tb-row tb-operation-row">
-          <div class="tb-group tb-app-group" role="group" aria-label="应用控制">
+          <div v-if="!isBrowser" class="tb-group tb-app-group" role="group" aria-label="应用控制">
             <span class="tb-label">应用</span>
             <!-- 应用下拉（Android 运行目标）：选中即保存为设备配置包名，启动/脚本共用；
                  选项 = 设备配置包名 ∪ 已安装应用（「读取」拉取），Package 数据上下文与此无关 -->
@@ -65,9 +65,9 @@
           </div>
           <div class="tb-group tb-control-group" role="group" aria-label="投屏操作">
             <button class="btn btn-sm" title="截图" aria-label="截图" :disabled="!connected" @click="shot"><UiIcon name="image" />截图</button>
-            <button class="btn btn-sm" title="返回" aria-label="返回" :disabled="!connected" @click="key('BACK')"><UiIcon name="back" />返回</button>
+            <button v-if="!isBrowser" class="btn btn-sm" title="返回" aria-label="返回" :disabled="!connected" @click="key('BACK')"><UiIcon name="back" />返回</button>
             <button class="btn btn-sm" title="全屏" aria-label="全屏" @click="fullscreen"><UiIcon name="expand" />全屏</button>
-            <button
+            <button v-if="!isBrowser"
               class="btn btn-sm keyboard-mode-btn"
               :class="{ active: keyboardMode === 'text' }"
               :title="keyboardMode === 'text' ? '当前为文本模式，字母和空格按文本发送' : '当前为游戏模式，保留按下/释放按键语义'"
@@ -94,26 +94,42 @@
         <span v-if="toolbarMenuOpen" class="tb-more-mask" @click.stop="closeToolbarMenu"></span>
         <div v-if="toolbarMenuOpen === 'device'" class="tb-more-dropdown tb-more-dropdown-fixed action-menu" :style="toolbarMenuStyle" role="menu">
           <button class="tb-more-item action-menu-item" role="menuitem" :disabled="forceReconnecting" @click="closeToolbarMenu(); startAdd()">新增设备</button>
-          <button class="tb-more-item action-menu-item" role="menuitem" :disabled="!current || forceReconnecting" @click="closeToolbarMenu(); openSettings()">设备设置</button>
-          <button class="tb-more-item action-menu-item" role="menuitem" :disabled="!current || apkInstalling || forceReconnecting" :title="apkInstalling ? '正在上传并安装 APK…' : '选择本地 .apk 安装包安装到当前设备'" @click="closeToolbarMenu(); installApk()">安装应用</button>
-          <button class="tb-more-item action-menu-item" role="menuitem" :disabled="!current || connecting || forceReconnecting || apkInstalling" title="重启电脑端 ADB 服务并重新连接，会中断所有设备的投屏" @click="closeToolbarMenu(); forceReconnect()">{{ forceReconnecting ? '强制重连中…' : '强制重连' }}</button>
+          <button class="tb-more-item action-menu-item" @click="closeToolbarMenu(); browserEdit = null; browserModal = true">新增浏览器目标</button>
+          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" :disabled="!current || forceReconnecting" @click="closeToolbarMenu(); openSettings()">设备设置</button>
+          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" :disabled="!current || apkInstalling || forceReconnecting" :title="apkInstalling ? '正在上传并安装 APK…' : '选择本地 .apk 安装包安装到当前设备'" @click="closeToolbarMenu(); installApk()">安装应用</button>
+          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" :disabled="!current || connecting || forceReconnecting || apkInstalling" title="重启电脑端 ADB 服务并重新连接，会中断所有设备的投屏" @click="closeToolbarMenu(); forceReconnect()">{{ forceReconnecting ? '强制重连中…' : '强制重连' }}</button>
           <div class="action-menu-separator" role="separator"></div>
-          <button class="tb-more-item action-menu-item danger" role="menuitem" :disabled="!current || forceReconnecting" @click="closeToolbarMenu(); removeDevice()">删除设备</button>
+          <button v-if="!isBrowser" class="tb-more-item action-menu-item danger" role="menuitem" :disabled="!current || forceReconnecting" @click="closeToolbarMenu(); removeDevice()">删除设备</button>
         </div>
         <div v-if="toolbarMenuOpen === 'actions'" class="tb-more-dropdown tb-more-dropdown-fixed action-menu" :style="toolbarMenuStyle" role="menu">
           <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); clipboard()">粘贴</button>
           <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); shot()">截图</button>
-          <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('HOME')">主屏幕</button>
-          <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('BACK')">返回</button>
-          <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); rotate()">旋转</button>
-          <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('APP_SWITCH')">最近应用</button>
-          <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('VOL_UP')">增大音量</button>
-          <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('VOL_DOWN')">减小音量</button>
-          <button class="tb-more-item action-menu-item" role="menuitem" :title="audioMuted ? '取消静音（听游戏声音）' : '静音'" @click="closeToolbarMenu(); toggleAudio()">{{ audioMuted ? '取消静音' : '静音' }}</button>
+          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('HOME')">主屏幕</button>
+          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('BACK')">返回</button>
+          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); rotate()">旋转</button>
+          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('APP_SWITCH')">最近应用</button>
+          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('VOL_UP')">增大音量</button>
+          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('VOL_DOWN')">减小音量</button>
+          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" :title="audioMuted ? '取消静音（听游戏声音）' : '静音'" @click="closeToolbarMenu(); toggleAudio()">{{ audioMuted ? '取消静音' : '静音' }}</button>
         </div>
       </Teleport>
 
+      <BrowserTargetModal v-if="browserModal" :target="browserEdit" @close="browserModal = false" @saved="browserSaved" />
+      <div v-if="isBrowser" class="browser-status-row" data-keyboard-ignore="true">
+        <span>无窗口浏览器 · 约 2 帧/秒预览</span>
+        <select :value="browserPages.bound" @change="bindBrowserPage($event.target.value)">
+          <option value="">当前标签页</option>
+          <option v-for="p in browserPages.pages" :key="p.id" :value="p.id">{{ p.title || p.url }}</option>
+        </select>
+        <button class="btn btn-sm" @click="refreshBrowserPages">读取标签页</button>
+        <button class="btn btn-sm" @click="browserEdit = current; browserModal = true">设置</button>
+        <button class="btn btn-sm" @click="closeBrowserTarget">关闭浏览器</button>
+        <button class="btn btn-sm" @click="removeBrowserTarget">删除目标</button>
+        <span v-if="errorMsg" role="alert">{{ errorMsg }}</span>
+      </div>
       <DeviceStage
+        :browser-preview="isBrowser ? browserPreview.view : null"
+        :on-browser-loaded="browserPreview.loaded"
         :bridge="deviceStageBridge"
         :connected="connected"
         :connecting="connecting"
@@ -150,7 +166,7 @@
 
       <!-- 未启动应用提示：连接不再自动启动应用，画面停在桌面/黑屏时容易被误以为卡住。
            纯提示无按钮；显示几秒自动消失，应用已启动（手动/脚本拉起）或脚本运行中不出现 -->
-      <div v-if="connected && !appHintDismissed" class="app-hint">
+      <div v-if="!isBrowser && connected && !appHintDismissed" class="app-hint">
         <span>已连接。未启动应用时画面停在桌面/黑屏</span>
       </div>
     </div>
@@ -242,6 +258,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { store, devicesData, scriptsData, templatesData, useToast, appStartedDevices } from '../store'
 import { api } from '../api'
 import DeviceStage from '../workspace/DeviceStage.vue'
+import BrowserTargetModal from '../components/console/BrowserTargetModal.vue'
+import { useBrowserPreview } from '../components/console/useBrowserPreview'
 import PackageContextBar from '../workspace/PackageContextBar.vue'
 import PluginWorkspace from '../workspace/PluginWorkspace.vue'
 import { createPanelRegistry, DEFAULT_PANEL_KEY } from '../workspace/registry'
@@ -384,8 +402,8 @@ const keymap = createKeymapController({
   remote: remoteKeymapRunning,
   sendInputEvent: sendControl,
   getVideoSize: () => ({
-    width: videoElement.value?.videoWidth || 1920,
-    height: videoElement.value?.videoHeight || 1080,
+    width: (videoElement.value?.naturalWidth || videoElement.value?.videoWidth) || 1920,
+    height: (videoElement.value?.naturalHeight || videoElement.value?.videoHeight) || 1080,
   }),
   getKeyMetaState: () => keyboard.getMetaState(),
   mode: keyboardMode,
@@ -400,6 +418,22 @@ function syncKeymapPressed() {
 // ---------- 统一舞台来源 StageSource（视频工作台 V1）----------
 // 实时/视频来源切换、媒体控制、指定帧捕获与设备输入门禁收敛在 useConsoleStage；
 // 壳只接线：工具条按钮态、门禁调用（sendControl/键盘/鼠标路由）与来源切换清理。
+const isBrowser = computed(() => store.deviceId?.startsWith('browser-'))
+const browserModal = ref(false), browserEdit = ref(null)
+const browserPages = ref({ bound: '', pages: [] })
+async function refreshBrowserPages() { try { browserPages.value = await api.browserPages(store.deviceId) } catch (e) { toast(e.message, 'error') } }
+async function bindBrowserPage(id) {
+  if (!id) return
+  try { await api.bindBrowser(store.deviceId, id); cleanup(true); await connect(true); await refreshBrowserPages() } catch (e) { toast(e.message, 'error') }
+}
+const browserPreview = useBrowserPreview({ deviceId: () => store.deviceId, connected, connecting, errorMsg, toast, onEvent: data => onControlMessage({ data: JSON.stringify(data) }) })
+async function browserSaved(id) { cleanup(true); browserModal.value = false; await loadData(); store.deviceId = id }
+async function closeBrowserTarget() {
+  try { await api.closeBrowser(store.deviceId); cleanup(true); await refreshDeviceStatus() } catch (e) { toast(e.message, 'error') }
+}
+async function removeBrowserTarget() {
+  try { await api.deleteBrowser(store.deviceId); cleanup(true); store.deviceId = null; await loadData() } catch (e) { toast(e.message, 'error') }
+}
 const stageCtl = useConsoleStage({
   toast,
   deviceId: computed(() => store.deviceId),
@@ -419,7 +453,7 @@ const coreStatuses = computed(() => {
   if (picking.value || cellPick.mode) statuses.unshift(cellPick.mode === 'color' ? '点击取色 · Esc 取消' : cellPick.mode === 'coord' ? '点击取点 · Esc 取消' : '框选中 · Esc 取消')
   return statuses
 })
-watch(() => store.deviceId, () => { stageCtl.onDeviceChanged(); operationFeedback.setCore(null) })
+watch(() => store.deviceId, () => { browserPages.value = { bound: '', pages: [] }; stageCtl.onDeviceChanged(); operationFeedback.setCore(null) })
 watch(() => stageCtl.view.sourceId, () => { operationFeedback.setCore(null) })
 /** 媒体 <video> 元素挂载/更换（含卸载传 null）：交给舞台组合式挂播放监听 */
 function onStageMediaVideoMounted(el) {
@@ -716,8 +750,8 @@ const webrtcLifecycle = useWebRtcLifecycle({
     const v = event.track
     v.addEventListener('unmute', () => {
       setTimeout(() => {
-        const w = videoElement.value?.videoWidth || 0
-        const h = videoElement.value?.videoHeight || 0
+        const w = (videoElement.value?.naturalWidth || videoElement.value?.videoWidth) || 0
+        const h = (videoElement.value?.naturalHeight || videoElement.value?.videoHeight) || 0
         if (w) res.value = `${w}x${h}`
       }, 200)
     })
@@ -739,11 +773,13 @@ function scheduleReconnect() {
 }
 
 async function connect(manual = false) {
+  if (isBrowser.value) { await browserPreview.connect(); return }
   await webrtcLifecycle.connect(manual)
 }
 
 /** 释放 WebRTC 资源；manual=true 表示主动关闭（不触发自动重连） */
 function cleanup(manual = false) {
+  browserPreview.close()
   keymap.releaseAll()
   syncKeymapPressed()
   keyboard.releaseAll()
@@ -769,6 +805,12 @@ const REST_FALLBACK_CONTROL_TYPES = new Set([
 function sendKeyboardControl(obj) {
   // 安全红线：视频来源（媒体模式）为离线只读，舞台产生的键盘/按键映射输入一律拒绝
   if (!stageCtl.guardDeviceInput(obj)) return false
+  if (isBrowser.value) {
+    if (obj.type === 'touch') return browserPreview.send({ type: 'pointer', action: obj.action, x: obj.x, y: obj.y })
+    if (obj.type === 'scroll') return browserPreview.send({ type: 'scroll', x: obj.x, y: obj.y, delta_x: obj.scroll_x || 0, delta_y: obj.scroll_y || 0 })
+    if (obj.type === 'text' || obj.type === 'tap') return browserPreview.send(obj)
+    toast('此操作不适用于浏览器目标', 'warn'); return false
+  }
   const channel = webrtcLifecycle.getControlChannel() || controlChannel
   if (channel && channel.readyState === 'open') {
     channel.send(JSON.stringify(obj))
@@ -786,6 +828,12 @@ function sendControl(obj) {
   // 安全红线：视频来源（媒体模式）为离线只读——鼠标触控/滚轮/按键/启停应用等
   // 舞台产生的设备输入在统一输入路由处拒绝（含 REST fallback 之前的全部路径）
   if (!stageCtl.guardDeviceInput(obj)) return false
+  if (isBrowser.value) {
+    if (obj.type === 'touch') return browserPreview.send({ type: 'pointer', action: obj.action, x: obj.x, y: obj.y })
+    if (obj.type === 'scroll') return browserPreview.send({ type: 'scroll', x: obj.x, y: obj.y, delta_x: obj.scroll_x || 0, delta_y: obj.scroll_y || 0 })
+    if (obj.type === 'text' || obj.type === 'tap') return browserPreview.send(obj)
+    toast('此操作不适用于浏览器目标', 'warn'); return false
+  }
   // 拖动/滚轮类输入打标（画面停滞看门狗用）：这类操作预期画面变化，
   // 若随后渲染指纹持续冻结则流已病态（见 startStats 处注释）
   if ((obj.type === 'touch' && obj.action === 'move') || obj.type === 'scroll' || obj.type === 'swipe') {
@@ -840,6 +888,7 @@ function onStageFocusIn(e) {
 }
 
 function onStageFocusOut(e) {
+  if (isBrowser.value) browserPreview.release()
   const next = e?.relatedTarget
   if (next && stageFocusEl.value?.contains(next)) return
   keyboardFocused.value = false
@@ -850,6 +899,7 @@ function onStageFocusOut(e) {
 
 function onStageKeyDown(e) {
   if (!connected.value || !stageCtl.view.canDeviceInput || picking.value || selecting.value || cellPick.mode || isGlobalEscapeConsumed(e)) return
+  if (isBrowser.value) { if (!shouldIgnoreKeyboardTarget(e.target)) { e.preventDefault(); browserPreview.send({ type: 'key', key: e.key === ' ' ? 'Space' : e.key, action: 'down' }) } return }
   if (keyboardMode.value === 'game') {
     const mapped = keymap.handleKeyDown(e)
     syncKeymapPressed()
@@ -861,6 +911,7 @@ function onStageKeyDown(e) {
 
 function onStageKeyUp(e) {
   if (!connected.value || !stageCtl.view.canDeviceInput) return
+  if (isBrowser.value) { if (!shouldIgnoreKeyboardTarget(e.target)) { e.preventDefault(); browserPreview.send({ type: 'key', key: e.key === ' ' ? 'Space' : e.key, action: 'up' }) } return }
   const mapped = keymap.handleKeyUp(e)
   syncKeymapPressed()
   if (mapped?.handled || mapped === true) return
@@ -1064,9 +1115,10 @@ function onMouseDown(e) {
   }
   // 设备输入（触控/按键映射）：视频来源为只读，统一拒绝（触控终不发）
   if (!connected.value || !stageCtl.view.canDeviceInput) return
+  if (isBrowser.value) { const { x, y } = toDeviceCoord(e.clientX, e.clientY); browserPreview.send({ type: 'pointer', action: 'down', button: ['left', 'middle', 'right'][e.button] || 'left', x, y }); return }
   cancelPendingMove()
   const { x, y } = toDeviceCoord(e.clientX, e.clientY)
-  if (remoteKeymapRunning.value) {
+  if (!isBrowser.value && remoteKeymapRunning.value) {
     keymap.handleInputEvent({ type: 'mousedown', button: e.button, x, y }, 'down', e)
     return
   }
@@ -1093,6 +1145,7 @@ function onMouseMove(e) {
     updateLoupe(e.clientX, e.clientY, toDeviceCoord(e.clientX, e.clientY), 2.5, [])
     return
   }
+  if (isBrowser.value && connected.value && stageCtl.view.canDeviceInput) { const { x, y } = toDeviceCoord(e.clientX, e.clientY); browserPreview.send({ type: 'pointer', action: 'move', x, y }); return }
   if (remoteKeymapRunning.value && connected.value && stageCtl.view.canDeviceInput) {
     const { x, y } = toDeviceCoord(e.clientX, e.clientY)
     keymap.handleInputEvent({
@@ -1122,7 +1175,9 @@ function onMouseUp(e) {
     if (rect.w >= 8 && rect.h >= 8) openCrop(rect)
     else toast('框选区域太小，请重新框选', 'warn')
     return
-  }  if (remoteKeymapRunning.value && connected.value && stageCtl.view.canDeviceInput) {
+  }
+  if (isBrowser.value && connected.value && stageCtl.view.canDeviceInput) { const { x, y } = toDeviceCoord(e.clientX, e.clientY); browserPreview.send({ type: 'pointer', action: 'up', button: ['left', 'middle', 'right'][e.button] || 'left', x, y }); return }
+  if (remoteKeymapRunning.value && connected.value && stageCtl.view.canDeviceInput) {
     const { x, y } = toDeviceCoord(e.clientX, e.clientY)
     keymap.handleInputEvent({ type: 'mouseup', button: e.button, x, y }, 'up', e)
     return
@@ -1132,7 +1187,7 @@ function onMouseUp(e) {
   touchState.active = false
   const { x, y } = toDeviceCoord(e.clientX, e.clientY)
   sendTouchPhase('up', 0, x, y)
-  const w = videoElement.value?.videoWidth, h = videoElement.value?.videoHeight
+  const w = (videoElement.value?.naturalWidth || videoElement.value?.videoWidth), h = (videoElement.value?.naturalHeight || videoElement.value?.videoHeight)
   operationFeedback.setCore({ text: gestureOrigin && Math.hypot(x - gestureOrigin.x, y - gestureOrigin.y) > 6 ? '滑动至' : '点击了', actions: [
     { label: `(${x}, ${y})`, copy: `[${x}, ${y}]` },
     ...(w && h ? [{ label: `(${(x / w).toFixed(4)}, ${(y / h).toFixed(4)})`, copy: `[${(x / w).toFixed(4)}, ${(y / h).toFixed(4)}]` }] : []),
@@ -1141,6 +1196,7 @@ function onMouseUp(e) {
 
 /** 鼠标离开投屏区域时隐藏取点/框选辅助层。 */
 function onVideoMouseLeave() {
+  if (isBrowser.value) browserPreview.release()
   hideLoupe()
 }
 
@@ -1148,7 +1204,7 @@ function onWheel(e) {
   // 滚轮 = 设备输入：视频来源（媒体模式）为只读，统一拒绝
   if (!connected.value || !stageCtl.view.canDeviceInput) return
   const { x, y } = toDeviceCoord(e.clientX, e.clientY)
-  if (remoteKeymapRunning.value) {
+  if (!isBrowser.value && remoteKeymapRunning.value) {
     keymap.handleInputEvent({
       type: 'wheel', x, y, deltaX: e.deltaX, deltaY: e.deltaY,
     }, 'wheel', e)
@@ -1161,6 +1217,7 @@ function onWheel(e) {
 // 切换实时/视频时：绝不自动恢复按键按下状态，清指针（拖拽/待发 move）、键盘焦点
 // （keymap/keyboard 残留按下全部释放）、框选进行态与旧来源的叠加层标记
 watch(() => stageCtl.view.kind, () => {
+  if (isBrowser.value) browserPreview.release()
   cancelPendingMove()
   touchState.active = false
   keymap.releaseAll()
@@ -1235,6 +1292,8 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.browser-status-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 10px; font-size: 12px; }
+.browser-status-row select { max-width: 200px; }
 .console {
   display: flex; height: 100%; padding: 14px; gap: 14px;
 }

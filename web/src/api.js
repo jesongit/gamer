@@ -281,6 +281,12 @@ export const api = {
 
   // 设备
   listDevices: () => req('GET', '/api/devices'),
+  browserPages: (id) => req('GET', `/api/browser-targets/${encodeURIComponent(id)}/pages`),
+  bindBrowser: (id, targetId) => req('POST', `/api/browser-targets/${encodeURIComponent(id)}/bind`, { target_id: targetId }),
+  saveBrowser: (target) => req('POST', '/api/browser-targets', target),
+  connectBrowser: (id) => req('POST', `/api/browser-targets/${encodeURIComponent(id)}/connect`),
+  closeBrowser: (id) => req('POST', `/api/browser-targets/${encodeURIComponent(id)}/disconnect`),
+  deleteBrowser: (id) => req('DELETE', `/api/browser-targets/${encodeURIComponent(id)}`),
   scanDevices: () => req('POST', '/api/devices/scan'),
   createDevice: (d) => req('POST', '/api/devices', d),
   updateDevice: (id, d) => req('PUT', `/api/devices/${id}`, d),

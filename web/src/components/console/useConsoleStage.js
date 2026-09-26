@@ -132,12 +132,12 @@ export function useConsoleStage({
     if (kind.value === 'media') {
       const el = mediaVideoEl.value
       return {
-        width: el?.videoWidth || mediaMeta.value?.width || 0,
-        height: el?.videoHeight || mediaMeta.value?.height || 0,
+        width: (el?.naturalWidth || el?.videoWidth) || mediaMeta.value?.width || 0,
+        height: (el?.naturalHeight || el?.videoHeight) || mediaMeta.value?.height || 0,
       }
     }
     const el = liveVideoEl?.()
-    return { width: el?.videoWidth || 0, height: el?.videoHeight || 0 }
+    return { width: (el?.naturalWidth || el?.videoWidth) || 0, height: (el?.naturalHeight || el?.videoHeight) || 0 }
   })
   // V1：参考尺寸 = 来源原始画面尺寸（外部素材的显式校准为后续能力）
   const referenceSize = computed(() => ({ ...displaySize.value }))
@@ -280,7 +280,7 @@ export function useConsoleStage({
     const syncMeta = () => {
       if (!isCurrent()) return
       if (Number.isFinite(el.duration)) durationSec.value = el.duration
-      frameReady.value = (el.videoWidth || 0) > 0
+      frameReady.value = ((el?.naturalWidth || el?.videoWidth) || 0) > 0
     }
     const syncPlay = () => {
       if (!isCurrent() || kind.value !== 'media') return
@@ -461,7 +461,7 @@ export function useConsoleStage({
    * 不声明服务端精确帧身份，原始像素尺寸保证匹配框与舞台坐标一致。 */
   async function capturePreviewFrame() {
     const el = mediaVideoEl.value
-    if (kind.value !== 'media' || !el || el.readyState < 2 || el.seeking || !el.videoWidth || !el.videoHeight) return null
+    if (kind.value !== 'media' || !el || el.readyState < 2 || el.seeking || !(el?.naturalWidth || el?.videoWidth) || !(el?.naturalHeight || el?.videoHeight)) return null
     pauseMedia()
     const expectedGeneration = generation.value
     const operation = ++frameOperationSeq
@@ -470,8 +470,8 @@ export function useConsoleStage({
       && mediaVideoEl.value === el && generation.value === expectedGeneration
       && operation === frameOperationSeq && !el.seeking && el.currentTime === time && !playing.value
     const canvas = document.createElement('canvas')
-    canvas.width = el.videoWidth
-    canvas.height = el.videoHeight
+    canvas.width = (el?.naturalWidth || el?.videoWidth)
+    canvas.height = (el?.naturalHeight || el?.videoHeight)
     const ctx = canvas.getContext('2d')
     if (!ctx) throw new Error('无法读取当前视频画面')
     ctx.drawImage(el, 0, 0, canvas.width, canvas.height)
@@ -513,8 +513,8 @@ export function useConsoleStage({
   async function captureFrame() {
     if (kind.value === 'live') {
       const el = liveVideoEl?.()
-      if (!el?.videoWidth) return null
-      return { source: el, width: el.videoWidth, height: el.videoHeight, generation: generation.value, label: '实时画面当前帧' }
+      if (!(el?.naturalWidth || el?.videoWidth)) return null
+      return { source: el, width: (el?.naturalWidth || el?.videoWidth), height: (el?.naturalHeight || el?.videoHeight), generation: generation.value, label: '实时画面当前帧' }
     }
     pauseMedia()
     if (mediaVideoEl.value) currentTimeSec.value = Math.max(0, Number(mediaVideoEl.value.currentTime) || 0)
