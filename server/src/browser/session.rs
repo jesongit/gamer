@@ -1,4 +1,7 @@
-use super::{transport::Transport, BrowserTarget};
+use super::{
+    transport::{ScreencastFrame, Transport},
+    BrowserTarget,
+};
 use anyhow::{anyhow, ensure};
 use base64::Engine as _;
 use serde_json::{json, Value};
@@ -274,6 +277,76 @@ impl CdpSession {
             "页面正在跳转，请等待后重新取帧"
         );
         Ok(())
+    }
+    pub async fn start_preview(
+        &self,
+    ) -> anyhow::Result<tokio::sync::watch::Receiver<Option<Arc<ScreencastFrame>>>> {
+        ensure!(self.is_alive(), "浏览器目标已断开");
+        // Restart also requests a fresh image of a static page after navigation.
+        self.transport
+            .call("Page.stopScreencast", json!({}))
+            .await?;
+        self.transport.frames.send_replace(None);
+        let frames = self.transport.frames.subscribe();
+        self.transport
+            .call(
+                "Page.startScreencast",
+                json!({"format":"jpeg","quality":80,"everyNthFrame":1}),
+            )
+            .await?;
+        Ok(frames)
+    }
+    pub async fn stop_preview(&self) {
+        let _ = self.transport.call("Page.stopScreencast", json!({})).await;
+        self.transport.frames.send_replace(None);
+    }
+    pub async fn preview_stamp(&self, frame: &ScreencastFrame) -> anyhow::Result<FrameStamp> {
+        let _gate = self.gate.lock().await;
+        let stamp = FrameStamp {
+            revision: frame.revision,
+            ..self.stamp()
+        };
+        self.validate(&stamp)?;
+        let metadata = &frame.metadata;
+        let w = metadata["deviceWidth"].as_f64().unwrap_or(0.0);
+        let h = metadata["deviceHeight"].as_f64().unwrap_or(0.0);
+        ensure!(
+            w > 0.0
+                && h > 0.0
+                && metadata["pageScaleFactor"].as_f64() == Some(1.0)
+                && metadata["offsetTop"].as_f64() == Some(0.0),
+            "预览坐标映射无效，请恢复页面缩放后重新连接"
+        );
+        let bytes = base64::engine::general_purpose::STANDARD.decode(&frame.data)?;
+        let size = image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()?
+            .into_dimensions()?;
+        // No preview downscaling: manual and automation coordinates share the
+        // same full-resolution viewport. Never silently reinterpret a crop.
+        ensure!(
+            size == (w.round() as u32, h.round() as u32),
+            "预览尺寸与页面不一致，请重新连接"
+        );
+        let changed = *self.viewport.read() != (w, h) || self.size() != size;
+        self.validate(&stamp)?;
+        *self.viewport.write() = (w, h);
+        *self.size.write() = size;
+        if changed {
+            self.transport
+                .revision
+                .compare_exchange(
+                    stamp.revision,
+                    stamp.revision + 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .map_err(|_| anyhow!("页面已变化，请等待新画面"))?;
+            return Ok(FrameStamp {
+                revision: stamp.revision + 1,
+                ..stamp
+            });
+        }
+        Ok(stamp)
     }
     pub async fn capture(&self) -> anyhow::Result<(Vec<u8>, FrameStamp)> {
         let _gate = self.gate.lock().await;

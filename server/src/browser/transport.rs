@@ -9,7 +9,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 
 struct Command {
@@ -19,12 +19,20 @@ struct Command {
     revision: Option<u64>,
 }
 
+#[derive(Clone)]
+pub struct ScreencastFrame {
+    pub data: String,
+    pub metadata: Value,
+    pub revision: u64,
+}
+
 pub struct Transport {
     tx: mpsc::Sender<Command>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>,
     next: AtomicU64,
     pub revision: Arc<AtomicU64>,
     pub alive: Arc<AtomicBool>,
+    pub frames: watch::Sender<Option<Arc<ScreencastFrame>>>,
 }
 
 impl Transport {
@@ -42,15 +50,19 @@ impl Transport {
         >::new()));
         let revision = Arc::new(AtomicU64::new(1));
         let alive = Arc::new(AtomicBool::new(true));
+        let (frames, _) = watch::channel(None);
+        let next = AtomicU64::new(1);
         let transport = Arc::new(Self {
             tx,
             pending: pending.clone(),
-            next: AtomicU64::new(1),
+            next,
             revision: revision.clone(),
             alive: alive.clone(),
+            frames: frames.clone(),
         });
         tokio::spawn(async move {
             let mut main_frame: Option<String> = None;
+            let mut invalidated_at = 0.0;
             loop {
                 tokio::select! {
                     message = rx.recv() => match message {
@@ -81,12 +93,30 @@ impl Transport {
                             }
                         } else {
                             let method = v["method"].as_str().unwrap_or_default();
+                            if method == "Page.screencastFrame" {
+                                let params = &v["params"];
+                                // Acknowledge even discarded frames. Only the latest image is
+                                // retained; a slow viewer must not block CDP responses/input.
+                                // Negative IDs are reserved for these fire-and-forget ACKs.
+                                if writer.send(Message::Text(json!({"id":-1,"method":"Page.screencastFrameAck","params":{"sessionId":params["sessionId"]}}).to_string())).await.is_err() {break;}
+                                if params["metadata"]["timestamp"].as_f64().is_some_and(|t| t >= invalidated_at) {
+                                    if let Some(data) = params["data"].as_str().filter(|data|data.len() <= 32*1024*1024) {
+                                        frames.send_replace(Some(Arc::new(ScreencastFrame {
+                                            data: data.into(), metadata: params["metadata"].clone(),
+                                            revision: revision.load(Ordering::SeqCst),
+                                        })));
+                                    }
+                                }
+                                continue;
+                            }
                             let top_navigation=method=="Page.frameNavigated" && v["params"]["frame"].get("parentId").is_none();
                             if top_navigation {main_frame=v["params"]["frame"]["id"].as_str().map(str::to_string);}
                             let main_event=main_frame.as_deref().is_none_or(|id|v["params"]["frameId"].as_str()==Some(id));
                             if top_navigation || method=="Page.frameResized"
                                 || (main_event && matches!(method,"Page.navigatedWithinDocument"|"Page.frameStartedLoading")) {
                                 revision.fetch_add(1, Ordering::SeqCst);
+                                invalidated_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
+                                frames.send_replace(None);
                             }
                             if matches!(method, "Inspector.detached" | "Inspector.targetCrashed") {break;}
                         }
@@ -94,6 +124,7 @@ impl Transport {
                 }
             }
             alive.store(false, Ordering::SeqCst);
+            frames.send_replace(None);
             for (_, reply) in pending.lock().await.drain() {
                 let _ = reply.send(Err("browser target disconnected".into()));
             }

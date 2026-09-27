@@ -461,7 +461,7 @@ const coreStatuses = computed(() => {
   } else if (connected.value) {
     if (keyboardFocused.value && stage.canDeviceInput && !picking.value && !cellPick.mode) statuses.push('键盘控制已启用')
     if (isBrowser.value) {
-      statuses.push(`${browserPreview.view.width}×${browserPreview.view.height} · 约 2 帧/秒预览`)
+      statuses.push(`${browserPreview.view.width}×${browserPreview.view.height} · ${browserPreview.view.fps ? `${browserPreview.view.fps} 帧/秒` : '等待画面更新'}`)
       if (errorMsg.value) statuses.push(errorMsg.value)
     } else {
       statuses.push(`${res.value} · ${fps.value} fps · ${delay.value} ms · ${bitrate.value}`)

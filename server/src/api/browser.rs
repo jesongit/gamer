@@ -1,4 +1,4 @@
-//! Authenticated browser target management and a bounded screenshot preview.
+//! Authenticated browser target management and a bounded CDP screencast preview.
 use super::{ApiError, AppState};
 use crate::browser::{BrowserTarget, CdpSession, FrameStamp};
 use axum::{
@@ -9,7 +9,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use base64::Engine as _;
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
 
@@ -165,24 +164,45 @@ pub(super) async fn bind(
 }
 async fn serve(mut socket: WebSocket, s: Arc<CdpSession>, st: AppState) {
     let mut events = st.devices.browsers.events.subscribe();
-    let mut tick = tokio::time::interval(Duration::from_millis(500));
+    let mut frames = match s.start_preview().await {
+        Ok(frames) => frames,
+        Err(e) => {
+            let _ = socket
+                .send(Message::Text(
+                    json!({"type":"error","error":e.to_string()}).to_string(),
+                ))
+                .await;
+            return;
+        }
+    };
+    let mut revision = s.stamp();
+    let mut serial = 0_u64;
+    let mut awaiting_display: Option<(u64, tokio::time::Instant)> = None;
+    let mut tick = tokio::time::interval(Duration::from_millis(33));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         let reply = tokio::select! {
-            // A detailed 1080p PNG can take longer than the preview interval.
-            // Drain queued controls first; random selection would repeatedly
-            // insert another expensive capture between key-down/up messages.
+            // Controls take priority over delivering the latest preview image.
             biased;
             message=socket.recv()=> {
                 let Some(Ok(Message::Text(text)))=message else {break};
                 let result=async {
                     let value:Value=serde_json::from_str(&text)?;
+                    if value["type"]=="frame_ack" {
+                        if awaiting_display.is_some_and(|(id,_)|value["id"].as_u64()==Some(id)) {awaiting_display=None;}
+                        return Ok::<_,anyhow::Error>(());
+                    }
                     if value["type"]=="release" {anyhow::ensure!(st.runs.active_for_device(&s.id).is_none() && s.runs.load(std::sync::atomic::Ordering::SeqCst)==0,"任务执行期间禁止手动操作");s.release_manual().await;return Ok::<_,anyhow::Error>(())}
                     anyhow::ensure!(st.runs.active_for_device(&s.id).is_none(),"任务执行期间禁止手动操作");
                     let stamp:FrameStamp=serde_json::from_value(value["stamp"].clone())?;
                     s.manual_input(&value,&stamp).await
                 }.await;
-                match result {Ok(())=>continue,Err(e)=>json!({"type":"error","source":"input","error":e.to_string()})}
+                match result {Ok(())=>continue,Err(e)=>{
+                    // A static page may not produce another screencast event.
+                    // Re-send its latest valid image to restore the display guard.
+                    frames.mark_changed();
+                    json!({"type":"error","source":"input","error":e.to_string()})
+                }}
             },
             event=events.recv()=> {
                 let Ok(event)=event else {continue};
@@ -191,9 +211,35 @@ async fn serve(mut socket: WebSocket, s: Arc<CdpSession>, st: AppState) {
                 if let Some(obj)=value.as_object_mut() {obj.insert("type".into(),json!("se"));if let Some(trace)=event.trace {obj.insert("trace".into(),trace);}}
                 value
             },
-            _=tick.tick()=> match s.capture().await {
-                Ok((bytes,stamp))=>json!({"type":"frame","png":base64::engine::general_purpose::STANDARD.encode(bytes),"stamp":stamp}),
-                Err(e)=>json!({"type":"error","error":e.to_string()}),
+            _=tick.tick()=> {
+                if !s.is_alive() {break;}
+                if s.stamp() != revision {
+                    revision = s.stamp();
+                    awaiting_display = None;
+                    match s.start_preview().await {
+                        Ok(receiver) => frames = receiver,
+                        Err(_) => break,
+                    }
+                    json!({"type":"invalidated"})
+                } else if awaiting_display.is_some() {
+                    // Keep one image in flight, not an ever-growing network/decode
+                    // queue. An unresponsive viewer must reconnect.
+                    if awaiting_display.is_some_and(|(_,at)|at.elapsed()>Duration::from_secs(10)) {break;}
+                    continue;
+                } else {
+                    if !frames.has_changed().unwrap_or(false) {continue;}
+                    let frame = frames.borrow_and_update().clone();
+                    let Some(frame) = frame else {continue};
+                    match s.preview_stamp(&frame).await {
+                        Ok(stamp) => {
+                            revision = stamp.clone();
+                            serial += 1;
+                            awaiting_display = Some((serial,tokio::time::Instant::now()));
+                            json!({"type":"frame","id":serial,"jpeg":frame.data,"stamp":stamp})
+                        },
+                        Err(e) => json!({"type":"error","error":e.to_string()}),
+                    }
+                }
             },
         };
         if !matches!(
@@ -210,6 +256,7 @@ async fn serve(mut socket: WebSocket, s: Arc<CdpSession>, st: AppState) {
             break;
         }
     }
+    s.stop_preview().await;
     // Do not release keys owned by an automation that started after this viewer.
     if st.runs.active_for_device(&s.id).is_none() {
         s.release_manual().await;

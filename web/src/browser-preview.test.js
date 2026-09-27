@@ -27,12 +27,29 @@ function setup(hooks = {}) {
 }
 afterEach(() => { wrapper?.unmount(); vi.unstubAllGlobals(); vi.clearAllMocks() })
 describe('browser preview target and displayed frame guards', () => {
+  it('acknowledges display and keeps input available while an unchanged mapping loads its next image', async () => {
+    const { preview } = setup()
+    await preview.connect()
+    const socket = Socket.instances[0]
+    const stamp = { target: 'browser-a', epoch: 'one', revision: 1 }
+    socket.receive({ type: 'frame', id: 1, jpeg: 'AA==', stamp })
+    expect(socket.sent).toHaveLength(0)
+    preview.loaded({ target: { src: preview.view.src } })
+    expect(socket.sent).toEqual([{ type: 'frame_ack', id: 1 }])
+    socket.receive({ type: 'frame', id: 2, jpeg: 'BB==', stamp })
+    expect(preview.send({ type: 'key', key: 'w', action: 'up' })).toBe(true)
+    expect(socket.sent.filter(m => m.type === 'frame_ack')).toHaveLength(1)
+    socket.receive({ type: 'invalidated' })
+    preview.loaded({ target: { src: preview.view.src } })
+    expect(preview.view.stamp).toBeNull()
+    expect(preview.send({ type: 'tap', x: 1, y: 1 })).toBe(false)
+  })
   it('shows rejected input instead of silently clearing the error on the next frame', async () => {
     const toast = vi.fn()
     const { preview } = setup({ toast })
     await preview.connect()
     const socket = Socket.instances[0]
-    const frame = { type: 'frame', png: 'AA==', stamp: { target: 'browser-a', epoch: 'one', revision: 1 } }
+    const frame = { type: 'frame', id: 1, jpeg: 'AA==', stamp: { target: 'browser-a', epoch: 'one', revision: 1 } }
     socket.receive(frame)
     preview.loaded({ target: { src: preview.view.src } })
     const rejected = { type: 'error', source: 'input', error: '目标正在执行任务' }
@@ -48,23 +65,23 @@ describe('browser preview target and displayed frame guards', () => {
     await preview.connect()
     const socket = Socket.instances[0]
     const stamp = { target: 'browser-a', epoch: 'one', revision: 1 }
-    socket.receive({ type: 'frame', png: 'AA==', stamp })
+    socket.receive({ type: 'frame', id: 1, jpeg: 'AA==', stamp })
     expect(preview.send({ type: 'tap', x: 1, y: 1 })).toBe(false)
     preview.loaded({ target: { src: preview.view.src } })
     expect(connected.value).toBe(true)
     expect(preview.send({ type: 'tap', x: 1, y: 1 })).toBe(true)
-    expect(socket.sent[0].stamp).toEqual(stamp)
+    expect(socket.sent.find(m => m.type === 'tap').stamp).toEqual(stamp)
     id.value = 'browser-b'
     await nextTick()
     expect(preview.send({ type: 'tap', x: 1, y: 1 })).toBe(false)
-    socket.receive({ type: 'frame', png: 'BB==', stamp })
+    socket.receive({ type: 'frame', id: 2, jpeg: 'BB==', stamp })
     expect(preview.view.src).toBe('')
   })
   it('does not restore a closed connection when its last image finishes loading', async () => {
     const { preview, connected } = setup()
     await preview.connect()
     const socket = Socket.instances[0]
-    socket.receive({ type: 'frame', png: 'AA==', stamp: { target: 'browser-a', epoch: 'one', revision: 1 } })
+    socket.receive({ type: 'frame', id: 1, jpeg: 'AA==', stamp: { target: 'browser-a', epoch: 'one', revision: 1 } })
     socket.close()
     preview.loaded({ target: { src: preview.view.src } })
     expect(connected.value).toBe(false)
@@ -75,7 +92,7 @@ describe('browser preview target and displayed frame guards', () => {
     const { preview, connected } = setup({ onConnected, onDisconnected })
     await preview.connect()
     const socket = Socket.instances[0]
-    const frame = { type: 'frame', png: 'AA==', stamp: { target: 'browser-a', epoch: 'one', revision: 1 } }
+    const frame = { type: 'frame', id: 1, jpeg: 'AA==', stamp: { target: 'browser-a', epoch: 'one', revision: 1 } }
     socket.receive(frame)
     socket.receive(frame)
     expect(preview.send({ type: 'tap', x: 1, y: 1 })).toBe(false)
@@ -94,7 +111,7 @@ describe('browser preview target and displayed frame guards', () => {
     const { preview, errorMsg } = setup()
     await preview.connect()
     const socket = Socket.instances[0]
-    const frame = { type: 'frame', png: 'AA==', stamp: { target: 'browser-a', epoch: 'one', revision: 1 } }
+    const frame = { type: 'frame', id: 1, jpeg: 'AA==', stamp: { target: 'browser-a', epoch: 'one', revision: 1 } }
     socket.receive(frame)
     socket.receive({ type: 'error', error: 'stale frame' })
     preview.loaded({ target: { src: preview.view.src } })
@@ -111,12 +128,12 @@ describe('browser preview target and displayed frame guards', () => {
     const { preview } = setup()
     await preview.connect()
     const socket = Socket.instances[0]
-    const frame = { type: 'frame', png: 'AA==', stamp: { target: 'browser-a', epoch: 'one', revision: 1 } }
+    const frame = { type: 'frame', id: 1, jpeg: 'AA==', stamp: { target: 'browser-a', epoch: 'one', revision: 1 } }
     socket.receive(frame)
     preview.loaded({ target: { src: preview.view.src } })
-    socket.receive({ ...frame, png: 'BB==' })
+    socket.receive({ ...frame, id: 2, jpeg: 'BB==' })
     socket.receive({ ...frame, stamp: { ...frame.stamp, revision: 2 } })
-    expect(preview.view.src).toBe('data:image/png;base64,AA==')
+    expect(preview.view.src).toBe('data:image/jpeg;base64,AA==')
     expect(preview.send({ type: 'tap', x: 1, y: 1 })).toBe(false)
     preview.loaded({ target: { src: preview.view.src } })
     expect(preview.send({ type: 'tap', x: 1, y: 1 })).toBe(true)

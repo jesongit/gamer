@@ -2,7 +2,7 @@ import { reactive, onUnmounted, watch } from 'vue'
 import { api } from '../../api'
 
 export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, toast, onEvent, onConnected, onDisconnected }) {
-  const view = reactive({ src: '', stamp: null, pending: null, width: 0, height: 0 })
+  const view = reactive({ src: '', stamp: null, pending: null, width: 0, height: 0, fps: 0 })
   let socket = null
   let generation = 0
   let lastMove = 0
@@ -10,6 +10,10 @@ export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, t
   let displayedSrc = ''
   let notifiedConnected = false
   let lastInputError = ''
+  let pendingId = null
+  let fpsTimer = null
+  let displayedFrames = 0
+  let fpsSince = 0
   function disconnected() {
     if (!notifiedConnected) return
     notifiedConnected = false
@@ -26,6 +30,11 @@ export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, t
     view.pending = null
     view.width = 0
     view.height = 0
+    view.fps = 0
+    pendingId = null
+    clearInterval(fpsTimer)
+    fpsTimer = null
+    displayedFrames = 0
     displayedSrc = ''
     lastInputError = ''
     disconnected()
@@ -43,17 +52,31 @@ export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, t
       pendingConnect = false
       const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/browser/${encodeURIComponent(id)}`)
       socket = ws
+      fpsSince = performance.now()
+      fpsTimer = setInterval(() => {
+        const now = performance.now()
+        view.fps = Math.round(displayedFrames * 1000 / Math.max(1, now - fpsSince))
+        displayedFrames = 0
+        fpsSince = now
+      }, 1000)
       ws.onmessage = event => {
         if (seq !== generation || id !== deviceId() || ws.readyState !== WebSocket.OPEN) return
         const data = JSON.parse(event.data)
         if (data.type === 'frame') {
-          view.stamp = null
+          // Same target/mapping: keep controls usable while the next image
+          // decodes. Navigation/resize still invalidates before any new input.
+          if (!sameStamp(view.stamp, data.stamp)) view.stamp = null
           view.pending = data.stamp
-          const src = `data:image/png;base64,${data.png}`
+          pendingId = data.id
+          const src = `data:image/jpeg;base64,${data.jpeg}`
           const alreadyDisplayed = view.src === src && displayedSrc === src
           view.src = src
           if (alreadyDisplayed) acceptFrame()
           else displayedSrc = ''
+        } else if (data.type === 'invalidated') {
+          view.stamp = null
+          view.pending = null
+          pendingId = null
         } else if (data.type === 'se') { onEvent?.(data)
         } else if (data.error) {
           view.stamp = null
@@ -71,6 +94,8 @@ export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, t
         connecting.value = false
         view.stamp = null
         view.pending = null
+        clearInterval(fpsTimer)
+        view.fps = 0
         disconnected()
         errorMsg.value ||= '浏览器预览已断开；请确认没有其他投屏页面占用，再重新连接'
       }
@@ -89,9 +114,18 @@ export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, t
     view.width = event.target.naturalWidth || 0
     view.height = event.target.naturalHeight || 0
     if (view.pending) acceptFrame()
+    else acknowledgeFrame()
+  }
+  function sameStamp(a, b) { return a && b && a.target === b.target && a.epoch === b.epoch && a.revision === b.revision }
+  function acknowledgeFrame() {
+    if (pendingId == null || socket?.readyState !== WebSocket.OPEN) return
+    socket.send(JSON.stringify({ type: 'frame_ack', id: pendingId }))
+    pendingId = null
+    displayedFrames++
   }
   function acceptFrame() {
     view.stamp = view.pending
+    acknowledgeFrame()
     connected.value = true
     connecting.value = false
     errorMsg.value = ''

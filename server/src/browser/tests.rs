@@ -228,3 +228,95 @@ async fn capture(session: &CdpSession) -> (Vec<u8>, FrameStamp) {
     }
     panic!("browser frame never became ready")
 }
+
+#[tokio::test]
+#[ignore = "requires installed browser; local CDP integration"]
+async fn screencast_continuous_frames_input_capture_and_restart() {
+    use axum::{response::Html, routing::get, Router};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let app = Router::new().route("/", get(|| async { Html(r#"<!doctype html><style>body{margin:0;background:#123456}input{position:absolute;left:20px;top:20px;width:240px;height:40px}#box{position:absolute;top:200px;width:200px;height:200px;background:red}</style><input id="entry"><div id="box"></div><script>function animate(t){box.style.left=(t/4%1500)+'px';window.animation=requestAnimationFrame(animate)}animate(0)</script>"#) }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = crate::config::Config {
+        data_dir: dir.path().to_path_buf(),
+        ..Default::default()
+    };
+    let mut t = target(&url, "stream");
+    t.width = 1920;
+    t.height = 1080;
+    let session = CdpSession::launch(&t, &cfg, browser_executable(&cfg).unwrap())
+        .await
+        .unwrap();
+    // Let navigation settle without using captureScreenshot to bootstrap preview.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let mut frames = session.start_preview().await.unwrap();
+    let mut stamp = None;
+    let started = tokio::time::Instant::now();
+    let mut count = 0;
+    while started.elapsed() < Duration::from_secs(2) {
+        tokio::time::timeout(Duration::from_secs(5), frames.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let frame = frames.borrow_and_update().clone();
+        if let Some(frame) = frame {
+            stamp = Some(session.preview_stamp(&frame).await.unwrap());
+            count += 1;
+        }
+    }
+    eprintln!(
+        "1080p CDP frames in {:.2}s: {count}",
+        started.elapsed().as_secs_f64()
+    );
+    assert!(
+        count >= 10,
+        "continuous animation should exceed old 2fps polling"
+    );
+    let stamp = stamp.unwrap();
+    assert_eq!(session.size(), (1920, 1080));
+    session
+        .manual_input(&json!({"type":"tap","x":80,"y":40}), &stamp)
+        .await
+        .unwrap();
+    session
+        .manual_input(&json!({"type":"text","text":"流畅123"}), &stamp)
+        .await
+        .unwrap();
+    assert_eq!(
+        session.evaluate_for_test("entry.value").await,
+        json!("流畅123")
+    );
+    let (png, capture_stamp) = session.capture().await.unwrap();
+    assert_eq!(image::load_from_memory(&png).unwrap().width(), 1920);
+    assert_eq!(capture_stamp, stamp);
+    // A stalled consumer retains just the newest frame; input remains responsive.
+    let previous_time = frames.borrow_and_update().as_ref().unwrap().metadata["timestamp"]
+        .as_f64()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    let latest_time = frames.borrow_and_update().as_ref().unwrap().metadata["timestamp"]
+        .as_f64()
+        .unwrap();
+    assert!(latest_time > previous_time + 0.1);
+    session
+        .evaluate_for_test("cancelAnimationFrame(animation); location.hash='next'; true")
+        .await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(session
+        .manual_input(&json!({"type":"tap","x":80,"y":40}), &stamp)
+        .await
+        .is_err());
+    // Re-starting requests a frame even when the page stopped changing.
+    frames = session.start_preview().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), frames.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    let frame = frames.borrow_and_update().clone().unwrap();
+    let fresh = session.preview_stamp(&frame).await.unwrap();
+    assert_ne!(fresh.revision, stamp.revision);
+    session.stop_preview().await;
+    session.close().await;
+    server.abort();
+}

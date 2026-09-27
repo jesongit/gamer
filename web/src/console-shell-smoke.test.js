@@ -164,7 +164,7 @@ describe('浏览器投屏的真实舞台输入接线', () => {
       await wrapper.find('.tb-device-group .btn-primary').trigger('click')
       await flushPromises()
       const stamp = { target: 'browser-check', epoch: 'one', revision: 1 }
-      socket.onmessage({ data: JSON.stringify({ type: 'frame', png: 'AA==', stamp }) })
+      socket.onmessage({ data: JSON.stringify({ type: 'frame', id: 1, jpeg: 'AA==', stamp }) })
       await nextTick()
       const img = wrapper.find('img[alt="浏览器目标画面"]')
       Object.defineProperty(img.element, 'naturalWidth', { value: 1280 })
