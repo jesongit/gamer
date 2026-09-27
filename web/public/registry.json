@@ -1,21 +1,21 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-09-27T05:18:42Z",
+  "generated_at": "2026-09-27T06:07:03Z",
   "host_api": "1.0.0",
   "provenance": {
-    "plugin_commit": "74e85b41168a05e74fcb83d28b20c6a4a30ec037",
+    "plugin_commit": "c9e15588d3870277563ab0860d3326e24908d5fc",
     "sdk_host_commit": "77f3684e251e874ec9a34c7d1eb87ae29b4ab666"
   },
   "plugins": [
     {
       "id": "gamer-live",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "name": "直播助手",
       "description": "向直播姬提供设备音视频素材，接收 B 站直播互动；支持手动 RTMP 输出",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-live-0.2.2.gplugin",
-      "sha256": "a98c89195db2d7c6d720adc8a828ff965696380a4e49a089f30627cc8f4d4bd6",
-      "size": 16956,
+      "download_url": "/plugins/gamer-live-0.2.3.gplugin",
+      "sha256": "7e6780355082311e2a5011cda39802a95d7888707759407c953c748f96f113a1",
+      "size": 17589,
       "permissions": [
         "ui.host",
         "media.stream",
