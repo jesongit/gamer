@@ -35,7 +35,7 @@ impl TargetCapabilities {
         Self {
             multitouch: false,
             android_app: false,
-            recording: false,
+            recording: true,
             media_output: false,
             ..Self::android()
         }

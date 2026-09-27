@@ -36,6 +36,10 @@ pub struct CdpSession {
     buttons: Mutex<u32>,
     pointer: Mutex<(f64, f64)>,
     input_revision: std::sync::atomic::AtomicU64,
+    stream_gate: Mutex<()>,
+    preview_active: AtomicBool,
+    recording_active: AtomicBool,
+    held_contact: Mutex<Option<(u64, FrameStamp)>>,
     size: parking_lot::RwLock<(u32, u32)>,
     viewport: parking_lot::RwLock<(f64, f64)>,
 }
@@ -141,6 +145,10 @@ impl CdpSession {
             buttons: Mutex::new(0),
             pointer: Mutex::new((0.0, 0.0)),
             input_revision: std::sync::atomic::AtomicU64::new(0),
+            stream_gate: Mutex::new(()),
+            preview_active: AtomicBool::new(false),
+            recording_active: AtomicBool::new(false),
+            held_contact: Mutex::new(None),
             size: parking_lot::RwLock::new((target.width, target.height)),
             viewport: parking_lot::RwLock::new((target.width as f64, target.height as f64)),
         });
@@ -225,6 +233,10 @@ impl CdpSession {
             input_revision: std::sync::atomic::AtomicU64::new(0),
             viewer: Arc::new(Mutex::new(())),
             runs: std::sync::atomic::AtomicUsize::new(0),
+            stream_gate: Mutex::new(()),
+            preview_active: AtomicBool::new(false),
+            recording_active: AtomicBool::new(false),
+            held_contact: Mutex::new(None),
             size: parking_lot::RwLock::new((width, height)),
             viewport: parking_lot::RwLock::new((width as f64, height as f64)),
         }))
@@ -281,6 +293,14 @@ impl CdpSession {
     pub async fn start_preview(
         &self,
     ) -> anyhow::Result<tokio::sync::watch::Receiver<Option<Arc<ScreencastFrame>>>> {
+        let _stream = self.stream_gate.lock().await;
+        let frames = self.start_stream().await?;
+        self.preview_active.store(true, Ordering::SeqCst);
+        Ok(frames)
+    }
+    async fn start_stream(
+        &self,
+    ) -> anyhow::Result<tokio::sync::watch::Receiver<Option<Arc<ScreencastFrame>>>> {
         ensure!(self.is_alive(), "浏览器目标已断开");
         // Restart also requests a fresh image of a static page after navigation.
         self.transport
@@ -296,7 +316,37 @@ impl CdpSession {
             .await?;
         Ok(frames)
     }
+    pub async fn start_recording(
+        &self,
+    ) -> anyhow::Result<tokio::sync::watch::Receiver<Option<Arc<ScreencastFrame>>>> {
+        let _stream = self.stream_gate.lock().await;
+        ensure!(
+            !self.recording_active.load(Ordering::SeqCst),
+            "目标正在录制"
+        );
+        let frames = if self.preview_active.load(Ordering::SeqCst) {
+            self.transport.frames.subscribe()
+        } else {
+            self.start_stream().await?
+        };
+        self.recording_active.store(true, Ordering::SeqCst);
+        Ok(frames)
+    }
+    pub async fn stop_recording(&self) {
+        let _stream = self.stream_gate.lock().await;
+        self.recording_active.store(false, Ordering::SeqCst);
+        if !self.preview_active.load(Ordering::SeqCst) {
+            self.stop_stream().await;
+        }
+    }
     pub async fn stop_preview(&self) {
+        let _stream = self.stream_gate.lock().await;
+        self.preview_active.store(false, Ordering::SeqCst);
+        if !self.recording_active.load(Ordering::SeqCst) {
+            self.stop_stream().await;
+        }
+    }
+    async fn stop_stream(&self) {
         let _ = self.transport.call("Page.stopScreencast", json!({})).await;
         self.transport.frames.send_replace(None);
     }
@@ -411,6 +461,7 @@ impl CdpSession {
     }
     pub async fn input(&self, value: &Value, expected: Option<&FrameStamp>) -> anyhow::Result<()> {
         let _gate = self.gate.lock().await;
+        self.check_pointer_owner(value).await?;
         let result = self.input_locked(value, expected).await;
         if result.is_err() {
             self.release_locked().await;
@@ -420,11 +471,21 @@ impl CdpSession {
     pub async fn manual_input(&self, value: &Value, expected: &FrameStamp) -> anyhow::Result<()> {
         let _gate = self.gate.lock().await;
         ensure!(self.runs.load(Ordering::SeqCst) == 0, "目标正在执行任务");
+        self.check_pointer_owner(value).await?;
         let result = self.input_locked(value, Some(expected)).await;
         if result.is_err() {
             self.release_locked().await;
         }
         result
+    }
+    async fn check_pointer_owner(&self, value: &Value) -> anyhow::Result<()> {
+        if matches!(value["type"].as_str(), Some("tap" | "pointer" | "scroll")) {
+            ensure!(
+                self.held_contact.lock().await.is_none(),
+                "请先松开映射中的持续指针"
+            );
+        }
+        Ok(())
     }
     async fn input_locked(
         &self,
@@ -585,7 +646,50 @@ impl CdpSession {
             }
             _ => anyhow::bail!("浏览器不支持此操作: {kind}"),
         }
+        crate::recording::observe_browser(&self.id, value);
         Ok(())
+    }
+    /// Single-contact mapping over the browser mouse. Concurrent contacts are rejected.
+    pub async fn mapped_contact(
+        &self,
+        id: u64,
+        action: &str,
+        x: u32,
+        y: u32,
+        manual: Option<&FrameStamp>,
+    ) -> anyhow::Result<()> {
+        let _gate = self.gate.lock().await;
+        if manual.is_some() {
+            ensure!(self.runs.load(Ordering::SeqCst) == 0, "目标正在执行任务");
+        }
+        let mut contact = self.held_contact.lock().await;
+        let stamp = if action == "down" {
+            ensure!(
+                contact.is_none() && *self.buttons.lock().await == 0,
+                "浏览器仅支持一个持续指针，请先松开已有操作"
+            );
+            manual.cloned().unwrap_or_else(|| self.stamp())
+        } else {
+            let (held, stamp) = contact.as_ref().ok_or_else(|| anyhow!("持续指针已释放"))?;
+            ensure!(*held == id, "持续指针身份不匹配");
+            stamp.clone()
+        };
+        let result = self
+            .input_locked(
+                &json!({"type":"pointer","action":action,"x":x,"y":y}),
+                Some(&stamp),
+            )
+            .await;
+        if result.is_err() || action == "up" {
+            *contact = None;
+        } else {
+            *contact = Some((id, stamp));
+        }
+        drop(contact);
+        if result.is_err() {
+            self.release_locked().await;
+        }
+        result
     }
     pub async fn release_manual(&self) {
         let _gate = self.gate.lock().await;
@@ -598,6 +702,7 @@ impl CdpSession {
         self.release_locked().await;
     }
     async fn release_locked(&self) {
+        self.held_contact.lock().await.take();
         let keys: Vec<_> = self.keys.lock().await.drain().map(|(_, key)| key).collect();
         for name in keys {
             if let Ok((key, code, vk)) = key_info(&name) {

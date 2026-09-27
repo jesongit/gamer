@@ -17,12 +17,15 @@ struct ActiveTouch {
     point: TouchPoint,
 }
 
+// Capability adapters may be recreated while a browser session survives.
+// A late release from an old adapter must never match a new contact.
+static NEXT_POINTER_ID: AtomicU64 = AtomicU64::new(1);
+
 /// Maps opaque capability touch handles to scrcpy pointer IDs. The latter never
 /// crosses the capability boundary.
 pub(crate) struct TouchAdapter {
     device: Arc<DeviceAdapter>,
     active: Mutex<HashMap<TouchHandle, ActiveTouch>>,
-    next_pointer_id: AtomicU64,
 }
 
 impl TouchAdapter {
@@ -30,7 +33,6 @@ impl TouchAdapter {
         Self {
             device,
             active: Mutex::new(HashMap::new()),
-            next_pointer_id: AtomicU64::new(1),
         }
     }
 
@@ -53,13 +55,27 @@ impl TouchAdapter {
         action: u8,
         point: TouchPoint,
     ) -> CapabilityResult<()> {
-        if !crate::targets::capabilities(&self.device.devices, state.device.id().as_str())
-            .map_err(|e| CapabilityError::Failed(e.to_string()))?
-            .multitouch
-        {
-            return Err(CapabilityError::Unavailable(
-                "target.multitouch: 当前目标不支持持续触控",
-            ));
+        if crate::targets::is_browser(state.device.id().as_str()) {
+            let session = self
+                .device
+                .devices
+                .browsers
+                .session(state.device.id().as_str())
+                .map_err(|e| CapabilityError::Failed(e.to_string()))?;
+            let action = match action {
+                ACTION_DOWN => "down",
+                ACTION_UP => "up",
+                _ => "move",
+            };
+            return super::with_capability_input_source(session.mapped_contact(
+                state.pointer_id,
+                action,
+                point.x(),
+                point.y(),
+                state.device.manual_frame(),
+            ))
+            .await
+            .map_err(|e| CapabilityError::Failed(e.to_string()));
         }
         // 录制输入观察（合同 §2.1）：能力层触控经此进入设备发送路径；
         // source 标注调用方 scope 优先（keymap/runner），缺省 "plugin"
@@ -97,7 +113,7 @@ impl TouchService for TouchAdapter {
     ) -> CapabilityResult<TouchHandle> {
         let state = ActiveTouch {
             device: device.clone(),
-            pointer_id: self.next_pointer_id.fetch_add(1, Ordering::Relaxed),
+            pointer_id: NEXT_POINTER_ID.fetch_add(1, Ordering::Relaxed),
             point,
         };
         self.inject(&state, ACTION_DOWN, point).await?;
@@ -123,16 +139,17 @@ impl TouchService for TouchAdapter {
 
     async fn end(&self, touch: &TouchHandle) -> CapabilityResult<()> {
         let state = self.active(touch)?;
-        self.inject(
-            &state,
-            ACTION_UP,
-            TouchPoint::new(state.point.x(), state.point.y(), 0.0),
-        )
-        .await?;
+        let result = self
+            .inject(
+                &state,
+                ACTION_UP,
+                TouchPoint::new(state.point.x(), state.point.y(), 0.0),
+            )
+            .await;
         self.active
             .lock()
             .map_err(|_| CapabilityError::Failed("touch state poisoned".into()))?
             .remove(touch);
-        Ok(())
+        result
     }
 }

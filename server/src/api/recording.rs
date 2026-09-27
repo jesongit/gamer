@@ -80,7 +80,11 @@ async fn api_start(State(st): State<AppState>, Json(req): Json<RecordingStartReq
 
 /// `POST /api/recording/:id/stop`：200 终态 session（幂等）。
 async fn api_stop(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    match service(&st.cfg).stop(&RecordingId(id)) {
+    let service = service(&st.cfg);
+    match tokio::task::spawn_blocking(move || service.stop(&RecordingId(id)))
+        .await
+        .unwrap_or_else(|e| Err(e.into()))
+    {
         Ok(meta) => Json(meta).into_response(),
         Err(err) => map_failure(err),
     }
@@ -88,7 +92,11 @@ async fn api_stop(State(st): State<AppState>, Path(id): Path<String>) -> Respons
 
 /// `POST /api/recording/:id/cancel`：200 终态（已落盘部分保留为素材）。
 async fn api_cancel(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    match service(&st.cfg).cancel(&RecordingId(id)) {
+    let service = service(&st.cfg);
+    match tokio::task::spawn_blocking(move || service.cancel(&RecordingId(id)))
+        .await
+        .unwrap_or_else(|e| Err(e.into()))
+    {
         Ok(meta) => Json(meta).into_response(),
         Err(err) => map_failure(err),
     }

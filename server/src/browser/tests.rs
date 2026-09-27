@@ -316,6 +316,69 @@ async fn screencast_continuous_frames_input_capture_and_restart() {
     let frame = frames.borrow_and_update().clone().unwrap();
     let fresh = session.preview_stamp(&frame).await.unwrap();
     assert_ne!(fresh.revision, stamp.revision);
+    // Recording owns the producer after the viewer disconnects.
+    let mut recording = session.start_recording().await.unwrap();
+    session.stop_preview().await;
+    session
+        .evaluate_for_test("document.body.style.background='green'; true")
+        .await;
+    tokio::time::timeout(Duration::from_secs(3), recording.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    session.stop_recording().await;
+    session.evaluate_for_test("window.drag=[]; for(const t of ['mousedown','mousemove','mouseup'])document.addEventListener(t,e=>drag.push([t,e.clientX,e.clientY]));true").await;
+    let (_, frame) = session.capture().await.unwrap();
+    session
+        .mapped_contact(1, "down", 100, 100, Some(&frame))
+        .await
+        .unwrap();
+    assert!(session
+        .mapped_contact(2, "down", 200, 200, Some(&frame))
+        .await
+        .is_err());
+    session
+        .mapped_contact(1, "move", 300, 300, Some(&frame))
+        .await
+        .unwrap();
+    session
+        .mapped_contact(1, "up", 300, 300, Some(&frame))
+        .await
+        .unwrap();
+    assert_eq!(
+        session.evaluate_for_test("drag").await,
+        json!([
+            ["mousedown", 100, 100],
+            ["mousemove", 300, 300],
+            ["mouseup", 300, 300]
+        ])
+    );
+    session
+        .mapped_contact(3, "down", 100, 100, Some(&frame))
+        .await
+        .unwrap();
+    session.release_manual().await;
+    assert!(session
+        .mapped_contact(3, "move", 200, 200, Some(&frame))
+        .await
+        .is_err());
+    session
+        .mapped_contact(4, "down", 100, 100, Some(&frame))
+        .await
+        .unwrap();
+    session
+        .evaluate_for_test("location.hash='contact';true")
+        .await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(session
+        .mapped_contact(4, "move", 400, 400, Some(&frame))
+        .await
+        .is_err());
+    assert!(!session
+        .evaluate_for_test("drag.some(e=>e[0]==='mousemove'&&e[1]===400)")
+        .await
+        .as_bool()
+        .unwrap());
     session.stop_preview().await;
     session.close().await;
     server.abort();

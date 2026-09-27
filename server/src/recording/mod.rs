@@ -25,6 +25,7 @@
 //! 丢弃并计数，绝不反压采集/推流路径）；输入观察在无活动会话时是一次
 //! `OnceLock::get` + 空 map 查找的直通开销。
 
+mod browser;
 pub mod mp4;
 
 use std::collections::HashMap;
@@ -318,6 +319,7 @@ struct SessionState {
     /// 素材展示名基名（分段按 -partN 追加）。
     asset_base_name: String,
     current: Option<SegmentWriter>,
+    browser: Option<browser::BrowserRecording>,
     /// 待开段使用的参数集（SPS/PPS Annex-B）。
     pending_config: Option<Vec<u8>>,
     events: EventLog,
@@ -616,6 +618,8 @@ impl SessionShared {
             return st.meta.clone();
         }
         st.meta.state = RecordingState::Finalizing;
+        self.stopping.store(true, Ordering::Release);
+        self.stop_notify.notify_waiters();
         self.close_segment(st, close_reason);
         st.meta.state = target;
         st.meta.ended_at = Some(now_rfc3339());
@@ -628,7 +632,52 @@ impl SessionShared {
         st.meta.clone()
     }
 
+    fn finalize_browser(
+        &self,
+        target: RecordingState,
+        reason: SegmentReason,
+        error: Option<String>,
+    ) -> Option<RecordingSessionMeta> {
+        let (recording, width, height, name, end_us) = {
+            let mut st = self.state.lock();
+            let recording = st.browser.take()?;
+            st.meta.state = RecordingState::Finalizing;
+            self.stopping.store(true, Ordering::Release);
+            self.stop_notify.notify_waiters();
+            self.persist(&st);
+            (
+                recording,
+                st.width,
+                st.height,
+                st.asset_base_name.clone(),
+                st.elapsed_us(),
+            )
+        };
+        let result = browser::finish(self, recording, width, height, &name, end_us, reason);
+        let mut st = self.state.lock();
+        let (target, error) = match result {
+            Ok(segment) => {
+                if let Some(segment) = segment {
+                    st.meta.segments.push(segment);
+                }
+                (target, error)
+            }
+            Err(e) => (
+                RecordingState::Failed,
+                Some(format!("浏览器录像封装失败: {e}")),
+            ),
+        };
+        Some(self.finalize_with(&mut st, target, reason, error))
+    }
     fn finalize_stop(&self) -> RecordingSessionMeta {
+        if let Some(meta) =
+            self.finalize_browser(RecordingState::Completed, SegmentReason::Normal, None)
+        {
+            return meta;
+        }
+        if self.stopping.load(Ordering::Acquire) {
+            return self.meta_snapshot();
+        }
         let mut st = self.state.lock();
         self.finalize_with(
             &mut st,
@@ -639,6 +688,14 @@ impl SessionShared {
     }
 
     fn finalize_cancel(&self) -> RecordingSessionMeta {
+        if let Some(meta) =
+            self.finalize_browser(RecordingState::Cancelled, SegmentReason::Normal, None)
+        {
+            return meta;
+        }
+        if self.stopping.load(Ordering::Acquire) {
+            return self.meta_snapshot();
+        }
         let mut st = self.state.lock();
         self.finalize_with(
             &mut st,
@@ -649,6 +706,13 @@ impl SessionShared {
     }
 
     fn end_interrupted(&self, reason: SegmentReason, error: Option<String>) {
+        if self
+            .finalize_browser(RecordingState::Interrupted, reason, error.clone())
+            .is_some()
+            || self.stopping.load(Ordering::Acquire)
+        {
+            return;
+        }
         let mut st = self.state.lock();
         self.finalize_with(&mut st, RecordingState::Interrupted, reason, error);
     }
@@ -897,19 +961,21 @@ impl RecordingService {
                 "target_capability_unsupported: 当前目标尚不支持录制",
             );
         }
-        let Some(session) = devices.session(device_id) else {
-            return failure(
-                FailureKind::DeviceOffline,
-                "设备未连接，无法开始录制（请先连接设备）",
-            );
-        };
-        let Some(frames_tx) = devices.frames_tx(device_id) else {
-            return failure(
-                FailureKind::DeviceOffline,
-                "设备视频帧分发不可用，无法开始录制（请先连接设备）",
-            );
-        };
-        if self.inner.lookup_active(device_id).is_some() {
+        let browser_session =
+            if crate::targets::is_browser(device_id) {
+                Some(devices.browsers.session(device_id).map_err(|e| {
+                    RecordingFailure::new(FailureKind::DeviceOffline, e.to_string())
+                })?)
+            } else {
+                None
+            };
+        let session = devices.session(device_id);
+        let frames_tx = devices.frames_tx(device_id);
+        if browser_session.is_none() && (session.is_none() || frames_tx.is_none()) {
+            return failure(FailureKind::DeviceOffline, "设备未连接，无法开始录制");
+        }
+        let mut active = self.inner.active_by_device.lock();
+        if active.contains_key(device_id) {
             return failure(FailureKind::Busy, "该设备已有进行中的录制会话");
         }
 
@@ -917,7 +983,10 @@ impl RecordingService {
         let primary_media = MediaId(uuid::Uuid::new_v4().simple().to_string());
         let dir = self.inner.data_root.join(&primary_media.0);
         std::fs::create_dir_all(dir.join("recording"))?;
-        let (width, height) = session.video_size();
+        let (width, height) = browser_session
+            .as_ref()
+            .map(|s| s.size())
+            .unwrap_or_else(|| session.as_ref().unwrap().video_size());
         let asset_base_name = format!("recording-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
         let meta = RecordingSessionMeta {
             id: id.clone(),
@@ -943,6 +1012,9 @@ impl RecordingService {
                 height,
                 asset_base_name,
                 current: None,
+                browser: browser_session
+                    .as_ref()
+                    .map(|_| browser::BrowserRecording::new(devices.cfg.ffmpeg_path.clone())),
                 pending_config: None,
                 events: EventLog::new(dir.join("recording")),
                 dropped_frames: 0,
@@ -976,11 +1048,14 @@ impl RecordingService {
             .sessions
             .lock()
             .insert(id.0.clone(), shared.clone());
-        self.inner
-            .active_by_device
-            .lock()
-            .insert(device_id.to_string(), id.0.clone());
+        active.insert(device_id.to_string(), id.0.clone());
+        drop(active);
 
+        if let Some(session) = browser_session {
+            browser::spawn(shared.clone(), session);
+            return Ok(shared.meta_snapshot());
+        }
+        let frames_tx = frames_tx.unwrap();
         // 帧订阅消费任务：广播慢消费者被 Lagged 丢弃（有界队列语义），
         // 任何失败只影响录制会话，绝不反压采集/推流路径。
         let consumer = shared.clone();
@@ -1010,7 +1085,7 @@ impl RecordingService {
         });
 
         // 起录立即请求设备输出 IDR（reset_video；best effort，不阻塞返回）
-        let reset = Some(session);
+        let reset = session;
         tokio::spawn(async move {
             if let Some(session) = reset {
                 let _ = tokio::time::timeout(Duration::from_secs(1), session.reset_video()).await;
@@ -1408,6 +1483,48 @@ pub(crate) fn observe_text(device_id: &str, text: &str) {
     }
 }
 
+/// Browser accepted input retains named keys rather than inventing Android codes.
+pub(crate) fn observe_browser(device_id: &str, value: &serde_json::Value) {
+    let Some(inner) = OBSERVER.get() else {
+        return;
+    };
+    let Some(shared) = inner.lookup_active(device_id) else {
+        return;
+    };
+    let x = value["x"].as_f64().unwrap_or(0.0) as u32;
+    let y = value["y"].as_f64().unwrap_or(0.0) as u32;
+    match value["type"].as_str().unwrap_or("") {
+        "tap" => {
+            shared.on_touch(TOUCH_DOWN, 0, x, y);
+            shared.on_touch(TOUCH_UP, 0, x, y);
+        }
+        "pointer" if value["button"].as_str().unwrap_or("left") == "left" => {
+            let action = match value["action"].as_str().unwrap_or("move") {
+                "down" => TOUCH_DOWN,
+                "up" => TOUCH_UP,
+                _ => 2,
+            };
+            shared.on_touch(action, 0, x, y);
+        }
+        "text" => shared.on_text(value["text"].as_str().unwrap_or("")),
+        "key" if value["action"].as_str().unwrap_or("press") != "up" => {
+            let mut st = shared.state.lock();
+            if st.meta.state == RecordingState::Recording {
+                let op = st.next_op();
+                let time = st.elapsed_us();
+                st.emit(
+                    &shared.id.0,
+                    "named_key",
+                    json!({"name":value["key"],"action":value["action"]}),
+                    time,
+                    op,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
 /// 设备视频读循环退出（socket 断开）：活动录制立即安全收尾为 interrupted，
 /// 不等看门狗。幂等（随后 device 层的 disconnect 边界命中终态直返）。
 pub(crate) fn on_video_stream_ended(device_id: &str) {
@@ -1641,7 +1758,7 @@ mod tests {
         assert!(service.history().unwrap().is_empty());
     }
 
-    fn test_session(root: &Path, device_id: &str) -> Arc<SessionShared> {
+    pub(super) fn test_session(root: &Path, device_id: &str) -> Arc<SessionShared> {
         let inner = Arc::new(Inner {
             data_root: root.to_path_buf(),
             sessions: Mutex::new(HashMap::new()),
@@ -1674,6 +1791,7 @@ mod tests {
                 height: 1080,
                 asset_base_name: "recording-test".to_string(),
                 current: None,
+                browser: None,
                 pending_config: None,
                 events: EventLog::new(dir.join("recording")),
                 dropped_frames: 0,
