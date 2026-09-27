@@ -121,11 +121,9 @@ async fn ffmpeg_hls_preserves_timestamped_video_and_game_audio() {
         if n[0] & 31 == 9 && !frame.is_empty() {
             frames.push(std::mem::take(&mut frame));
         }
-        if n[0] & 31 == 7 || n[0] & 31 == 8 {
-            if config.len() < 100 {
-                config.extend_from_slice(&[0, 0, 0, 1]);
-                config.extend_from_slice(n);
-            }
+        if (n[0] & 31 == 7 || n[0] & 31 == 8) && config.len() < 100 {
+            config.extend_from_slice(&[0, 0, 0, 1]);
+            config.extend_from_slice(n);
         }
         frame.extend_from_slice(&[0, 0, 0, 1]);
         frame.extend_from_slice(n);
@@ -145,11 +143,11 @@ async fn ffmpeg_hls_preserves_timestamped_video_and_game_audio() {
         &rgb,
     );
     let raw = std::fs::read(rgb).unwrap();
-    let frames = raw.chunks_exact(160 * 120 * 3).collect::<Vec<_>>();
+    let frames = raw.as_chunks::<{ 160 * 120 * 3 }>().0;
     let mut packets = Vec::new();
     for (i, f) in frames.iter().enumerate() {
         let pts = 250_000 + i as u64 * 40_000 + if i >= 20 { 200_000 } else { 0 };
-        packets.push((pts, stream_mux::raw_packet(1, pts, true, f).unwrap()));
+        packets.push((pts, stream_mux::raw_packet(1, pts, true, f.as_slice()).unwrap()));
     }
     for (i, p) in opus_packets(&std::fs::read(opus).unwrap())
         .iter()
