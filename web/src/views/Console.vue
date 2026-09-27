@@ -426,7 +426,12 @@ async function bindBrowserPage(id) {
   if (!id) return
   try { await api.bindBrowser(store.deviceId, id); cleanup(true); await connect(true); await refreshBrowserPages() } catch (e) { toast(e.message, 'error') }
 }
-const browserPreview = useBrowserPreview({ deviceId: () => store.deviceId, connected, connecting, errorMsg, toast, onEvent: data => onControlMessage({ data: JSON.stringify(data) }) })
+const browserPreview = useBrowserPreview({
+  deviceId: () => store.deviceId, connected, connecting, errorMsg, toast,
+  onEvent: data => onControlMessage({ data: JSON.stringify(data) }),
+  onConnected() { startLogPolling(); refreshDeviceStatus() },
+  onDisconnected() { stopLogPolling() },
+})
 async function browserSaved(id) { cleanup(true); browserModal.value = false; await loadData(); store.deviceId = id }
 async function closeBrowserTarget() {
   try { await api.closeBrowser(store.deviceId); cleanup(true); await refreshDeviceStatus() } catch (e) { toast(e.message, 'error') }
@@ -448,7 +453,11 @@ const coreStatuses = computed(() => {
     statuses.push(`视频 · ${stage.mediaSizeLabel || '读取尺寸…'} · ${stage.playing ? '播放中' : '已暂停'} · ${stage.timeText} / ${stage.durationText}`)
   } else if (connected.value) {
     if (keyboardFocused.value && stage.canDeviceInput && !picking.value && !cellPick.mode) statuses.push('键盘控制已启用')
-    statuses.push(`${res.value} · ${fps.value} fps · ${delay.value} ms · ${bitrate.value}`)
+    if (isBrowser.value) {
+      statuses.push(`${browserPreview.view.width}×${browserPreview.view.height} · 截图预览`)
+    } else {
+      statuses.push(`${res.value} · ${fps.value} fps · ${delay.value} ms · ${bitrate.value}`)
+    }
   }
   if (picking.value || cellPick.mode) statuses.unshift(cellPick.mode === 'color' ? '点击取色 · Esc 取消' : cellPick.mode === 'coord' ? '点击取点 · Esc 取消' : '框选中 · Esc 取消')
   return statuses

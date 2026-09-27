@@ -1,12 +1,19 @@
 import { reactive, onUnmounted, watch } from 'vue'
 import { api } from '../../api'
 
-export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, toast, onEvent }) {
-  const view = reactive({ src: '', stamp: null, pending: null })
+export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, toast, onEvent, onConnected, onDisconnected }) {
+  const view = reactive({ src: '', stamp: null, pending: null, width: 0, height: 0 })
   let socket = null
   let generation = 0
   let lastMove = 0
   let pendingConnect = false
+  let displayedSrc = ''
+  let notifiedConnected = false
+  function disconnected() {
+    if (!notifiedConnected) return
+    notifiedConnected = false
+    onDisconnected?.()
+  }
   function close() {
     generation++
     if (socket || view.src || pendingConnect) { connected.value = false; connecting.value = false }
@@ -16,6 +23,10 @@ export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, t
     view.src = ''
     view.stamp = null
     view.pending = null
+    view.width = 0
+    view.height = 0
+    displayedSrc = ''
+    disconnected()
   }
   async function connect() {
     close()
@@ -31,17 +42,20 @@ export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, t
       const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/browser/${encodeURIComponent(id)}`)
       socket = ws
       ws.onmessage = event => {
-        if (seq !== generation || id !== deviceId()) return
+        if (seq !== generation || id !== deviceId() || ws.readyState !== WebSocket.OPEN) return
         const data = JSON.parse(event.data)
         if (data.type === 'frame') {
           view.stamp = null
           view.pending = data.stamp
           const src = `data:image/png;base64,${data.png}`
-          if (view.src === src) view.stamp = data.stamp
-          else view.src = src
+          const alreadyDisplayed = view.src === src && displayedSrc === src
+          view.src = src
+          if (alreadyDisplayed) acceptFrame()
+          else displayedSrc = ''
         } else if (data.type === 'se') { onEvent?.(data)
         } else if (data.error) {
           view.stamp = null
+          view.pending = null
           errorMsg.value = data.error
         }
       }
@@ -51,6 +65,7 @@ export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, t
         connecting.value = false
         view.stamp = null
         view.pending = null
+        disconnected()
         errorMsg.value ||= '浏览器预览已断开；请确认没有其他投屏页面占用，再重新连接'
       }
       ws.onerror = () => { if (seq === generation) errorMsg.value = '无法打开浏览器预览' }
@@ -63,11 +78,21 @@ export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, t
     }
   }
   function loaded(event) {
-    if (socket?.readyState !== WebSocket.OPEN || !view.pending || event.target.src !== view.src) return
+    if (socket?.readyState !== WebSocket.OPEN || event.target.src !== view.src) return
+    displayedSrc = view.src
+    view.width = event.target.naturalWidth || 0
+    view.height = event.target.naturalHeight || 0
+    if (view.pending) acceptFrame()
+  }
+  function acceptFrame() {
     view.stamp = view.pending
     connected.value = true
     connecting.value = false
     errorMsg.value = ''
+    if (!notifiedConnected) {
+      notifiedConnected = true
+      onConnected?.()
+    }
   }
   function send(value) {
     if (socket?.readyState !== WebSocket.OPEN) return false

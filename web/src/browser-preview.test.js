@@ -17,13 +17,13 @@ class Socket {
   close() { this.readyState = 3; this.onclose?.() }
   receive(value) { this.onmessage?.({ data: JSON.stringify(value) }) }
 }
-function setup() {
+function setup(hooks = {}) {
   Socket.instances = []
   vi.stubGlobal('WebSocket', Socket)
   const id = ref('browser-a'), connected = ref(false), connecting = ref(false), errorMsg = ref('')
   let preview
-  wrapper = mount(defineComponent({ setup() { preview = useBrowserPreview({ deviceId: () => id.value, connected, connecting, errorMsg, toast: vi.fn() }); return () => null } }))
-  return { id, preview, connected, connecting }
+  wrapper = mount(defineComponent({ setup() { preview = useBrowserPreview({ deviceId: () => id.value, connected, connecting, errorMsg, toast: vi.fn(), ...hooks }); return () => null } }))
+  return { id, preview, connected, connecting, errorMsg }
 }
 afterEach(() => { wrapper?.unmount(); vi.unstubAllGlobals(); vi.clearAllMocks() })
 describe('browser preview target and displayed frame guards', () => {
@@ -53,6 +53,58 @@ describe('browser preview target and displayed frame guards', () => {
     preview.loaded({ target: { src: preview.view.src } })
     expect(connected.value).toBe(false)
     expect(preview.view.stamp).toBeNull()
+  })
+  it('waits for actual display even when the same PNG arrives twice before load', async () => {
+    const onConnected = vi.fn(), onDisconnected = vi.fn()
+    const { preview, connected } = setup({ onConnected, onDisconnected })
+    await preview.connect()
+    const socket = Socket.instances[0]
+    const frame = { type: 'frame', png: 'AA==', stamp: { target: 'browser-a', epoch: 'one', revision: 1 } }
+    socket.receive(frame)
+    socket.receive(frame)
+    expect(preview.send({ type: 'tap', x: 1, y: 1 })).toBe(false)
+    expect(connected.value).toBe(false)
+    expect(onConnected).not.toHaveBeenCalled()
+    preview.loaded({ target: { src: preview.view.src, naturalWidth: 640, naturalHeight: 480 } })
+    socket.receive(frame)
+    expect(preview.view.width).toBe(640)
+    expect(preview.view.height).toBe(480)
+    expect(onConnected).toHaveBeenCalledTimes(1)
+    socket.close()
+    preview.close()
+    expect(onDisconnected).toHaveBeenCalledTimes(1)
+  })
+  it('rejects an image that finishes loading after a frame error, then recovers on a valid frame', async () => {
+    const { preview, errorMsg } = setup()
+    await preview.connect()
+    const socket = Socket.instances[0]
+    const frame = { type: 'frame', png: 'AA==', stamp: { target: 'browser-a', epoch: 'one', revision: 1 } }
+    socket.receive(frame)
+    socket.receive({ type: 'error', error: 'stale frame' })
+    preview.loaded({ target: { src: preview.view.src } })
+    expect(preview.view.stamp).toBeNull()
+    expect(errorMsg.value).toBe('stale frame')
+    socket.receive(frame)
+    expect(preview.view.stamp).toEqual(frame.stamp)
+    socket.receive({ type: 'error', error: 'stale frame' })
+    socket.receive(frame)
+    expect(errorMsg.value).toBe('')
+    expect(preview.send({ type: 'tap', x: 1, y: 1 })).toBe(true)
+  })
+  it('waits for display when an earlier PNG returns while a different PNG is loading', async () => {
+    const { preview } = setup()
+    await preview.connect()
+    const socket = Socket.instances[0]
+    const frame = { type: 'frame', png: 'AA==', stamp: { target: 'browser-a', epoch: 'one', revision: 1 } }
+    socket.receive(frame)
+    preview.loaded({ target: { src: preview.view.src } })
+    socket.receive({ ...frame, png: 'BB==' })
+    socket.receive({ ...frame, stamp: { ...frame.stamp, revision: 2 } })
+    expect(preview.view.src).toBe('data:image/png;base64,AA==')
+    expect(preview.send({ type: 'tap', x: 1, y: 1 })).toBe(false)
+    preview.loaded({ target: { src: preview.view.src } })
+    expect(preview.send({ type: 'tap', x: 1, y: 1 })).toBe(true)
+    expect(socket.sent.at(-1).stamp.revision).toBe(2)
   })
   it('does not create a stale connection after changing the target during startup', async () => {
     let resolve
