@@ -16,6 +16,7 @@ vi.mock('./api', () => {
   return {
     api: new Proxy({}, {
       get(_target, name) {
+        if (name === 'listDevices') return _target[name] ||= vi.fn().mockResolvedValue([])
         if (name in listResponses) return vi.fn().mockResolvedValue(listResponses[name])
         if (name === 'listExtensions') return vi.fn().mockResolvedValue({ extensions: [], ui_contributions: [] })
         return vi.fn().mockResolvedValue({})
@@ -35,6 +36,7 @@ vi.mock('vue-router', () => ({
 import { mount, flushPromises } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { store } from './store'
+import { api } from './api'
 import Console from './views/Console.vue'
 import ConsoleVideoStage from './components/console/ConsoleVideoStage.vue'
 
@@ -122,6 +124,25 @@ describe('配置市场挂载冒烟', () => {
 })
 
 describe('浏览器投屏的真实舞台输入接线', () => {
+  it('刷新时恢复已有设备并完成初始化，不因 loadForm 缺失中断挂载', async () => {
+    vi.useFakeTimers()
+    api.listDevices.mockResolvedValue([{ id: 'browser-existing', name: '已保存浏览器', status: 'offline' }])
+    localStorage.setItem('gb_device_id', 'browser-existing')
+    let wrapper
+    try {
+      wrapper = mount(Console, { global: { stubs: { Teleport: true } } })
+      await vi.advanceTimersByTimeAsync(2100)
+      expect(store.deviceId).toBe('browser-existing')
+      expect(wrapper.findComponent(ConsoleVideoStage).props('currentName')).toBe('已保存浏览器')
+      expect(wrapper.find('.tb-browser-group').exists()).toBe(true)
+    } finally {
+      wrapper?.unmount()
+      api.listDevices.mockResolvedValue([])
+      store.deviceId = null
+      localStorage.removeItem('gb_device_id')
+      vi.useRealTimers()
+    }
+  })
   it('用图像尺寸换算坐标，内部转移焦点不中断按住，离开窗口释放按键', async () => {
     vi.useFakeTimers()
     let socket

@@ -169,6 +169,21 @@ async fn serve(mut socket: WebSocket, s: Arc<CdpSession>, st: AppState) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         let reply = tokio::select! {
+            // A detailed 1080p PNG can take longer than the preview interval.
+            // Drain queued controls first; random selection would repeatedly
+            // insert another expensive capture between key-down/up messages.
+            biased;
+            message=socket.recv()=> {
+                let Some(Ok(Message::Text(text)))=message else {break};
+                let result=async {
+                    let value:Value=serde_json::from_str(&text)?;
+                    if value["type"]=="release" {anyhow::ensure!(st.runs.active_for_device(&s.id).is_none() && s.runs.load(std::sync::atomic::Ordering::SeqCst)==0,"任务执行期间禁止手动操作");s.release_manual().await;return Ok::<_,anyhow::Error>(())}
+                    anyhow::ensure!(st.runs.active_for_device(&s.id).is_none(),"任务执行期间禁止手动操作");
+                    let stamp:FrameStamp=serde_json::from_value(value["stamp"].clone())?;
+                    s.manual_input(&value,&stamp).await
+                }.await;
+                match result {Ok(())=>continue,Err(e)=>json!({"type":"error","source":"input","error":e.to_string()})}
+            },
             event=events.recv()=> {
                 let Ok(event)=event else {continue};
                 if event.device_id.as_str()!=s.id {continue}
@@ -180,17 +195,6 @@ async fn serve(mut socket: WebSocket, s: Arc<CdpSession>, st: AppState) {
                 Ok((bytes,stamp))=>json!({"type":"frame","png":base64::engine::general_purpose::STANDARD.encode(bytes),"stamp":stamp}),
                 Err(e)=>json!({"type":"error","error":e.to_string()}),
             },
-            message=socket.recv()=> {
-                let Some(Ok(Message::Text(text)))=message else {break};
-                let result=async {
-                    let value:Value=serde_json::from_str(&text)?;
-                    if value["type"]=="release" {anyhow::ensure!(st.runs.active_for_device(&s.id).is_none() && s.runs.load(std::sync::atomic::Ordering::SeqCst)==0,"任务执行期间禁止手动操作");s.release_manual().await;return Ok::<_,anyhow::Error>(())}
-                    anyhow::ensure!(st.runs.active_for_device(&s.id).is_none(),"任务执行期间禁止手动操作");
-                    let stamp:FrameStamp=serde_json::from_value(value["stamp"].clone())?;
-                    s.manual_input(&value,&stamp).await
-                }.await;
-                match result {Ok(())=>continue,Err(e)=>json!({"type":"error","error":e.to_string()})}
-            }
         };
         if !matches!(
             tokio::time::timeout(

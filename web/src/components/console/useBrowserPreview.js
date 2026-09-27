@@ -9,6 +9,7 @@ export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, t
   let pendingConnect = false
   let displayedSrc = ''
   let notifiedConnected = false
+  let lastInputError = ''
   function disconnected() {
     if (!notifiedConnected) return
     notifiedConnected = false
@@ -26,6 +27,7 @@ export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, t
     view.width = 0
     view.height = 0
     displayedSrc = ''
+    lastInputError = ''
     disconnected()
   }
   async function connect() {
@@ -57,6 +59,10 @@ export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, t
           view.stamp = null
           view.pending = null
           errorMsg.value = data.error
+          if (data.source === 'input' && data.error !== lastInputError) {
+            lastInputError = data.error
+            toast(`操作未执行：${data.error}`, 'error')
+          }
         }
       }
       ws.onclose = () => {

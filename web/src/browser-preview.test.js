@@ -27,6 +27,22 @@ function setup(hooks = {}) {
 }
 afterEach(() => { wrapper?.unmount(); vi.unstubAllGlobals(); vi.clearAllMocks() })
 describe('browser preview target and displayed frame guards', () => {
+  it('shows rejected input instead of silently clearing the error on the next frame', async () => {
+    const toast = vi.fn()
+    const { preview } = setup({ toast })
+    await preview.connect()
+    const socket = Socket.instances[0]
+    const frame = { type: 'frame', png: 'AA==', stamp: { target: 'browser-a', epoch: 'one', revision: 1 } }
+    socket.receive(frame)
+    preview.loaded({ target: { src: preview.view.src } })
+    const rejected = { type: 'error', source: 'input', error: '目标正在执行任务' }
+    socket.receive(rejected)
+    expect(toast).toHaveBeenCalledWith('操作未执行：目标正在执行任务', 'error')
+    expect(preview.view.stamp).toBeNull()
+    socket.receive(frame)
+    socket.receive(rejected)
+    expect(toast).toHaveBeenCalledTimes(1)
+  })
   it('sends only after the displayed image loads, and invalidates immediately on target change', async () => {
     const { preview, id, connected } = setup()
     await preview.connect()

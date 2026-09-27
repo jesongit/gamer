@@ -364,7 +364,7 @@ const {
   devices, current, currentName, currentApplication,
   mode, form, scanning, configApplying, settingsOpen,
   screenSummary, formDirty,
-  startAdd, openSettings, cancelSettings, onDeviceSelect, refreshDeviceStatus, refreshDevices,
+  loadForm, startAdd, openSettings, cancelSettings, onDeviceSelect, refreshDeviceStatus, refreshDevices,
   saveSettings, flushAndConnect, addDevice, removeDevice, disconnect, loadApps,
   forceReconnecting, forceReconnect,
   appSelectSaving, onAppSelect, appLoading, pkgOptions, packageOptionLabel,
