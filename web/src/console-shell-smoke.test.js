@@ -32,7 +32,9 @@ vi.mock('vue-router', () => ({
   }),
 }))
 
-import { mount } from '@vue/test-utils'
+import { mount, flushPromises } from '@vue/test-utils'
+import { nextTick } from 'vue'
+import { store } from './store'
 import Console from './views/Console.vue'
 import ConsoleVideoStage from './components/console/ConsoleVideoStage.vue'
 
@@ -116,5 +118,60 @@ describe('配置市场挂载冒烟', () => {
     expect(wrapper.text()).toContain('市场暂无可用配置包')
     expect(wrapper.text()).toContain('添加仓库')
     wrapper.unmount()
+  })
+})
+
+describe('浏览器投屏的真实舞台输入接线', () => {
+  it('用图像尺寸换算坐标，内部转移焦点不中断按住，离开窗口释放按键', async () => {
+    vi.useFakeTimers()
+    let socket
+    class Socket {
+      static OPEN = 1
+      readyState = 1
+      bufferedAmount = 0
+      sent = []
+      constructor() { socket = this }
+      send(data) { this.sent.push(JSON.parse(data)) }
+      close() { this.readyState = 3 }
+    }
+    vi.stubGlobal('WebSocket', Socket)
+    const wrapper = mount(Console, { attachTo: document.body, global: { stubs: { Teleport: true } } })
+    try {
+      await vi.advanceTimersByTimeAsync(2100)
+      store.deviceId = 'browser-check'
+      await nextTick()
+      await wrapper.find('.tb-device-group .btn-primary').trigger('click')
+      await flushPromises()
+      const stamp = { target: 'browser-check', epoch: 'one', revision: 1 }
+      socket.onmessage({ data: JSON.stringify({ type: 'frame', png: 'AA==', stamp }) })
+      await nextTick()
+      const img = wrapper.find('img[alt="浏览器目标画面"]')
+      Object.defineProperty(img.element, 'naturalWidth', { value: 1280 })
+      Object.defineProperty(img.element, 'naturalHeight', { value: 720 })
+      img.element.getBoundingClientRect = () => ({ left: 10, top: 20, width: 640, height: 480 })
+      await img.trigger('load')
+      await flushPromises()
+      expect(wrapper.findAll('.toolbar > .tb-row')).toHaveLength(2)
+      expect(wrapper.find('.tb-operation-row select[aria-label="目标标签页"]').exists()).toBe(true)
+      expect(wrapper.find('.browser-status-row').exists()).toBe(false)
+      const stage = wrapper.find('.stage')
+      await img.trigger('mousedown', { clientX: 110, clientY: 190, button: 0 })
+      expect(socket.sent.at(-1)).toMatchObject({ type: 'pointer', action: 'down', x: 200, y: 220, stamp })
+      await stage.trigger('focusout', { relatedTarget: wrapper.find('.player-stage').element })
+      expect(socket.sent.at(-1).action).toBe('down')
+      await img.trigger('mouseup', { clientX: 110, clientY: 190, button: 0 })
+      expect(socket.sent.at(-1)).toMatchObject({ type: 'pointer', action: 'up', x: 200, y: 220 })
+      await stage.trigger('keydown', { key: 'w' })
+      expect(socket.sent.at(-1)).toMatchObject({ type: 'key', action: 'down', key: 'w' })
+      window.dispatchEvent(new Event('blur'))
+      expect(socket.sent.at(-1)).toEqual({ type: 'release' })
+      await stage.trigger('focusout', { relatedTarget: document.body })
+      expect(socket.sent.at(-1)).toEqual({ type: 'release' })
+    } finally {
+      wrapper.unmount()
+      store.deviceId = null
+      vi.unstubAllGlobals()
+      vi.useRealTimers()
+    }
   })
 })
