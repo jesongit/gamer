@@ -371,8 +371,15 @@ impl RuntimeServices {
             extensions::ExtensionService::for_data_root(cfg.data_dir.clone(), capabilities)
                 .with_runner_registrar(runner_registrar)
                 .with_builtin_service(Arc::new(extensions::live::LiveService::new(
-                    devices.clone(),
-                ))),
+                    extensions::live::runtime::Runtime {
+                        devices: devices.clone(),
+                        packages: packages.clone(),
+                        scheduler: scheduler.clone(),
+                        runs: runs.clone(),
+                        db: db.clone(),
+                    },
+                    &cfg.data_dir,
+                )?)),
         );
         let ctx = Self {
             packages,

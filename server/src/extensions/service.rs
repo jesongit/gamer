@@ -64,6 +64,9 @@ pub(crate) trait BuiltinService: Send + Sync {
         values: serde_json::Value,
     ) -> ExtensionResult<serde_json::Value>;
     async fn stop(&self);
+    async fn shutdown(&self) {
+        self.stop().await;
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -295,7 +298,7 @@ impl ExtensionService {
             if let Ok(id) = ExtensionId::parse(service.extension_id()) {
                 let gate = self.call_gate(&id);
                 let _lease = gate.write().await;
-                service.stop().await;
+                service.shutdown().await;
             }
         }
     }
