@@ -59,7 +59,7 @@ mod update_flow_tests {
             .uri("/api/packages")
             .header(axum::http::header::COOKIE, sid)
             .header(axum::http::header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"id":"com.test.app"}"#))
+            .body(Body::from(r#"{"id":"com.test.app","targets":{"android":{"packages":["*"]}}}"#))
             .unwrap();
         let _ = t.app.clone().oneshot(request).await.unwrap();
         // PUT 文本资源（force = 夹具直写语义）

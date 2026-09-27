@@ -8,6 +8,67 @@ pub fn is_browser(id: &str) -> bool {
     id.starts_with("browser-")
 }
 
+/// 兼容性所需的运行目标身份；不包含配置包或浏览器账号信息。
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct TargetIdentity {
+    pub kind: String,
+    pub value: Option<String>,
+    pub source: String,
+    pub note: String,
+}
+
+pub(crate) async fn identity(devices: &DeviceManager, id: &str) -> anyhow::Result<TargetIdentity> {
+    if !is_browser(id) {
+        let (device, _, _) = devices
+            .snapshot(id)
+            .ok_or_else(|| anyhow::anyhow!("目标不存在: {id}"))?;
+        return Ok(TargetIdentity {
+            kind: "android".into(),
+            value: device.pkg.filter(|p| !p.trim().is_empty()),
+            source: "configured".into(),
+            note: "按设备配置的应用包名判断".into(),
+        });
+    }
+    let target = devices.browsers.get(id)?;
+    let Ok(session) = devices.browsers.session(id) else {
+        return Ok(TargetIdentity {
+            kind: "web".into(),
+            value: Some(target.url),
+            source: "configured".into(),
+            note: "未连接：按配置网址估计，尚未验证实际页面".into(),
+        });
+    };
+    // 已建立过会话但目标丢失时不能把启动网址冒充当前页面。
+    let stamp = session.stamp();
+    let result = async {
+        let pages = session.pages().await?;
+        session.validate(&stamp)?;
+        let current = devices.browsers.session(id)?;
+        current.validate(&stamp)?;
+        pages
+            .iter()
+            .find(|p| p["id"].as_str() == Some(&session.target_id))
+            .and_then(|p| p["url"].as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("绑定的标签页已关闭或无法读取"))
+    }
+    .await;
+    Ok(match result {
+        Ok(url) => TargetIdentity {
+            kind: "web".into(),
+            value: Some(url),
+            source: "bound".into(),
+            note: "按当前绑定标签页的网址判断".into(),
+        },
+        Err(_) => TargetIdentity {
+            kind: "web".into(),
+            value: None,
+            source: "unavailable".into(),
+            note: "目标已断开、变化或无法读取，请连接后重试".into(),
+        },
+    })
+}
+
 /// Target support, independent of plugin permissions and connection readiness.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct TargetCapabilities {

@@ -63,11 +63,20 @@ pub(super) struct AndroidTargetsDto {
     packages: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WebTargetsDto {
+    #[serde(default)]
+    url_prefixes: Vec<String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TargetsDto {
     #[serde(default)]
     android: Option<AndroidTargetsDto>,
+    #[serde(default)]
+    web: Option<WebTargetsDto>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,6 +155,7 @@ fn manifest_json(manifest: &crate::resources::PackageManifest) -> Value {
         "revision": manifest.revision,
         "targets": {
             "android": { "packages": manifest.android_targets },
+            "web": { "url_prefixes": manifest.web_url_prefixes },
         },
         "plugins": manifest
             .plugins
@@ -191,6 +201,7 @@ pub(super) async fn api_create_package(
             version: req.version,
             author: req.author,
             android_targets: req.targets.android.map(|a| a.packages).unwrap_or_default(),
+            web_url_prefixes: req.targets.web.map(|w| w.url_prefixes).unwrap_or_default(),
             plugins: req.plugins,
         };
         let manifest = store.create_package(input).map_err(store_error)?;
@@ -271,25 +282,57 @@ fn media_refs_json(entries: &[crate::media::PackageMediaEntry]) -> Vec<Value> {
         .collect()
 }
 
-/// GET /api/packages/:pkg/compatibility?android_package=<pkg> — Android Target
-/// 兼容性检查（plan §17，warning 语义：不兼容仅提示，不禁止使用）。
-/// 匹配语义见 [`crate::resources::android_targets_match`]：空声明或 `*` =
-/// 通用包恒兼容。
+/// 只读身份查询：不连接、不启动浏览器，不读取当前活动标签页。
+pub(super) async fn api_target_identity(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    match crate::targets::identity(&st.devices, &id).await {
+        Ok(identity) => Json(identity).into_response(),
+        Err(e) => ApiError::not_found(e.to_string()).into_response(),
+    }
+}
+
+/// target_id 检查实际目标；android_package / url 可用于手动预估。仅提示。
 pub(super) async fn api_package_compatibility(
     State(st): State<AppState>,
     Path(pkg): Path<String>,
     Query(q): Query<CompatibilityQuery>,
 ) -> Response {
+    let provided: Vec<_> = [&q.target_id, &q.android_package, &q.url]
+        .into_iter()
+        .flatten()
+        .collect();
+    if provided.len() != 1 || provided[0].trim().is_empty() {
+        return ApiError::bad_request("请指定一个 target_id、android_package 或 url")
+            .into_response();
+    }
+    let target = if let Some(id) = q.target_id.as_deref().filter(|s| !s.trim().is_empty()) {
+        match crate::targets::identity(&st.devices, id).await {
+            Ok(target) => target,
+            Err(e) => return ApiError::not_found(e.to_string()).into_response(),
+        }
+    } else {
+        crate::targets::TargetIdentity {
+            kind: if q.url.is_some() { "web" } else { "android" }.into(),
+            value: q.url.or(q.android_package),
+            source: "manual".into(),
+            note: "按手动输入估计".into(),
+        }
+    };
     match run_blocking_api(move || -> Result<Value, ApiError> {
         let manifest = store_of(&st)
             .manifest(&pkg)
             .map_err(not_found_or_internal)?;
-        let compatible =
-            crate::resources::android_targets_match(&manifest.android_targets, &q.android_package);
+        let compatible = manifest.matches_target(&target.kind, target.value.as_deref());
+        let status = match compatible { Some(true) => "match", Some(false) => "mismatch", None => "unknown" };
         Ok(json!({
-            "android_package": q.android_package,
+            "target": target,
+            "status": status,
+            "reason": match compatible { Some(true) => "目标符合配置包声明", Some(false) => "目标不在配置包适用范围内（仍可继续使用）", None => "无法确定目标身份，请连接后重试或手动检查" },
             "compatible": compatible,
             "android_targets": manifest.android_targets,
+            "web_url_prefixes": manifest.web_url_prefixes,
         }))
     })
     .await
@@ -301,7 +344,9 @@ pub(super) async fn api_package_compatibility(
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct CompatibilityQuery {
-    android_package: String,
+    target_id: Option<String>,
+    android_package: Option<String>,
+    url: Option<String>,
 }
 
 /// Plugin Dependency 状态（plan §18）：对照扩展注册表，给出每个声明依赖的
@@ -370,8 +415,13 @@ pub(super) async fn api_update_package(
             author: req.author.or(current.author.clone()),
             android_targets: req
                 .targets
-                .and_then(|t| t.android.map(|a| a.packages))
+                .as_ref()
+                .and_then(|t| t.android.as_ref().map(|a| a.packages.clone()))
                 .unwrap_or_else(|| current.android_targets.clone()),
+            web_url_prefixes: req
+                .targets
+                .and_then(|t| t.web.map(|w| w.url_prefixes))
+                .unwrap_or_else(|| current.web_url_prefixes.clone()),
             plugins: req.plugins.unwrap_or_else(|| {
                 current
                     .plugins

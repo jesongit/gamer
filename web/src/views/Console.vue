@@ -569,6 +569,7 @@ const packageContext = usePackageContext({
   feedback: operationFeedback,
   beforePackageChange,
   currentApp: currentApplication,
+  currentTargetId: () => store.deviceId,
   loadCurrentApps: () => loadApps({ silent: true }),
   refreshAll: async () => {
     const pkg = currentPackageId.value

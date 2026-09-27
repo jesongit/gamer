@@ -27,7 +27,7 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
         &t,
         &sid,
         "/api/packages",
-        serde_json::json!({"id": "com.test.app"}),
+        serde_json::json!({"id": "com.test.app", "targets":{"android":{"packages":["*"]}}}),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED, "{}", json_body(resp).await);
@@ -36,7 +36,7 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
         &t,
         &sid,
         "/api/packages",
-        serde_json::json!({"id": "com.other.app"}),
+        serde_json::json!({"id": "com.other.app", "targets":{"android":{"packages":["*"]}}}),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -228,7 +228,7 @@ async fn keymap_store_read_text_probe() {
         &t,
         &sid,
         "/api/packages",
-        serde_json::json!({"id": "com.test.app"}),
+        serde_json::json!({"id": "com.test.app", "targets":{"android":{"packages":["*"]}}}),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -268,7 +268,7 @@ async fn keymaps_reject_invalid_yaml_fields_coordinates_and_duplicates() {
         &t,
         &sid,
         "/api/packages",
-        serde_json::json!({"id": "com.test.app"}),
+        serde_json::json!({"id": "com.test.app", "targets":{"android":{"packages":["*"]}}}),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED);

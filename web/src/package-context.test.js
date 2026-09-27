@@ -38,8 +38,8 @@ function setup() {
 
 beforeEach(() => {
   packageStore.packages = [
-    { id: 'com.demo', name: 'Demo', version: '1.0.0', targets: { android: { packages: [] } } },
-    { id: 'user.other', name: '', version: '0.1.0', targets: { android: { packages: [] } } },
+    { id: 'com.demo', name: 'Demo', version: '1.0.0', targets: { android: { packages: [] }, web: { url_prefixes: [] } } },
+    { id: 'user.other', name: '', version: '0.1.0', targets: { android: { packages: [] }, web: { url_prefixes: [] } } },
   ]
   packageStore.currentPackageId = 'com.demo'
   packageStore.loaded = true
@@ -116,7 +116,7 @@ describe('usePackageContext（plan §28：导入/导出/新建/复制/删除）'
       .mockRejectedValueOnce(apiError(409, {
         error: 'package_exists',
         message: '已存在',
-        existing: { id: 'pkg.demo', name: 'Demo', version: '0.9.0', targets: { android: { packages: ['com.x'] } }, plugins: [] },
+        existing: { id: 'pkg.demo', name: 'Demo', version: '0.9.0', targets: { android: { packages: ['com.x'] }, web: { url_prefixes: [] } }, plugins: [] },
       }))
       .mockResolvedValueOnce({ id: 'pkg.demo', version: '1.0.0' })
     api.listPackages.mockResolvedValue({ packages: [{ id: 'pkg.demo', name: '', version: '1.0.0' }] })
@@ -252,7 +252,7 @@ describe('usePackageContext（plan §28：导入/导出/新建/复制/删除）'
     await ctx.submitForm()
     expect(api.createPackage).toHaveBeenCalledWith({
       id: 'user.new', version: '1.0.0', name: 'New',
-      targets: { android: { packages: ['com.A', 'com.B'] } },
+      targets: { android: { packages: ['com.A', 'com.B'] }, web: { url_prefixes: [] } },
     })
     expect(packageStore.currentPackageId).toBe('user.new')
     expect(refreshAll).toHaveBeenCalledTimes(1)
@@ -273,19 +273,23 @@ describe('usePackageContext（plan §28：导入/导出/新建/复制/删除）'
     })
   })
 
-  it('新建表单默认 Android Targets = *（通用配置、零插件依赖）', async () => {
+  it('新建表单必须显式填写适用目标', async () => {
     const { api, toast } = setup()
     api.createPackage.mockResolvedValue({ id: 'user.new' })
     api.listPackages.mockResolvedValue({ packages: [{ id: 'user.new', name: '', version: '0.1.0' }] })
     const ctx = usePackageContext({ api, toast })
     ctx.openCreate()
-    expect(ctx.formModal.form.androidPackagesText).toBe('*')
+    expect(ctx.formModal.form.androidPackagesText).toBe('')
     ctx.formModal.form.id = 'user.new'
     ctx.formModal.form.name = ''
     await ctx.submitForm()
+    expect(api.createPackage).not.toHaveBeenCalled()
+    expect(ctx.formModal.error).toContain('至少')
+    ctx.formModal.form.androidPackagesText = '*'
+    await ctx.submitForm()
     expect(api.createPackage).toHaveBeenCalledWith({
       id: 'user.new', version: '1.0.0',
-      targets: { android: { packages: ['*'] } },
+      targets: { android: { packages: ['*'] }, web: { url_prefixes: [] } },
     })
   })
 

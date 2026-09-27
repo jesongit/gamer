@@ -129,9 +129,9 @@ pub struct PackageManifest {
     pub name: Option<String>,
     pub version: String,
     pub author: Option<String>,
-    /// Android 兼容目标（0 个 = 通用包，允许多个）。仅作运行目标声明，
-    /// 不参与任何资源寻址。
+    /// 兼容目标仅作提示，不参与资源寻址。至少声明一种类型。
     pub android_targets: Vec<String>,
+    pub web_url_prefixes: Vec<String>,
     pub plugins: BTreeMap<String, PluginDependency>,
     pub revision: u64,
 }
@@ -144,6 +144,7 @@ pub struct PackageInput {
     pub version: Option<String>,
     pub author: Option<String>,
     pub android_targets: Vec<String>,
+    pub web_url_prefixes: Vec<String>,
     pub plugins: BTreeMap<String, bool>,
 }
 
@@ -182,6 +183,17 @@ impl PackageInput {
                 targets.push(target.to_string());
             }
         }
+        let mut web_url_prefixes = Vec::new();
+        for prefix in &self.web_url_prefixes {
+            let prefix = validate_web_prefix(prefix.trim())?.to_string();
+            if !web_url_prefixes.contains(&prefix) {
+                web_url_prefixes.push(prefix);
+            }
+        }
+        anyhow::ensure!(
+            !targets.is_empty() || !web_url_prefixes.is_empty(),
+            "必须至少声明一个适用目标（Android 包名或网页 URL 前缀）"
+        );
         let mut plugins = BTreeMap::new();
         for (plugin, required) in &self.plugins {
             validate_scope_id("plugin id", plugin)?;
@@ -198,6 +210,7 @@ impl PackageInput {
             version,
             author: self.author.map(|a| a.trim().to_string()),
             android_targets: targets,
+            web_url_prefixes,
             plugins,
             revision,
         })
@@ -222,15 +235,74 @@ pub(crate) fn validate_android_target(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Android Target 匹配语义（package.toml 与插件 manifest 的
-/// `[targets.android].packages` 共用）：空声明 = 通用（恒命中），`*` = 通用
-/// （恒命中），其余按 Android 包名精确比较（区分大小写）。
+/// 插件 Android Target 匹配语义：空声明 / `*` 通用，其余精确匹配。
+/// 配置包必须先按目标类型判断，见 PackageManifest::matches_target。
 pub fn android_targets_match(targets: &[String], android_package: &str) -> bool {
     if targets.is_empty() {
         return true;
     }
     let app = android_package.trim();
     targets.iter().any(|target| target == "*" || target == app)
+}
+
+/// URL 前缀只描述 HTTP(S) origin 和路径，不接受隐式忽略的查询条件。
+pub(crate) fn validate_web_prefix(value: &str) -> anyhow::Result<reqwest::Url> {
+    anyhow::ensure!(
+        value.len() <= 4096 && !value.chars().any(char::is_control),
+        "网页 URL 前缀非法或过长"
+    );
+    let url = reqwest::Url::parse(value).map_err(|e| anyhow::anyhow!("网页 URL 前缀非法: {e}"))?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
+        "网页 URL 前缀必须是完整的 http/https 地址"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "网页 URL 前缀不能包含登录信息"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "网页 URL 前缀不能包含查询参数或 # 片段，请填写站点和路径"
+    );
+    Ok(url)
+}
+
+pub(crate) fn web_prefix_matches(prefix: &str, value: &str) -> bool {
+    let (Ok(prefix), Ok(url)) = (validate_web_prefix(prefix), reqwest::Url::parse(value)) else {
+        return false;
+    };
+    let path = prefix.path().trim_end_matches('/');
+    prefix.scheme() == url.scheme()
+        && prefix.host_str() == url.host_str()
+        && prefix.port_or_known_default() == url.port_or_known_default()
+        && (url.path() == path
+            || url
+                .path()
+                .strip_prefix(path)
+                .is_some_and(|rest| rest.starts_with('/')))
+}
+
+impl PackageManifest {
+    /// None 表示目标身份不可确定；不同目标类型不能借用对方的空列表命中。
+    pub(crate) fn matches_target(&self, kind: &str, value: Option<&str>) -> Option<bool> {
+        match kind {
+            "android" if self.android_targets.is_empty() => Some(false),
+            "web" if self.web_url_prefixes.is_empty() => Some(false),
+            "android" => value
+                .filter(|v| !v.is_empty())
+                .map(|v| android_targets_match(&self.android_targets, v)),
+            "web" => value
+                .filter(|v| {
+                    reqwest::Url::parse(v).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
+                })
+                .map(|v| {
+                    self.web_url_prefixes
+                        .iter()
+                        .any(|p| web_prefix_matches(p, v))
+                }),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -256,6 +328,15 @@ struct ManifestToml {
 struct TargetsToml {
     #[serde(default)]
     android: Option<AndroidTargetsToml>,
+    #[serde(default)]
+    web: Option<WebTargetsToml>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebTargetsToml {
+    #[serde(default)]
+    url_prefixes: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -286,8 +367,14 @@ pub fn parse_package_toml(bytes: &[u8]) -> anyhow::Result<PackageManifest> {
         author: raw.author,
         android_targets: raw
             .targets
-            .and_then(|t| t.android)
-            .map(|a| a.packages)
+            .as_ref()
+            .and_then(|t| t.android.as_ref())
+            .map(|a| a.packages.clone())
+            .unwrap_or_default(),
+        web_url_prefixes: raw
+            .targets
+            .and_then(|t| t.web)
+            .map(|w| w.url_prefixes)
             .unwrap_or_default(),
         plugins: raw
             .plugin_deps
@@ -317,6 +404,18 @@ pub fn serialize_package_toml(manifest: &PackageManifest) -> String {
                 .android_targets
                 .iter()
                 .map(|t| toml_quote(t))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        out.push_str("]\n");
+    }
+    if !manifest.web_url_prefixes.is_empty() {
+        out.push_str("\n[targets.web]\nurl_prefixes = [");
+        out.push_str(
+            &manifest
+                .web_url_prefixes
+                .iter()
+                .map(|p| toml_quote(p))
                 .collect::<Vec<_>>()
                 .join(", "),
         );
@@ -1347,6 +1446,7 @@ mod tests {
     fn input(id: &str) -> PackageInput {
         PackageInput {
             id: id.to_string(),
+            android_targets: vec!["*".into()],
             ..Default::default()
         }
     }
@@ -1517,9 +1617,10 @@ required = false
         assert_eq!(manifest, reparsed);
 
         // 缺省：version → 0.1.0，revision → 1
-        let minimal = parse_package_toml(b"id = \"a.b\"").unwrap();
+        let minimal =
+            parse_package_toml(b"id = \"a.b\"\n[targets.android]\npackages = [\"*\"]\n").unwrap();
         assert_eq!(minimal.version, "0.1.0");
-        assert_eq!(minimal.android_targets, Vec::<String>::new());
+        assert_eq!(minimal.android_targets, vec!["*"]);
     }
 
     #[test]
@@ -1555,6 +1656,76 @@ required = false
         // `*` 混排恒命中
         let mixed = vec!["com.a".to_string(), "*".to_string()];
         assert!(android_targets_match(&mixed, "whatever"));
+    }
+
+    #[test]
+    fn package_targets_are_typed_and_nonempty() {
+        assert!(parse_package_toml(b"id = \"empty\"").is_err());
+        assert!(parse_package_toml(
+            b"id = \"empty\"\n[targets.android]\npackages=[]\n[targets.web]\nurl_prefixes=[]"
+        )
+        .is_err());
+        let mut p = input("typed").into_manifest(1).unwrap();
+        assert_eq!(p.matches_target("android", Some("com.any")), Some(true));
+        assert_eq!(
+            p.matches_target("web", Some("https://sr.mihoyo.com/cloud")),
+            Some(false)
+        );
+        p.android_targets.clear();
+        p.web_url_prefixes = vec!["https://sr.mihoyo.com/cloud".into()];
+        assert_eq!(p.matches_target("android", Some("com.any")), Some(false));
+        assert_eq!(p.matches_target("web", None), None);
+        assert_eq!(p.matches_target("web", Some("about:blank")), None);
+        assert_eq!(
+            p.matches_target("web", Some("https://sr.mihoyo.com/cloud?account=1")),
+            Some(true)
+        );
+        p.android_targets.push("com.game".into());
+        assert_eq!(p.matches_target("android", Some("com.game")), Some(true));
+        assert_eq!(p.matches_target("android", Some("com.Game")), Some(false));
+        assert_eq!(
+            parse_package_toml(serialize_package_toml(&p).as_bytes()).unwrap(),
+            p
+        );
+    }
+
+    #[test]
+    fn web_prefix_has_origin_and_path_boundaries() {
+        let prefix = "https://sr.mihoyo.com/cloud";
+        for hit in [
+            prefix,
+            "https://SR.MIHOYO.COM:443/cloud/play?x=1#tab",
+            "https://sr.mihoyo.com/cloud/",
+            "https://sr.mihoyo.com/cloud#x",
+        ] {
+            assert!(web_prefix_matches(prefix, hit), "{hit}");
+        }
+        for miss in [
+            "http://sr.mihoyo.com/cloud",
+            "https://sr.mihoyo.com:444/cloud",
+            "https://sr.mihoyo.com.evil.test/cloud",
+            "https://sr.mihoyo.com@evil.test/cloud",
+            "https://sr.mihoyo.com/cloud-other",
+            "https://sr.mihoyo.com/cloud/../other",
+            "https://sr.mihoyo.com/CLOUD",
+            "https://sr.mihoyo.com/cloud%2Fother",
+        ] {
+            assert!(!web_prefix_matches(prefix, miss), "{miss}");
+        }
+        assert!(web_prefix_matches(
+            "https://sr.mihoyo.com",
+            "https://sr.mihoyo.com/any"
+        ));
+        for invalid in [
+            "*",
+            "sr.mihoyo.com/cloud",
+            "file:///cloud",
+            "https://user:pass@example.com/cloud",
+            "https://example.com/cloud?x=1",
+            "https://example.com/cloud#x",
+        ] {
+            assert!(validate_web_prefix(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]
@@ -1673,6 +1844,7 @@ required = false
                 PackageInput {
                     id: "a.b".into(),
                     name: Some("renamed".into()),
+                    android_targets: vec!["*".into()],
                     ..Default::default()
                 },
                 Some(1),

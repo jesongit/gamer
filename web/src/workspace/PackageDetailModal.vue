@@ -27,10 +27,7 @@
             <span>作者（留空保持不变）</span>
             <input v-model="ctx.detailModal.form.author" class="input" />
           </label>
-          <label class="field">
-            <span>Android 兼容目标（逗号分隔，留空 = 通用配置）</span>
-            <input v-model="ctx.detailModal.form.androidPackagesText" class="input mono" spellcheck="false" />
-          </label>
+          <PackageTargetsEditor :form="ctx.detailModal.form" :busy="ctx.addingTarget" @add-current="ctx.addCurrentEditTarget" />
           <div class="field">
             <span>插件依赖（逐行 id + required；允许声明未安装插件）</span>
             <div v-for="(dep, i) in ctx.detailModal.form.plugins" :key="`dep-${i}`" class="plugin-dep-row">
@@ -47,7 +44,7 @@
           <dt>版本</dt><dd class="mono">{{ pkg.version || '—' }}</dd>
           <dt>作者</dt><dd>{{ pkg.author || '—' }}</dd>
           <dt>Revision</dt><dd class="mono">{{ pkg.revision }}</dd>
-          <dt>Android Targets</dt><dd class="mono">{{ targetsText }}</dd>
+          <dt>适用目标</dt><dd class="mono">{{ targetsText }}</dd>
         </dl>
 
         <!-- 插件依赖五态（§18）：available=绿 / disabled=黄 / missing_required=红 /
@@ -79,12 +76,14 @@
         <!-- 兼容性检查（§17）：不兼容仅黄条提示，不禁止使用 -->
         <div class="detail-section">
           <span class="section-label">兼容性检查</span>
+          <button class="btn btn-sm" :disabled="ctx.detailModal.compat.checking" @click="ctx.checkCompatibility(undefined, true)">检查当前目标</button>
           <div class="compat-row">
+            <select v-model="ctx.detailModal.compat.kind" class="select" aria-label="检查目标类型"><option value="android">Android 包名</option><option value="web">网页网址</option></select>
             <input
               v-model="ctx.detailModal.compat.input"
               class="input mono"
               list="pkg-compat-candidates"
-              placeholder="Android 包名，如 com.miHoYo.hkrpg"
+              :placeholder="ctx.detailModal.compat.kind === 'web' ? 'https://sr.mihoyo.com/cloud' : 'Android 包名，如 com.miHoYo.hkrpg'"
               spellcheck="false"
               @keydown.enter.prevent="runCompat"
             />
@@ -97,13 +96,15 @@
               @click="runCompat"
             >{{ ctx.detailModal.compat.checking ? '检查中…' : '检查' }}</button>
           </div>
-          <p v-if="!targets.length" class="compat-info">通用配置，兼容所有应用</p>
-          <p v-if="compatResult && compatResult.compatible" class="compat-ok">
-            ✔ {{ compatResult.android_package }} 在配置声明的兼容列表中
+          <p v-if="!targets.length" class="compat-info">未声明适用目标，请编辑后补充</p>
+          <p v-if="compatResult" class="detail-hint">{{ compatResult.target?.value }} · {{ compatResult.target?.note }}</p>
+          <p v-if="compatResult?.compatible === true" class="compat-ok">
+            ✔ {{ compatResult.reason || '目标在配置声明的兼容列表中' }}
           </p>
-          <p v-if="compatResult && !compatResult.compatible" class="compat-warning">
-            ⚠ 该应用不在配置声明的兼容列表中（仍可继续运行）
+          <p v-if="compatResult?.compatible === false" class="compat-warning">
+            ⚠ {{ compatResult.reason || '目标不在配置声明的兼容列表中（仍可继续运行）' }}
           </p>
+          <p v-if="compatResult?.status === 'unknown'" class="compat-warning">{{ compatResult.reason }}</p>
           <p v-if="ctx.detailModal.compat.error" class="form-error">{{ ctx.detailModal.compat.error }}</p>
         </div>
 
@@ -140,21 +141,25 @@
  * usePackageContext（detailModal），本组件只做呈现；androidCandidates 由宿主
  * 注入（如设备配置的 Android 包名），缺省手输。
  */
-import { computed } from 'vue'
+import { computed, reactive } from 'vue'
 import { formatBytes } from '../composables/usePackageContext'
+import PackageTargetsEditor from './PackageTargetsEditor.vue'
 
 const props = defineProps({
   context: { type: Object, required: true },
   androidCandidates: { type: Array, default: () => [] },
 })
 
-const ctx = props.context
+const ctx = reactive(props.context)
 
 const pkg = computed(() => ctx.detailModal.detail?.package || null)
 const stats = computed(() => ctx.detailModal.detail?.stats || { files: 0, bytes: 0, plugins: [] })
 const pluginStates = computed(() => ctx.detailModal.detail?.pluginStates || [])
-const targets = computed(() => pkg.value?.targets?.android?.packages || [])
-const targetsText = computed(() => targets.value.join(', ') || '通用包（兼容所有应用）')
+const targets = computed(() => [
+  ...(pkg.value?.targets?.android?.packages || []).map(p => `Android: ${p}`),
+  ...(pkg.value?.targets?.web?.url_prefixes || []).map(p => `网页: ${p}`),
+])
+const targetsText = computed(() => targets.value.join('；') || '未声明适用目标')
 const compatResult = computed(() => ctx.detailModal.compat.result)
 
 function runCompat() {

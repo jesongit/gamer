@@ -6,7 +6,7 @@ import { operationReporter } from '../workspace/operation-feedback'
 //
 // §40：旧的「读取应用 + 导入 + 导出 + 编辑」同栏设计已删除——Android 应用
 // 控制归左侧设备区域，Installed/Editable 双层语义不复存在。
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { api as defaultApi } from '../api'
 import { sha256Hex } from '../workspace/plugin-center/registry-client'
 import {
@@ -41,6 +41,7 @@ export function usePackageContext({
   beforePackageChange,
   download,
   currentApp,
+  currentTargetId,
   loadCurrentApps,
 } = {}) {
   const beginReport = operationReporter(feedback, '', toast)
@@ -88,7 +89,7 @@ export function usePackageContext({
   /** 覆盖确认弹窗（plan §9/§36）：明示整体替换 + Required Plugin 缺失提示。 */
   const overwriteModal = reactive({
     open: false, submitting: false, error: '',
-    summary: { id: '', name: '', version: '', author: '', androidTargets: [], plugins: [] },
+    summary: { id: '', name: '', version: '', author: '', androidTargets: [], webUrlPrefixes: [], plugins: [] },
     // 缺少的 Required Plugin id 列表（对照 GET /api/extensions；提示但允许继续导入）
     missingRequired: [],
     file: null, bytes: null, sha256: '',
@@ -125,6 +126,7 @@ export function usePackageContext({
       author: summary?.author || '',
       androidTargets: Array.isArray(summary?.targets?.android?.packages)
         ? summary.targets.android.packages : [],
+      webUrlPrefixes: summary?.targets?.web?.url_prefixes || [],
       plugins: Array.isArray(summary?.plugins) ? summary.plugins : [],
     }
     overwriteModal.file = file
@@ -268,7 +270,7 @@ export function usePackageContext({
   // ---------- 新建 / 复制（同一表单弹窗） ----------
   const formModal = reactive({
     open: false, mode: 'create', submitting: false, error: '',
-    form: { id: '', name: '', version: PACKAGE_INITIAL_VERSION, androidPackagesText: '' },
+    form: { id: '', name: '', version: PACKAGE_INITIAL_VERSION, androidPackagesText: '', webUrlPrefixesText: '' },
   })
 
   function unwrap(value) {
@@ -308,9 +310,8 @@ export function usePackageContext({
 
   function openCreate() {
     formModal.mode = 'create'
-    // 默认 Android Targets = `*`（通用配置、零插件依赖）；需要绑定具体应用时
-    // 改填包名或用「填入当前应用」。
-    formModal.form = { id: '', name: '', version: PACKAGE_INITIAL_VERSION, androidPackagesText: '*' }
+    // 由用户明确选择适用目标，不默认扩大范围。
+    formModal.form = { id: '', name: '', version: PACKAGE_INITIAL_VERSION, androidPackagesText: '', webUrlPrefixesText: '' }
     formModal.error = ''
     formModal.open = true
   }
@@ -325,6 +326,7 @@ export function usePackageContext({
       name: src?.name ? `${src.name}（副本）` : '',
       version: src?.version || PACKAGE_INITIAL_VERSION,
       androidPackagesText: (src?.targets?.android?.packages || []).join(', '),
+      webUrlPrefixesText: (src?.targets?.web?.url_prefixes || []).join('\n'),
     }
     formModal.error = ''
     formModal.open = true
@@ -356,6 +358,10 @@ export function usePackageContext({
       formModal.error = '配置 ID 非法：小写字母/数字开头，仅含小写字母、数字、点、下划线、连字符'
       return
     }
+    if (formModal.mode === 'create' && !androidPackages.length && !parseWebPrefixes(formModal.form.webUrlPrefixesText).length) {
+      formModal.error = '请至少填写一个适用目标'
+      return
+    }
     formModal.submitting = true
     formModal.error = ''
     try {
@@ -363,7 +369,7 @@ export function usePackageContext({
         await api.createPackage({
           id, version,
           ...(name ? { name } : {}),
-          targets: { android: { packages: androidPackages } },
+          targets: { android: { packages: androidPackages }, web: { url_prefixes: parseWebPrefixes(formModal.form.webUrlPrefixesText) } },
         })
         toast(`配置已创建：${id}`, 'success')
       } else {
@@ -422,8 +428,8 @@ export function usePackageContext({
     packageId: '',
     detail: null,        // normalizeDetail 形态 {package, stats, pluginStates}
     editing: false, saving: false, editError: '', editConflict: false,
-    form: { name: '', version: '', author: '', androidPackagesText: '', plugins: [] },
-    compat: { input: '', checking: false, error: '', result: null },
+    form: { name: '', version: '', author: '', androidPackagesText: '', webUrlPrefixesText: '', plugins: [] },
+    compat: { input: '', kind: 'android', checking: false, error: '', result: null },
   })
 
   /** GET /api/packages/:pkg 响应 → 组件友好形态（plugin_states → pluginStates）。 */
@@ -437,6 +443,7 @@ export function usePackageContext({
         author: pkg.author || '',
         revision: pkg.revision ?? 0,
         targets: {
+          web: { url_prefixes: pkg.targets?.web?.url_prefixes || [] },
           android: {
             packages: Array.isArray(pkg.targets?.android?.packages)
               ? pkg.targets.android.packages : [],
@@ -473,12 +480,14 @@ export function usePackageContext({
     detailModal.editing = false
     detailModal.editConflict = false
     detailModal.editError = ''
-    detailModal.compat = { input: '', checking: false, error: '', result: null }
+    ++compatGeneration
+    detailModal.compat = { input: '', kind: 'android', checking: false, error: '', result: null }
     detailModal.open = true
     await reloadDetail()
   }
 
   function closeDetail() {
+    ++compatGeneration
     detailModal.open = false
     detailModal.error = ''
   }
@@ -491,6 +500,7 @@ export function usePackageContext({
       version: p.version || '',
       author: p.author || '',
       androidPackagesText: (p.targets?.android?.packages || []).join(', '),
+      webUrlPrefixesText: (p.targets?.web?.url_prefixes || []).join('\n'),
       plugins: p.plugins.map(dep => ({
         id: dep?.id || '', required: dep?.required !== false,
       })),
@@ -528,8 +538,12 @@ export function usePackageContext({
     const toast = beginReport()
     if (detailModal.saving || !detailModal.detail?.package) return
     const body = {
-      targets: { android: { packages: parseAndroidPackages(detailModal.form.androidPackagesText) } },
+      targets: { android: { packages: parseAndroidPackages(detailModal.form.androidPackagesText) }, web: { url_prefixes: parseWebPrefixes(detailModal.form.webUrlPrefixesText) } },
       plugins: buildPluginsPayload(),
+    }
+    if (!body.targets.android.packages.length && !body.targets.web.url_prefixes.length) {
+      detailModal.editError = '请至少填写一个适用目标'
+      return
     }
     const name = detailModal.form.name.trim()
     const version = detailModal.form.version.trim()
@@ -549,6 +563,7 @@ export function usePackageContext({
         package: normalizeDetail({ package: updated }).package,
       }
       detailModal.editing = false
+      detailModal.compat.result = null
       toast(`配置元数据已保存：${detailModal.packageId}`, 'success')
       await refreshPackages({ api })
     } catch (e) {
@@ -575,20 +590,63 @@ export function usePackageContext({
   }
 
   /** §17 兼容性检查（warning 语义：不兼容仅提示不禁止）。 */
-  async function checkCompatibility(androidPackage) {
+  let compatGeneration = 0
+  watch(() => unwrap(currentTargetId), () => {
+    ++compatGeneration
+    Object.assign(detailModal.compat, { result: null, error: '', checking: false })
+  }, { flush: 'sync' })
+  watch(() => [detailModal.compat.input, detailModal.compat.kind], () => {
+    ++compatGeneration
+    Object.assign(detailModal.compat, { result: null, error: '', checking: false })
+  }, { flush: 'sync' })
+  async function checkCompatibility(androidPackage, useCurrent = false) {
     const input = String(androidPackage ?? (detailModal.compat.input || '')).trim()
-    if (!input || detailModal.compat.checking) return
+    const id = unwrap(currentTargetId)
+    if ((!useCurrent && !input) || detailModal.compat.checking) return
+    if (useCurrent && !id) { detailModal.compat.error = '请先选择运行目标'; return }
     detailModal.compat.input = input
+    const generation = ++compatGeneration
     detailModal.compat.checking = true
     detailModal.compat.error = ''
     detailModal.compat.result = null
     try {
-      detailModal.compat.result = await api.packageCompatibility(detailModal.packageId, input)
+      const query = useCurrent ? { target_id: id } : detailModal.compat.kind === 'web' ? { url: input } : input
+      const result = await api.packageCompatibility(detailModal.packageId, query)
+      if (generation === compatGeneration) detailModal.compat.result = result
     } catch (e) {
-      detailModal.compat.error = e?.message || '兼容性检查失败'
+      if (generation === compatGeneration) detailModal.compat.error = e?.message || '兼容性检查失败'
     } finally {
-      detailModal.compat.checking = false
+      if (generation === compatGeneration) detailModal.compat.checking = false
     }
+  }
+
+  function parseWebPrefixes(text) {
+    return [...new Set(String(text || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean))]
+  }
+  const addingTarget = ref(false)
+  async function addCurrentTarget(form, errorOwner) {
+    if (addingTarget.value) return
+    const id = unwrap(currentTargetId)
+    if (!id) { errorOwner[errorOwner === detailModal ? 'editError' : 'error'] = '请先选择运行目标'; return }
+    addingTarget.value = true
+    try {
+      const identity = await api.targetIdentity(id)
+      if (id !== unwrap(currentTargetId)) throw new Error('当前目标已变化，请重新添加')
+      if (!identity.value) throw new Error(identity.note || '无法读取当前目标')
+      if (identity.kind === 'web') {
+        const url = new URL(identity.value)
+        if (!['http:', 'https:'].includes(url.protocol)) throw new Error('当前页面不是 HTTP(S) 网页')
+        // 添加的是站点和路径规则，明确在提示中告知不包含参数。
+        const prefix = url.origin + url.pathname
+        form.webUrlPrefixesText = [...new Set([...parseWebPrefixes(form.webUrlPrefixesText), prefix])].join('\n')
+        toast?.(`已添加网页前缀（不含查询参数与片段）。${identity.note}`, 'success')
+      } else {
+        form.androidPackagesText = [...new Set([...parseAndroidPackages(form.androidPackagesText), identity.value])].join(', ')
+      }
+      errorOwner[errorOwner === detailModal ? 'editError' : 'error'] = ''
+    } catch (e) {
+      errorOwner[errorOwner === detailModal ? 'editError' : 'error'] = e?.message || '读取目标失败'
+    } finally { addingTarget.value = false }
   }
 
   return {
@@ -602,6 +660,9 @@ export function usePackageContext({
     detailModal, openDetail, closeDetail, reloadDetail,
     startEdit, cancelEdit, saveEdit, retryEdit, addPluginDep, removePluginDep,
     checkCompatibility, resolveOverwriteMissingRequired,
+    addingTarget,
+    addCurrentFormTarget: () => addCurrentTarget(formModal.form, formModal),
+    addCurrentEditTarget: () => addCurrentTarget(detailModal.form, detailModal),
   }
 }
 

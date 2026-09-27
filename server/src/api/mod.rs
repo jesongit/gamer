@@ -204,6 +204,7 @@ pub(crate) fn build_router_with_extensions(
         )
         .route("/ws/browser/:id", get(browser::preview))
         .route("/api/browser-targets/:id/pages", get(browser::pages))
+        .route("/api/targets/:id/identity", get(packages::api_target_identity))
         .route("/api/browser-targets/:id/bind", post(browser::bind))
         .route(
             "/api/package-sources",
