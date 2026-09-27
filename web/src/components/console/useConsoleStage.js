@@ -85,6 +85,9 @@ export function useConsoleStage({
   connected,
   /** 实时画面元素访问器（live 坐标系/帧冻结源） */
   liveVideoEl,
+  /** 图片流可提供已显示帧快照和稳定尺寸，避免读取正在换帧的 img。 */
+  captureLiveFrame,
+  liveSize,
   /** 测试注入：帧图片加载器 */
   loadImage = defaultLoadImage,
 } = {}) {
@@ -137,6 +140,8 @@ export function useConsoleStage({
       }
     }
     const el = liveVideoEl?.()
+    const size = liveSize?.()
+    if (size) return size
     return { width: (el?.naturalWidth || el?.videoWidth) || 0, height: (el?.naturalHeight || el?.videoHeight) || 0 }
   })
   // V1：参考尺寸 = 来源原始画面尺寸（外部素材的显式校准为后续能力）
@@ -512,6 +517,14 @@ export function useConsoleStage({
    *  返回 {source,width,height,generation,label,frame?}；画面不可用返回 null。 */
   async function captureFrame() {
     if (kind.value === 'live') {
+      const captured = captureLiveFrame?.()
+      if (captured !== undefined) {
+        const expectedGeneration = generation.value
+        const expectedDevice = devId()
+        const frame = await captured
+        if (!frame || kind.value !== 'live' || generation.value !== expectedGeneration || devId() !== expectedDevice) return null
+        return { ...frame, generation: expectedGeneration }
+      }
       const el = liveVideoEl?.()
       if (!(el?.naturalWidth || el?.videoWidth)) return null
       return { source: el, width: (el?.naturalWidth || el?.videoWidth), height: (el?.naturalHeight || el?.videoHeight), generation: generation.value, label: '实时画面当前帧' }
@@ -716,6 +729,7 @@ export function useConsoleStage({
       ready: () => stageReady.value,
       generation: () => generation.value,
       surfaceEl,
+      displaySize: () => ({ ...displaySize.value }),
       captureFrame,
       capturePreviewFrame,
       frameAt: () => frameAt.value,

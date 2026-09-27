@@ -27,6 +27,27 @@ function setup(hooks = {}) {
 }
 afterEach(() => { wrapper?.unmount(); vi.unstubAllGlobals(); vi.clearAllMocks() })
 describe('browser preview target and displayed frame guards', () => {
+  it('captures the last displayed JPEG while the next image loads, and rejects a late snapshot after navigation', async () => {
+    let resolveImage
+    const loadImage = vi.fn(() => new Promise(resolve => { resolveImage = resolve }))
+    const { preview } = setup({ loadImage })
+    await preview.connect()
+    const socket = Socket.instances[0]
+    const stamp = { target: 'browser-a', epoch: 'one', revision: 1 }
+    socket.receive({ type: 'frame', id: 1, jpeg: 'AA==', stamp })
+    preview.loaded({ target: { src: preview.view.src, naturalWidth: 1280, naturalHeight: 720 } })
+    socket.receive({ type: 'frame', id: 2, jpeg: 'BB==', stamp })
+    const capture = preview.captureFrame()
+    expect(loadImage).toHaveBeenCalledWith('data:image/jpeg;base64,AA==')
+    const image = { naturalWidth: 1280, naturalHeight: 720 }
+    resolveImage(image)
+    expect(await capture).toMatchObject({ source: image, width: 1280, height: 720 })
+    const stale = preview.captureFrame()
+    socket.receive({ type: 'invalidated' })
+    resolveImage(image)
+    expect(await stale).toBeNull()
+    expect(await preview.captureFrame()).toBeNull()
+  })
   it('acknowledges display and keeps input available while an unchanged mapping loads its next image', async () => {
     const { preview } = setup()
     await preview.connect()

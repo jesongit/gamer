@@ -1,7 +1,16 @@
 import { reactive, onUnmounted, watch } from 'vue'
 import { api } from '../../api'
 
-export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, toast, onEvent, onConnected, onDisconnected }) {
+function loadFrameImage(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('浏览器画面解码失败'))
+    image.src = src
+  })
+}
+
+export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, toast, onEvent, onConnected, onDisconnected, loadImage = loadFrameImage }) {
   const view = reactive({ src: '', stamp: null, pending: null, width: 0, height: 0, fps: 0 })
   let socket = null
   let generation = 0
@@ -14,6 +23,7 @@ export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, t
   let fpsTimer = null
   let displayedFrames = 0
   let fpsSince = 0
+  let displayedFrame = null
   function disconnected() {
     if (!notifiedConnected) return
     notifiedConnected = false
@@ -36,6 +46,7 @@ export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, t
     fpsTimer = null
     displayedFrames = 0
     displayedSrc = ''
+    displayedFrame = null
     lastInputError = ''
     disconnected()
   }
@@ -125,6 +136,7 @@ export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, t
   }
   function acceptFrame() {
     view.stamp = view.pending
+    displayedFrame = { src: view.src, stamp: view.stamp, width: view.width, height: view.height }
     acknowledgeFrame()
     connected.value = true
     connecting.value = false
@@ -133,6 +145,16 @@ export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, t
       notifiedConnected = true
       onConnected?.()
     }
+  }
+  // Decode a fixed copy of the last displayed frame only when requested. The
+  // live img may already be loading its next JPEG and have zero naturalWidth.
+  async function captureFrame() {
+    const frame = displayedFrame
+    const seq = generation
+    if (!frame?.width || !frame.height || !sameStamp(frame.stamp, view.stamp)) return null
+    const source = await loadImage(frame.src)
+    if (seq !== generation || !sameStamp(frame.stamp, view.stamp) || socket?.readyState !== WebSocket.OPEN) return null
+    return { source, width: frame.width, height: frame.height, label: '浏览器画面当前帧' }
   }
   function send(value) {
     if (socket?.readyState !== WebSocket.OPEN) return false
@@ -148,5 +170,5 @@ export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, t
   function release() { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'release' })) }
   watch(deviceId, close, { flush: 'sync' })
   onUnmounted(close)
-  return { view, connect, close, send, loaded, release }
+  return { view, connect, close, send, loaded, release, captureFrame }
 }

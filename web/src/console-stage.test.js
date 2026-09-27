@@ -552,6 +552,26 @@ function mediaStageBridge(genRef, captureImpl) {
 describe('useConsoleTemplates：指定帧裁切（合同 §4/§6）', () => {
   beforeEach(() => stubCanvasCreation())
 
+  it('浏览器连续图片换帧时用稳定尺寸框选，并裁切已显示帧的快照', async () => {
+    const img = { tagName: 'IMG', naturalWidth: 0, naturalHeight: 0,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 960, height: 540 }) }
+    const frozen = { naturalWidth: 1280, naturalHeight: 720 }
+    const captureFrame = vi.fn(async () => ({ source: frozen, width: 1280, height: 720, generation: 1, label: '浏览器画面当前帧' }))
+    const stage = { kind: () => 'live', ready: () => true, generation: () => 1,
+      surfaceEl: () => img, displaySize: () => ({ width: 1280, height: 720 }), captureFrame }
+    const { tpl } = mountTemplates({ stage, videoEl: img })
+    Object.assign(tpl.selStart, { x: 75, y: 75 })
+    Object.assign(tpl.selEnd, { x: 225, y: 150 })
+    const rect = tpl.selToDeviceRect()
+    expect(rect).toEqual({ x: 100, y: 100, w: 200, h: 100 })
+    await tpl.openCrop(rect)
+    expect(captureFrame).toHaveBeenCalledOnce()
+    expect(tpl.crop.active).toBe(true)
+    expect(tpl.crop.imgW).toBe(1280)
+    expect(tpl.crop.baseW).toBe(200)
+    expect(tpl.crop.sourceLabel).toBe('浏览器画面当前帧')
+  })
+
   it('媒体来源裁切：底图 = captureFrame 指定帧图像，坐标系用素材帧尺寸（displaySize）', async () => {
     const genRef = { value: 3 }
     const frameImage = { naturalWidth: 640, naturalHeight: 360 }

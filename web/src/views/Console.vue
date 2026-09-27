@@ -451,6 +451,8 @@ const stageCtl = useConsoleStage({
   deviceId: computed(() => store.deviceId),
   connected,
   liveVideoEl: () => videoElement.value,
+  captureLiveFrame: () => isBrowser.value ? browserPreview.captureFrame() : undefined,
+  liveSize: () => isBrowser.value ? { width: browserPreview.view.width, height: browserPreview.view.height } : null,
 })
 provide(STAGE_MEDIA_CONTROLLER_KEY, stageCtl.view)
 const coreStatuses = computed(() => {
