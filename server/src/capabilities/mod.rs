@@ -17,7 +17,7 @@
 mod device;
 mod error;
 mod frame;
-mod input;
+pub mod input;
 mod log;
 mod registry;
 mod resource;

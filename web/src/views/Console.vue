@@ -76,7 +76,7 @@
             <button v-if="isBrowser" class="btn btn-sm" :disabled="!connected" title="粘贴文字到网页" @click="clipboard()"><UiIcon name="copy" />粘贴</button>
             <button v-if="!isBrowser" class="btn btn-sm" title="返回" aria-label="返回" :disabled="!connected" @click="key('BACK')"><UiIcon name="back" />返回</button>
             <button class="btn btn-sm" title="全屏" aria-label="全屏" @click="fullscreen"><UiIcon name="expand" />全屏</button>
-            <button v-if="!isBrowser"
+            <button
               class="btn btn-sm keyboard-mode-btn"
               :class="{ active: keyboardMode === 'text' }"
               :title="keyboardMode === 'text' ? '当前为文本模式，字母和空格按文本发送' : '当前为游戏模式，保留按下/释放按键语义'"
@@ -402,10 +402,7 @@ const keymap = createKeymapController({
   send: sendControl,
   remote: remoteKeymapRunning,
   sendInputEvent: sendControl,
-  getVideoSize: () => ({
-    width: (videoElement.value?.naturalWidth || videoElement.value?.videoWidth) || 1920,
-    height: (videoElement.value?.naturalHeight || videoElement.value?.videoHeight) || 1080,
-  }),
+  getVideoSize: () => stageCtl.displaySize(),
   getKeyMetaState: () => keyboard.getMetaState(),
   mode: keyboardMode,
 })
@@ -451,6 +448,7 @@ const stageCtl = useConsoleStage({
   deviceId: computed(() => store.deviceId),
   connected,
   liveVideoEl: () => videoElement.value,
+  targetCapabilities: () => current.value?.capabilities,
   captureLiveFrame: () => isBrowser.value ? browserPreview.captureFrame() : undefined,
   liveSize: () => isBrowser.value ? { width: browserPreview.view.width, height: browserPreview.view.height } : null,
 })
@@ -552,6 +550,7 @@ const {
   keyboardMode,
   keymap,
   keymapPressed,
+  stage: stageCtl.templateBridge,
   videoElement,
   videoWrap,
   deviceRectStyle,
@@ -825,9 +824,12 @@ function sendKeyboardControl(obj) {
   // 安全红线：视频来源（媒体模式）为离线只读，舞台产生的键盘/按键映射输入一律拒绝
   if (!stageCtl.guardDeviceInput(obj)) return false
   if (isBrowser.value) {
-    if (obj.type === 'touch') return browserPreview.send({ type: 'pointer', action: obj.action, x: obj.x, y: obj.y })
+    if (obj.type === 'touch') {
+      if (obj.pointer_id !== 0) { toast('当前目标不支持持续触控映射', 'warn'); return false }
+      return browserPreview.send({ type: 'pointer', action: obj.action, x: obj.x, y: obj.y })
+    }
     if (obj.type === 'scroll') return browserPreview.send({ type: 'scroll', x: obj.x, y: obj.y, delta_x: obj.scroll_x || 0, delta_y: obj.scroll_y || 0 })
-    if (obj.type === 'text' || obj.type === 'tap') return browserPreview.send(obj)
+    if (obj.type === 'input_event' || obj.type === 'text' || obj.type === 'tap') return browserPreview.send(obj)
     toast('此操作不适用于浏览器目标', 'warn'); return false
   }
   const channel = webrtcLifecycle.getControlChannel() || controlChannel
@@ -850,7 +852,7 @@ function sendControl(obj) {
   if (isBrowser.value) {
     if (obj.type === 'touch') return browserPreview.send({ type: 'pointer', action: obj.action, x: obj.x, y: obj.y })
     if (obj.type === 'scroll') return browserPreview.send({ type: 'scroll', x: obj.x, y: obj.y, delta_x: obj.scroll_x || 0, delta_y: obj.scroll_y || 0 })
-    if (obj.type === 'text' || obj.type === 'tap') return browserPreview.send(obj)
+    if (obj.type === 'input_event' || obj.type === 'text' || obj.type === 'tap') return browserPreview.send(obj)
     toast('此操作不适用于浏览器目标', 'warn'); return false
   }
   // 拖动/滚轮类输入打标（画面停滞看门狗用）：这类操作预期画面变化，
@@ -918,22 +920,22 @@ function onStageFocusOut(e) {
 
 function onStageKeyDown(e) {
   if (!connected.value || !stageCtl.view.canDeviceInput || picking.value || selecting.value || cellPick.mode || isGlobalEscapeConsumed(e)) return
-  if (isBrowser.value) { if (!shouldIgnoreKeyboardTarget(e.target)) { e.preventDefault(); browserPreview.send({ type: 'key', key: e.key === ' ' ? 'Space' : e.key, action: 'down' }) } return }
   if (keyboardMode.value === 'game') {
     const mapped = keymap.handleKeyDown(e)
     syncKeymapPressed()
     if (mapped?.handled || mapped === true) return
   }
   // 控制器只对已映射且未被 UI 过滤的按键 preventDefault；未知按键保留浏览器行为。
+  if (isBrowser.value) { if (!shouldIgnoreKeyboardTarget(e.target)) { e.preventDefault(); browserPreview.send({ type: 'key', key: e.key === ' ' ? 'Space' : e.key, action: 'down' }) } return }
   keyboard.handleKeyDown(e)
 }
 
 function onStageKeyUp(e) {
   if (!connected.value || !stageCtl.view.canDeviceInput) return
-  if (isBrowser.value) { if (!shouldIgnoreKeyboardTarget(e.target)) { e.preventDefault(); browserPreview.send({ type: 'key', key: e.key === ' ' ? 'Space' : e.key, action: 'up' }) } return }
   const mapped = keymap.handleKeyUp(e)
   syncKeymapPressed()
   if (mapped?.handled || mapped === true) return
+  if (isBrowser.value) { if (!shouldIgnoreKeyboardTarget(e.target)) { e.preventDefault(); browserPreview.send({ type: 'key', key: e.key === ' ' ? 'Space' : e.key, action: 'up' }) } return }
   keyboard.handleKeyUp(e)
 }
 
@@ -1095,9 +1097,10 @@ const fxHitStyle = computed(() => (scriptFx.hit.show
 // ---------- 鼠标/滚轮输入（触控、框选、取点、映射输入路由） ----------
 
 // 手动输入坐标属于核心画面链路，不依赖已安装模板插件对 img/video 的支持。
-function browserControlPoint(e) {
-  const image = videoElement.value
-  return mapControlCoord(e.clientX, e.clientY, image.getBoundingClientRect(), browserPreview.view.width, browserPreview.view.height)
+function stageControlPoint(e) {
+  const size = stageCtl.displaySize()
+  const rect = stageCtl.surfaceEl()?.getBoundingClientRect()
+  return mapControlCoord(e.clientX, e.clientY, rect, size.width, size.height)
 }
 
 // 触控状态
@@ -1142,13 +1145,13 @@ function onMouseDown(e) {
   }
   // 设备输入（触控/按键映射）：视频来源为只读，统一拒绝（触控终不发）
   if (!connected.value || !stageCtl.view.canDeviceInput) return
-  if (isBrowser.value) { e.preventDefault(); stageFocusEl.value?.focus({ preventScroll: true }); const { x, y } = browserControlPoint(e); browserPreview.send({ type: 'pointer', action: 'down', button: ['left', 'middle', 'right'][e.button] || 'left', x, y }); return }
   cancelPendingMove()
-  const { x, y } = toDeviceCoord(e.clientX, e.clientY)
-  if (!isBrowser.value && remoteKeymapRunning.value) {
+  const { x, y } = stageControlPoint(e)
+  if (remoteKeymapRunning.value) {
     keymap.handleInputEvent({ type: 'mousedown', button: e.button, x, y }, 'down', e)
     return
   }
+  if (isBrowser.value) { e.preventDefault(); stageFocusEl.value?.focus({ preventScroll: true }); const { x, y } = stageControlPoint(e); browserPreview.send({ type: 'pointer', action: 'down', button: ['left', 'middle', 'right'][e.button] || 'left', x, y }); return }
   gestureOrigin = { x, y }
   touchState.active = true
   touchState.lastX = x; touchState.lastY = y
@@ -1172,16 +1175,16 @@ function onMouseMove(e) {
     updateLoupe(e.clientX, e.clientY, toDeviceCoord(e.clientX, e.clientY), 2.5, [])
     return
   }
-  if (isBrowser.value && connected.value && stageCtl.view.canDeviceInput) { const { x, y } = browserControlPoint(e); browserPreview.send({ type: 'pointer', action: 'move', x, y }); return }
   if (remoteKeymapRunning.value && connected.value && stageCtl.view.canDeviceInput) {
-    const { x, y } = toDeviceCoord(e.clientX, e.clientY)
+    const { x, y } = stageControlPoint(e)
     keymap.handleInputEvent({
       type: 'mousemove', x, y, movementX: e.movementX, movementY: e.movementY,
     }, 'move', e)
     return
   }
+  if (isBrowser.value && connected.value && stageCtl.view.canDeviceInput) { const { x, y } = stageControlPoint(e); browserPreview.send({ type: 'pointer', action: 'move', x, y }); return }
   if (!touchState.active || !connected.value) return
-  const { x, y } = toDeviceCoord(e.clientX, e.clientY)
+  const { x, y } = stageControlPoint(e)
   if (Math.abs(x - touchState.lastX) + Math.abs(y - touchState.lastY) > 6) {
     touchState.lastX = x; touchState.lastY = y
     scheduleMove(x, y)
@@ -1203,16 +1206,16 @@ function onMouseUp(e) {
     else toast('框选区域太小，请重新框选', 'warn')
     return
   }
-  if (isBrowser.value && connected.value && stageCtl.view.canDeviceInput) { const { x, y } = browserControlPoint(e); browserPreview.send({ type: 'pointer', action: 'up', button: ['left', 'middle', 'right'][e.button] || 'left', x, y }); return }
   if (remoteKeymapRunning.value && connected.value && stageCtl.view.canDeviceInput) {
-    const { x, y } = toDeviceCoord(e.clientX, e.clientY)
+    const { x, y } = stageControlPoint(e)
     keymap.handleInputEvent({ type: 'mouseup', button: e.button, x, y }, 'up', e)
     return
   }
+  if (isBrowser.value && connected.value && stageCtl.view.canDeviceInput) { const { x, y } = stageControlPoint(e); browserPreview.send({ type: 'pointer', action: 'up', button: ['left', 'middle', 'right'][e.button] || 'left', x, y }); return }
   if (!touchState.active) return
   cancelPendingMove()
   touchState.active = false
-  const { x, y } = toDeviceCoord(e.clientX, e.clientY)
+  const { x, y } = stageControlPoint(e)
   sendTouchPhase('up', 0, x, y)
   const w = (videoElement.value?.naturalWidth || videoElement.value?.videoWidth), h = (videoElement.value?.naturalHeight || videoElement.value?.videoHeight)
   operationFeedback.setCore({ text: gestureOrigin && Math.hypot(x - gestureOrigin.x, y - gestureOrigin.y) > 6 ? '滑动至' : '点击了', actions: [
@@ -1230,8 +1233,8 @@ function onVideoMouseLeave() {
 function onWheel(e) {
   // 滚轮 = 设备输入：视频来源（媒体模式）为只读，统一拒绝
   if (!connected.value || !stageCtl.view.canDeviceInput) return
-  const { x, y } = isBrowser.value ? browserControlPoint(e) : toDeviceCoord(e.clientX, e.clientY)
-  if (!isBrowser.value && remoteKeymapRunning.value) {
+  const { x, y } = stageControlPoint(e)
+  if (remoteKeymapRunning.value) {
     keymap.handleInputEvent({
       type: 'wheel', x, y, deltaX: e.deltaX, deltaY: e.deltaY,
     }, 'wheel', e)

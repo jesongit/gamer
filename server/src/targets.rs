@@ -7,6 +7,61 @@ use crate::{
 pub fn is_browser(id: &str) -> bool {
     id.starts_with("browser-")
 }
+
+/// Target support, independent of plugin permissions and connection readiness.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct TargetCapabilities {
+    pub frame: bool,
+    pub keyboard: bool,
+    pub pointer: bool,
+    pub multitouch: bool,
+    pub android_app: bool,
+    pub recording: bool,
+    pub media_output: bool,
+}
+impl TargetCapabilities {
+    pub fn android() -> Self {
+        Self {
+            frame: true,
+            keyboard: true,
+            pointer: true,
+            multitouch: true,
+            android_app: true,
+            recording: true,
+            media_output: true,
+        }
+    }
+    pub fn browser() -> Self {
+        Self {
+            multitouch: false,
+            android_app: false,
+            recording: false,
+            media_output: false,
+            ..Self::android()
+        }
+    }
+}
+pub fn capabilities(devices: &DeviceManager, id: &str) -> anyhow::Result<TargetCapabilities> {
+    if is_browser(id) {
+        devices.browsers.get(id)?;
+        Ok(TargetCapabilities::browser())
+    } else {
+        anyhow::ensure!(devices.snapshot(id).is_some(), "目标不存在: {id}");
+        Ok(TargetCapabilities::android())
+    }
+}
+
+pub fn check_available(devices: &DeviceManager, id: &str) -> anyhow::Result<()> {
+    capabilities(devices, id)?;
+    if let Some((_, status, error)) = devices.snapshot(id) {
+        anyhow::ensure!(
+            status != crate::device::DeviceStatus::Offline || error.is_none(),
+            "目标离线：{}",
+            error.unwrap_or_default()
+        );
+    }
+    Ok(())
+}
 pub fn app_context(
     devices: &DeviceManager,
     id: &str,

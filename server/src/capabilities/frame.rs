@@ -26,7 +26,7 @@ impl FrameSize {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct FrameStamp {
     pub target: String,
     pub epoch: String,

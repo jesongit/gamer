@@ -17,10 +17,12 @@ import * as m15 from "../package-store"
 import * as m16 from "../keymap-control"
 import * as m17 from "../components/task/runner-editors"
 import * as m18 from "../workspace/plugin-messages"
+import * as frameSource from "../console/frame-source"
 
 export function installPluginModuleSdk() {
   globalThis.__gamerPluginSdkV1 = Object.freeze({
   "api": m0,
+  "console/frame-source": frameSource,
   "gamer-plugin-ids": m1,
   "vue": m2,
   "store": m3,

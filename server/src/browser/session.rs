@@ -534,6 +534,21 @@ impl CdpSession {
                     })
                     | (if keys.contains_key("MetaLeft") { 4 } else { 0 })
                     | (if keys.contains_key("ShiftLeft") { 8 } else { 0 });
+                // Mapping envelopes use physical codes; preserve Shift text
+                // semantics when the pass-through path supplies KeyA/Digit1.
+                let key = if modifiers & 8 != 0 && name.len() > 1 && key.len() == 1 {
+                    if key.as_bytes()[0].is_ascii_alphabetic() {
+                        key.to_ascii_uppercase()
+                    } else {
+                        "1234567890-=[]\\;',./`"
+                            .find(&key)
+                            .and_then(|i| "!@#$%^&*()_+{}|:\"<>?~".chars().nth(i))
+                            .map(|c| c.to_string())
+                            .unwrap_or(key)
+                    }
+                } else {
+                    key
+                };
                 let mut params = json!({"type":if action=="up" {"keyUp"} else {"keyDown"},"key":&key,"code":&code,"windowsVirtualKeyCode":vk,"modifiers":modifiers});
                 if action != "up" && key.chars().count() == 1 && modifiers & 7 == 0 {
                     params["text"] = json!(&key);
@@ -651,6 +666,15 @@ fn browser_profile_argument(path: &std::path::Path) -> String {
 }
 
 fn key_info(name: &str) -> anyhow::Result<(String, String, u32)> {
+    if let Some(letter) = name
+        .strip_prefix("Key")
+        .filter(|v| v.len() == 1 && v.is_ascii())
+    {
+        return key_info(&letter.to_ascii_lowercase());
+    }
+    if let Some(digit) = name.strip_prefix("Digit").filter(|v| v.len() == 1) {
+        return key_info(digit);
+    }
     if name.len() == 1 {
         let ch = name.chars().next().unwrap();
         if ch.is_ascii_alphabetic() {
@@ -710,10 +734,22 @@ fn key_info(name: &str) -> anyhow::Result<(String, String, u32)> {
         "ARROWDOWN" | "DOWN" => ("ArrowDown", "ArrowDown", 40),
         "ARROWLEFT" | "LEFT" => ("ArrowLeft", "ArrowLeft", 37),
         "ARROWRIGHT" | "RIGHT" => ("ArrowRight", "ArrowRight", 39),
-        "SHIFT" => ("Shift", "ShiftLeft", 16),
-        "CTRL" | "CONTROL" => ("Control", "ControlLeft", 17),
-        "ALT" => ("Alt", "AltLeft", 18),
-        "META" => ("Meta", "MetaLeft", 91),
+        "SHIFT" | "SHIFTLEFT" | "SHIFTRIGHT" => ("Shift", "ShiftLeft", 16),
+        "CTRL" | "CONTROL" | "CONTROLLEFT" | "CONTROLRIGHT" => ("Control", "ControlLeft", 17),
+        "ALT" | "ALTLEFT" | "ALTRIGHT" => ("Alt", "AltLeft", 18),
+        "META" | "METALEFT" | "METARIGHT" => ("Meta", "MetaLeft", 91),
+        "NUMPADENTER" => ("Enter", "NumpadEnter", 13),
+        "SEMICOLON" => (";", "Semicolon", 186),
+        "EQUAL" => ("=", "Equal", 187),
+        "COMMA" => (",", "Comma", 188),
+        "MINUS" => ("-", "Minus", 189),
+        "PERIOD" => (".", "Period", 190),
+        "SLASH" => ("/", "Slash", 191),
+        "BACKQUOTE" => ("`", "Backquote", 192),
+        "BRACKETLEFT" => ("[", "BracketLeft", 219),
+        "BACKSLASH" => ("\\", "Backslash", 220),
+        "BRACKETRIGHT" => ("]", "BracketRight", 221),
+        "QUOTE" => ("'", "Quote", 222),
         _ => anyhow::bail!("不支持的浏览器按键: {name}"),
     };
     Ok((key.into(), code.into(), vk))

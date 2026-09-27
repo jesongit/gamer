@@ -13,6 +13,7 @@ function setup() {
   const frame = ref({mediaId: 'clip', index: 29, ptsUs: 966666})
   const kind = ref('media'), generation = ref(1), toast = vi.fn()
   const stage = {
+    displaySize: () => ({ width: 640, height: 360 }),
     kind: () => kind.value, generation: () => generation.value, ready: () => true,
     surfaceEl: () => ({videoWidth: 640, videoHeight: 360}), frameAt: () => frame.value,
     captureFrame: vi.fn(),

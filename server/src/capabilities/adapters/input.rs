@@ -37,19 +37,14 @@ impl InputService for InputAdapter {
         stamp: Option<&super::super::FrameStamp>,
     ) -> CapabilityResult<()> {
         if crate::targets::is_browser(device.id().as_str()) {
-            let session = self
+            return self
                 .device
-                .devices
-                .browsers
-                .session(device.id().as_str())
-                .map_err(|e| CapabilityError::Failed(e.to_string()))?;
-            return session
-                .input(
+                .browser_input(
+                    device,
                     &serde_json::json!({"type":"tap","x":point.x(),"y":point.y()}),
                     stamp,
                 )
-                .await
-                .map_err(|e| CapabilityError::Failed(e.to_string()));
+                .await;
         }
         if stamp.is_some() {
             return Err(CapabilityError::InvalidRequest(
@@ -65,24 +60,19 @@ impl InputService for InputAdapter {
         action: KeyAction,
     ) -> CapabilityResult<()> {
         if crate::targets::is_browser(device.id().as_str()) {
-            let session = self
-                .device
-                .devices
-                .browsers
-                .session(device.id().as_str())
-                .map_err(|e| CapabilityError::Failed(e.to_string()))?;
             let action = match action {
                 KeyAction::Down => "down",
                 KeyAction::Up => "up",
                 KeyAction::Press => "press",
             };
-            return session
-                .input(
+            return self
+                .device
+                .browser_input(
+                    device,
                     &serde_json::json!({"type":"key","key":name,"action":action}),
                     None,
                 )
-                .await
-                .map_err(|e| CapabilityError::Failed(e.to_string()));
+                .await;
         }
         let code = super::super::input::android_key_code(name)?;
         self.key(
@@ -114,15 +104,15 @@ impl InputService for InputAdapter {
                 .map_err(|e| CapabilityError::Failed(e.to_string()))?;
             let stamp = expected.cloned().unwrap_or_else(|| session.stamp());
             let result=async {
-                session.input(&serde_json::json!({"type":"pointer","action":"down","x":gesture.start().x(),"y":gesture.start().y()}),Some(&stamp)).await?;
+                self.device.browser_input(device, &serde_json::json!({"type":"pointer","action":"down","x":gesture.start().x(),"y":gesture.start().y()}),Some(&stamp)).await?;
                 for i in 1..=20 {
                     let t=i as f64/20.0;
                     let x=gesture.start().x() as f64+(gesture.end().x() as f64-gesture.start().x() as f64)*t;
                     let y=gesture.start().y() as f64+(gesture.end().y() as f64-gesture.start().y() as f64)*t;
-                    session.input(&serde_json::json!({"type":"pointer","action":"move","x":x,"y":y}),Some(&stamp)).await?;
+                    self.device.browser_input(device, &serde_json::json!({"type":"pointer","action":"move","x":x,"y":y}),Some(&stamp)).await?;
                     tokio::time::sleep(gesture.duration()/20).await;
                 }
-                session.input(&serde_json::json!({"type":"pointer","action":"up","x":gesture.end().x(),"y":gesture.end().y()}),Some(&stamp)).await?;
+                self.device.browser_input(device, &serde_json::json!({"type":"pointer","action":"up","x":gesture.end().x(),"y":gesture.end().y()}),Some(&stamp)).await?;
                 Ok::<_,anyhow::Error>(())
             }.await;
             if result.is_err() {
@@ -158,6 +148,11 @@ impl InputService for InputAdapter {
     }
 
     async fn key(&self, device: &DeviceHandle, input: KeyInput) -> CapabilityResult<()> {
+        if crate::targets::is_browser(device.id().as_str()) {
+            return Err(CapabilityError::Unavailable(
+                "target.android_key: 当前目标不支持 Android 数字键码，请使用命名按键",
+            ));
+        }
         let session = self.device.session(device)?;
         // 录制输入观察（合同 §2.1）：能力层按键的 source 标注——调用方
         // scope 优先（keymap/runner），缺省 "plugin"；观察本体在 scrcpy
@@ -175,19 +170,14 @@ impl InputService for InputAdapter {
 
     async fn text(&self, device: &DeviceHandle, input: TextInput) -> CapabilityResult<()> {
         if crate::targets::is_browser(device.id().as_str()) {
-            let session = self
+            return self
                 .device
-                .devices
-                .browsers
-                .session(device.id().as_str())
-                .map_err(|e| CapabilityError::Failed(e.to_string()))?;
-            return session
-                .input(
+                .browser_input(
+                    device,
                     &serde_json::json!({"type":"text","text":input.as_str()}),
                     None,
                 )
-                .await
-                .map_err(|e| CapabilityError::Failed(e.to_string()));
+                .await;
         }
 
         let session = self.device.session(device)?;

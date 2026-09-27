@@ -34,11 +34,23 @@ impl DeviceId {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DeviceHandle {
     id: DeviceId,
+    manual_frame: Option<super::FrameStamp>,
 }
 
 impl DeviceHandle {
     pub fn new(id: DeviceId) -> Self {
-        Self { id }
+        Self {
+            id,
+            manual_frame: None,
+        }
+    }
+
+    pub fn with_manual_frame(mut self, frame: super::FrameStamp) -> Self {
+        self.manual_frame = Some(frame);
+        self
+    }
+    pub fn manual_frame(&self) -> Option<&super::FrameStamp> {
+        self.manual_frame.as_ref()
     }
 
     pub fn id(&self) -> &DeviceId {

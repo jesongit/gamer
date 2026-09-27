@@ -1,5 +1,6 @@
 import { computed, onUnmounted, reactive, ref, shallowRef, watch } from 'vue'
 import { api } from '../../api'
+import { frameSource } from '../../console/frame-source'
 const videoApi = {
   mediaFrames: async (id, { ptsUs } = {}) => {
     return api.mediaFrames(id, ptsUs)
@@ -88,6 +89,7 @@ export function useConsoleStage({
   /** 图片流可提供已显示帧快照和稳定尺寸，避免读取正在换帧的 img。 */
   captureLiveFrame,
   liveSize,
+  targetCapabilities,
   /** 测试注入：帧图片加载器 */
   loadImage = defaultLoadImage,
 } = {}) {
@@ -525,9 +527,8 @@ export function useConsoleStage({
         if (!frame || kind.value !== 'live' || generation.value !== expectedGeneration || devId() !== expectedDevice) return null
         return { ...frame, generation: expectedGeneration }
       }
-      const el = liveVideoEl?.()
-      if (!(el?.naturalWidth || el?.videoWidth)) return null
-      return { source: el, width: (el?.naturalWidth || el?.videoWidth), height: (el?.naturalHeight || el?.videoHeight), generation: generation.value, label: '实时画面当前帧' }
+      const frame = frameSource(() => liveVideoEl?.()).captureFrame()
+      return frame ? { ...frame, generation: generation.value, label: '实时画面当前帧' } : null
     }
     pauseMedia()
     if (mediaVideoEl.value) currentTimeSec.value = Math.max(0, Number(mediaVideoEl.value.currentTime) || 0)
@@ -564,6 +565,11 @@ export function useConsoleStage({
   }
 
   // ---------- 录制按钮态 ----------
+  async function captureDisplayFrame() {
+    if (kind.value === 'live') return captureFrame()
+    const frame = frameSource(surfaceEl).captureFrame()
+    return frame ? { ...frame, generation: generation.value } : null
+  }
   const TERMINAL_STATES = new Set(['completed', 'interrupted', 'failed', 'cancelled'])
 
   async function pollActiveSession() {
@@ -591,6 +597,7 @@ export function useConsoleStage({
   async function startRecording() {
     const id = devId()
     if (!id) return toast?.('请先选择设备', 'warn')
+    if (targetCapabilities?.()?.recording === false) return toast?.('当前目标尚不支持录制', 'warn')
     if (!canDeviceInput.value || !connected?.value) return toast?.('请先连接设备再开始录制', 'warn')
     recordingBusy.value = true
     try {
@@ -731,6 +738,7 @@ export function useConsoleStage({
       surfaceEl,
       displaySize: () => ({ ...displaySize.value }),
       captureFrame,
+      captureDisplayFrame,
       capturePreviewFrame,
       frameAt: () => frameAt.value,
     },

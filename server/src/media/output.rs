@@ -153,7 +153,10 @@ async fn source_file(
 }
 pub async fn start(devices: Arc<DeviceManager>, req: OutputRequest) -> Result<OutputHandle> {
     req.validate()?;
-    ensure!(devices.snapshot(&req.device_id).is_some(), "设备不存在");
+    ensure!(
+        crate::targets::capabilities(&devices, &req.device_id)?.media_output,
+        "target_capability_unsupported: 当前目标尚不支持音视频输出"
+    );
     let lease = devices.acquire_activity(&req.device_id, ActivityKind::Extension);
     // Connection has a bounded startup; later retries run inside the owned worker.
     tokio::time::timeout(

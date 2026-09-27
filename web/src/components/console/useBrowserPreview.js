@@ -159,7 +159,7 @@ export function useBrowserPreview({ deviceId, connected, connecting, errorMsg, t
   function send(value) {
     if (socket?.readyState !== WebSocket.OPEN) return false
     if (!view.stamp) { if (value.action === 'up') release(); return false }
-    if (value.type === 'pointer' && value.action === 'move') {
+    if ((value.type === 'pointer' && value.action === 'move') || (value.type === 'input_event' && value.event?.type === 'mouse_move')) {
       const now = performance.now()
       if (now - lastMove < 50 || socket.bufferedAmount > 32 * 1024) return false
       lastMove = now

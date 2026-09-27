@@ -15,6 +15,24 @@ pub(crate) struct DeviceAdapter {
 }
 
 impl DeviceAdapter {
+    pub(crate) async fn browser_input(
+        &self,
+        device: &DeviceHandle,
+        value: &serde_json::Value,
+        stamp: Option<&super::super::FrameStamp>,
+    ) -> CapabilityResult<()> {
+        let session = self
+            .devices
+            .browsers
+            .session(device.id().as_str())
+            .map_err(|e| CapabilityError::Failed(e.to_string()))?;
+        let result = if let Some(frame) = device.manual_frame() {
+            session.manual_input(value, frame).await
+        } else {
+            session.input(value, stamp).await
+        };
+        result.map_err(|e| CapabilityError::Failed(e.to_string()))
+    }
     pub(crate) fn new(devices: Arc<DeviceManager>) -> Self {
         Self { devices }
     }

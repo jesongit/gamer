@@ -418,12 +418,15 @@ describe('useConsoleStage：媒体播放控制与指定帧', () => {
     wrapper.unmount()
   })
 
-  it('captureFrame：live = 实时视频元素；media = 先定位展示帧，再按索引冻结 PNG 与帧身份', async () => {
+  it('captureFrame：live 同步复制为固定帧；media 按展示索引冻结 PNG', async () => {
+    const draw = vi.fn()
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage: draw })
     const liveEl = { videoWidth: 1920, videoHeight: 1080 }
     const { ctl, wrapper } = mountStage({ liveVideo: liveEl })
     const liveFrame = await ctl.captureFrame()
     expect(liveFrame).toMatchObject({ width: 1920, height: 1080, generation: 0, label: '实时画面当前帧' })
-    expect(liveFrame.source).toBe(liveEl)
+    expect(liveFrame.source).not.toBe(liveEl)
+    expect(draw).toHaveBeenCalledWith(liveEl, 0, 0, 1920, 1080)
     wrapper.unmount()
 
     const media = await mountInMedia({
@@ -545,6 +548,7 @@ function mediaStageBridge(genRef, captureImpl) {
     ready: () => true,
     generation: () => genRef.value,
     surfaceEl: () => mediaEl,
+    displaySize: () => ({ width: 640, height: 360 }),
     captureFrame: captureImpl,
   }
 }
@@ -608,7 +612,7 @@ describe('useConsoleTemplates：指定帧裁切（合同 §4/§6）', () => {
     expect(tpl.crop.active).toBe(false)
   })
 
-  it('实时来源裁切保持既有路径：同步冻结实时视频元素当前画面', () => {
+  it('实时来源裁切通过统一帧接口，不访问预览元素', async () => {
     const liveEl = {
       videoWidth: 1920,
       videoHeight: 1080,
@@ -620,12 +624,12 @@ describe('useConsoleTemplates：指定帧裁切（合同 §4/§6）', () => {
       ready: () => true,
       generation: () => 1,
       surfaceEl: () => liveEl,
-      captureFrame: async () => { captureCalls += 1; return null },
+      displaySize: () => ({ width: 1920, height: 1080 }),
+      captureFrame: async () => { captureCalls += 1; return { source: {}, width: 1920, height: 1080, generation: 1, label: '实时画面当前帧' } },
     }
     const { tpl } = mountTemplates({ stage })
-    tpl.openCrop({ x: 10, y: 10, w: 100, h: 50 })
-    // live 路径同步完成，不调 captureFrame（现有截图路径不变）
-    expect(captureCalls).toBe(0)
+    await tpl.openCrop({ x: 10, y: 10, w: 100, h: 50 })
+    expect(captureCalls).toBe(1)
     expect(tpl.crop.active).toBe(true)
     expect(tpl.crop.imgW).toBe(1920)
     expect(tpl.crop.imgH).toBe(1080)

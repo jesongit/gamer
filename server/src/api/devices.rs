@@ -23,6 +23,7 @@ use crate::webrtc::{remove_and_teardown_viewer, ViewerDisconnectReason};
 
 #[derive(Serialize)]
 struct DeviceView {
+    capabilities: crate::targets::TargetCapabilities,
     id: String,
     name: String,
     addr: String,
@@ -143,6 +144,7 @@ fn render_device_views(
             .map(|fc| fc.dims())
             .unwrap_or((0, 0));
         out.push(DeviceView {
+            capabilities: crate::targets::TargetCapabilities::android(),
             id: d.id.clone(),
             name: d.name.clone(),
             addr: d.addr.clone(),

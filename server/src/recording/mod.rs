@@ -889,8 +889,13 @@ impl RecordingService {
         if device_id.is_empty() {
             return failure(FailureKind::Invalid, "device_id 不能为空");
         }
-        if devices.snapshot(device_id).is_none() {
-            return failure(FailureKind::NotFound, "device_not_found");
+        let caps = crate::targets::capabilities(devices, device_id)
+            .map_err(|e| RecordingFailure::new(FailureKind::NotFound, e.to_string()))?;
+        if !caps.recording {
+            return failure(
+                FailureKind::Invalid,
+                "target_capability_unsupported: 当前目标尚不支持录制",
+            );
         }
         let Some(session) = devices.session(device_id) else {
             return failure(

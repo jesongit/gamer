@@ -28,6 +28,7 @@ pub(super) async fn list(State(st): State<AppState>) -> Result<Json<Vec<Value>>,
                     .is_ok_and(|s| s.is_alive());
                 let mut value = serde_json::to_value(t).unwrap();
                 value["kind"] = json!("browser");
+                value["capabilities"] = json!(crate::targets::TargetCapabilities::browser());
                 value["status"] = json!(if live { "online" } else { "offline" });
                 value
             })
@@ -195,6 +196,9 @@ async fn serve(mut socket: WebSocket, s: Arc<CdpSession>, st: AppState) {
                     if value["type"]=="release" {anyhow::ensure!(st.runs.active_for_device(&s.id).is_none() && s.runs.load(std::sync::atomic::Ordering::SeqCst)==0,"任务执行期间禁止手动操作");s.release_manual().await;return Ok::<_,anyhow::Error>(())}
                     anyhow::ensure!(st.runs.active_for_device(&s.id).is_none(),"任务执行期间禁止手动操作");
                     let stamp:FrameStamp=serde_json::from_value(value["stamp"].clone())?;
+                    if value["type"]=="input_event" {
+                        return mapped_input(&st, &s, &value, &stamp).await;
+                    }
                     s.manual_input(&value,&stamp).await
                 }.await;
                 match result {Ok(())=>continue,Err(e)=>{
@@ -261,4 +265,58 @@ async fn serve(mut socket: WebSocket, s: Arc<CdpSession>, st: AppState) {
     if st.runs.active_for_device(&s.id).is_none() {
         s.release_manual().await;
     }
+}
+
+async fn mapped_input(
+    st: &AppState,
+    session: &CdpSession,
+    value: &Value,
+    stamp: &FrameStamp,
+) -> anyhow::Result<()> {
+    use crate::capabilities::{DeviceHandle, DeviceId};
+    use crate::extensions::{InputEvent, ScreenSize};
+    session.validate(stamp)?;
+    anyhow::ensure!(
+        session.runs.load(std::sync::atomic::Ordering::SeqCst) == 0,
+        "目标正在执行任务"
+    );
+    let event: InputEvent = serde_json::from_value(value["event"].clone())?;
+    let (width, height) = session.size();
+    let result = st
+        .extensions
+        .dispatch_keymap_input(
+            DeviceHandle::new(DeviceId::new(session.id.clone())).with_manual_frame(stamp.clone()),
+            ScreenSize::new(width, height),
+            event.clone(),
+            None,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    if result.consume {
+        return Ok(());
+    }
+    let button = |b| match b {
+        1 => "middle",
+        2 => "right",
+        _ => "left",
+    };
+    let input = match event {
+        InputEvent::KeyDown { code, .. } => json!({"type":"key","key":code,"action":"down"}),
+        InputEvent::KeyUp { code, .. } => json!({"type":"key","key":code,"action":"up"}),
+        InputEvent::MouseDown { button: b, x, y } => {
+            json!({"type":"pointer","action":"down","button":button(b),"x":x,"y":y})
+        }
+        InputEvent::MouseUp { button: b, x, y } => {
+            json!({"type":"pointer","action":"up","button":button(b),"x":x,"y":y})
+        }
+        InputEvent::MouseMove { x, y, .. } => json!({"type":"pointer","action":"move","x":x,"y":y}),
+        InputEvent::Wheel {
+            x,
+            y,
+            delta_x,
+            delta_y,
+        } => json!({"type":"scroll","x":x,"y":y,"delta_x":delta_x,"delta_y":delta_y}),
+        _ => return Ok(()),
+    };
+    session.manual_input(&input, stamp).await
 }

@@ -53,6 +53,14 @@ impl TouchAdapter {
         action: u8,
         point: TouchPoint,
     ) -> CapabilityResult<()> {
+        if !crate::targets::capabilities(&self.device.devices, state.device.id().as_str())
+            .map_err(|e| CapabilityError::Failed(e.to_string()))?
+            .multitouch
+        {
+            return Err(CapabilityError::Unavailable(
+                "target.multitouch: 当前目标不支持持续触控",
+            ));
+        }
         // 录制输入观察（合同 §2.1）：能力层触控经此进入设备发送路径；
         // source 标注调用方 scope 优先（keymap/runner），缺省 "plugin"
         // （扩展能力输入的历史缺省语义），精确归属由调用方
