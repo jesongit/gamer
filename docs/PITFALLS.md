@@ -494,3 +494,6 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - 本机 Cargo 镜像缺少锁定的 Wasmtime 48.0.1 时无法解析依赖：仅对当前命令覆盖镜像到 crates.io，不修改全局配置或擅自降低锁定版本。
 
 - CDP 连续返回相同 PNG 时，仅比较图片 URL 会在首次解码完成前开放控制或让切换中的旧图获得新坐标身份；必须同时校验实际已显示的图片，来源改变后重新等待 load，并使错误/断线后的迟到事件失效。
+
+- 独立测试 config.toml 缺少 decode_frames/max_size/bitrate_mbps/fps 时服务会直接退出：这些字段没有反序列化默认值，应完整填写，不能只配置端口和路径。
+- 从 Windows 用户目录映射路径 fetch worktree 内的 submodule 报 not a git repository：相对 gitdir 按映射盘符解析到了错误位置，改用实际盘符目录或 rev-parse --absolute-git-dir 返回的仓库路径。
