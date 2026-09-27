@@ -1,54 +1,12 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-09-27T06:07:03Z",
+  "generated_at": "2026-09-27T06:41:39Z",
   "host_api": "1.0.0",
   "provenance": {
-    "plugin_commit": "c9e15588d3870277563ab0860d3326e24908d5fc",
-    "sdk_host_commit": "77f3684e251e874ec9a34c7d1eb87ae29b4ab666"
+    "plugin_commit": "cb153338900ce4a16999aa0ad988a6dfd3f7f2de",
+    "sdk_host_commit": "ca12b1278154f8fa506f6acf0287f59d8ee80e5e"
   },
   "plugins": [
-    {
-      "id": "gamer-live",
-      "version": "0.2.3",
-      "name": "直播助手",
-      "description": "向直播姬提供设备音视频素材，接收 B 站直播互动；支持手动 RTMP 输出",
-      "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-live-0.2.3.gplugin",
-      "sha256": "7e6780355082311e2a5011cda39802a95d7888707759407c953c748f96f113a1",
-      "size": 17589,
-      "permissions": [
-        "ui.host",
-        "media.stream",
-        "live.connect",
-        "resource.read",
-        "run.submit",
-        "run.control"
-      ],
-      "host_api": {
-        "media": "^1.0",
-        "resource": "^1.0",
-        "run": "^1.0",
-        "runtime": "^1.0",
-        "ui": "^1.0"
-      },
-      "ui": {
-        "contributions": [
-          {
-            "component": "LiveWorkspace",
-            "entry": "ui/plugin.js",
-            "location": "console.right",
-            "order": 50,
-            "panel_id": "live",
-            "requires_device": false,
-            "runtime": "core",
-            "title": "直播助手"
-          }
-        ]
-      },
-      "execution": {
-        "kind": "builtin"
-      }
-    },
     {
       "id": "gamer-keymap",
       "version": "0.1.0",
@@ -88,6 +46,48 @@
       },
       "execution": {
         "kind": "wasm"
+      }
+    },
+    {
+      "id": "gamer-live",
+      "version": "0.2.4",
+      "name": "直播助手",
+      "description": "向直播姬提供设备音视频素材，接收 B 站直播互动；支持手动 RTMP 输出",
+      "publisher": "gamer.dev",
+      "download_url": "/plugins/gamer-live-0.2.4.gplugin",
+      "sha256": "acde6f6752cb88fd1f47c0a7522efdaecfbe66f46c89d9c7574c77802b16ac3c",
+      "size": 17579,
+      "permissions": [
+        "ui.host",
+        "media.stream",
+        "live.connect",
+        "resource.read",
+        "run.submit",
+        "run.control"
+      ],
+      "host_api": {
+        "media": "^1.0",
+        "resource": "^1.0",
+        "run": "^1.0",
+        "runtime": "^1.0",
+        "ui": "^1.0"
+      },
+      "ui": {
+        "contributions": [
+          {
+            "component": "LiveWorkspace",
+            "entry": "ui/plugin.js",
+            "location": "console.right",
+            "order": 50,
+            "panel_id": "live",
+            "requires_device": false,
+            "runtime": "core",
+            "title": "直播助手"
+          }
+        ]
+      },
+      "execution": {
+        "kind": "builtin"
       }
     },
     {
