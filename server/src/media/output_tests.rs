@@ -147,7 +147,10 @@ async fn ffmpeg_hls_preserves_timestamped_video_and_game_audio() {
     let mut packets = Vec::new();
     for (i, f) in frames.iter().enumerate() {
         let pts = 250_000 + i as u64 * 40_000 + if i >= 20 { 200_000 } else { 0 };
-        packets.push((pts, stream_mux::raw_packet(1, pts, true, f.as_slice()).unwrap()));
+        packets.push((
+            pts,
+            stream_mux::raw_packet(1, pts, true, f.as_slice()).unwrap(),
+        ));
     }
     for (i, p) in opus_packets(&std::fs::read(opus).unwrap())
         .iter()
