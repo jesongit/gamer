@@ -640,7 +640,9 @@ pub fn restore(layout: &InstallLayout, update_id: &str) -> Result<(), String> {
 
 /// `inspect --data-dir <p> --json` 解析 user_version；不可用返回 None（尽力而为）。
 pub fn inspect_schema(exe: &Path, data_dir: &Path) -> Option<u32> {
+    use std::os::windows::process::CommandExt;
     let output = Command::new(exe)
+        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
         .args(["inspect", "--data-dir"])
         .arg(data_dir)
         .arg("--json")

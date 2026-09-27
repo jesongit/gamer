@@ -231,13 +231,22 @@ pub fn spawn_supervised_with_extras(
 }
 
 /// 启动自更新 trampoline helper。helper 只接收绝对路径和数值环境变量，使用
-/// 已构建的 launcher 自身作为 helper 镜像；不启动 server，也不继承业务环境。
+/// 已校验的不可变候选组件作为 helper 镜像，不占用待替换入口；不启动 server。
 pub fn spawn_trampoline(
     launcher_exe: &Path,
     trampoline_env: &BTreeMap<String, String>,
 ) -> std::io::Result<Child> {
+    use std::os::windows::process::CommandExt;
     let mut command = Command::new(launcher_exe);
+    let current = trampoline_env
+        .get(crate::upgrade::trampoline::TRAMPOLINE_CURRENT_ENV)
+        .map(Path::new)
+        .and_then(Path::parent)
+        .ok_or_else(|| std::io::Error::other("trampoline 缺少安装根"))?;
     command
+        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+        .arg("--install-root")
+        .arg(current)
         .arg("status")
         .env_clear()
         .env("SystemRoot", system_root())
@@ -247,6 +256,19 @@ pub fn spawn_trampoline(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // A restarted GUI/browser needs the user's normal Windows environment.
+    for key in [
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "TEMP",
+        "TMP",
+        "WINDIR",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
     // Preserve the user's local-only choice across launcher self-update restart.
     if let Ok(value) = std::env::var("GAMER_LOCAL_ONLY") {
         command.env("GAMER_LOCAL_ONLY", value);

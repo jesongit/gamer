@@ -77,6 +77,12 @@ pub fn dispatch(cli: &Cli, layout: &InstallLayout) -> i32 {
         return match trampoline::run_from_environment() {
             Ok(()) => 0,
             Err(e) => {
+                tracing::error!(error = %e, "启动器自更新失败");
+                let _ = fs::create_dir_all(layout.state_dir());
+                let _ = fs::write(
+                    layout.state_dir().join("launcher-update-error.txt"),
+                    e.to_string(),
+                );
                 eprintln!("错误: launcher 自更新 trampoline 失败: {e}");
                 1
             }

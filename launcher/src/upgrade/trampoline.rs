@@ -1,7 +1,7 @@
 //! LCH-013：launcher 自更新 trampoline。
 //!
 //! 运行中的 Windows executable 不能可靠地覆盖自身，因此更新拆成两阶段：
-//! 当前 launcher 只负责把候选复制到同卷临时目录并启动自身的 helper；helper
+//! 当前 launcher 把候选复制到同卷临时目录，并从不可变候选组件启动 helper；helper
 //! 等父进程退出后再原子替换目标。替换前不删除、不改名旧文件，替换失败时旧
 //! launcher 仍保持原样可启动。
 
@@ -19,9 +19,10 @@ pub const TRAMPOLINE_STAGED_ENV: &str = "GAMER_LAUNCHER_TRAMPOLINE_STAGED";
 pub const TRAMPOLINE_TEMP_ENV: &str = "GAMER_LAUNCHER_TRAMPOLINE_TEMP";
 pub const TRAMPOLINE_PARENT_PID_ENV: &str = "GAMER_LAUNCHER_TRAMPOLINE_PARENT_PID";
 pub const TRAMPOLINE_WAIT_MS_ENV: &str = "GAMER_LAUNCHER_TRAMPOLINE_WAIT_MS";
+pub const RESUME_MANIFEST_ENV: &str = "GAMER_LAUNCHER_RESUME_MANIFEST";
 
-const MAX_REPLACE_ATTEMPTS: u32 = 10;
-const RETRY_DELAY: Duration = Duration::from_millis(25);
+const MAX_REPLACE_ATTEMPTS: u32 = 50;
+const RETRY_DELAY: Duration = Duration::from_millis(100);
 const DEFAULT_PARENT_WAIT: Duration = Duration::from_secs(30);
 
 /// 一次 launcher 自更新请求。`temp_parent` 只是临时目录的父目录；默认使用
@@ -29,6 +30,7 @@ const DEFAULT_PARENT_WAIT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone)]
 pub struct LauncherUpdateRequest {
     pub restart: bool,
+    pub resume_manifest: Option<PathBuf>,
     pub current: PathBuf,
     pub candidate: PathBuf,
     pub temp_parent: Option<PathBuf>,
@@ -39,6 +41,7 @@ impl LauncherUpdateRequest {
     pub fn new(current: impl Into<PathBuf>, candidate: impl Into<PathBuf>) -> Self {
         Self {
             restart: false,
+            resume_manifest: None,
             current: current.into(),
             candidate: candidate.into(),
             temp_parent: None,
@@ -156,7 +159,16 @@ pub fn schedule(request: &LauncherUpdateRequest) -> Result<Child, TrampolineErro
     if request.restart {
         env.insert("GAMER_LAUNCHER_RESTART_AFTER_UPDATE".into(), "1".into());
     }
-    let child = supervisor::spawn_trampoline(&request.current, &env)?;
+    if let Some(path) = &request.resume_manifest {
+        env.insert(
+            RESUME_MANIFEST_ENV.into(),
+            path.to_string_lossy().into_owned(),
+        );
+    }
+    // The verified component is immutable and distinct from both replacement paths.
+    // Running current would lock the destination; running staged would lock the source.
+    let child = supervisor::spawn_trampoline(&request.candidate, &env)?;
+    tracing::info!(helper_pid = child.id(), current = %request.current.display(), "启动器更新已交接");
     staged.cleanup = false;
     Ok(child)
 }
@@ -220,12 +232,21 @@ pub fn run_from_environment() -> Result<(), TrampolineError> {
             "staged launcher 不在 trampoline 临时目录内".to_string(),
         ));
     }
+    let _cleanup = StagedLauncher {
+        temp_dir: temp_dir.clone(),
+        staged: staged.clone(),
+        cleanup: true,
+    };
     if !wait_for_parent_exit(parent_pid, wait_ms) {
         return Err(TrampolineError::Invalid(
             "等待旧 launcher 退出超时；旧 launcher 未被替换".to_string(),
         ));
     }
     apply_staged(&staged, &temp_dir, &current)?;
+    if let Some(root) = current.parent() {
+        let _ = fs::remove_file(root.join("state/launcher-update-error.txt"));
+    }
+    tracing::info!(current = %current.display(), "启动器替换完成");
     if std::env::var("GAMER_LAUNCHER_RESTART_AFTER_UPDATE")
         .ok()
         .as_deref()
@@ -235,6 +256,11 @@ pub fn run_from_environment() -> Result<(), TrampolineError> {
         std::process::Command::new(&current)
             .env_remove(TRAMPOLINE_MODE_ENV)
             .env_remove("GAMER_LAUNCHER_RESTART_AFTER_UPDATE")
+            .env_remove(TRAMPOLINE_CURRENT_ENV)
+            .env_remove(TRAMPOLINE_STAGED_ENV)
+            .env_remove(TRAMPOLINE_TEMP_ENV)
+            .env_remove(TRAMPOLINE_PARENT_PID_ENV)
+            .env_remove(TRAMPOLINE_WAIT_MS_ENV)
             .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
             .spawn()?;
     }

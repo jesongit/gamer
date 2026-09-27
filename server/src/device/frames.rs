@@ -841,7 +841,7 @@ impl FrameCache {
         let spawn_started = Instant::now();
         let n = gop.len().saturating_sub(1);
         let filter = format!("select=gte(n\\,{})", n);
-        let spawned = tokio::process::Command::new(ffmpeg)
+        let spawned = crate::background_process::tokio_command(ffmpeg)
             .args([
                 "-loglevel",
                 "error",

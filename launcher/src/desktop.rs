@@ -55,6 +55,7 @@ impl Default for Snapshot {
 }
 enum Job {
     Inspect(bool),
+    ResumeUpdate(PathBuf),
     Install,
     Plugins(Vec<String>),
     Start,
@@ -136,7 +137,12 @@ pub fn run(layout: InstallLayout) -> i32 {
             let quiet_start = tray.is_some();
             cc.egui_ctx
                 .send_viewport_cmd(ViewportCommand::Visible(!quiet_start));
-            jobs.send(Job::Inspect(true))?;
+            let resume = std::env::var_os(crate::upgrade::trampoline::RESUME_MANIFEST_ENV);
+            std::env::remove_var(crate::upgrade::trampoline::RESUME_MANIFEST_ENV);
+            jobs.send(match resume {
+                Some(path) => Job::ResumeUpdate(path.into()),
+                None => Job::Inspect(true),
+            })?;
             Ok(Box::new(Desktop {
                 layout,
                 jobs,
@@ -283,7 +289,6 @@ impl Desktop {
 }
 impl eframe::App for Desktop {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        // eframe may show its first rendered frame regardless of the initial builder flag.
         // Keep startup hidden until an explicit interaction or actionable state reveals it.
         if self.quiet_start {
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
@@ -718,6 +723,7 @@ impl Worker {
         self.publish();
         let result = match job {
             Job::Inspect(auto) => self.inspect(auto),
+            Job::ResumeUpdate(path) => self.resume_update(path),
             Job::Install => self.install(),
             Job::Plugins(selected) => self.install_plugins(selected),
             Job::Start => self.start(),
@@ -749,6 +755,13 @@ impl Worker {
     }
     fn inspect(&mut self, auto: bool) -> Result<(), String> {
         if auto {
+            let error_path = self.layout.state_dir().join("launcher-update-error.txt");
+            if let Ok(error) = fs::read_to_string(&error_path) {
+                let _ = fs::remove_file(error_path);
+                return Err(format!(
+                    "上次启动器更新失败：{error}。详情见 logs/launcher.log"
+                ));
+            }
             let report = crate::upgrade::recovery::recover_on_startup(
                 &self.layout,
                 &StateStore::new(&self.layout.root),
@@ -885,6 +898,7 @@ impl Worker {
                 spec.install_dir(&self.layout).join("gamer-launcher.exe"),
             );
             request.restart = true;
+            request.resume_manifest = Some(path);
             crate::upgrade::trampoline::schedule(&request).map_err(|e| e.to_string())?;
             let _ = self.events.send(Event::Exit);
             self.ctx.request_repaint();
@@ -920,6 +934,24 @@ impl Worker {
         }
         self.repair_model(&model, false)?;
         self.start()
+    }
+    fn resume_update(&mut self, path: PathBuf) -> Result<(), String> {
+        let report = crate::upgrade::recovery::recover_on_startup(
+            &self.layout,
+            &StateStore::new(&self.layout.root),
+        )
+        .map_err(|e| e.to_string())?;
+        if report.is_manual() {
+            return Err("上次更新需要人工恢复，请查看 logs/launcher.log".into());
+        }
+        // Continue the exact manifest the user approved before the launcher handoff.
+        let model = dist::read(&self.layout, &path)?;
+        self.state.current = dist::current(&self.layout);
+        self.state.target = Some(model.release.version.clone());
+        self.state.message = "启动器已更新，继续安装主程序…".into();
+        self.candidate = Some(path);
+        self.publish();
+        self.install()
     }
     fn repair_model(&mut self, model: &Manifest, deep: bool) -> Result<(), String> {
         let platform = model
