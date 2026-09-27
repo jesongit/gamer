@@ -125,7 +125,7 @@
     <input class="mc-seek" type="range" min="0" :max="stage.duration || 0" step="0.001"
       :value="stage.currentTime || 0" :disabled="!stage.stageReady" aria-label="视频播放位置"
       :style="{ '--progress': `${stage.duration ? Math.min(100, stage.currentTime / stage.duration * 100) : 0}%` }"
-      @input="stage.seek($event.target.value)" />
+      @pointerdown="beginSeekDrag" @input="stage.seek($event.target.value)" />
     <div class="media-control-row">
       <button class="mc-btn mc-play" type="button" :disabled="!stage.stageReady" :title="stage.playing ? '暂停' : '播放'"
         :aria-label="stage.playing ? '暂停' : '播放'" @click="stage.togglePlay()"><UiIcon :name="stage.playing ? 'pause' : 'play'" /></button>
@@ -148,7 +148,7 @@
 
 <script setup>
 import UiIcon from '../ui/UiIcon.vue'
-import { onMounted, ref, watch } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { useMediaGestures } from './useMediaGestures'
 import { useMediaKeyboard } from './useMediaKeyboard'
 
@@ -198,10 +198,42 @@ const mediaKeys = useMediaKeyboard({
   report: gestures.show,
 })
 function focusMediaPlayer(event) {
-  if (props.stage?.kind !== 'media' || event.target?.closest?.('button,input,select,textarea,a,[contenteditable]')) return
+  if (props.stage?.kind !== 'media') return
+  const control = event.target?.closest?.('button,input,select,textarea,a,[contenteditable]')
+  if (control && !(event.detail > 0 && control.closest('.media-controls') && control.matches('button,input[type="range"]'))) return
   playerRoot.value?.focus({ preventScroll: true })
   event.stopPropagation()
 }
+let seekDrag = null
+function beginSeekDrag(event) {
+  if (event.button !== 0 || props.stage?.kind !== 'media') return
+  seekDrag = { pointerId: event.pointerId, element: event.currentTarget }
+}
+function finishSeekDrag(event) {
+  if (!seekDrag || event.pointerId !== seekDrag.pointerId) return
+  const { element } = seekDrag
+  seekDrag = null
+  // A native range drag can end outside the control without producing a click.
+  // Wait for dispatch to finish, and never steal focus from another control.
+  queueMicrotask(() => {
+    if (props.stage?.kind === 'media' && element.isConnected && document.activeElement === element) {
+      playerRoot.value?.focus({ preventScroll: true })
+    }
+  })
+}
+function cancelSeekDrag() { seekDrag = null }
+onMounted(() => {
+  window.addEventListener('pointerup', finishSeekDrag, true)
+  window.addEventListener('pointercancel', cancelSeekDrag, true)
+  window.addEventListener('blur', cancelSeekDrag)
+})
+onUnmounted(() => {
+  cancelSeekDrag()
+  window.removeEventListener('pointerup', finishSeekDrag, true)
+  window.removeEventListener('pointercancel', cancelSeekDrag, true)
+  window.removeEventListener('blur', cancelSeekDrag)
+})
+watch(() => [props.stage?.kind, props.stage?.mediaId], cancelSeekDrag)
 function toggleMediaFullscreen() {
   if (document.fullscreenElement) document.exitFullscreen?.()
   else videoWrap.value?.parentElement?.requestFullscreen?.()

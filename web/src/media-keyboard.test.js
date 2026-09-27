@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { defineComponent, h, reactive } from 'vue'
 import { mount } from '@vue/test-utils'
 import { useMediaKeyboard } from './components/console/useMediaKeyboard'
+import ConsoleVideoStage from './components/console/ConsoleVideoStage.vue'
 
 let wrapper
 beforeEach(() => vi.useFakeTimers())
@@ -59,4 +60,74 @@ it('失焦、换素材或卸载均终止长按', () => {
   expect(seek).toHaveBeenCalledTimes(2)
   state.kind='media'; down('KeyK'); wrapper.unmount(); vi.advanceTimersByTime(1000)
   expect(seek).toHaveBeenCalledTimes(3)
+})
+
+function mountPlayer() {
+  const stage = reactive({
+    kind: 'media', mediaId: 'test', mediaSrc: '', stageReady: true,
+    currentTime: 30, duration: 120, playing: false,
+    mediaOptions: [], rateOptions: [1], rate: 1,
+    seek: vi.fn(t => { stage.currentTime = Number(t) }),
+    togglePlay: vi.fn(), stepFrames: vi.fn(), setRate: vi.fn(),
+    onMediaPick: vi.fn(), backToLive: vi.fn(),
+  })
+  const noop = () => {}
+  wrapper = mount(ConsoleVideoStage, { attachTo: document.body, props: {
+    stage, scriptFx: {tap: {show: false}, swipe: {show: false}, hit: {show: false}},
+    loupe: {show: false}, onMouseDown: noop, onMouseMove: noop, onMouseUp: noop,
+    onWheel: noop, onVideoMouseLeave: noop, flushAndConnect: noop, fullscreen: noop,
+  } })
+  return {stage, root: wrapper.element, slider: wrapper.get('.mc-seek').element}
+}
+function press(code) {
+  document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {code, bubbles: true}))
+  document.activeElement.dispatchEvent(new KeyboardEvent('keyup', {code, bubbles: true}))
+}
+it('鼠标点击播放按钮后，空格和方向键继续控制播放器', async () => {
+  const {stage, root} = mountPlayer()
+  const button = wrapper.get('.mc-play')
+  button.element.focus()
+  await button.trigger('click', {detail: 1})
+  expect(document.activeElement).toBe(root)
+  press('Space'); press('ArrowRight')
+  expect(stage.togglePlay).toHaveBeenCalledTimes(2)
+  expect(stage.currentTime).toBe(35)
+})
+it('进度条拖动在控件外松手且没有 click 时，恢复焦点和视频快捷键', async () => {
+  const {stage, root, slider} = mountPlayer()
+  slider.focus()
+  slider.dispatchEvent(new PointerEvent('pointerdown', {button: 0, pointerId: 7, bubbles: true}))
+  slider.value = '60'
+  slider.dispatchEvent(new Event('input', {bubbles: true}))
+  document.body.dispatchEvent(new PointerEvent('pointerup', {pointerId: 7, bubbles: true}))
+  await Promise.resolve()
+  expect(document.activeElement).toBe(root)
+  press('KeyJ'); press('Space')
+  expect(stage.currentTime).toBe(55)
+  expect(stage.togglePlay).toHaveBeenCalledOnce()
+})
+it('键盘操作进度条、播放按钮和鼠标点击下拉框不被抢走焦点', async () => {
+  const {stage, slider} = mountPlayer()
+  for (const selector of ['.mc-seek', '.mc-play', '.mc-rate', '.media-pick']) {
+    const control = wrapper.get(selector)
+    control.element.focus()
+    await control.trigger('click', {detail: selector.includes('pick') || selector.includes('rate') ? 1 : 0})
+    expect(document.activeElement).toBe(control.element)
+  }
+  slider.focus()
+  press('KeyJ')
+  expect(stage.seek).not.toHaveBeenCalled()
+})
+it('取消拖动或焦点已转移时，迟到的松手事件不抢焦点', async () => {
+  const {slider} = mountPlayer()
+  const down = () => slider.dispatchEvent(new PointerEvent('pointerdown', {button: 0, pointerId: 7, bubbles: true}))
+  const up = () => window.dispatchEvent(new PointerEvent('pointerup', {pointerId: 7}))
+  slider.focus(); down()
+  window.dispatchEvent(new PointerEvent('pointercancel', {pointerId: 7}))
+  up(); await Promise.resolve()
+  expect(document.activeElement).toBe(slider)
+  down()
+  const select = wrapper.get('.mc-rate').element
+  select.focus(); up(); await Promise.resolve()
+  expect(document.activeElement).toBe(select)
 })
