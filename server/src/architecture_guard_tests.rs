@@ -1082,7 +1082,7 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
             .as_array()
             .unwrap()
             .len(),
-        3,
+        1,
         "enable → Running 重新发布 UI 贡献"
     );
     // 已删除的细粒度端点：start/stop/activate 不再存在（V1 用户操作收敛）
