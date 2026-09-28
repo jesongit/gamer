@@ -56,7 +56,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $draft = (& gh release view $env:TAG --repo $env:GH_REPO --json isDraft --jq .isDraft | Out-String).Trim()
           if ($LASTEXITCODE -ne 0 -or $draft -ne 'true') { throw 'Expected an existing draft release' }
-          $flags = if ($env:TAG.Contains('-')) { @('--prerelease', '--latest=false') } else { @('--latest') }
+          [string[]]$flags = if ($env:TAG.Contains('-')) { @('--prerelease', '--latest=false') } else { @('--latest') }
           gh release edit $env:TAG --repo $env:GH_REPO --draft=false @flags
           if ($LASTEXITCODE -ne 0) { throw 'Publication failed' }
           $draft = (& gh release view $env:TAG --repo $env:GH_REPO --json isDraft --jq .isDraft | Out-String).Trim()
