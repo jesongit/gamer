@@ -1,9 +1,9 @@
 {
-  "scenario": "POST /api/system/update/install 受理：202 + 后台协调器接管停机/快照/迁移/切换；HTTP 服务随后会重启、连接会断开——前端断连不得报「安装失败」，重连后以 app.version/boot_id 判定结果",
-  "endpoint": "POST /api/system/update/install",
+  "scenario": "POST /api/system/update/apply 受理：202 + 后台协调器接管停机/快照/迁移/切换；HTTP 服务随后会重启、连接会断开——前端断连不得报「安装失败」，重连后以 app.version/boot_id 判定结果",
+  "endpoint": "POST /api/system/update/apply",
   "request": {
     "method": "POST",
-    "path": "/api/system/update/install",
+    "path": "/api/system/update/apply",
     "headers": {
       "Accept": "application/json",
       "Content-Type": "application/json",

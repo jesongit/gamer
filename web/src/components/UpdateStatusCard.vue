@@ -9,6 +9,7 @@
 
     <template v-if="view">
       <p class="state-desc">{{ meta.desc }}</p>
+      <p v-if="view.apply_requested" class="detail-line">已预约更新：下载完成且当前工作结束后自动安装。<button class="btn btn-sm" @click="emit('action', 'cancel')">取消预约</button></p>
       <p v-if="detailLabel" class="detail-line">当前阶段：{{ detailLabel }}</p>
       <p v-if="view.update_id" class="meta-line">
         <span>事务 {{ view.update_id }}</span>
@@ -36,7 +37,7 @@
         </span>
       </div>
 
-      <div v-if="view.state === 'failed' && view.last_error" class="err-box">
+      <div v-if="view.state !== 'manual_recovery' && view.last_error" class="err-box">
         <span class="err-code">{{ view.last_error.code }}</span>
         <span>{{ view.last_error.message }}</span>
       </div>
@@ -61,9 +62,8 @@
       </p>
 
       <div class="acts">
-        <button class="btn btn-sm" data-action="check" :disabled="busy || !can.check" @click="act('check')">检查更新</button>
-        <button class="btn btn-sm" data-action="download" :disabled="busy || !can.download" @click="act('download')">下载</button>
-        <button class="btn btn-primary btn-sm" data-action="install" :disabled="busy || !can.install" @click="act('install')">立即安装</button>
+        <button class="btn btn-sm" data-action="check" :disabled="busy || view.apply_requested || !can.check" @click="act('check')">检查更新</button>
+        <button class="btn btn-primary btn-sm" data-action="install" :disabled="busy || view.apply_requested || !(can.install || can.download)" @click="act('install')">更新并重启</button>
         <button class="btn btn-danger btn-sm" data-action="rollback" :disabled="busy || !can.rollback" @click="act('rollback')">回滚</button>
       </div>
     </template>
@@ -138,7 +138,7 @@ const pct = computed(() => {
 })
 
 function act(name) {
-  if (can.value[name] && !props.busy) emit('action', name)
+  if ((can.value[name] || name === 'install' && can.value.download) && !props.busy) emit('action', name)
 }
 </script>
 

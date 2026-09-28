@@ -14,7 +14,7 @@ param(
     # 发布说明 URL（https）
     [string]$ReleaseNotesUrl = '',
     # 最低 launcher / 升级起点版本（批次基线 0.1.0）
-    [string]$MinLauncherVersion = '0.2.0-beta.1',
+    [string]$MinUpdaterVersion = '0.2.0-beta.1',
     [string]$MinUpgradeVersion = '0.1.0'
 )
 
@@ -102,7 +102,6 @@ $appZipName   = 'gamer-app-{0}-windows-x64.zip' -f $Version
 $adbZipName   = 'gamer-adb-{0}-windows-x64.zip' -f $adbVersion
 $ffmpegZipName = 'gamer-ffmpeg-{0}-windows-x64.zip' -f $ffmpegVersion
 $scrcpyZipName = 'gamer-scrcpy-server-{0}-windows-x64.zip' -f $jarVersion
-$launcherVersion = [regex]::Match([IO.File]::ReadAllText((Join-Path $repoRoot 'launcher/Cargo.toml')), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
 
 # 通用组件字段保持 v1；新启动器独占解释 launcher / official-plugins 的产品行为。
 function New-ZipComponent {
@@ -141,13 +140,13 @@ if ($jarSha -ne $lockJarSha) {
 
 # ---------- 组 manifest（键序与 schema 描述一致）----------
 $manifest = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     product        = 'gamebot'
     release        = [ordered]@{
         version                  = $Version
         channel                  = $Channel
         published_at             = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-        minimum_launcher_version = $MinLauncherVersion
+        minimum_updater_version = $MinUpdaterVersion
         minimum_upgrade_version  = $MinUpgradeVersion
         data_schema              = [int]([regex]::Match([IO.File]::ReadAllText((Join-Path $repoRoot 'server/src/migrations.rs')), 'TARGET_SCHEMA:\s*i64\s*=\s*(\d+)').Groups[1].Value)
         rollback_floor           = 1
@@ -178,7 +177,6 @@ $manifest = [ordered]@{
                     artifact = New-Artifact -Name $scrcpyZipName -Url "$DownloadBaseUrl/$scrcpyZipName"
                     required_files = New-RequiredFiles -Files $scrcpy.files
                 },
-                (New-ZipComponent -Id 'launcher' -ComponentVersion $launcherVersion),
                 (New-ZipComponent -Id 'official-plugins' -ComponentVersion $Version)
             )
             resources = [ordered]@{

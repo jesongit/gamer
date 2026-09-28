@@ -7,7 +7,7 @@
 //! 503 `update_not_ready`。activate 成功（令牌校验通过、仅回环）→ 主流程
 //! 完成完整初始化 → stage=ready（/health/ready 翻转 200）。
 //!
-//! 激活令牌：`X-Launcher-Token` 必须等于 `GAMER_LAUNCHER_IPC_TOKEN` 注入值
+//! 激活令牌：`X-Update-Token` 必须等于 `GAMER_UPDATE_TOKEN` 注入值
 //! （launcher 会话令牌，与 IPC 帧的 `auth` 同源）；令牌缺失时闸永久无法激活
 //! （fail closed，只记日志）。
 //!
@@ -72,19 +72,19 @@ pub struct StartupGate {
 
 impl StartupGate {
     /// 生产装配：`GAMER_ACTIVATION_GATE=1` 开闸；激活令牌取
-    /// `GAMER_LAUNCHER_IPC_TOKEN`（与 IPC 帧令牌同源）。开闸但无令牌 →
+    /// `GAMER_UPDATE_TOKEN`（与 IPC 帧令牌同源）。开闸但无令牌 →
     /// fail closed（无法激活，日志告警）。
     pub fn from_env() -> Arc<Self> {
         let enabled = std::env::var("GAMER_ACTIVATION_GATE")
             .map(|v| v.trim() == "1")
             .unwrap_or(false);
-        let token = std::env::var("GAMER_LAUNCHER_IPC_TOKEN")
+        let token = std::env::var("GAMER_UPDATE_TOKEN")
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
         if enabled && token.is_none() {
             tracing::error!(
-                "GAMER_ACTIVATION_GATE=1 but GAMER_LAUNCHER_IPC_TOKEN is missing; \
+                "GAMER_ACTIVATION_GATE=1 but GAMER_UPDATE_TOKEN is missing; \
                  activation will be rejected (fail closed)"
             );
         }

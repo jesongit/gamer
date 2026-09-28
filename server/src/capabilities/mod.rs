@@ -17,7 +17,7 @@
 mod device;
 mod error;
 mod frame;
-mod input;
+pub mod input;
 mod log;
 mod registry;
 mod resource;
@@ -30,7 +30,7 @@ pub(crate) mod adapters;
 
 pub(crate) use device::{AppId, DeviceHandle, DeviceId, DeviceService};
 pub(crate) use error::{CapabilityError, CapabilityResult};
-pub(crate) use frame::{FrameHandle, FrameService, FrameSize};
+pub(crate) use frame::{FrameHandle, FrameService, FrameSize, FrameStamp};
 pub(crate) use input::{InputService, KeyAction, KeyCode, KeyInput, SwipeGesture, TextInput};
 pub(crate) use log::{LogLevel, LogRecord, LogService};
 pub(crate) use registry::{CapabilityRegistry, CapabilityRegistryBuilder};

@@ -30,7 +30,7 @@
             </div>
             <div class="mono market-remote-id">{{ entry.id }}</div>
             <div class="market-remote-facts">
-              <span>适用应用：{{ formatList(entry.android_targets) }}</span>
+              <span>适用目标：{{ [...(entry.android_targets || []).map(p => `Android: ${p}`), ...(entry.web_url_prefixes || []).map(p => `网页: ${p}`)].join('；') || '未声明适用目标' }}</span>
               <span>必需插件：{{ formatList(entry.required_plugins) }}</span>
               <span v-if="hasList(entry.optional_plugins)">可选插件：{{ formatList(entry.optional_plugins) }}</span>
               <span>作者：{{ entry.author || entry.publisher || '未声明' }}</span>

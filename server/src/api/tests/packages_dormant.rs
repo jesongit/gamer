@@ -254,7 +254,7 @@ async fn installed_keymap_plugin_starts_directly_on_dormant_data() {
         .contains("content_package"));
 
     // package_id 指向不存在方案的包 → 启动失败（缺数据是显式错误，非静默降级）
-    let _ = post_json(&t, &sid, "/api/packages", serde_json::json!({"id": "empty.pkg"})).await;
+    let _ = post_json(&t, &sid, "/api/packages", serde_json::json!({"id": "empty.pkg", "targets":{"android":{"packages":["*"]}}})).await;
     let no_scheme = post_json(
         &t,
         &sid,

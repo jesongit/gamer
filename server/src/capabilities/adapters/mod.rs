@@ -164,6 +164,7 @@ mod tests {
         store
             .create_package(crate::resources::PackageInput {
                 id: pkg.to_string(),
+                android_targets: vec!["*".into()],
                 ..Default::default()
             })
             .unwrap();

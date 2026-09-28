@@ -13,7 +13,7 @@ async fn browser_preview_matches_uploaded_pixels_without_device_or_media() {
         &t,
         &sid,
         "/api/packages",
-        serde_json::json!({"id":"preview", "name":"preview"}),
+        serde_json::json!({"id":"preview", "name":"preview", "targets":{"android":{"packages":["*"]}}}),
     )
     .await;
     assert!(created.status().is_success());

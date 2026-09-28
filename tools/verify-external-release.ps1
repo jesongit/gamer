@@ -7,7 +7,7 @@ param(
     [string]$Version = '',
     [ValidateSet('stable', 'beta')][string]$Channel = 'stable',
     [string]$DownloadDir = '',
-    [switch]$SkipLauncherDoctor
+    [switch]$SkipStartupSmoke
 )
 
 $ErrorActionPreference = 'Stop'
@@ -267,12 +267,12 @@ try {
         Fail "Release download directory contains unexpected directories: $($downloadDirectories.Name -join ', ')"
     }
     $downloadedNames = @($downloadItems | ForEach-Object { $_.Name })
-    if ($downloadedNames.Count -ne 13) {
-        Fail "Release download must contain exactly 13 files (12 assets + SHA256SUMS.txt); got $($downloadedNames.Count)"
+    if ($downloadedNames.Count -ne 11) {
+        Fail "Release download must contain exactly 11 files (10 assets + SHA256SUMS.txt); got $($downloadedNames.Count)"
     }
 
     $releaseSums = Read-Sha256Sums -SumsPath (Join-Path $DownloadDir 'SHA256SUMS.txt') -BaseDir $DownloadDir -FlatOnly
-    if ($releaseSums.Count -ne 12) { Fail "Release SHA256SUMS must contain exactly 12 assets; got $($releaseSums.Count)" }
+    if ($releaseSums.Count -ne 10) { Fail "Release SHA256SUMS must contain exactly 10 assets; got $($releaseSums.Count)" }
 
     $manifestPath = Join-Path $DownloadDir "$Version.json"
     $manifest = Get-JsonFile -Path $manifestPath -Label 'downloaded release manifest'
@@ -296,7 +296,6 @@ try {
         "Gamer-$Version-licenses.zip",
         "$Version.json",
         "gamer-release.json",
-        "gamer-launcher.exe",
         "gamer-sbom-$Version-windows-x64.cdx.json"
     )
     foreach ($component in $components) {
@@ -356,24 +355,16 @@ try {
         '-SbomPath', $sbomPath, '-ExpectedVersion', $Version, '-RepoRoot', $repoRoot
     ) -Label 'downloaded SBOM contract verification' | Out-Null
 
-    if ($SkipLauncherDoctor) {
+    if ($SkipStartupSmoke) {
         $partial = $true
-        Write-Host '[release] launcher doctor skipped by explicit -SkipLauncherDoctor' -ForegroundColor Yellow
+        Write-Host '[release] portable startup skipped by explicit -SkipStartupSmoke' -ForegroundColor Yellow
     } else {
         if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-            Fail 'launcher doctor requires Windows; use -SkipLauncherDoctor only for an explicitly partial asset smoke'
+            Fail 'portable startup requires Windows; use -SkipStartupSmoke only for an explicitly partial asset smoke'
         }
-        $launcher = Join-Path $fullRoot 'gamer-launcher.exe'
-        Require-File -Path $launcher -Label 'full package launcher'
-        Invoke-NativeChecked -FilePath $launcher -Arguments @(
-            '--install-root', $fullRoot, 'doctor'
-        ) -Label 'launcher doctor inventory smoke' | Out-Null
-        Invoke-NativeChecked -FilePath $launcher -Arguments @(
-            '--install-root', $fullRoot, 'doctor', '--manifest',
-            (Join-Path $fullRoot "manifests\$Version.json"),
-            '--expect-current-version', $Version, '--expect-channel', $Channel
-        ) -Label 'launcher doctor manifest smoke' | Out-Null
-        Write-Host '[release] launcher doctor inventory + manifest smoke passed' -ForegroundColor Green
+        & (Join-Path $repoRoot 'release/packaging/test-portable-start.ps1') -Root $fullRoot
+        if ($LASTEXITCODE -ne 0) { Fail 'portable startup smoke failed' }
+
     }
 
     if ($partial) {

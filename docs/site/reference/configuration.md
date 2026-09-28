@@ -66,7 +66,7 @@ rtc_external_port = 50000
 | `GAMER_PROFILE` | 开发或生产配置策略 |
 | `GAMER_APP_DIR` | 应用资产目录 |
 | `GAMER_DATA_DIR` | 覆盖数据目录 |
-| `GAMER_LOCAL_ONLY` | 覆盖本机模式，接受 `1`/`true` 或 `0`/`false`；启动器会透传给升级和回滚进程 |
+| `GAMER_LOCAL_ONLY` | 覆盖本机模式，接受 `1`/`true` 或 `0`/`false`；便携应用会透传给更新和回退进程 |
 | `GAMER_ADB_PATH`、`GAMER_FFMPEG_PATH` | 覆盖工具路径 |
 | `GAMER_SCRCPY_SERVER` | 覆盖 scrcpy server 路径 |
 

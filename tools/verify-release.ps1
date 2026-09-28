@@ -9,7 +9,7 @@
     It verifies:
       1. PowerShell syntax for tools/*.ps1;
       3. cargo metadata --locked --no-deps;
-      4. strict cargo audit (warnings denied) for the server and launcher
+      4. strict cargo audit (warnings denied) for the server and updater
          lockfiles; missing cargo-audit is a hard failure.
     An optional benchmark smoke check can call tools\run-perf-benchmark.ps1.
 
@@ -77,12 +77,12 @@ if ($parseFailures.Count -gt 0) {
     throw "PowerShell parse failed with $($parseFailures.Count) error(s)"
 }
 
-Write-Step 'cargo metadata --locked --no-deps (server + launcher)'
+Write-Step 'cargo metadata --locked --no-deps (server + updater)'
 $cargo = Test-Tool @('cargo')
 if ($null -eq $cargo) {
     throw 'cargo not found'
 }
-foreach ($cargoDir in @('server', 'launcher')) {
+foreach ($cargoDir in @('server', 'updater')) {
     Push-Location (Join-Path $RepoRoot $cargoDir)
     try {
         & $cargo metadata --format-version 1 --locked --no-deps | Out-Null
@@ -95,7 +95,7 @@ foreach ($cargoDir in @('server', 'launcher')) {
     Write-Host ("[metadata] {0}: cargo metadata passed" -f $cargoDir) -ForegroundColor Green
 }
 
-Write-Step 'cargo audit (server + launcher lockfiles, warnings denied)'
+Write-Step 'cargo audit (server + updater lockfiles, warnings denied)'
 if (-not (Get-Command cargo-audit -ErrorAction SilentlyContinue)) {
     throw 'cargo-audit not found; release audit gate cannot run. Install with: cargo install cargo-audit --locked'
 }
@@ -107,7 +107,7 @@ if (-not (Get-Command cargo-audit -ErrorAction SilentlyContinue)) {
 #   exists within the webrtc 0.13 line. webrtc >= 0.20 (rtc-dtls) drops bincode
 #   but is a cross-version API migration; drop this ignore after that upgrade.
 $auditIgnoreIds = @('RUSTSEC-2025-0141')
-foreach ($auditDir in @('server', 'launcher')) {
+foreach ($auditDir in @('server', 'updater')) {
     Push-Location (Join-Path $RepoRoot $auditDir)
     try {
         $auditArgs = @('audit', '--color', 'never', '-D', 'warnings')

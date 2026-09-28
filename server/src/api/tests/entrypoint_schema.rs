@@ -29,7 +29,7 @@ async fn save_resource(
         t,
         sid,
         "/api/packages",
-        serde_json::json!({ "id": "com.test.app" }),
+        serde_json::json!({ "id": "com.test.app", "targets":{"android":{"packages":["*"]}} }),
     )
     .await;
     // Package API：PUT 创建/更新（force 跳过版本门禁，夹具语义 = 直写）

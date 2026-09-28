@@ -1111,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "gamer-server"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1124,6 +1124,7 @@ dependencies = [
  "cron",
  "flate2",
  "futures-util",
+ "gamer-updater",
  "hmac",
  "image",
  "md-5",
@@ -1157,6 +1158,24 @@ dependencies = [
  "windows-sys 0.59.0",
  "wit-component",
  "yaml-interp",
+ "zip",
+]
+
+[[package]]
+name = "gamer-updater"
+version = "0.2.5"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "ureq",
+ "windows-sys 0.59.0",
  "zip",
 ]
 

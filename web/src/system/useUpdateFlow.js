@@ -43,8 +43,8 @@ export function judgeAfterRestart({ before, after, requireEvidence = true } = {}
   out.versionChanged = !!b.version && !!version && version !== b.version
   const state = update.state
   if (state === 'installing' || state === 'restarting' || state === 'rolling_back') return out
-  if (state === 'failed') { out.verdict = 'failed'; return out }
   if (state === 'manual_recovery') { out.verdict = 'manual_recovery'; return out }
+  if (update.last_error || state === 'failed') { out.verdict = 'failed'; return out }
   if (state === 'idle') {
     const detail = String(update.detail ?? '')
     if (!requireEvidence || out.restarted || out.versionChanged

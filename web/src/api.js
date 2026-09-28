@@ -281,6 +281,12 @@ export const api = {
 
   // 设备
   listDevices: () => req('GET', '/api/devices'),
+  browserPages: (id) => req('GET', `/api/browser-targets/${encodeURIComponent(id)}/pages`),
+  bindBrowser: (id, targetId) => req('POST', `/api/browser-targets/${encodeURIComponent(id)}/bind`, { target_id: targetId }),
+  saveBrowser: (target) => req('POST', '/api/browser-targets', target),
+  connectBrowser: (id) => req('POST', `/api/browser-targets/${encodeURIComponent(id)}/connect`),
+  closeBrowser: (id) => req('POST', `/api/browser-targets/${encodeURIComponent(id)}/disconnect`),
+  deleteBrowser: (id) => req('DELETE', `/api/browser-targets/${encodeURIComponent(id)}`),
   scanDevices: () => req('POST', '/api/devices/scan'),
   createDevice: (d) => req('POST', '/api/devices', d),
   updateDevice: (id, d) => req('PUT', `/api/devices/${id}`, d),
@@ -396,9 +402,10 @@ export const api = {
     { new_id: requireId(newId, 'new_id') },
   ),
   // targets 兼容性（plan §17，warning 语义：不兼容仅提示不禁止）
-  packageCompatibility: (packageId, androidPackage) => req(
+  targetIdentity: (id) => req('GET', `/api/targets/${encodeURIComponent(requireId(id, 'target_id'))}/identity`),
+  packageCompatibility: (packageId, target) => req(
     'GET',
-    `/api/packages/${encodeURIComponent(requireId(packageId, 'package_id'))}/compatibility?android_package=${encodeURIComponent(requireId(androidPackage, 'android_package'))}`,
+    `/api/packages/${encodeURIComponent(requireId(packageId, 'package_id'))}/compatibility?${new URLSearchParams(typeof target === 'string' ? { android_package: requireId(target, 'android_package') } : target)}`,
   ),
   // 导入 .gamerpkg 原始字节（Content-Type: application/zip）；expectedSha256 →
   // X-Expected-Sha256；overwrite=true 原子替换已存在包（409 = 已存在且未确认覆盖）

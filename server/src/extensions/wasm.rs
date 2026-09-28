@@ -626,9 +626,12 @@ mod wasmtime_runtime {
                 device_id: app_context
                     .as_ref()
                     .map(|context| context.device_id.as_str().to_string()),
-                android_package: app_context
-                    .as_ref()
-                    .map(|context| context.android_package.as_str().to_string()),
+                android_package: app_context.as_ref().and_then(|context| {
+                    context
+                        .android_package
+                        .as_ref()
+                        .map(|p| p.as_str().to_string())
+                }),
                 content_package: app_context.as_ref().and_then(|context| {
                     context
                         .content_package

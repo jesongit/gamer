@@ -50,7 +50,7 @@ function upd(state, extra = {}) {
   }
 }
 
-const ACTIONS = ['check', 'download', 'install', 'rollback']
+const ACTIONS = ['check', 'install', 'rollback']
 
 /** §4.2 状态×动作受理矩阵（与 system-api.test.js 的矩阵断言互为印证：组件层禁用态） */
 const MATRIX = {
@@ -93,7 +93,7 @@ describe('SystemInfoCard（WEB-002）', () => {
     expect(t).toContain('0.2.0')
     expect(t).toContain('01234567') // commit 截短展示
     expect(t).toContain('x86_64-pc-windows-msvc')
-    expect(t).toContain('便携托管（launcher）')
+    expect(t).toContain('便携版')
     expect(t).toContain('升级器托管')
     expect(t).toContain('数据库 schema v1')
     expect(t).toContain('文件布局 schema v1')
@@ -195,7 +195,7 @@ describe('UpdateStatusCard：11 状态全覆盖（WEB-003）', () => {
       for (const a of ACTIONS) {
         const btn = w.find(`[data-action="${a}"]`)
         expect(btn.exists()).toBe(true)
-        expect(btn.attributes('disabled') !== undefined).toBe(!allowed[a])
+        expect(btn.attributes('disabled') !== undefined).toBe(!(allowed[a] || a === 'install' && allowed.download))
       }
     })
   }
@@ -322,7 +322,7 @@ describe('UpdateConfirmModal（WEB-004）', () => {
     expect(t).toContain('02:00')
     expect(t).toContain('06:00')
     expect(t).toContain('冻结窗口 30 分钟')
-    expect(t).toContain('服务将重启')
+    expect(t).toContain('服务会短暂重启')
   })
 
   it('回滚确认：回滚目标、升级前快照警示、危险按钮样式', async () => {

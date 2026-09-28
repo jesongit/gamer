@@ -3457,6 +3457,7 @@ entry = "plugin.wasm"
         package_store
             .create_package(crate::resources::PackageInput {
                 id: "native-call".into(),
+                android_targets: vec!["*".into()],
                 ..Default::default()
             })
             .unwrap();
@@ -3541,6 +3542,7 @@ entry = "plugin.wasm"
         package_store
             .create_package(crate::resources::PackageInput {
                 id: "stale-call".into(),
+                android_targets: vec!["*".into()],
                 ..Default::default()
             })
             .unwrap();
@@ -3589,6 +3591,7 @@ entry = "plugin.wasm"
         package_store
             .create_package(crate::resources::PackageInput {
                 id: "permission-call".into(),
+                android_targets: vec!["*".into()],
                 ..Default::default()
             })
             .unwrap();
@@ -3640,12 +3643,14 @@ entry = "plugin.wasm"
         packages
             .create_package(crate::resources::PackageInput {
                 id: package.as_str().to_string(),
+                android_targets: vec!["*".into()],
                 ..Default::default()
             })
             .unwrap();
         packages
             .create_package(crate::resources::PackageInput {
                 id: "other-context".into(),
+                android_targets: vec!["*".into()],
                 ..Default::default()
             })
             .unwrap();

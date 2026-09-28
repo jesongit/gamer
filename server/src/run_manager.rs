@@ -324,6 +324,8 @@ impl RunManager {
         req: StartRequest,
         on_finish: Option<FinishHook>,
     ) -> Result<RunRecord, StartError> {
+        let _reservation =
+            crate::update::barrier::reservation().map_err(|_| StartError::ShuttingDown)?;
         if self.draining.load(Ordering::SeqCst) {
             return Err(StartError::ShuttingDown);
         }

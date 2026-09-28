@@ -1,5 +1,5 @@
 ﻿# DEP-005: 第三方组件清单（SBOM）生成。
-# 解析 server/Cargo.lock 与 launcher/Cargo.lock（Cargo.lock 本身即含全部传递
+# 解析 server/Cargo.lock 与 updater/Cargo.lock（Cargo.lock 本身即含全部传递
 # 依赖），生成 CycloneDX 1.5 JSON（name/version/purl），输出到 release/sbom/。
 # 零外部依赖：手写行级解析 + 手拼 JSON；兼容 Windows PowerShell 5.1 与 pwsh。
 #
@@ -15,7 +15,7 @@ param(
     [string]$RepoRoot = '',
     # SBOM 输出目录（默认 <repo>/release/sbom）
     [string]$OutDir = '',
-    # Cargo.lock 路径列表（默认 server + launcher）
+    # Cargo.lock 路径列表（默认 server + updater）
     [string[]]$LockPaths = @()
 )
 
@@ -27,7 +27,7 @@ if (-not $OutDir)   { $OutDir   = Join-Path $RepoRoot 'release\sbom' }
 if ($LockPaths.Count -eq 0) {
     $LockPaths = @(
         (Join-Path $RepoRoot 'server\Cargo.lock'),
-        (Join-Path $RepoRoot 'launcher\Cargo.lock')
+        (Join-Path $RepoRoot 'updater\Cargo.lock')
     )
 }
 
@@ -88,7 +88,7 @@ foreach ($lock in $LockPaths) {
         $key = ('{0}@{1}' -f $p['name'], $p['version']).ToLowerInvariant()
         if ($seen.ContainsKey($key)) { continue }
         $seen[$key] = $true
-        # 无 source = workspace 本包（gamer-server / gamer-launcher），按应用类型登记
+        # 无 source = workspace 本包（gamer-server / gamer-updater），按应用类型登记
         [void]$sorted.Add(@{
             name    = [string]$p['name']
             version = [string]$p['version']
@@ -128,7 +128,7 @@ $json = New-Object System.Text.StringBuilder
 [void]$json.AppendLine('    ],')
 [void]$json.AppendLine('    "component": {')
 [void]$json.AppendLine(('      "type": "application", "bom-ref": "pkg:gamebot/gamebot@{0}", "name": "gamebot", "version": "{0}",' -f $productVersion))
-[void]$json.AppendLine('      "description": "Gamer 游戏自动化助手（server + launcher + web 前端）"')
+[void]$json.AppendLine('      "description": "Gamer 游戏自动化助手（server + updater + web 前端）"')
 [void]$json.AppendLine('    }')
 [void]$json.AppendLine('  },')
 [void]$json.AppendLine('  "components": [')

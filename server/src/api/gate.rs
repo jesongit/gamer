@@ -2,8 +2,8 @@
 //!
 //! `GAMER_ACTIVATION_GATE=1` 时 main 以本路由启动 HTTP 服务：
 //! - 放行 `/health/live`、`/health/ready`（503 ready:false 契约 not-ready 形态）、
-//!   `/health/shutdown`、`POST /api/system/activate`（X-Launcher-Token ==
-//!   GAMER_LAUNCHER_IPC_TOKEN，仅回环）；
+//!   `/health/shutdown`、`POST /api/system/activate`（X-Update-Token ==
+//!   GAMER_UPDATE_TOKEN，仅回环）；
 //! - 其余一切路径（业务读写 API）→ 503 `{"code":"update_not_ready",...}`；
 //! - activate 成功 → main 的初始化任务完成完整初始化 → [`GateShared`] 换入完整
 //!   路由 → 所有请求（除 activate 幂等回执）转发完整路由。
@@ -89,9 +89,7 @@ async fn gate_activate(
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let token = headers
-        .get("x-launcher-token")
-        .and_then(|v| v.to_str().ok());
+    let token = headers.get("x-update-token").and_then(|v| v.to_str().ok());
     match deps.gate.verify(Some(remote), token) {
         Ok(()) => {
             deps.gate.activate();
@@ -134,7 +132,10 @@ async fn forward_when_ready(
     req: Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> Response {
-    if req.uri().path() != "/api/system/activate" {
+    if !matches!(
+        req.uri().path(),
+        "/api/system/activate" | "/api/system/commit"
+    ) {
         if let Some(full) = shared.get() {
             // Router 的 Service Error = Infallible
             return full.oneshot(req).await.unwrap_or_else(|e| match e {});
@@ -164,12 +165,29 @@ pub fn build_gate_router(
         .route("/health/ready", get(gate_health_ready))
         .route("/health/shutdown", get(gate_shutdown_state))
         .route("/api/system/activate", post(gate_activate))
+        .route("/api/system/commit", post(commit_update))
         .fallback(gate_not_ready)
         .layer(axum::middleware::from_fn_with_state(
             shared,
             forward_when_ready,
         ))
         .with_state(deps)
+}
+
+async fn commit_update(
+    State(deps): State<GateDeps>,
+    headers: axum::http::HeaderMap,
+    remote: Option<ConnectInfo<SocketAddr>>,
+) -> Response {
+    let token = headers.get("X-Update-Token").and_then(|v| v.to_str().ok());
+    if deps.gate.verify(remote.map(|v| v.0), token).is_err() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if crate::update::gate::stage_str() != "ready" {
+        return StatusCode::CONFLICT.into_response();
+    }
+    crate::update::barrier::resume();
+    Json(serde_json::json!({"committed":true})).into_response()
 }
 
 #[cfg(test)]
@@ -294,7 +312,7 @@ mod tests {
                 .method("POST")
                 .uri("/api/system/activate");
             if let Some(t) = token {
-                b = b.header("x-launcher-token", t);
+                b = b.header("x-update-token", t);
             }
             with_remote(b, "127.0.0.1:51000")
                 .body(Body::empty())
@@ -323,7 +341,7 @@ mod tests {
             HttpRequest::builder()
                 .method("POST")
                 .uri("/api/system/activate")
-                .header("x-launcher-token", "tok"),
+                .header("x-update-token", "tok"),
             "10.1.2.3:51000",
         )
         .body(Body::empty())
@@ -382,7 +400,7 @@ mod tests {
             HttpRequest::builder()
                 .method("POST")
                 .uri("/api/system/activate")
-                .header("x-launcher-token", "tok"),
+                .header("x-update-token", "tok"),
             "127.0.0.1:51000",
         )
         .body(Body::empty())

@@ -72,6 +72,10 @@ if ($webVersion -ne $cargoVersion) {
     $errors.Add("web/package.json version '$webVersion' != Cargo package.version '$cargoVersion'")
 }
 
+$updaterText = Get-Content -LiteralPath (Join-Path $RepoRoot 'updater/Cargo.toml') -Raw
+$updaterVersion = [regex]::Match($updaterText, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+if ($updaterVersion -ne $cargoVersion) { $errors.Add("updater version '$updaterVersion' != '$cargoVersion'") }
+
 # ---- Optional: release tag ----
 if (-not [string]::IsNullOrWhiteSpace($Tag)) {
     $tagNorm = $Tag.Trim()

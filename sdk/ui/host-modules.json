@@ -92,5 +92,8 @@
   ],
   "workspace/plugin-messages": [
     "pluginMessageChannel"
+  ],
+  "console/frame-source": [
+    "frameSource"
   ]
 }

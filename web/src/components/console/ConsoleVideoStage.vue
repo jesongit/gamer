@@ -8,7 +8,7 @@
   >
     <!-- 实时来源（WebRTC）：媒体模式下仅隐藏显示，流与设备会话保持不动（来源切换不拆连接） -->
     <video
-      v-show="!(stage && stage.kind === 'media')"
+      v-show="!browserPreview && !(stage && stage.kind === 'media')"
       ref="videoElement"
       autoplay
       playsinline
@@ -22,6 +22,9 @@
       @mouseleave="props.onVideoMouseLeave"
     ></video>
 
+    <img v-if="browserPreview?.src" v-show="stage?.kind !== 'media'" :src="browserPreview.src" alt="浏览器目标画面" draggable="false"
+      class="video-stream" @load="browserLoaded" @mousedown="props.onMouseDown" @mousemove="props.onMouseMove"
+      @mouseup="props.onMouseUp" @wheel.prevent="props.onWheel" @contextmenu.prevent @mouseleave="props.onVideoMouseLeave" />
     <!-- 视频手势只控制本地播放；框选/取点模式优先转交舞台处理器，不向设备发输入。 -->
     <video
       v-if="stage && stage.kind === 'media' && stage.mediaSrc"
@@ -98,7 +101,7 @@
     <!-- 实时连接覆盖层：视频来源模式不需要设备连接，不显示 -->
     <div class="v-overlay" v-if="!props.connected && !(stage && stage.kind === 'media')">
       <div class="v-connecting" v-if="props.connecting">
-        <span class="dot run"></span> 正在建立 WebRTC 连接…
+        <span class="dot run"></span> 正在建立画面连接…
       </div>
       <div v-else>
         <div class="v-empty-icon"><UiIcon name="phone" /></div>
@@ -122,7 +125,7 @@
     <input class="mc-seek" type="range" min="0" :max="stage.duration || 0" step="0.001"
       :value="stage.currentTime || 0" :disabled="!stage.stageReady" aria-label="视频播放位置"
       :style="{ '--progress': `${stage.duration ? Math.min(100, stage.currentTime / stage.duration * 100) : 0}%` }"
-      @input="stage.seek($event.target.value)" />
+      @pointerdown="beginSeekDrag" @input="stage.seek($event.target.value)" />
     <div class="media-control-row">
       <button class="mc-btn mc-play" type="button" :disabled="!stage.stageReady" :title="stage.playing ? '暂停' : '播放'"
         :aria-label="stage.playing ? '暂停' : '播放'" @click="stage.togglePlay()"><UiIcon :name="stage.playing ? 'pause' : 'play'" /></button>
@@ -145,7 +148,7 @@
 
 <script setup>
 import UiIcon from '../ui/UiIcon.vue'
-import { onMounted, ref, watch } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { useMediaGestures } from './useMediaGestures'
 import { useMediaKeyboard } from './useMediaKeyboard'
 
@@ -159,6 +162,8 @@ const props = defineProps({
   // playing/currentTime/duration/timeText/... 与动作（togglePlay/seek/stepFrames/
   // setRate/onMediaPick/backToLive）均来自同一个 Stage 控制器。
   stage: { type: Object, default: null },
+  browserPreview: { type: Object, default: null },
+  onBrowserLoaded: { type: Function, default: null },
   showHit: { type: Boolean, default: false },
   hitMiss: { type: Boolean, default: false },
   hitStyle: { type: Object, default: () => ({}) },
@@ -182,6 +187,8 @@ const props = defineProps({
   fullscreen: { type: Function, required: true },
 })
 
+function browserLoaded(event) { emit('video-mounted', event.target); props.onBrowserLoaded?.(event) }
+watch(() => props.browserPreview, value => { if (!value) emit('video-mounted', videoElement.value) })
 const gestures = useMediaGestures(props)
 const playerRoot = ref(null)
 const mediaKeys = useMediaKeyboard({
@@ -200,6 +207,36 @@ function focusMediaPlayer(event) {
   playerRoot.value?.focus({ preventScroll: true })
   event.stopPropagation()
 }
+let seekDrag = null
+function beginSeekDrag(event) {
+  if (event.button !== 0 || props.stage?.kind !== 'media') return
+  seekDrag = { pointerId: event.pointerId, element: event.currentTarget }
+}
+function finishSeekDrag(event) {
+  if (!seekDrag || event.pointerId !== seekDrag.pointerId) return
+  const { element } = seekDrag
+  seekDrag = null
+  // A native range drag can end outside the control without producing a click.
+  // Wait for dispatch to finish, and never steal focus from another control.
+  queueMicrotask(() => {
+    if (props.stage?.kind === 'media' && element.isConnected && document.activeElement === element) {
+      playerRoot.value?.focus({ preventScroll: true })
+    }
+  })
+}
+function cancelSeekDrag() { seekDrag = null }
+onMounted(() => {
+  window.addEventListener('pointerup', finishSeekDrag, true)
+  window.addEventListener('pointercancel', cancelSeekDrag, true)
+  window.addEventListener('blur', cancelSeekDrag)
+})
+onUnmounted(() => {
+  cancelSeekDrag()
+  window.removeEventListener('pointerup', finishSeekDrag, true)
+  window.removeEventListener('pointercancel', cancelSeekDrag, true)
+  window.removeEventListener('blur', cancelSeekDrag)
+})
+watch(() => [props.stage?.kind, props.stage?.mediaId], cancelSeekDrag)
 function toggleMediaFullscreen() {
   if (document.fullscreenElement) document.exitFullscreen?.()
   else videoWrap.value?.parentElement?.requestFullscreen?.()

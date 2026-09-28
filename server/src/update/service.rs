@@ -19,7 +19,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::controller::{Capabilities, UpdateController};
-use super::ipc::{LastErrorCodeMessage, LauncherUpdateStatus, UpdateError};
+use super::ipc::{LastErrorCodeMessage, UpdateError, UpdateStatus};
 use super::model::{admit, Admission, InstallBlocking, UpdateAction, UpdateErrorCode, UpdateState};
 use super::policy::{PolicyStore, PolicyValidationError, UpdatePolicy};
 use super::workload::Workload;
@@ -54,13 +54,13 @@ impl UpdateTxn {
 /// 状态缓存：launcher journal 的最近一次快照 + 状态最后变更时间
 #[derive(Default)]
 struct StatusCache {
-    status: LauncherUpdateStatus,
+    status: UpdateStatus,
     updated_at: Option<String>,
     last_refresh: Option<std::time::Instant>,
 }
 
 impl StatusCache {
-    fn same_state(a: &LauncherUpdateStatus, b: &LauncherUpdateStatus) -> bool {
+    fn same_state(a: &UpdateStatus, b: &UpdateStatus) -> bool {
         a.state == b.state
             && a.detail == b.detail
             && a.update_id == b.update_id
@@ -79,6 +79,8 @@ pub type WorkloadProvider = Arc<dyn Fn() -> Workload + Send + Sync>;
 pub const NOT_MANAGED_MESSAGE: &str = "当前部署模式不受升级器托管（直跑模式请手动替换程序）";
 
 pub struct UpdateService {
+    apply_requested: AtomicBool,
+    install_guard: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     controller: Arc<dyn UpdateController>,
     policy: Arc<PolicyStore>,
     txn: Arc<UpdateTxn>,
@@ -89,6 +91,68 @@ pub struct UpdateService {
 }
 
 impl UpdateService {
+    pub fn apply_requested(&self) -> bool {
+        self.apply_requested.load(Ordering::SeqCst)
+    }
+    pub fn cancel_apply(&self) -> Result<(), UpdateError> {
+        if self.txn.is_active() || super::barrier::paused() {
+            return Err(UpdateError::new(
+                UpdateErrorCode::UpdateBusy,
+                "已开始安装，无法取消",
+            ));
+        }
+        self.set_apply_requested(false)
+    }
+    pub fn set_apply_requested(&self, requested: bool) -> Result<(), UpdateError> {
+        if let Some(path) = apply_request_path() {
+            let result = if requested {
+                std::fs::write(&path, b"requested")
+            } else {
+                match std::fs::remove_file(&path) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    other => other,
+                }
+            };
+            result.map_err(|e| {
+                UpdateError::new(UpdateErrorCode::UpdaterUnavailable, e.to_string())
+            })?;
+        }
+        self.apply_requested.store(requested, Ordering::SeqCst);
+        Ok(())
+    }
+    pub async fn request_apply(&self) -> Result<Value, UpdateError> {
+        let status = self.refresh(true).await?;
+        if !self.managed() {
+            return Err(UpdateError::new(
+                UpdateErrorCode::UpdateNotManaged,
+                NOT_MANAGED_MESSAGE,
+            ));
+        }
+        if !matches!(
+            status.state,
+            Some(
+                UpdateState::Available
+                    | UpdateState::Staged
+                    | UpdateState::Downloading
+                    | UpdateState::Waiting
+            )
+        ) {
+            return Err(UpdateError::new(
+                UpdateErrorCode::UpdateNotReady,
+                "请先检查可用更新",
+            ));
+        }
+        self.set_apply_requested(true)?;
+        Ok(accepted_json(
+            status.update_id.as_deref().unwrap_or(""),
+            status.state.unwrap_or(UpdateState::Waiting),
+        ))
+    }
+    pub fn with_install_guard(mut self, guard: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
+        self.install_guard = Some(guard);
+        self
+    }
+
     pub fn new(
         controller: Arc<dyn UpdateController>,
         policy: Arc<PolicyStore>,
@@ -97,6 +161,8 @@ impl UpdateService {
         db: Db,
     ) -> Self {
         Self {
+            apply_requested: AtomicBool::new(apply_request_path().is_some_and(|p| p.is_file())),
+            install_guard: None,
             controller,
             policy,
             txn,
@@ -149,8 +215,8 @@ impl UpdateService {
     }
 
     /// 从 controller 拉一次 launcher journal 并入缓存。通道不通时保留缓存并
-    /// 返回 Err（GET 走缓存降级展示；动作端点把 Err 映射 502 launcher_unreachable）
-    async fn refresh(&self, force: bool) -> Result<LauncherUpdateStatus, UpdateError> {
+    /// 返回 Err（GET 走缓存降级展示；动作端点把 Err 映射 502 updater_unavailable）
+    async fn refresh(&self, force: bool) -> Result<UpdateStatus, UpdateError> {
         {
             let cache = self.cache.lock().unwrap();
             if !force
@@ -162,6 +228,15 @@ impl UpdateService {
             }
         }
         let status = self.controller.status().await?;
+        if status.last_error.is_some()
+            && matches!(
+                status.state,
+                Some(UpdateState::Failed | UpdateState::Staged | UpdateState::Idle)
+            )
+        {
+            self.txn.end();
+            super::barrier::resume();
+        }
         let mut cache = self.cache.lock().unwrap();
         if !StatusCache::same_state(&cache.status, &status) || cache.updated_at.is_none() {
             cache.updated_at = Some(now_rfc3339());
@@ -180,13 +255,23 @@ impl UpdateService {
         };
         let policy = self.policy.get().await;
         let updated_at = self.cache.lock().unwrap().updated_at.clone();
-        status_json(&status, &policy, &updated_at.unwrap_or_else(now_rfc3339))
+        {
+            let mut body = status_json(&status, &policy, &updated_at.unwrap_or_else(now_rfc3339));
+            body["apply_requested"] = json!(self.apply_requested());
+            body
+        }
     }
 
     // ---------- 动作端点（受理路径） ----------
 
     /// POST check（幂等，202 形态）
     pub async fn request_check(&self) -> Result<Value, UpdateError> {
+        if self.apply_requested() {
+            return Err(UpdateError::new(
+                UpdateErrorCode::UpdateBusy,
+                "已预约更新，请先取消预约再检查",
+            ));
+        }
         self.request_long_op(UpdateAction::Check, Op::Check).await
     }
 
@@ -268,6 +353,14 @@ impl UpdateService {
         // 单事务门禁：两 install 只有一个取得（§7 update_busy / §11.4）
         if !self.txn.try_begin() {
             return Err(UpdateError::new(UpdateErrorCode::UpdateBusy, BUSY_MESSAGE));
+        }
+
+        if self.install_guard.as_ref().is_some_and(|guard| !guard()) {
+            self.txn.end();
+            return Err(UpdateError::new(
+                UpdateErrorCode::UpdateNotReady,
+                "仍有活动运行、录制或媒体输出，请结束后更新",
+            ));
         }
 
         // 状态机置 installing + 审计日志（prepare_install 之前；SYS-006）
@@ -399,6 +492,7 @@ impl InstallBackground {
                     .await;
             }
             Err(e) => {
+                super::barrier::resume();
                 self.txn.end();
                 let _ = self
                     .db
@@ -454,17 +548,14 @@ fn code_default_message(code: UpdateErrorCode) -> &'static str {
 
 /// `GET /api/system/update` 契约体装配（纯函数；fixture 键集比对直接驱动）。
 /// launcher 给出的 detail 若越出 §5.2 允许集，回退到该态缺省驻留值。
-pub fn status_json(
-    status: &LauncherUpdateStatus,
-    policy: &UpdatePolicy,
-    updated_at: &str,
-) -> Value {
+pub fn status_json(status: &UpdateStatus, policy: &UpdatePolicy, updated_at: &str) -> Value {
     let state = status.state.unwrap_or(UpdateState::Idle);
     let detail = match &status.detail {
         Some(d) if state.allows_detail(d) => d.clone(),
         _ => default_detail(state).to_string(),
     };
     json!({
+        "apply_requested": false,
         "state": state.as_str(),
         "detail": detail,
         "update_id": status.update_id.clone().map(Value::from).unwrap_or(Value::Null),
@@ -503,4 +594,9 @@ pub fn error_json(err: &UpdateError) -> Value {
 
 pub fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+fn apply_request_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("GAMER_INSTALL_ROOT")
+        .map(|p| std::path::PathBuf::from(p).join("state/apply-requested"))
 }

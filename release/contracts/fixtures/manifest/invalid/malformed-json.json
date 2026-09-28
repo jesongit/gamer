@@ -1,11 +1,11 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "product" "gamebot",
   "release": {
     "version": "0.2.0",
     "channel": "stable",
     "published_at": "2026-08-31T00:00:00Z",
-    "minimum_launcher_version": "0.1.0",
+    "minimum_updater_version": "0.1.0",
     "minimum_upgrade_version": "0.1.0",
     "data_schema": 1,
     "rollback_floor": 1,

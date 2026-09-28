@@ -4,8 +4,12 @@
   "request": {
     "method": "GET",
     "path": "/api/system/update",
-    "headers": { "Accept": "application/json" },
-    "cookies": ["gb_session=<会话 Cookie>"],
+    "headers": {
+      "Accept": "application/json"
+    },
+    "cookies": [
+      "gb_session=<会话 Cookie>"
+    ],
     "body": null
   },
   "response": {
@@ -24,11 +28,15 @@
       "progress": null,
       "policy": {
         "strategy": "notify",
-        "maintenance_window": { "start": "02:00", "end": "06:00" },
+        "maintenance_window": {
+          "start": "02:00",
+          "end": "06:00"
+        },
         "freeze_window_minutes": 30
       },
       "last_error": null,
-      "updated_at": "2026-08-31T12:00:00Z"
+      "updated_at": "2026-08-31T12:00:00Z",
+      "apply_requested": false
     }
   }
 }

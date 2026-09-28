@@ -1346,7 +1346,7 @@ async fn architecture_guard_bare_core_serves_full_base_api_with_zero_extensions(
         &guard.app,
         &cookie,
         "/api/packages",
-        serde_json::json!({"id": "guard.pkg"}),
+        serde_json::json!({"id": "guard.pkg", "targets":{"android":{"packages":["*"]}}}),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
@@ -1498,7 +1498,7 @@ async fn architecture_guard_isolation_yaml_task_survives_extension_absence_and_r
         &guard.app,
         &cookie,
         "/api/packages",
-        serde_json::json!({"id": "com.guard.app"}),
+        serde_json::json!({"id": "com.guard.app", "targets":{"android":{"packages":["*"]}}}),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");

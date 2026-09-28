@@ -12,7 +12,7 @@ cd assets
 sha256sum -c SHA256SUMS.txt
 ```
 
-`SHA256SUMS.txt` 包含 12 个内容资产：full/app/adb/ffmpeg/scrcpy-server/launcher/official-plugins/licenses 共 8 个 ZIP、独立启动器 EXE、版本化清单 JSON、固定入口 `gamer-release.json`、CycloneDX SBOM。加上校验和文件，下载目录共 13 个文件。
+`SHA256SUMS.txt` 包含 10 个内容资产：full/app/adb/ffmpeg/scrcpy-server/official-plugins/licenses 共 7 个 ZIP、版本化清单 JSON、固定入口 `gamer-release.json`、CycloneDX SBOM。加上校验和文件，下载目录共 11 个文件。
 
 ```powershell
 node release/contracts/validate-manifest.mjs check assets/<v>.json --expect-current-version <v> --expect-channel stable
@@ -20,9 +20,9 @@ Expand-Archive assets/Gamer-<v>-windows-x64-full.zip -DestinationPath pkg
 node release/contracts/validate-manifest.mjs check pkg/manifests/<v>.json --expect-current-version <v> --expect-channel stable
 ```
 
-发布级、固定入口、包内清单必须逐字节一致；app 与所有组件 ZIP 必须匹配清单中的 size/SHA256；full 包内每个文件都必须列入并匹配包内 SHA256SUMS。独立启动器及 full 包启动器应匹配 launcher 组件的文件哈希。
+发布级、固定入口、包内清单必须逐字节一致；app 与所有组件 ZIP 必须匹配清单中的 size/SHA256；full 包内每个文件都必须列入并匹配包内 SHA256SUMS。full 包根入口 `Gamer.exe` 应与应用归档中的服务端程序逐字节一致。
 
-`tools/verify-external-release.ps1` 执行下载资产校验与启动器探针；`release/packaging/verify-sbom.ps1 -SbomPath <sbom> -ExpectedVersion <v>` 校验 SBOM 与锁定依赖。
+`tools/verify-external-release.ps1` 执行下载资产校验与便携应用启动冒烟；`release/packaging/verify-sbom.ps1 -SbomPath <sbom> -ExpectedVersion <v>` 校验 SBOM 与锁定依赖。
 
 ## 离线回归
 

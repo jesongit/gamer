@@ -488,6 +488,15 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - 直播姬的第三方推流服务器地址不等于「多媒体」素材地址：需要直播姬混音时，使用 Gamer 生成的本机 HLS 拉流地址作为素材，开播仍在直播姬完成。
 - scrcpy 静态画面可能不再出视频帧，直接封装 HLS 会停止更新分片；直播输出应持续解码并按输出时钟重复已解码画面，不重放 P 帧破坏 H.264 参考链。
 - Windows 用户目录下的 worktree 会让 Cargo 读取祖先 `.cargo/config.toml`，旧镜像可能缺少锁定的 wasmtime 版本并诱发无关降级；使用工作树实际盘符路径和独立 CARGO_HOME 连接官方索引，保留既有 Cargo.lock 版本。
+
+- Windows CDP 资料目录重启后 Cookie 丢失：`canonicalize` 的 `\\?\` 路径前缀会影响 Chrome/Edge Cookie 持久化，传给 `--user-data-dir` 前转换为普通绝对路径，并在关闭时等待浏览器刷新资料。
+- 插件固定 gitlink 尚未推送时 worktree 的 submodule 初始化会报找不到提交：从已有本地插件仓获取该精确提交，不能改为远端最新分支以绕过。
+- 本机 Cargo 镜像缺少锁定的 Wasmtime 48.0.1 时无法解析依赖：仅对当前命令覆盖镜像到 crates.io，不修改全局配置或擅自降低锁定版本。
+
+- CDP 连续返回相同 PNG 时，仅比较图片 URL 会在首次解码完成前开放控制或让切换中的旧图获得新坐标身份；必须同时校验实际已显示的图片，来源改变后重新等待 load，并使错误/断线后的迟到事件失效。
+
+- 独立测试 config.toml 缺少 decode_frames/max_size/bitrate_mbps/fps 时服务会直接退出：这些字段没有反序列化默认值，应完整填写，不能只配置端口和路径。
+- 从 Windows 用户目录映射路径 fetch worktree 内的 submodule 报 not a git repository：相对 gitdir 按映射盘符解析到了错误位置，改用实际盘符目录或 rev-parse --absolute-git-dir 返回的仓库路径。
 - Windows 启动器下载完退出但入口仍为旧版：helper 从待覆盖 exe 自身启动会锁住目标，失败 stderr 又被丢弃；从已校验的不可变组件运行 helper、记录失败并继续原清单，旧版需手动替换一次入口恢复。
 - eframe 0.36.2 首帧会强制显示显式隐藏的根窗口，随后隐藏产生闪窗；固定源码修正首帧显示条件，并用原生窗口可见性探针验证，不能只测应用层隐藏指令。
 

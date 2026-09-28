@@ -22,7 +22,7 @@ use serde::Deserialize;
 
 use super::common::{err_response, validate_text_field};
 use super::{ApiError, AppState};
-use crate::core::{AppContext, AppPackageId, DeviceId, RunPayload, RunRequest};
+use crate::core::{AppPackageId, RunPayload, RunRequest};
 use crate::timer_core::{TimerCompletion, TimerRunnerError};
 
 /// POST /api/runs 请求形态（plan §11.3）。
@@ -59,6 +59,10 @@ pub(super) async fn api_dispatch_run(
             return ApiError::bad_request("payload 必须是对象").into_response();
         }
     }
+    if !crate::targets::is_browser(&req.device_id) && st.devices.snapshot(&req.device_id).is_none()
+    {
+        return ApiError::not_found("设备不存在").into_response();
+    }
     // Package 上下文（资源解析域）：显式 content_package 优先，缺省按
     // entrypoint 首段约定解析
     let content_package = match &req.content_package {
@@ -79,39 +83,10 @@ pub(super) async fn api_dispatch_run(
         ))
         .into_response();
     };
-    // Android 包上下文（app.start/app.stop 的缺省目标）只来自设备配置的
-    // pkg，绝不回退到 Package id——两个命名空间严格分离（plan §2.1/§16）。
-    // 设备不存在 / 未配置 pkg 时明确拒绝，而不是让 app.start 在运行期拿一个
-    // 语义错乱的包名失败。
-    let Some((device, _, _)) = st.devices.snapshot(&req.device_id) else {
-        return ApiError::not_found(format!(
-            "设备不存在: {}（运行目标必须先登记设备）",
-            req.device_id
-        ))
-        .into_response();
-    };
-    let android_package = device
-        .pkg
-        .as_deref()
-        .map(str::trim)
-        .filter(|pkg| !pkg.is_empty())
-        .map(str::to_string);
-    let Some(android_package) = android_package else {
-        return ApiError::bad_request(format!(
-            "设备 {} 未配置 Android 应用包名（pkg）：app.start 的缺省目标来自设备配置，与资源所属配置相互独立",
-            req.device_id
-        ))
-        .into_response();
-    };
-    let device_id = match DeviceId::new(&req.device_id) {
-        Ok(id) => id,
+    let app = match crate::targets::app_context(&st.devices, &req.device_id, Some(content)) {
+        Ok(app) => app,
         Err(error) => return ApiError::bad_request(error.to_string()).into_response(),
     };
-    let android = match crate::core::AndroidPackageName::new(&android_package) {
-        Ok(name) => name,
-        Err(error) => return ApiError::bad_request(error.to_string()).into_response(),
-    };
-    let app = AppContext::new(device_id, android, Some(content));
     let request = match RunRequest::for_app(
         app,
         req.runner_id.clone(),

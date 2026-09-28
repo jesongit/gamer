@@ -83,12 +83,13 @@ impl Default for HostApiCatalog {
                 .map(|domain| {
                     // Input 1.1 adds match-center taps and resolves relative input
                     // against the current device frame on every native call.
-                    let supported =
-                        if matches!(domain, HostApiDomain::Input | HostApiDomain::Resource) {
-                            Version::new(1, 1, 0)
-                        } else {
-                            version.clone()
-                        };
+                    let supported = if matches!(domain, HostApiDomain::Input) {
+                        Version::new(1, 2, 0)
+                    } else if matches!(domain, HostApiDomain::Resource | HostApiDomain::Ui) {
+                        Version::new(1, 1, 0)
+                    } else {
+                        version.clone()
+                    };
                     (domain, supported)
                 })
                 .collect(),

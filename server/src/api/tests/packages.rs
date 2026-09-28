@@ -29,7 +29,8 @@ fn resource_url(pkg: &str, plugin: &str, path: &str) -> String {
     format!("/api/packages/{pkg}/plugins/{plugin}/resources/{path}")
 }
 
-async fn create_package(t: &TestApp, sid: &str, body: serde_json::Value) -> HttpResponse<Body> {
+async fn create_package(t: &TestApp, sid: &str, mut body: serde_json::Value) -> HttpResponse<Body> {
+    if body.get("targets").is_none() { body["targets"] = serde_json::json!({"android":{"packages":["*"]}}); }
     post_json(t, sid, "/api/packages", body).await
 }
 
@@ -1188,6 +1189,8 @@ async fn package_import_with_media_restores_bytes_and_releases_refs_on_delete() 
     };
     let package_toml = br#"id = "official.media.demo"
 version = "1.0.0"
+[targets.android]
+packages = ["*"]
 "#;
 
     // —— 含素材导入：201，media 摘要 imported=1 ——

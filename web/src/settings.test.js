@@ -91,7 +91,7 @@ describe('Settings：三卡片挂载（WEB-005）', () => {
 
     // SystemInfoCard：版本与部署模式来自 /api/system/info
     expect(w.text()).toContain('Gamer 0.2.0')
-    expect(w.text()).toContain('便携托管（launcher）')
+    expect(w.text()).toContain('便携版')
     // UpdateStatusCard：staged 状态标签
     expect(w.get('[data-testid="state-tag"]').text()).toBe('已就绪待安装')
     // 策略卡：表单回填 notify / 02:00 / 06:00 / 30，未保存前无「已保存」note
@@ -202,7 +202,7 @@ describe('Settings：能力降级与动作流', () => {
       },
     })
 
-    for (const a of ['check', 'download', 'install', 'rollback']) {
+    for (const a of ['check', 'install', 'rollback']) {
       expect(w.find(`[data-action="${a}"]`).attributes('disabled')).toBeDefined()
     }
     expect(w.text()).toContain('update_not_managed')
@@ -214,18 +214,18 @@ describe('Settings：能力降级与动作流', () => {
     w.unmount()
   })
 
-  it('check 被同步拒绝（launcher_unreachable 502）→ toast 显示契约错误文案', async () => {
+  it('check 被同步拒绝（updater_unavailable 502）→ toast 显示契约错误文案', async () => {
     vi.useFakeTimers()
     const w = await mountSettled({
       'GET /api/system/info': () => res(200, INFO),
       'GET /api/system/update': () => res(200, UPD),
-      'POST /api/system/update/check': () => res(502, { code: 'launcher_unreachable', message: 'ipc down', details: null }),
+      'POST /api/system/update/check': () => res(502, { code: 'updater_unavailable', message: 'ipc down', details: null }),
     })
 
     await w.get('[data-action="check"]').trigger('click')
     await flushPromises()
-    expect(document.querySelector('.toast-wrap').textContent).toContain('无法连接升级器')
-    expect(document.querySelector('.toast-wrap').textContent).toContain('launcher_unreachable')
+    expect(document.querySelector('.toast-wrap').textContent).toContain('更新服务暂不可用')
+    expect(document.querySelector('.toast-wrap').textContent).toContain('updater_unavailable')
     w.unmount()
   })
 
@@ -243,7 +243,7 @@ describe('Settings：能力降级与动作流', () => {
     w.unmount()
   })
 
-  it('安装完整流：确认弹窗 → 202 受理 → 断连容忍不误报失败 → 重连按新版本/boot_id 判定成功', async () => {
+  it.each(['available', 'staged'])('从 %s 一键更新：确认 → 202 → 断连容忍 → 新版本就绪', async (initialState) => {
     vi.useFakeTimers()
     let down = false
     const INFO_AFTER = {
@@ -253,12 +253,12 @@ describe('Settings：能力降级与动作流', () => {
     }
     const UPD_AFTER = { ...UPD, state: 'idle', detail: 'committed', candidate: null, progress: null }
     let infoBody = INFO
-    let updBody = UPD
+    let updBody = { ...UPD, state: initialState }
     let installCalls = 0
     const w = await mountSettled({
       'GET /api/system/info': () => (down ? Promise.reject(new TypeError('network down')) : res(200, infoBody)),
       'GET /api/system/update': () => (down ? Promise.reject(new TypeError('network down')) : res(200, updBody)),
-      'POST /api/system/update/install': () => {
+      'POST /api/system/update/apply': () => {
         installCalls++
         down = true // 安装协调器接管：服务即将重启，连接断开（断连是正常路径）
         return res(202, { update_id: 'upd-t1', state: 'installing' })
@@ -269,11 +269,11 @@ describe('Settings：能力降级与动作流', () => {
     await w.get('[data-action="install"]').trigger('click')
     expect(w.get('.modal-mask').text()).toContain('安装更新确认')
 
-    // 确认 → 202 受理 → 等待期弹窗保持打开，不显示任何失败
+    // 确认 → 202 受理 → 关闭弹窗，不阻塞继续工作或取消预约
     await w.get('[data-testid="confirm-btn"]').trigger('click')
     await flushPromises()
     expect(installCalls).toBe(1)
-    expect(w.get('[data-testid="confirm-btn"]').text()).toBe('提交中…')
+    expect(w.find('.modal-mask').exists()).toBe(false)
     expect(w.find('.modal-mask .err-box').exists()).toBe(false)
 
     // 断连轮询：两轮失败仍等待（有界重连，不判失败）
@@ -281,7 +281,7 @@ describe('Settings：能力降级与动作流', () => {
     await flushPromises()
     await vi.advanceTimersByTimeAsync(2000)
     await flushPromises()
-    expect(w.find('.modal-mask').exists()).toBe(true)
+    expect(w.find('.modal-mask').exists()).toBe(false)
 
     // 服务恢复：新版本 + 新 boot_id + idle/committed → 判定成功，弹窗关闭并刷新
     down = false

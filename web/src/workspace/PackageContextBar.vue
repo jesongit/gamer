@@ -44,10 +44,8 @@
         <span>版本</span>
         <input v-model="ctx.formModal.form.version" class="input mono" />
       </label>
-      <label class="field">
-        <span>Android 兼容目标（逗号分隔；`*` 或留空 = 通用配置）</span>
-        <input v-model="ctx.formModal.form.androidPackagesText" class="input mono" placeholder="* 或 com.miHoYo.hkrpg, com.HoYoverse.hkrpgoversea" spellcheck="false" />
-      </label>
+      <PackageTargetsEditor v-if="ctx.formModal.mode === 'create'" :form="ctx.formModal.form" :busy="ctx.addingTarget" @add-current="ctx.addCurrentFormTarget" />
+      <p v-else class="target-copy-hint">副本保留原配置的全部适用目标与资源，可在复制后进入详情编辑。</p>
       <p v-if="ctx.formModal.error" class="form-error">{{ ctx.formModal.error }}</p>
       <div class="modal-actions">
         <button v-if="ctx.formModal.mode === 'create'" class="btn" :disabled="ctx.formModal.submitting" @click="ctx.fillCurrentApp">填入当前应用</button>
@@ -68,7 +66,7 @@
         <dt>ID</dt><dd class="mono">{{ ctx.overwriteModal.summary.id }}</dd>
         <dt>名称</dt><dd>{{ ctx.overwriteModal.summary.name || '—' }}</dd>
         <dt>版本</dt><dd class="mono">{{ ctx.overwriteModal.summary.version || '—' }}</dd>
-        <dt>兼容目标</dt><dd class="mono">{{ ctx.overwriteModal.summary.androidTargets.join(', ') || '通用配置' }}</dd>
+        <dt>兼容目标</dt><dd class="mono">{{ [...ctx.overwriteModal.summary.androidTargets.map(p => `Android: ${p}`), ...(ctx.overwriteModal.summary.webUrlPrefixes || []).map(p => `网页: ${p}`)].join('；') || '未声明适用目标' }}</dd>
       </dl>
       <!-- plan §36：缺 Required Plugin 只黄条提示，允许继续导入（安装插件后自动恢复） -->
       <div v-if="ctx.overwriteModal.missingRequired.length" class="missing-required-warning" role="alert">
@@ -181,6 +179,7 @@ import { useToast, devicesData } from '../store'
 import { usePackageContext, formatBytes } from '../composables/usePackageContext'
 import UiIcon from '../components/ui/UiIcon.vue'
 import PackageDetailModal from './PackageDetailModal.vue'
+import PackageTargetsEditor from './PackageTargetsEditor.vue'
 
 const props = defineProps({ context: { type: Object, default: null }, compact: Boolean, management: Boolean, dialogs: { type: Boolean, default: true } })
 const toast = useToast()

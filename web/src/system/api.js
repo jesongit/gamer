@@ -32,7 +32,7 @@ export const SYSTEM_ERRORS = Object.freeze({
   artifact_invalid:         { status: 422, retryable: true,  hint: '下载产物完整性校验失败，可重新下载修复传输损坏' },
   insufficient_space:       { status: 507, retryable: true,  hint: '磁盘空间不足，清理空间后重试' },
   schema_incompatible:      { status: 422, retryable: false, hint: '候选版本的数据 schema 超出当前程序可升级范围，需等待兼容的新版本' },
-  launcher_unreachable:     { status: 502, retryable: true,  hint: '无法连接升级器（launcher 未运行或 IPC 不可用），恢复后有界重试' },
+  updater_unavailable:     { status: 502, retryable: true,  hint: '更新服务暂不可用，恢复后重试' },
   rollback_unavailable:     { status: 409, retryable: false, hint: '没有可用的自动回滚点（自动回滚仅承诺提交之前的事务）' },
   manual_recovery_required: { status: 409, retryable: false, hint: '升级与自动回滚均失败，必须按维护手册人工恢复' },
 })
@@ -130,7 +130,8 @@ export const systemApi = {
    * 返回 {accepted:true, update_id, state}；调用方不等待安装完成——期间 HTTP 服务会重启、
    * 连接会断开，断连不得判失败，重连后以 app.version/boot_id + update.state 判定结果。
    */
-  installUpdate: async () => requireAccepted(await reqJson('POST', '/api/system/update/install', {})),
+  cancelUpdate: () => reqJson('DELETE', '/api/system/update/apply'),
+  installUpdate: async () => requireAccepted(await reqJson('POST', '/api/system/update/apply', {})),
 
   /** §4 POST rollback：202 受理后台回滚（非幂等；并发第二个 409 update_busy） */
   rollbackUpdate: async () => requireAccepted(await reqJson('POST', '/api/system/update/rollback', {})),

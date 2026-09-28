@@ -1,10 +1,10 @@
 # =============================================================================
-# Gamer 配置模板（launcher 托管模式 / REL-002 Full 包）
+# Gamer 配置模板（Gamer 托管模式 / REL-002 Full 包）
 # =============================================================================
-# 本文件由 Gamer 便携包携带，运行时由 gamer-launcher.exe 管理：
+# 本文件由 Gamer 便携包携带，运行时由 Gamer.exe 管理：
 # GAMER_APP_DIR / GAMER_DATA_DIR / GAMER_ADB_PATH / GAMER_FFMPEG_PATH /
-# GAMER_SCRCPY_SERVER 等绝对路径由 launcher 启动 server 时注入环境变量，
-# 优先级高于本文件同名字段——标注「launcher 注入」的条目留空即可，无需手改。
+# GAMER_SCRCPY_SERVER 等绝对路径由 Gamer 启动 server 时注入环境变量，
+# 优先级高于本文件同名字段——标注「Gamer 注入」的条目留空即可，无需手改。
 # 字段与 server/src/config.rs 一一对应；文件解析失败 / 校验不过进程直接退出。
 # 完整字段说明见仓库 server/config.example.toml 与 server/src/config.rs。
 
@@ -14,14 +14,14 @@ port = 8443
 local_only = false
 
 # 数据目录（SQLite、模板图片、脚本按应用分区存放于其下）。
-# 相对路径相对本配置文件所在目录解析；launcher 托管模式会注入绝对路径覆盖。
+# 相对路径相对本配置文件所在目录解析；Gamer 托管模式会注入绝对路径覆盖。
 data_dir = "./data"
 
-# 应用资产根目录（jar / web-dist 解析基准）——launcher 注入，无需配置
+# 应用资产根目录（jar / web-dist 解析基准）——Gamer 注入，无需配置
 # app_dir = ""
 
-# 外部工具路径：留空 = 由 launcher 注入绝对路径（runtime/ 下的 adb、ffmpeg 与
-# 版本目录内 assets/scrcpy-server.jar）。脱离 launcher 独立运行时才手填：
+# 外部工具路径：留空 = 由 Gamer 注入绝对路径（runtime/ 下的 adb、ffmpeg 与
+# 版本目录内 assets/scrcpy-server.jar）。脱离 Gamer 独立运行时才手填：
 #   adb_path / ffmpeg_path: PATH 内命令名或绝对路径；可执行性启动探测只告警不阻断
 #   scrcpy_server: 启动必检，指向的 jar 缺失直接退出
 adb_path = ""
@@ -60,4 +60,4 @@ session_abs_secs = 43200   # 会话绝对有效期秒 [60, 2592000]
 session_idle_secs = 7200   # 会话空闲有效期秒 [60, 604800]
 login_max_fails = 10       # 登录限流失败次数上限 [1, 1000]
 login_window_secs = 300    # 限流滑动窗口秒 [1, 86400]
-password_hash = ""         # Argon2id PHC（launcher 托管模式：首次启动后设置）
+password_hash = ""         # Argon2id PHC（Gamer 托管模式：首次启动后设置）

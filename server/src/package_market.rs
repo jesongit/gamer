@@ -60,6 +60,8 @@ pub(crate) struct PackageEntry {
     pub version: String,
     pub author: String,
     pub android_targets: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub web_url_prefixes: Vec<String>,
     pub required_plugins: Vec<String>,
     pub optional_plugins: Vec<String>,
     pub asset_name: String,
@@ -76,6 +78,7 @@ impl PackageEntry {
             version: manifest.version,
             author: manifest.author.unwrap_or_default(),
             android_targets: manifest.android_targets,
+            web_url_prefixes: manifest.web_url_prefixes,
             required_plugins: manifest
                 .plugins
                 .iter()
@@ -121,9 +124,13 @@ impl PackageEntry {
         ensure!(
             self.name.len() <= 1024
                 && self.author.len() <= 1024
-                && self.android_targets.len() <= 128,
+                && self.android_targets.len() <= 128
+                && self.web_url_prefixes.len() <= 128,
             "配置包元数据超限"
         );
+        for prefix in &self.web_url_prefixes {
+            crate::resources::validate_web_prefix(prefix)?;
+        }
         for id in self.required_plugins.iter().chain(&self.optional_plugins) {
             validate_scope_id("plugin", id)?;
         }
@@ -456,6 +463,7 @@ mod tests {
             .create_package(crate::resources::PackageInput {
                 id: "demo".into(),
                 version: Some("1.0.0".into()),
+                android_targets: vec!["*".into()],
                 ..Default::default()
             })
             .unwrap();

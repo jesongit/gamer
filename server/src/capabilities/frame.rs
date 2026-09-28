@@ -26,12 +26,30 @@ impl FrameSize {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct FrameStamp {
+    pub target: String,
+    pub epoch: String,
+    pub revision: u64,
+}
+
 /// Frame acquisition and metadata boundary.
 ///
 /// `latest` and `capture` return handles only. A concrete adapter owns decode,
 /// retention, and screenshot encoding policy.
 #[async_trait]
 pub trait FrameService: Send + Sync {
+    /// Size and identity read together, for converting literal relative coordinates.
+    async fn coordinate_space(
+        &self,
+        device: &DeviceHandle,
+    ) -> CapabilityResult<(FrameSize, Option<FrameStamp>)> {
+        Ok((self.device_size(device).await?, None))
+    }
+    async fn stamp(&self, _frame: FrameHandle) -> CapabilityResult<Option<FrameStamp>> {
+        Ok(None)
+    }
+
     /// Current input/video coordinate space. Metadata only: do not decode a
     /// screenshot just to convert a relative tap or swipe to pixels.
     async fn device_size(&self, device: &DeviceHandle) -> CapabilityResult<FrameSize>;

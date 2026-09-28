@@ -244,6 +244,12 @@ pub(super) fn build_task(
         validate_text_field(preset_id, "preset_id", 255)?;
     }
     validate_schedule(registry, &req.schedule)?;
+    let browser = crate::targets::is_browser(req.app.device_id.as_str());
+    if browser == req.app.android_package.is_some() {
+        return Err(ApiError::bad_request(
+            "浏览器任务不得携带 Android 包名；Android 任务必须配置应用包名",
+        ));
+    }
     let enabled = req
         .enabled
         .or_else(|| existing.as_ref().map(|task| task.enabled))

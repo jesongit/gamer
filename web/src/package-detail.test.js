@@ -23,7 +23,7 @@ function detailRep(overrides = {}) {
   return {
     package: {
       id: 'com.demo', name: 'Demo', version: '1.2.3', author: 'alice', revision: 7,
-      targets: { android: { packages: ['com.miHoYo.hkrpg'] } },
+      targets: { android: { packages: ['com.miHoYo.hkrpg'] }, web: { url_prefixes: [] } },
       plugins: [
         { id: 'gamer-yaml', required: true },
         { id: 'gamer-keymap', required: false },
@@ -90,7 +90,7 @@ async function mountModal(ctx) {
 
 beforeEach(() => {
   packageStore.packages = [
-    { id: 'com.demo', name: 'Demo', version: '1.0.0', targets: { android: { packages: [] } } },
+    { id: 'com.demo', name: 'Demo', version: '1.0.0', targets: { android: { packages: [] }, web: { url_prefixes: [] } } },
   ]
   packageStore.currentPackageId = 'com.demo'
   packageStore.loaded = true
@@ -144,11 +144,11 @@ describe('PackageDetailModal（plan §18/§21/§37 + §17）', () => {
 
   it('0 targets 显示通用配置提示；兼容性检查不兼容 → 黄条 warning（不禁止）', async () => {
     const { api } = setup()
-    api.getPackage.mockResolvedValue(detailRep({ package: { ...detailRep().package, targets: { android: { packages: [] } } } }))
+    api.getPackage.mockResolvedValue(detailRep({ package: { ...detailRep().package, targets: { android: { packages: [] }, web: { url_prefixes: [] } } } }))
     const ctx = await makeCtx(api)
     const wrapper = await mountModal(ctx)
 
-    expect(wrapper.text()).toContain('通用配置，兼容所有应用')
+    expect(wrapper.text()).toContain('未声明适用目标')
 
     api.packageCompatibility.mockResolvedValueOnce({
       android_package: 'com.other.app', compatible: false, android_targets: [],
@@ -158,7 +158,7 @@ describe('PackageDetailModal（plan §18/§21/§37 + §17）', () => {
     await flushPromises()
 
     expect(api.packageCompatibility).toHaveBeenCalledWith('com.demo', 'com.other.app')
-    expect(wrapper.find('.compat-warning').text()).toContain('该应用不在配置声明的兼容列表中（仍可继续运行）')
+    expect(wrapper.find('.compat-warning').text()).toContain('目标不在配置声明的兼容列表中（仍可继续运行）')
 
     api.packageCompatibility.mockResolvedValueOnce({
       android_package: 'com.miHoYo.hkrpg', compatible: true, android_targets: ['com.miHoYo.hkrpg'],
@@ -201,7 +201,7 @@ describe('PackageDetailModal（plan §18/§21/§37 + §17）', () => {
       name: 'Demo',
       version: '2.0.0',
       author: 'alice',
-      targets: { android: { packages: ['com.A', 'com.B'] } },
+      targets: { android: { packages: ['com.A', 'com.B'] }, web: { url_prefixes: [] } },
       plugins: { 'gamer-yaml': true, 'gamer-keymap': false },
       expected_revision: 7,
     })
@@ -251,7 +251,7 @@ describe('PackageDetailModal（plan §18/§21/§37 + §17）', () => {
       name: 'Demo',
       version: '2.0.0',
       author: 'alice',
-      targets: { android: { packages: ['com.miHoYo.hkrpg'] } },
+      targets: { android: { packages: ['com.miHoYo.hkrpg'] }, web: { url_prefixes: [] } },
       plugins: { 'gamer-yaml': true, 'gamer-keymap': false },
       force: true,
     })

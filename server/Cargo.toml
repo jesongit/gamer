@@ -1,6 +1,6 @@
 [package]
 name = "gamer-server"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 description = "Gamer 游戏自动化助手服务端：scrcpy 设备控制 + WebRTC 推流 + 模板匹配 + YAML 自动化 + 定时任务"
 
@@ -85,3 +85,6 @@ tower = { version = "0.4", features = ["util"] }
 # V1 权威解释器：仅测试原生编译（生产执行走 WASM guest，同一份源码；
 # 计划 Phase 2：不为测试另写参考解释器）
 yaml-interp = { path = "../plugins/gamer-yaml/interpreter" }
+
+[target.'cfg(windows)'.dependencies]
+gamer-updater = { path = "../updater" }

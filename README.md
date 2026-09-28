@@ -21,13 +21,13 @@ Gamer 是一个通过浏览器操作 Android 设备的游戏自动化工具。�
 
 ### 下载 Windows 正式版
 
-正式发行版为 [Gamer 0.2.1](https://github.com/jesongit/gamer/releases/tag/v0.2.1)。可选择独立 `gamer-launcher.exe` 在线安装，或下载 `Gamer-0.2.1-windows-x64-full.zip` 离线安装。完整包带齐本体、启动器、ADB、FFmpeg/FFprobe、scrcpy 和首次可选的官方插件，不携带个人数据。文件用 HTTPS + SHA256 校验，不需要签名密钥。
+当前开发版采用直接启动方式：完整包解压后双击 `Gamer.exe`，准备好后自动打开浏览器。无需单独安装启动器；关闭网页后服务保留在托盘，托盘可重新打开工作台或退出。
 
-四款官方插件均为 0.1.0，自动化插件修复模板中心点击和相对坐标缩放，保存时检查已知引用类型。请先更新 Gamer 本体，再更新自动化插件；旧本体会拒绝安装要求 input 1.1 的新版插件。
+软件更新统一在「设置 → 软件更新」进行，点击「更新并重启」后自动下载、等待当前工作结束、备份、更新前后端及配套依赖并重启。页面检测到新版就绪后自动刷新；有未保存内容时提示先保存。安装失败会在放行新业务前恢复更新前快照。
 
-配置包发布插件要求 Gamer 0.2.1，下载配置不需要 gh 登录。默认配置源为 [gamer-packages](https://github.com/jesongit/gamer-packages)，也可添加自己的公开仓库。
+官方插件在插件页按需安装。软件更新同时升级已安装的配套官方插件，不会安装用户未选择的插件；权限扩展需要先在插件页确认。配置包保持独立的数据上下文。
 
-启动器安装在所在目录；已安装且无更新时收起到托盘并打开网页，有更新时显示“更新 / 取消”。完整包解压后仍需点击“安装”，将包内组件展开到运行目录。详细步骤见 [启动器快速上手](docs/guides/launcher-quickstart.md)。
+当前源码布局与历史公开发行包不同，不提供启动器迁移路径。使用说明见 [便携版与更新](docs/guides/UPDATE.md)。
 
 ### 从源码启动
 
@@ -74,25 +74,13 @@ pnpm --dir web install --frozen-lockfile
 
 ### 使用 Windows 完整包
 
-已有 Windows x64 完整包时，解压后双击 `gamer-launcher.exe` 即可进入启动流程；也可在解压目录执行：
+完整包解压后双击 `Gamer.exe`，无需安装 Rust、Node.js 或 pnpm。保留整个目录结构，`config/` 和 `data/` 存放个人配置与数据。不要用新包覆盖这两个目录。
 
-```powershell
-.\gamer-launcher.exe start
-```
-
-完整包携带运行依赖和前端产物，使用时无需安装 Rust、Node.js 或 pnpm。依赖检查、修复和状态查询入口为：
-
-```powershell
-.\gamer-launcher.exe doctor
-.\gamer-launcher.exe repair --probe
-.\gamer-launcher.exe status
-```
-
-安装细节以包内 `INSTALL.md` 为准。构包、发布及升级说明见 [发布手册](docs/guides/RELEASE.md) 和 [更新指南](docs/guides/UPDATE.md)。
+构包、发布及恢复说明见 [发布手册](docs/guides/RELEASE.md) 和 [更新指南](docs/guides/UPDATE.md)。
 
 ## 第一次使用
 
-1. **安装插件**：启动器首次安装时选择需要的官方插件，也可随后进入「插件」页安装或导入 `.gplugin`。插件页独立发现 [官方插件仓 Release](https://github.com/jesongit/gamer-plugins/releases)，网络失败时回退缓存和随包目录；安装或更新仍需确认权限，不自动覆盖已安装插件。安装成功后自动启用；新安装或更新 UI 后刷新页面。
+1. **安装插件**：进入「插件」页选择需要的官方插件，或导入 `.gplugin`。插件页独立发现 [官方插件仓 Release](https://github.com/jesongit/gamer-plugins/releases)，网络失败时回退缓存和随包目录；安装或更新仍需确认权限，不自动覆盖已安装插件。安装成功后自动启用；新安装或更新 UI 后刷新页面。
 2. **连接设备**：先用 `adb devices -l` 确认设备已授权且可用，再在工作台扫描设备或填写 ADB 地址。选择屏幕模式，建立投屏连接。
 3. **选择应用**：在工作台工具栏选择设备上要操作的 Android 应用，再启动应用。建立投屏连接本身不会自动启动应用。
 4. **选择配置**：使用首次启动创建的空白默认配置，或在「配置包」页新建、导入自己的配置包。
@@ -130,7 +118,7 @@ Gamer 使用 **ADB 地址**识别设备。USB 真机、无线设备和模拟器�
 
 默认 WebRTC 使用 host candidate 直连，适合同机或局域网，没有内置 STUN/TURN。跨 NAT 访问需配置 `rtc_external_ip`、`rtc_udp_port`、`rtc_external_port`，并保证浏览器能访问对应 UDP 地址；仅能打开网页不代表视频链路已经可达。
 
-仅在本机使用或验收时，可在配置顶层设置 `local_only = true`，或启动前设置 `$env:GAMER_LOCAL_ONLY = '1'`，让 HTTP 与 WebRTC 都使用回环地址；其他电脑将无法访问，USB ADB 仍可使用。该选项与上述 NAT 配置的非默认值互斥，详见 [本机模式](docs/guides/launcher-quickstart.md#本机测试与防火墙提示)。
+仅在本机使用或验收时，可在配置顶层设置 `local_only = true`，或启动前设置 `$env:GAMER_LOCAL_ONLY = '1'`，让 HTTP 与 WebRTC 都使用回环地址；其他电脑将无法访问，USB ADB 仍可使用。该选项与上述 NAT 配置的非默认值互斥，详见 [本机模式](docs/guides/UPDATE.md#本机模式)。
 
 ## 配置包与自动化
 
@@ -194,7 +182,7 @@ gamer/
 │   ├── gamer-keymap/           # 按键映射 UI 与 WASM 输入规则
 │   └── gamer-video/            # 视频工作台与项目，使用 Core 媒体和录制能力
 ├── sdk/                        # 插件接口、UI SDK 与独立示例
-├── launcher/                   # Windows 安装启动与更新管理
+├── updater/                    # 内置更新引擎、便携启动与托盘
 ├── tools/                      # 插件构建、质量检查与开发工具
 ├── release/                    # 依赖锁、发布契约与打包脚本
 ├── docs/                       # 使用指南、接口参考、设计规范与报告

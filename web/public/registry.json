@@ -1,21 +1,21 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-09-27T06:41:39Z",
+  "generated_at": "2026-09-28T12:27:53Z",
   "host_api": "1.0.0",
   "provenance": {
-    "plugin_commit": "cb153338900ce4a16999aa0ad988a6dfd3f7f2de",
-    "sdk_host_commit": "ca12b1278154f8fa506f6acf0287f59d8ee80e5e"
+    "plugin_commit": "3d570dc72c8925739d453cf42730537006f94d3e",
+    "sdk_host_commit": "3de0c7e7e21ef3ad78f3c8604fd09f225bc5ee73"
   },
   "plugins": [
     {
       "id": "gamer-keymap",
-      "version": "0.1.0",
+      "version": "0.1.3",
       "name": "键盘映射",
       "description": "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-keymap-0.1.0.gplugin",
-      "sha256": "903a41a68785d936bb0b868cd5792725713bb2f81d7f30f7a8df75c7b00c2945",
-      "size": 131737,
+      "download_url": "/plugins/gamer-keymap-0.1.3.gplugin",
+      "sha256": "f62ac46f8953d13ac455c40785ff42cb61d3131e60aa8336b8d88196e3c086ea",
+      "size": 131898,
       "permissions": [
         "ui.host",
         "input.tap",
@@ -24,9 +24,9 @@
         "touch"
       ],
       "host_api": {
-        "input": "^1.0",
+        "input": "^1.2",
         "touch": "^1.0",
-        "ui": "^1.0"
+        "ui": "^1.1"
       },
       "ui": {
         "contributions": [
@@ -50,13 +50,13 @@
     },
     {
       "id": "gamer-live",
-      "version": "0.2.4",
+      "version": "0.2.5",
       "name": "直播助手",
       "description": "向直播姬提供设备音视频素材，接收 B 站直播互动；支持手动 RTMP 输出",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-live-0.2.4.gplugin",
-      "sha256": "acde6f6752cb88fd1f47c0a7522efdaecfbe66f46c89d9c7574c77802b16ac3c",
-      "size": 17579,
+      "download_url": "/plugins/gamer-live-0.2.5.gplugin",
+      "sha256": "ea9f03d91026b2152c9d096e0baae63dac7c5db5ce96136481a48e43febbcf6f",
+      "size": 22325,
       "permissions": [
         "ui.host",
         "media.stream",
@@ -127,13 +127,13 @@
     },
     {
       "id": "gamer-video",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "name": "视频工作台",
       "description": "视频工作台：媒体素材库、设备录制与操作草稿生成",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-video-0.1.0.gplugin",
-      "sha256": "9c5d8557dae44bf6a7c41b1f5062b853306381e5a5a90dbcec5868d73bcf8dd6",
-      "size": 63283,
+      "download_url": "/plugins/gamer-video-0.1.1.gplugin",
+      "sha256": "ac63e6251be2ac87ba8d797f3b433e83b381f18d6d90e7e13fa8243b887dea5d",
+      "size": 63386,
       "permissions": [
         "ui.host",
         "media.read",
@@ -167,13 +167,13 @@
     },
     {
       "id": "gamer-yaml",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "name": "自动化",
       "description": "自动化：YAML V1 脚本、函数库与模板的制作与运行",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-yaml-0.1.0.gplugin",
-      "sha256": "60b983fb11b6c5452a7f7116fccc4939e079b399376a399bd145e200f04f4781",
-      "size": 451660,
+      "download_url": "/plugins/gamer-yaml-0.1.1.gplugin",
+      "sha256": "59eb9071a7bf2022e042e433ecb174d196d0c93635ee76feebb2e0893ef2cedc",
+      "size": 451819,
       "permissions": [
         "ui.host",
         "device.read",
@@ -194,7 +194,7 @@
         "log": "^1.0",
         "resource": "^1.0",
         "runtime": "^1.0",
-        "ui": "^1.0",
+        "ui": "^1.1",
         "vision": "^1.0"
       },
       "ui": {
