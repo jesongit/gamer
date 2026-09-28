@@ -16,8 +16,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod api;
-mod browser;
 mod background_process;
+mod browser;
 mod build_info;
 pub(crate) mod capabilities;
 mod config;

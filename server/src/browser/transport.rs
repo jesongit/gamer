@@ -26,9 +26,11 @@ pub struct ScreencastFrame {
     pub revision: u64,
 }
 
+type PendingReplies = HashMap<u64, oneshot::Sender<Result<Value, String>>>;
+
 pub struct Transport {
     tx: mpsc::Sender<Command>,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>,
+    pending: Arc<Mutex<PendingReplies>>,
     next: AtomicU64,
     pub revision: Arc<AtomicU64>,
     pub alive: Arc<AtomicBool>,

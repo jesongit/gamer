@@ -802,7 +802,8 @@ mod tests {
     }
 
     fn manifest_bytes(id: &str) -> Vec<u8> {
-        format!("id = \"{id}\"\nversion = \"1.0.0\"\n[targets.android]\npackages = [\"*\"]\n").into_bytes()
+        format!("id = \"{id}\"\nversion = \"1.0.0\"\n[targets.android]\npackages = [\"*\"]\n")
+            .into_bytes()
     }
 
     #[test]

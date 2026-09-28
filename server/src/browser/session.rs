@@ -722,8 +722,8 @@ impl CdpSession {
         let bits = std::mem::take(&mut *self.buttons.lock().await);
         let (x, y) = *self.pointer.lock().await;
         for (bit, button) in [(1, "left"), (2, "right"), (4, "middle")] {
-            if bits & bit != 0 {
-                if self
+            if bits & bit != 0
+                && self
                     .transport
                     .call(
                         "Input.dispatchMouseEvent",
@@ -731,9 +731,8 @@ impl CdpSession {
                     )
                     .await
                     .is_err()
-                {
-                    self.invalidate();
-                }
+            {
+                self.invalidate();
             }
         }
     }

@@ -75,7 +75,7 @@ async fn collect(
             );
             let now = st.elapsed_us();
             let recording = st.browser.as_mut().unwrap();
-            if recording.frames.len() % 90 == 0 {
+            if recording.frames.len().is_multiple_of(90) {
                 anyhow::ensure!(
                     disk_free_bytes(&writer.dir).is_none_or(|n| n >= MIN_FREE_BYTES),
                     "磁盘空间不足，录制已结束"

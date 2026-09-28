@@ -392,7 +392,13 @@ mod sec_tests {
         path: &str,
         content: &str,
     ) -> HttpResponse<Body> {
-        let _ = post_json(t, sid, "/api/packages", serde_json::json!({ "id": pkg, "targets":{"android":{"packages":["*"]}} })).await;
+        let _ = post_json(
+            t,
+            sid,
+            "/api/packages",
+            serde_json::json!({ "id": pkg, "targets":{"android":{"packages":["*"]}} }),
+        )
+        .await;
         send(
             &t.app,
             req(
