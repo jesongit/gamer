@@ -289,7 +289,7 @@ Rust 测试中的 WASM 场景会构建 guest，需要预先安装 `wasm32-unknow
 | 设备连接 | [ADB 设备接入](docs/reference/DEVICE_ACCESS.md) |
 | 自动化入门与语法 | [教程](docs/guides/yaml-tutorial.md) · [YAML 参考](docs/reference/YAML.md) |
 | 插件开发 | [开发指南](docs/guides/plugin-dev.md) · [Host API](docs/reference/PLUGIN_API.md) · [SDK](sdk/README.md) |
-| 界面与交互 | [UI 设计规范](docs/design/gamer-ui-spec.md) · [iframe UI SDK](sdk/ui/README.md) |
+| 界面与交互 | [UI 设计规范](docs/design/gamer-ui-spec.md) · [插件界面设计规范](docs/design/gamer-plugin-ui-spec.md) · [iframe UI SDK](sdk/ui/README.md) |
 | 发布与更新 | [发布手册](docs/guides/RELEASE.md) · [更新指南](docs/guides/UPDATE.md) |
 | 架构约定 | [开发约定](AGENTS.md) · [架构决策](docs/reference/adr/) |
 | 第三方组件 | [NOTICE](licenses/NOTICE.md) · [依赖版本与来源](release/dependencies.lock.toml) |
