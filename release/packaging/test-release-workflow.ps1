@@ -94,7 +94,7 @@ Assert-Text $workflow 'package-app\.ps1\s+-Channel \$env:CHANNEL' 'app 包构建
 Assert-Text $workflow 'gen-manifest\.ps1\s+-Channel \$env:CHANNEL' 'manifest 必须消费派生 channel'
 
 Assert-True ($workflow -notmatch 'sign-manifest|verify-key-rotation|RELEASE_MANIFEST_PRIVATE_KEY|RELEASE_MANIFEST_KEY_ID|release-sign|\.sig') '发行流程不应依赖签名、密钥或签名文件'
-Assert-Text $workflow 'sha256sum \*\.zip \*\.exe \*\.json' '全部发行资产必须生成 SHA256SUMS'
+Assert-Text $workflow 'sha256sum \*\.zip \*\.json' '全部发行资产必须生成 SHA256SUMS（Gamer.exe 位于完整包内）'
 Assert-Text $workflow 'validate-manifest\.mjs check' '重新下载的发行清单必须校验结构与语义'
 
 $draftPos = $workflow.IndexOf("`n  draft-release:")

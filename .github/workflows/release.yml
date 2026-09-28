@@ -354,7 +354,7 @@ jobs:
           set -euo pipefail
           cd dist
           # *.cdx.json 已包含在 *.json 中，不能再次展开，否则 SUMS 会出现重复条目。
-          sha256sum *.zip *.exe *.json | sort -k2 > SHA256SUMS.txt
+          sha256sum *.zip *.json | sort -k2 > SHA256SUMS.txt
           cat SHA256SUMS.txt
           name="SHA256SUMS.txt"
           local_hash="$(sha256sum "$name" | cut -d' ' -f1)"
