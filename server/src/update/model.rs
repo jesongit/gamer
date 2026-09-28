@@ -41,6 +41,7 @@ impl UpdateState {
         }
     }
 
+    #[cfg(any(windows, test))]
     pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "idle" => UpdateState::Idle,
@@ -94,6 +95,8 @@ pub enum UpdateAction {
 }
 
 /// 11 个统一业务错误码（§7 冻结；与 IPC 帧共享）
+// The HTTP contract includes errors emitted only by the Windows installation engine.
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateErrorCode {
     UpdateNotManaged,
@@ -126,6 +129,7 @@ impl UpdateErrorCode {
         }
     }
 
+    #[cfg(windows)]
     pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "update_not_managed" => UpdateErrorCode::UpdateNotManaged,

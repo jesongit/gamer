@@ -26,7 +26,8 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
-    /// managed（launcher + IPC 通道建立）→ 全 true
+    /// Windows portable updates; also available to platform-independent controller tests.
+    #[cfg(any(windows, test))]
     pub const MANAGED: Self = Self {
         check: true,
         download: true,

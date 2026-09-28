@@ -9,7 +9,9 @@ pub enum DependencyKind {
     Ffmpeg,
 }
 #[derive(Debug)]
+#[cfg(windows)]
 pub struct FrameError(String);
+#[cfg(windows)]
 impl FrameError {
     #[allow(non_snake_case)]
     fn Malformed(message: String) -> Self {
@@ -67,6 +69,7 @@ pub struct LastErrorCodeMessage {
     pub message: String,
 }
 
+#[cfg(windows)]
 pub(crate) fn parse_status_update_block(result: &Value) -> Result<UpdateStatus, FrameError> {
     // Older launchers may omit the update block while no transaction exists.
     // Treat that shape as the documented idle/default state; a null block has
@@ -136,6 +139,7 @@ impl UpdateError {
         self.details = Some(details);
         self
     }
+    #[cfg(windows)]
     pub fn from_frame(err: FrameError) -> Self {
         Self::new(UpdateErrorCode::UpdaterUnavailable, err.0)
     }
