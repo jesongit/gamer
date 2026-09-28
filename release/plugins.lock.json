@@ -1,17 +1,17 @@
 {
   "schema_version": 1,
-  "tag": "gamer-package-publisher-v0.1.0",
-  "plugin_commit": "cc5bc47c5e7c144f98181a35d5bb1ddea9a02a6c",
+  "tag": "gamer-live-v0.2.4",
+  "plugin_commit": "cb153338900ce4a16999aa0ad988a6dfd3f7f2de",
   "registry": {
     "name": "registry.json",
-    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-package-publisher-v0.1.0/registry.json",
-    "size": 5910,
-    "sha256": "0bb6dc46da51ec79a61818d352ccb7db22df0ddbf36f2280cc2bcca93dc3c04e"
+    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-live-v0.2.4/registry.json",
+    "size": 7078,
+    "sha256": "47017c2fdde9b654917369c1c1ad2be98a451645c7a841a7e4e222d296178a1d"
   },
   "bundle": {
-    "name": "gamer-official-plugins-0.1.0-windows-x64.zip",
-    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-package-publisher-v0.1.0/gamer-official-plugins-0.1.0-windows-x64.zip",
-    "size": 651425,
-    "sha256": "753ca576acd4e15010689d1d6142739526469e4ebc012fbbc6e2549cbc1fa470"
+    "name": "gamer-official-plugins-0.2.4-windows-x64.zip",
+    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-live-v0.2.4/gamer-official-plugins-0.2.4-windows-x64.zip",
+    "size": 669053,
+    "sha256": "c21b905db2850379a145bc1efda4dee50817e670e935f5f8f87894afbd2891b6"
   }
 }

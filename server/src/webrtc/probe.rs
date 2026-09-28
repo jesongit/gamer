@@ -37,7 +37,7 @@ pub(super) fn probe_encoder_blockiness(
     {
         return;
     }
-    let out = std::process::Command::new(ffmpeg_path)
+    let out = crate::background_process::command(ffmpeg_path)
         .args(["-y", "-loglevel", "error", "-f", "h264", "-i"])
         .arg(&h264_path)
         .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])

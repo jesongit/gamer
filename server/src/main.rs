@@ -17,6 +17,7 @@
 
 mod api;
 mod browser;
+mod background_process;
 mod build_info;
 pub(crate) mod capabilities;
 mod config;

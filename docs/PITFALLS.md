@@ -497,3 +497,10 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 
 - 独立测试 config.toml 缺少 decode_frames/max_size/bitrate_mbps/fps 时服务会直接退出：这些字段没有反序列化默认值，应完整填写，不能只配置端口和路径。
 - 从 Windows 用户目录映射路径 fetch worktree 内的 submodule 报 not a git repository：相对 gitdir 按映射盘符解析到了错误位置，改用实际盘符目录或 rev-parse --absolute-git-dir 返回的仓库路径。
+- Windows 启动器下载完退出但入口仍为旧版：helper 从待覆盖 exe 自身启动会锁住目标，失败 stderr 又被丢弃；从已校验的不可变组件运行 helper、记录失败并继续原清单，旧版需手动替换一次入口恢复。
+- eframe 0.36.2 首帧会强制显示显式隐藏的根窗口，随后隐藏产生闪窗；固定源码修正首帧显示条件，并用原生窗口可见性探针验证，不能只测应用层隐藏指令。
+
+- Windows 服务端被隐藏启动并不保证它启动的 ADB/FFmpeg/ffprobe 或数据库 inspect 也隐藏：生产子进程必须设置 CREATE_NO_WINDOW，统一后台构造入口并用真实子进程 GetConsoleWindow 验证。
+- Windows 并行 Rust 链接可能因页面文件不足报 os error 1455 或无法 mmap 元数据，未必是缓存损坏；等待其他编译结束后用 -j 1 和所需 --lib/--bin 目标重试，避免直接清空缓存或修改系统设置。
+- 视频快捷键只接收播放器根元素焦点时，鼠标点击进度条或播放按钮会把焦点留在原生控件而失效；鼠标操作播放控件后恢复播放器焦点，下拉框和键盘激活仍保留原生焦点，并用组件实际焦点与冒泡按键事件回归。
+- 新工作树只安装 web 依赖时，舞台测试跨目录加载插件源码可能报缺少 pinyin-pro；先执行 `node tools/build-plugin-ui.mjs --install-only` 安装固定插件快照的 UI 依赖，不修改解析别名或跟随插件仓最新提交。
