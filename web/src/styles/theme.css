@@ -90,7 +90,22 @@ body {
 }
 .input:focus, .select:focus, .textarea:focus { border-color: var(--accent); }
 .textarea { font-family: var(--mono); line-height: 1.6; resize: vertical; }
-.select option { background: var(--bg-1); }
+select option, select optgroup { background: var(--bg-2); color: var(--text-0); }
+/* Theme native pickers as well as their closed fields; preserve native selection/keyboard behavior. */
+@supports (appearance: base-select) {
+  select:not([multiple]):not([size]), select:not([multiple]):not([size])::picker(select) { appearance: base-select; }
+  select:not([multiple]):not([size]) { align-items: center; gap: 8px; }
+  select:not([multiple]):not([size])::picker-icon { color: var(--text-2); font-size: 10px; }
+  select:not([multiple]):not([size])::picker(select) {
+    padding: 4px; max-height: 280px; overflow: auto;
+    background: var(--bg-2); color: var(--text-0); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); box-shadow: var(--shadow); font: inherit;
+  }
+  select:not([multiple]):not([size]) option { padding: 6px 8px; min-height: 28px; border-radius: var(--radius-sm); cursor: pointer; }
+  select:not([multiple]):not([size]) option:hover, select:not([multiple]):not([size]) option:focus { background: var(--bg-3); color: var(--accent); outline: none; }
+  select:not([multiple]):not([size]) option:checked { color: var(--accent); }
+  select:not([multiple]):not([size]) option:disabled { color: var(--text-2); opacity: .55; cursor: not-allowed; }
+}
 /* number 输入去掉浏览器自带的上下箭头（DPI、测试阈值等） */
 input[type="number"]::-webkit-outer-spin-button,
 input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }

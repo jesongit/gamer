@@ -143,6 +143,47 @@ function memoryStorage() {
 }
 
 describe('useRunArgsFlow', () => {
+  it.each(['script', 'function_library'])('%s 有默认值或可选参数时直接运行，不读取旧覆盖值', async kind => {
+    const exec = vi.fn().mockResolvedValue({ run_id: 'defaults' })
+    const storage = memoryStorage()
+    storage.setItem('gb_run_args:s1', JSON.stringify({ name: 'old override', enabled: true }))
+    const flow = useRunArgsFlow({ exec, storage, loadParams: async () => ({ schema: [
+      { name: 'name', type: 'string', default: 'configured name' },
+      { name: 'enabled', type: 'boolean', default: false },
+      { name: 'count', type: 'integer', default: 0 },
+      { name: 'empty', type: 'string', default: '' },
+      { name: 'optional', type: 'string', required: false, default: null },
+    ] }) })
+    expect(await flow.begin({ ...BEGIN_OPTS, kind })).toEqual({ form: false })
+    expect(flow.modal.open).toBe(false)
+    expect(exec).toHaveBeenCalledWith(expect.objectContaining({ args: undefined }))
+  })
+
+  it('仅弹出缺少的必填参数，已提供值保留、默认参数不接收覆盖', async () => {
+    const exec = vi.fn().mockResolvedValue({ run_id: 'required' })
+    const flow = useRunArgsFlow({ exec, loadParams: async () => ({ schema: [
+      ...DESCRIPTOR_WITH_PARAMS.schema, { name: 'number', type: 'integer', required: true, default: null },
+    ] }) })
+    await flow.begin({ ...BEGIN_OPTS, initialArgs: { account: 'a.png', timeout: '10s' } })
+    expect(flow.modal.params.map(param => param.name)).toEqual(['number'])
+    await flow.confirm({ number: 0, timeout: '5s' })
+    expect(exec).toHaveBeenCalledWith(expect.objectContaining({ args: { account: 'a.png', number: 0 } }))
+  })
+  it('关闭后迟到的旧参数响应不能启动运行或覆盖新目标', async () => {
+    let finish
+    const exec = vi.fn()
+    const loadParams = vi.fn().mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+      .mockResolvedValue(DESCRIPTOR_WITH_PARAMS)
+    const flow = useRunArgsFlow({ exec, loadParams })
+    const old = flow.begin(BEGIN_OPTS)
+    flow.close()
+    await flow.begin({ ...BEGIN_OPTS, id: 'new', entrypoint: 'com.demo#chosen' })
+    finish(EMPTY_DESCRIPTOR)
+    expect(await old).toMatchObject({ cancelled: true })
+    expect(flow.modal.targetId).toBe('new')
+    expect(flow.modal.open).toBe(true)
+    expect(exec).not.toHaveBeenCalled()
+  })
   it('默认 loadParams 走 api.getEntrypointParams：GET entrypoint descriptor（整体编码），schema 适配进弹窗', async () => {
     const calls = stubFetch([
       { method: 'GET', url: '/api/runners/gamer-yaml/entrypoint', body: DESCRIPTOR_WITH_PARAMS },
@@ -155,7 +196,7 @@ describe('useRunArgsFlow', () => {
     expect(calls[0].url).toBe('/api/runners/gamer-yaml/entrypoint?entrypoint=com.demo%2Fmain.yaml')
     expect(flow.modal.params.map(p => [p.name, p.type, p.default])).toEqual([
       ['account', 'template', null],
-      ['timeout', 'duration', '30s'],
+
     ])
   })
 
@@ -173,7 +214,7 @@ describe('useRunArgsFlow', () => {
   })
 
   it('有参数声明：打开表单；confirm 提交稀疏 args 并写入建议缓存', async () => {
-    const exec = vi.fn().mockResolvedValue({ run_id: 'r2', state: 'starting', resolved_args: { account: 'a.png', timeout: '10s' } })
+    const exec = vi.fn().mockResolvedValue({ run_id: 'r2', state: 'starting', resolved_args: { account: 'a.png', timeout: '30s' } })
     const loadParams = vi.fn().mockResolvedValue(DESCRIPTOR_WITH_PARAMS)
     const storage = memoryStorage()
     const notes = []
@@ -181,14 +222,14 @@ describe('useRunArgsFlow', () => {
     const r = await flow.begin({ ...BEGIN_OPTS, startIndex: 1 })
     expect(r).toEqual({ form: true })
     expect(flow.modal.open).toBe(true)
-    expect(flow.modal.params.map(p => p.name)).toEqual(['account', 'timeout'])
+    expect(flow.modal.params.map(p => p.name)).toEqual(['account'])
     expect(flow.modal.suggestions).toEqual({}) // 建议缓存初读
-    const done = await flow.confirm({ timeout: '10s' })
+    const done = await flow.confirm({ account: 'a.png' })
     expect(done.ok).toBe(true)
-    expect(exec).toHaveBeenCalledWith(expect.objectContaining({ args: { timeout: '10s' }, startIndex: 1 }))
-    expect(storage.getItem('gb_run_args:s1')).toBe(JSON.stringify({ timeout: '10s' }))
-    expect(notes[0].summary).toContain('timeout=10s（覆盖）')
-    expect(notes[0].summary).toContain('account=a.png（必填）')
+    expect(exec).toHaveBeenCalledWith(expect.objectContaining({ args: { account: 'a.png' }, startIndex: 1 }))
+    expect(storage.getItem('gb_run_args:s1')).toBe(JSON.stringify({ account: 'a.png' }))
+    expect(notes[0].summary).toContain('timeout=30s（默认）')
+    expect(notes[0].summary).toContain('account=a.png（覆盖）')
     expect(flow.modal.open).toBe(false)
   })
 
@@ -198,10 +239,10 @@ describe('useRunArgsFlow', () => {
     const storage = memoryStorage()
     const flow = useRunArgsFlow({ exec, notify: () => {}, storage, loadParams })
     await flow.begin(BEGIN_OPTS)
-    await flow.confirm({ timeout: '10s' })
+    await flow.confirm({ account: 'a.png' })
     await flow.begin(BEGIN_OPTS)
     expect(flow.modal.open).toBe(true)
-    expect(flow.modal.suggestions).toEqual({ timeout: '10s' })
+    expect(flow.modal.suggestions).toEqual({ account: 'a.png' })
   })
 
   it('400 invalid_args：诊断映射到字段回填表单标红，弹窗保持打开', async () => {
@@ -334,7 +375,7 @@ describe('Console 运行参数接线', () => {
     expect(runnerSrc).toContain("import { useRunArgsFlow } from '../../composables/useRunArgsFlow'")
     expect(consoleSrc).toContain("RunParamsModal")
     expect(consoleSrc).toContain('<RunParamsModal')
-    expect(runnerSrc).toContain('runYamlScript(id, store.deviceId, startIndex, args)')
+    expect(runnerSrc).toContain('runYamlScript(id, deviceId, startIndex, args)')
     expect(runnerSrc).toContain("import { GAMER_YAML_RUNNER_ID, runYamlFunction, runYamlScript } from '../../gamer-yaml-runner'")
     expect(runnerSrc).toContain('function onRunArgsSubmit(')
     expect(runnerSrc).toContain('runArgsFlow.confirm(args).catch(handleRunStartError)')

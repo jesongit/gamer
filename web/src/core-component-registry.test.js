@@ -3,8 +3,7 @@ import './test-plugin-modules'
 import { describe, expect, it } from 'vitest'
 import { createApp, defineComponent, h } from 'vue'
 import KeymapPanel from '../../plugins/gamer-keymap/ui/src/components/console/KeymapPanel.vue'
-import ScriptRunner from '../../plugins/gamer-yaml/ui/src/components/console/ScriptRunner.vue'
-import TemplateCapture from '../../plugins/gamer-yaml/ui/src/components/console/TemplateCapture.vue'
+import AutomationWorkbench from '../../plugins/gamer-yaml/ui/src/components/console/AutomationWorkbench.vue'
 import VideoWorkbench from '../../plugins/gamer-video/ui/src/components/video/VideoWorkbench.vue'
 import {
   CORE_PANEL_COMPONENTS,
@@ -15,18 +14,14 @@ import { unknownCorePanel } from './workspace/contribution-manager'
 describe('Console core panel component registry', () => {
   it('maps manifest component keys to host console components with context extraction', async () => {
     const scripts = resolveCoreComponent(CORE_PANEL_COMPONENTS.scripts, 'gamer-yaml')
-    expect(scripts?.component).toBe(ScriptRunner)
+    expect(scripts?.component).toBe(AutomationWorkbench)
     expect(scripts?.panelClass).toBe('script-tab')
     expect(scripts?.aliases).toContain('script')
     expect(scripts?.getProps?.({ scriptRunner: { scripts: { kind: 'script-panel' } } })).toEqual({
-      context: { kind: 'script-panel' },
+      context: { scripts: { kind: 'script-panel' } },
     })
 
-    const templates = resolveCoreComponent('console.templates', 'gamer-yaml')
-    expect(templates?.component).toBe(TemplateCapture)
-    expect(templates?.getProps?.({ templateCapture: { kind: 'capture' } })).toEqual({
-      context: { kind: 'capture' },
-    })
+    expect(resolveCoreComponent('console.templates', 'gamer-yaml')).toBeNull()
 
     const keymaps = resolveCoreComponent('console.keymaps', 'gamer-keymap')
     expect(keymaps?.component).toBe(KeymapPanel)
@@ -36,17 +31,12 @@ describe('Console core panel component registry', () => {
     })
   })
 
-  it('functions panel binds its own runner scope (no shared runKind mutation)', async () => {
+  it('automation contains both scopes with no separate function panel', async () => {
     const scripts = resolveCoreComponent(CORE_PANEL_COMPONENTS.scripts, 'gamer-yaml')
-    const functions = resolveCoreComponent(CORE_PANEL_COMPONENTS.functions, 'gamer-yaml')
-    // 两个面板是同一宿主组件 + 各自作用域上下文；不存在「挂载即改写共享 runKind」的副作用
-    expect(functions?.component).toBe(ScriptRunner)
-    expect(functions?.getProps?.({ scriptRunner: { functions: { kind: 'func-panel' } } })).toEqual({
-      context: { kind: 'func-panel' },
-    })
-    // scripts 面板上下文与 functions 面板上下文互不读取对方作用域
-    expect(scripts?.getProps?.({ scriptRunner: { functions: { kind: 'func-panel' } } }))
-      .toEqual({ context: undefined })
+    const context = { scripts: { kind: 'script-panel' }, functions: { kind: 'func-panel' } }
+    const templates = { kind: 'capture' }
+    expect(scripts.getProps({ scriptRunner: context, templateCapture: templates })).toEqual({ context: { ...context, templates } })
+    expect(resolveCoreComponent('console.functions', 'gamer-yaml')).toBeNull()
   })
 
   it('maps gamer-video manifest component key VideoWorkbench (self-contained, no context injection)', async () => {

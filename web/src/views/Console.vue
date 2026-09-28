@@ -488,7 +488,7 @@ const {
   cropMouseDown, cropMouseMove, cropMouseUp, cropMouseLeave, cropWheel,
   saveTemplate, overwriteTemplate, backToCrop, cancelCrop, repick,
   onTplRowClick, onTplThumbClick, onTplNameClick, confirmRename, cancelRename, startRename,
-  onTplDeleteClick, onTplMatchClick, onTplUpload, replaceTemplateImage,
+  onTplDeleteClick, onTplMatchClick, onTplUpload,
   tplShortName, tplRegionBadge, tplThumbUrl, testMatch,
   selectRegionForBridge, beginCellPick, cancelCellPick, finishCellPick, cellPick,
   bridgeRegionSelected, finishBridgeRegionSelect, cancelBridgeRegionSelect, closeTplView,
@@ -998,14 +998,14 @@ function isGlobalEscapeConsumed(e) {
     || toolbarMenuOpen.value
     || settingsOpen.value
     || viewTpl.value
-    || resourcePreview.open
+    || resourcePreview?.open
     || confirmDelTpl.value
   )
 }
 
 /** 全局按键：Esc 关闭工具条菜单 / 设备设置弹窗 / 模板大图 / 资源预览 / 取消删除确认 */
 function onGlobalKeydown(e) {
-  if (e.key !== 'Escape') return
+  if (e.key !== 'Escape' || e.defaultPrevented) return
   if (cancelBridgeRegionSelect()) {
     // bridge 框选被 Esc 取消
   } else if (cellPick.mode) {
@@ -1016,7 +1016,7 @@ function onGlobalKeydown(e) {
     cancelSettings()
   } else if (viewTpl.value) {
     closeTplView()
-  } else if (resourcePreview.open) {
+  } else if (resourcePreview?.open) {
     closeResourcePreview()
   } else if (confirmDelTpl.value) {
     confirmDelTpl.value = null
