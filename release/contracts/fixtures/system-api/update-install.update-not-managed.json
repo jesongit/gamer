@@ -1,9 +1,9 @@
 {
   "scenario": "Docker/direct 模式（无 launcher 托管）调用 install → 409 update_not_managed；前端应隐藏/禁用安装按钮",
-  "endpoint": "POST /api/system/update/install",
+  "endpoint": "POST /api/system/update/apply",
   "request": {
     "method": "POST",
-    "path": "/api/system/update/install",
+    "path": "/api/system/update/apply",
     "headers": {
       "Accept": "application/json",
       "Content-Type": "application/json",

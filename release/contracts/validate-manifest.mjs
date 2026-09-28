@@ -8,10 +8,10 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = path.join(SCRIPT_DIR, 'fixtures');
 const VALID_DIR = path.join(FIXTURES_DIR, 'manifest', 'valid');
 const INVALID_DIR = path.join(FIXTURES_DIR, 'manifest', 'invalid');
-const SCHEMA_PATH = path.join(SCRIPT_DIR, 'manifest-v1.schema.json');
+const SCHEMA_PATH = path.join(SCRIPT_DIR, 'manifest-v2.schema.json');
 
 // ---------------------------------------------------------------------------
-// 冻结常量（与 manifest-v1.md 保持一致）
+// 冻结常量（与 manifest-v2.md 保持一致）
 // ---------------------------------------------------------------------------
 
 const PRODUCT = 'gamebot';
@@ -183,8 +183,8 @@ function semanticChecks(manifest, { expectCurrentVersion, expectChannel }) {
   const push = (code, detail) => errors.push({ code, detail });
 
   // -- schema / product -----------------------------------------------------
-  if (manifest.schema_version !== undefined && manifest.schema_version !== 1) {
-    push('unknown-schema-version', `schema_version=${JSON.stringify(manifest.schema_version)}; only 1 is defined`);
+  if (manifest.schema_version !== undefined && manifest.schema_version !== 2) {
+    push('unknown-schema-version', `schema_version=${JSON.stringify(manifest.schema_version)}; only 2 is defined`);
   }
   if (manifest.product !== undefined && manifest.product !== PRODUCT) {
     push('product-mismatch', `product=${JSON.stringify(manifest.product)}; expected "${PRODUCT}"`);
@@ -192,7 +192,7 @@ function semanticChecks(manifest, { expectCurrentVersion, expectChannel }) {
 
   // -- release 级规则 --------------------------------------------------------
   const release = isObj(manifest.release) ? manifest.release : {};
-  for (const field of ['version', 'minimum_launcher_version', 'minimum_upgrade_version']) {
+  for (const field of ['version', 'minimum_updater_version', 'minimum_upgrade_version']) {
     const v = release[field];
     if (typeof v === 'string' && !SEMVER_RE.test(v)) {
       push('version-not-semver', `release.${field}=${JSON.stringify(v)} is not SemVer 2.0.0`);
@@ -335,7 +335,7 @@ function semanticChecks(manifest, { expectCurrentVersion, expectChannel }) {
 
 // ---------------------------------------------------------------------------
 // 迷你 JSON Schema 解释器（draft 2020-12 子集，只支持本 schema 用到的关键字），
-// 作为结构回退校验执行 manifest-v1.schema.json —— schema 与 fixtures 保持同一份事实。
+// 作为结构回退校验执行 manifest-v2.schema.json —— schema 与 fixtures 保持同一份事实。
 // ---------------------------------------------------------------------------
 
 let CACHED_SCHEMA = null;
@@ -531,7 +531,7 @@ function runCheck(args) {
   console.log(`manifest: ${manifestPath}`);
   if (res.ok) {
     console.log(`release: ${res.info.version} (${res.info.channel}); platforms: ${res.info.platforms.join(', ')}`);
-    console.log('OK — release manifest v1 valid');
+    console.log('OK — release manifest v2 valid');
     return 0;
   }
   console.log(`FAIL — ${res.errors.length} error(s)`);

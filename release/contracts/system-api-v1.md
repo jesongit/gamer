@@ -1,3 +1,5 @@
+> 当前开发版补充：部署模式为 `portable`，更新控制位于服务进程内，不使用命名管道。设置页通过 `POST /api/system/update/apply` 预约下载与安装，`DELETE` 同路径取消未开始安装的预约；状态新增 `apply_requested` 布尔字段。原 download/install 作为内部动作保留。整体行为见 `docs/guides/UPDATE.md`。
+
 # System API v1 契约（ARC-003）
 
 > 状态：**冻结**（批次 0 契约；字段、枚举、状态码、错误码只能以版本化契约变更——任何字段/枚举/状态码/语义变更必须 bump 到 `system-api-v2` 并单独提交 fixture，不得口头改字段）。
@@ -67,7 +69,7 @@
     "channel": "stable",
     "target": "x86_64-pc-windows-msvc"
   },
-  "deployment": { "mode": "launcher", "update_strategy": "managed" },
+  "deployment": { "mode": "portable", "update_strategy": "managed" },
   "schema": { "db": 1, "file": 1, "rollback_floor": 1 },
   "dependencies": {
     "adb":    { "status": "ready", "version": "34.0.5", "source": "managed", "binding": "runtime" },
@@ -184,7 +186,7 @@
 | `active_run` | 存在 active/starting/stopping 的脚本运行 |
 | `update_transaction` | 存在另一个升级/回滚/备份/迁移/维护事务 |
 | `cron_freeze_window` | 距下一次启用 cron 的触发时间 ≤ 冻结窗口 |
-| `launcher_unreachable` | launcher/server IPC 不健康 |
+| `updater_unavailable` | launcher/server IPC 不健康 |
 | `insufficient_space` | 空间不足以容纳 staging、当前数据快照、新旧两版本及安全余量 |
 
 全部满足 → `202`，进入后台协调器。viewer 在线**不是**硬门禁：viewer 默认等待并提示（计划 §6.5），由协调器经现有优雅停机链路处理。
@@ -265,7 +267,7 @@
 | `artifact_invalid` | 下载产物 hash/大小/格式校验失败（截断、篡改、zip-slip 等） | 422 | 条件性（重新 download 可修复传输损坏；产物源本身损坏则需等新版本） | 无。主要出现形态：异步——`state=failed` + `last_error.code` |
 | `insufficient_space` | 磁盘空间不足以容纳 staging、数据快照、新旧两版本及安全余量（受理前预检或后台检查失败） | 507 | 是（清理空间后重试） | `required_bytes` / `available_bytes`（整数；不给路径） |
 | `schema_incompatible` | 候选目标 schema 超出当前 binary 的 `min_read/max_read` 兼容范围，或低于 `rollback_floor` 约束 | 422 | 否（需等待兼容的新版本） | `candidate_schema` / `supported_range`（整数/二元组） |
-| `launcher_unreachable` | launcher named pipe 连接失败/超时/令牌不匹配（launcher 未运行、被杀、IPC 损坏） | 502 | 是（launcher 恢复后有界退避重试） | 无 |
+| `updater_unavailable` | launcher named pipe 连接失败/超时/令牌不匹配（launcher 未运行、被杀、IPC 损坏） | 502 | 是（launcher 恢复后有界退避重试） | 无 |
 | `rollback_unavailable` | 无有效回滚点（无 previous 版本目录或无已验证快照），或目标事务已 committed（超出自动回滚承诺，计划 §6.7） | 409 | 否（人工介入/维护手册流程） | 无 |
 | `manual_recovery_required` | 升级与自动回滚均失败，状态机进入 `manual_recovery`；此后任何更新动作被拒 | 409 | 否（必须人工恢复；保留 journal/快照/新旧版本/quarantine 证据，停止自动循环） | 无 |
 
@@ -305,7 +307,7 @@
 | `system-update.manual-recovery.json` | GET 200，`manual_recovery` |
 | `system-update.unauthorized.json` | 未登录 401 |
 | `update-check.success.json` | 202 checking |
-| `update-check.launcher-unreachable.json` | 502 `launcher_unreachable` |
+| `update-check.launcher-unreachable.json` | 502 `updater_unavailable` |
 | `update-download.success.json` | 202 downloading |
 | `update-download.update-not-available.json` | 409 `update_not_available` |
 | `update-download.insufficient-space.json` | 507 `insufficient_space` |

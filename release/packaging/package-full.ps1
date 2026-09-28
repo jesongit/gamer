@@ -1,26 +1,9 @@
-﻿# REL-002: 组装 Full bootstrap 包 Gamer-<version>-windows-x64-full.zip。
-#
-# 布局（解压即安装根，launcher 按此消费）:
-#   gamer-launcher.exe                  cargo build --release（launcher crate 独立工作区）
-#   config/config.toml                  模板（launcher 托管模式：路径留空由注入，
-#                                       password_hash 占位，字段按 server/src/config.rs 写全）
-#   data/                              空目录，不携带个人配置或运行数据
-#   manifests/<version>.json     gen-manifest.ps1 产物
-#   seeds/                              发行清单锁定的本体、运行依赖、启动器、官方插件 ZIP
-#   SHA256SUMS.txt                      包内全部文件哈希清单
-#   INSTALL.md                          解压即用说明
-#   licenses/                           DEP-005 第三方声明（NOTICE + 各许可全文 + FFmpeg
-#                                       源码 offer + BUILD-CONFIG，履约 dependencies.lock.toml）
-#
-# 组包后自动结构校验：解压到临时目录 → 文件齐全 → SHA256SUMS 逐条对 →
-# manifest 结构与语义校验。可选 -SkipSmoke 跳过 gamer-launcher.exe doctor 冒烟。
-# 兼容 Windows PowerShell 5.1 与 pwsh。
-
+# 完整便携包：解压后双击 Gamer.exe，设置页更新。
 [CmdletBinding()]
 param(
-    # 跳过 launcher 构建，复用 launcher/target/release/gamer-launcher.exe
+    # 跳过应用构建，复用 app 归档
     [switch]$SkipBuild,
-    # 跳过解压后 gamer-launcher.exe doctor 冒烟
+    # 跳过真实启动冒烟
     [switch]$SkipSmoke,
     # 产品版本（默认读 server/Cargo.toml）
     [string]$Version = '',
@@ -79,53 +62,14 @@ function Get-ConfigTemplate {
 }
 
 function Get-InstallTemplate {
-    $s = @'
-# Gamer 安装与首次使用（Windows x64 便携包 v__VERSION__）
-
-## 第 1 步：解压
-
-把 `Gamer-__VERSION__-windows-x64-full.zip` 解压到本地目录（建议路径不含中文与
-空格，例如 `D:\Gamer`）。**必须保持解压出的相对布局**：`gamer-launcher.exe`
-与 `config\`、`data\`、`manifests\`、`seeds\`、`licenses\`、`SHA256SUMS.txt` 在
-同一目录，不要单独把 exe 拖出去运行。
-
-## 第 2 步：双击启动
-
-双击解压目录中的 `gamer-launcher.exe`，首次在小窗口点击“安装”，再从包内
-`seeds\` 安装 ADB、FFmpeg/FFprobe、scrcpy-server 与 Gamer 本体。安装支持暂停
-和恢复；已校验且未改变的文件不会重复计算哈希。有可用更新时显示启动器，
-其余情况下在后台检查后直接启动并留在托盘，不先弹出窗口。更新窗口只提供“更新 / 取消”。
-关闭窗口保留托盘，右键仅“打开 Gamer / 退出 Gamer”；双击托盘或再次双击 EXE，运行时打开网页，安装或更新时显示窗口。检查更新在工作台“设置”里，文件在启动时自动校验修复。
-
-启动成功后浏览器会打开（或手动打开）`http://127.0.0.1:8443`。
-
-## 首次设置登录密码
-
-第一次打开登录页时会显示“设置密码并进入”：输入至少 8 位管理员密码并确认即可，
-密码只以 Argon2id 不可逆哈希保存到 `config\config.toml`，设置成功后会自动登录。
-以后双击 `gamer-launcher.exe` 启动，再用该管理员密码登录即可。
-
-包内携带自动化、键盘映射、视频工作台及配置包发布等官方插件安装包，首次启动展示权限并
-选择安装（点“继续”，也可“跳过”）。包内没有个人脚本、配置、媒体或数据库；需要的配置包可在软件中导入。
-运行数据保存在 `data\`，更新时由启动器备份与保护。
-
-## 其他
-
-- 配置模板 `config\config.toml` 为 launcher 托管模式：`adb_path`/`ffmpeg_path`/
-  `scrcpy_server`/`data_dir` 等路径留空即可，由 launcher 注入绝对路径，无需手改。
-- 高级维护仍可在命令行运行 `gamer-launcher.exe doctor`、`repair` 或 `upgrade`，
-  日常使用不需要这些命令。
-- 第三方组件许可声明见 `licenses\NOTICE.md`（Apache-2.0 / LGPL-3.0 履约文本）。
-- 日常升级使用启动器的“更新”或工作台“设置 → 软件更新”。beta.4 及更早启动器
-  先通过启动器升级，旧版网页安装入口只校验下载内容。
-- 离线升级先退出并备份 `config/` 与 `data/`，将新包的 `seeds/`、`manifests/`
-  合并到原安装目录，并替换根目录的 `gamer-launcher.exe`，再运行
-  `gamer-launcher.exe upgrade --manifest manifests/<新版本>.json`。
-  不要直接覆盖原有 `config/` 或 `data/`，新包配置模板仅供首次安装。
-- 仅本机使用可在配置顶层设置 `local_only = true`，HTTP 与 WebRTC 都限制为回环地址；
-  USB ADB 仍可用，其他电脑无法访问，不能与非默认 NAT 配置同时使用。
-'@
-    return $s
+    return @"
+# Gamer __VERSION__
+解压完整目录后双击 Gamer.exe，服务准备好后自动打开浏览器。
+首次使用在网页设置管理员密码。软件更新统一在设置页进行，更新期间自动重启和恢复连接。
+关闭网页不停止服务；使用托盘的退出操作结束服务。
+config/ 和 data/ 是个人配置与数据，请保留。不要用新版完整包覆盖这些目录。
+官方插件在插件页按需安装；软件更新不会安装未选择的插件。
+"@
 }
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -148,7 +92,7 @@ if (-not $Version) {
 if (-not $Version) { Exit-Fail "无法确定产品版本" }
 
 # ---------- 输入清单 ----------
-$launcherExe    = Join-Path $repoRoot 'launcher\target\release\gamer-launcher.exe'
+$serverExe = Join-Path $repoRoot 'server\target\release\gamer-server.exe'
 $manifestJson   = Join-Path $ManifestDir ('{0}.json' -f $Version)
 $licensesDir    = Join-Path $repoRoot 'licenses'
 
@@ -163,14 +107,12 @@ $adbZipName    = 'gamer-adb-{0}-windows-x64.zip' -f $adbVersion
 $ffmpegZipName = 'gamer-ffmpeg-{0}-windows-x64.zip' -f $ffmpegVersion
 
 if (-not $SkipBuild) {
-    Write-Host "[package-full] cargo build --release（launcher crate，独立工作区）..."
-    Push-Location (Join-Path $repoRoot 'launcher')
-    try { & cargo build --release; if ($LASTEXITCODE -ne 0) { throw "cargo build 退出码 $LASTEXITCODE" } }
-    finally { Pop-Location }
+    & (Join-Path $PSScriptRoot 'package-app.ps1') -Channel $Channel
+    if ($LASTEXITCODE -ne 0) { throw '应用构建失败' }
 }
 
 foreach ($must in @(
-    $launcherExe, $manifestJson,
+    $manifestJson,
     (Join-Path $DistDir $appZipName), (Join-Path $DistDir $adbZipName), (Join-Path $DistDir $ffmpegZipName),
     (Join-Path $licensesDir 'NOTICE.md')
 )) {
@@ -187,20 +129,30 @@ $distBoundary = [IO.Path]::GetFullPath($DistDir).TrimEnd('\') + '\'
 if ($Version -notmatch '^[A-Za-z0-9._+-]+$' -or $Version.Contains('..')) { Exit-Fail '版本号不能用作目录名' }
 if (-not [IO.Path]::GetFullPath($stage).StartsWith($distBoundary, [StringComparison]::OrdinalIgnoreCase)) { Exit-Fail 'staging 超出输出目录' }
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
-foreach ($d in @('config', 'data', 'manifests', 'seeds')) {
+foreach ($d in @('config', 'data', 'manifests', 'state', 'versions', 'runtime')) {
     New-Item -ItemType Directory -Path (Join-Path $stage $d) -Force | Out-Null
 }
 try {
-    Copy-Item -LiteralPath $launcherExe -Destination (Join-Path $stage 'gamer-launcher.exe')
     Write-Utf8BomFile -Path (Join-Path $stage 'config\config.toml') -Text (Get-ConfigTemplate)
 
     # 数据目录留空，首次启动由 Core 播种默认配置包。
     Copy-Item -LiteralPath $manifestJson -Destination (Join-Path $stage ('manifests\{0}.json' -f $Version))
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
     $releaseModel = Get-Content -LiteralPath $manifestJson -Raw | ConvertFrom-Json
-    $seedNames = @($releaseModel.platforms.'windows-x86_64'.app.artifact.name) + @($releaseModel.platforms.'windows-x86_64'.components | ForEach-Object { $_.artifact.name })
-    foreach ($n in $seedNames) {
-        Copy-Item -LiteralPath (Join-Path $DistDir $n) -Destination (Join-Path $stage ('seeds\' + $n))
+    $platform = $releaseModel.platforms.'windows-x86_64'
+    $entries = @(@{ artifact=$platform.app.artifact; destination=(Join-Path $stage "versions/$Version") })
+    foreach ($component in $platform.components) {
+        $entries += @{ artifact=$component.artifact; destination=(Join-Path $stage "runtime/$($component.id)/$($component.version)") }
     }
+    foreach ($entry in $entries) {
+        $archive = Join-Path $DistDir $entry.artifact.name
+        if ((Get-Sha256Path $archive) -ne $entry.artifact.sha256 -or (Get-Item -LiteralPath $archive).Length -ne $entry.artifact.size) { throw "发行归档校验失败: $archive" }
+        [IO.Compression.ZipFile]::ExtractToDirectory($archive, $entry.destination)
+    }
+    # User entry is byte-identical to the manifest-verified application executable.
+    Copy-Item -LiteralPath (Join-Path $stage "versions/$Version/$($platform.app.entrypoint)") -Destination (Join-Path $stage 'Gamer.exe') -Force
+    $current = @{ schema_version=1; current=$Version; previous=$null; updated_at_unix_ms=0 } | ConvertTo-Json
+    [IO.File]::WriteAllText((Join-Path $stage 'state/current.json'), $current, (New-Object Text.UTF8Encoding($false)))
 
     # licenses/（DEP-005 履约：随 full 包附第三方声明与全文）
     New-Item -ItemType Directory -Path (Join-Path $stage 'licenses\android-platform-tools') -Force | Out-Null
@@ -260,10 +212,10 @@ try {
     Expand-Archive -LiteralPath $zipPath -DestinationPath $verify -Force
 
     foreach ($rel in @(
-        'gamer-launcher.exe',
+        'Gamer.exe', 'state/current.json',
         'config\config.toml',
         ('manifests\{0}.json' -f $Version),
-        ('seeds\' + $appZipName), ('seeds\' + $adbZipName), ('seeds\' + $ffmpegZipName),
+        ('versions\' + $Version + '\web-dist\index.html'),
         'SHA256SUMS.txt', 'INSTALL.md',
         'licenses\NOTICE.md',
         'licenses\android-platform-tools\LICENSE.txt', 'licenses\android-platform-tools\NOTICE.txt',
@@ -272,9 +224,7 @@ try {
     )) {
         if (-not (Test-Path -LiteralPath (Join-Path $verify $rel))) { Exit-Fail "解压后缺失: $rel" }
     }
-    foreach ($seed in $seedNames) {
-        if (-not (Test-Path -LiteralPath (Join-Path $verify ('seeds\' + $seed)))) { Exit-Fail "解压后缺少清单种子: $seed" }
-    }
+
 
     if (Get-ChildItem -LiteralPath (Join-Path $verify 'data') -File -Recurse -ErrorAction SilentlyContinue) {
         Exit-Fail '发行包禁止携带个人数据'
@@ -307,22 +257,13 @@ try {
     & node (Join-Path $repoRoot 'release\contracts\validate-manifest.mjs') check $extractedManifest --expect-current-version $Version --expect-channel $Channel
     if ($LASTEXITCODE -ne 0) { Exit-Fail "包内 manifest 校验未通过（退出码 $LASTEXITCODE）" }
 
-    # launcher doctor 冒烟失败必须阻断组包。
     if (-not $SkipSmoke) {
-        Write-Host '[package-full] launcher doctor 冒烟...'
-        $prevEap = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try {
-            $out = & (Join-Path $verify 'gamer-launcher.exe') --install-root $verify doctor 2>&1 | Out-String
-            $code = $LASTEXITCODE
-        } finally { $ErrorActionPreference = $prevEap }
-        foreach ($l in ($out.Trim() -split "`r?`n")) { Write-Host "  | $l" }
-        if ($code -eq 0) { Write-Host '[package-full] doctor 冒烟: 退出码 0' -ForegroundColor Green }
-        else { Exit-Fail "doctor 冒烟失败，退出码 $code" }
+        & (Join-Path $PSScriptRoot 'test-portable-start.ps1') -Root $verify
+        if ($LASTEXITCODE -ne 0) { throw '便携版启动失败' }
     }
+    # The complete layout is ready to execute without bootstrap installation.
+    if ((Get-Sha256Path (Join-Path $verify 'Gamer.exe')) -ne (Get-Sha256Path (Join-Path $verify "versions/$Version/gamer-server.exe"))) { throw '入口与发行程序不一致' }
 
-    $zipSize = (Get-Item -LiteralPath $zipPath).Length
-    Write-Host ("[package-full] PASS: {0}（{1} 字节, {2} 个条目）" -f $zipPath, $zipSize, $entryCount)
 } finally {
     Remove-Item -LiteralPath $verify -Recurse -Force -ErrorAction SilentlyContinue
 }

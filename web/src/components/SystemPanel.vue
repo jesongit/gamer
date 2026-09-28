@@ -162,12 +162,16 @@ const canAct = computed(() => {
   const a = allowedActions(st.update.state)
   const c = caps.value || {}
   return {
-    install: !!a.install && c.install === true,
+    install: !!(a.install || a.download) && c.install === true,
     rollback: !!a.rollback && c.rollback === true,
   }
 })
 
-function onAction(name) {
+async function onAction(name) {
+  if (name === 'cancel') {
+    try { await systemApi.cancelUpdate(); flowCtl.reset(); confirmOpen.value = false; await ctl.refresh() } catch (e) { beginReport()(errHint(e), 'error') }
+    return
+  }
   if (name === 'check') return onCheck()
   if (name === 'download') return onDownload()
   if (name === 'install') return requestInstall()
@@ -181,6 +185,12 @@ const flowBusy = computed(() => flow.phase === 'submitting' || flow.phase === 'w
 
 const confirmOpen = ref(false)
 const confirmMode = ref('install')
+watch(() => flow.phase, phase => {
+  if (phase === 'waiting') {
+    confirmOpen.value = false
+    ctl.refresh()
+  }
+})
 
 function requestInstall() {
   if (!canAct.value.install) { beginReport()('当前没有可安装的更新候选，请先检查更新', 'error'); return }
@@ -220,7 +230,7 @@ const confirmError = computed(() => {
   if (flow.verdict === 'timeout') {
     return {
       code: 'update_wait_timeout',
-      message: '等待超时：有界重连时间内服务未恢复，请确认服务进程状态后重试或刷新页面。',
+      message: '本页已停止等待，后台预约仍会继续。请查看更新状态，安装开始前可以取消预约。',
       details: null,
     }
   }

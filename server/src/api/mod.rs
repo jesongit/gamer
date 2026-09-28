@@ -204,7 +204,10 @@ pub(crate) fn build_router_with_extensions(
         )
         .route("/ws/browser/:id", get(browser::preview))
         .route("/api/browser-targets/:id/pages", get(browser::pages))
-        .route("/api/targets/:id/identity", get(packages::api_target_identity))
+        .route(
+            "/api/targets/:id/identity",
+            get(packages::api_target_identity),
+        )
         .route("/api/browser-targets/:id/bind", post(browser::bind))
         .route(
             "/api/package-sources",
@@ -353,6 +356,14 @@ pub(crate) fn build_router_with_extensions(
         )
         .route("/api/system/info", get(system::api_system_info))
         .route("/api/system/update", get(update::api_get_update))
+        .route(
+            "/api/system/update/apply",
+            post(update::api_apply_update).delete(update::api_cancel_apply),
+        )
+        .route(
+            "/api/system/update/plugins",
+            post(update::api_apply_plugins),
+        )
         .route("/api/system/update/check", post(update::api_update_check))
         .route(
             "/api/system/update/download",
@@ -523,4 +534,5 @@ pub(crate) fn build_router_with_extensions(
         .merge(protected_apk)
         .merge(protected_extensions)
         .layer(axmw::from_fn(auth::inject_ip_key))
+        .layer(axmw::from_fn(crate::update::barrier::middleware))
 }

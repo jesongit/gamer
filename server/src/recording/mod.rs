@@ -923,6 +923,10 @@ impl Inner {
 }
 
 impl RecordingService {
+    pub fn active_count(&self) -> usize {
+        self.inner.active_by_device.lock().len()
+    }
+
     pub fn open(data_root: PathBuf) -> anyhow::Result<Self> {
         Ok(Self {
             inner: Arc::new(Inner {
@@ -946,6 +950,7 @@ impl RecordingService {
         devices: &Arc<DeviceManager>,
         req: &RecordingStartReq,
     ) -> anyhow::Result<RecordingSessionMeta> {
+        let _reservation = crate::update::barrier::reservation().map_err(anyhow::Error::msg)?;
         let Ok(_connection) = devices.connection_gate.try_read() else {
             return failure(FailureKind::Busy, "正在强制重连设备，请稍后开始录制");
         };

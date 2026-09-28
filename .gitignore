@@ -100,3 +100,5 @@ release/keys/*.private.pem
 # 历史插件签名私钥同样不入库。
 tools/plugin-signing/*.key
 tools/plugin-packer/target/
+
+updater/target/

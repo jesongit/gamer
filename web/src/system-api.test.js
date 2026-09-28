@@ -103,7 +103,7 @@ describe('动作端点 202 受理语义（§4.1）', () => {
     const cases = [
       ['update-check.success.json', 'checkUpdate', '/api/system/update/check', 'checking'],
       ['update-download.success.json', 'downloadUpdate', '/api/system/update/download', 'downloading'],
-      ['update-install.success.json', 'installUpdate', '/api/system/update/install', 'installing'],
+      ['update-install.success.json', 'installUpdate', '/api/system/update/apply', 'installing'],
       ['update-rollback.success.json', 'rollbackUpdate', '/api/system/update/rollback', 'rolling_back'],
     ]
     for (const [name, method, path, state] of cases) {
@@ -146,7 +146,7 @@ describe('PUT /api/system/update/policy（§6 整对象替换）', () => {
 describe('错误归一化：HTTP 状态码 + {code,message,details} 统一为 ApiError（逐 fixture 对照）', () => {
   const cases = [
     // [fixture, 请求方法, 期望 {status, code, details}]
-    ['update-check.launcher-unreachable.json', 'checkUpdate', { status: 502, code: 'launcher_unreachable' }],
+    ['update-check.launcher-unreachable.json', 'checkUpdate', { status: 502, code: 'updater_unavailable' }],
     ['update-download.update-not-available.json', 'downloadUpdate', { status: 409, code: 'update_not_available' }],
     ['update-install.update-busy.json', 'installUpdate', { status: 409, code: 'update_busy' }],
     ['update-install.update-not-managed.json', 'installUpdate', { status: 409, code: 'update_not_managed' }],
@@ -170,7 +170,7 @@ describe('错误归一化：HTTP 状态码 + {code,message,details} 统一为 Ap
   }
 
   it('update_not_ready：details.blocking 冻结数组原样透传', async () => {
-    mockByPath({ '/api/system/update/install': fixtureRes('update-install.update-not-ready.json') })
+    mockByPath({ '/api/system/update/apply': fixtureRes('update-install.update-not-ready.json') })
     const err = await apiMod.systemApi.installUpdate().then(() => null, (e) => e)
     expect(err.status).toBe(409)
     expect(err.code).toBe('update_not_ready')
@@ -178,7 +178,7 @@ describe('错误归一化：HTTP 状态码 + {code,message,details} 统一为 Ap
   })
 
   it('schema_incompatible：details 携带 candidate_schema / supported_range', async () => {
-    mockByPath({ '/api/system/update/install': fixtureRes('update-install.schema-incompatible.json') })
+    mockByPath({ '/api/system/update/apply': fixtureRes('update-install.schema-incompatible.json') })
     const err = await apiMod.systemApi.installUpdate().then(() => null, (e) => e)
     expect(err.status).toBe(422)
     expect(err.code).toBe('schema_incompatible')
@@ -207,7 +207,7 @@ describe('错误归一化：HTTP 状态码 + {code,message,details} 统一为 Ap
     for (const [name, path, call] of [
       ['system-info.unauthorized.json', '/api/system/info', () => apiMod.systemApi.getSystemInfo()],
       ['system-update.unauthorized.json', '/api/system/update', () => apiMod.systemApi.getUpdateStatus()],
-      ['update-install.unauthorized.json', '/api/system/update/install', () => apiMod.systemApi.installUpdate()],
+      ['update-install.unauthorized.json', '/api/system/update/apply', () => apiMod.systemApi.installUpdate()],
     ]) {
       global.fetch.mockReset()
       auth.session.username = 'admin'
@@ -219,7 +219,7 @@ describe('错误归一化：HTTP 状态码 + {code,message,details} 统一为 Ap
   })
 
   it('跨站状态变更 403 forbidden_origin：中间件固定 body {error} 归一化', async () => {
-    mockByPath({ '/api/system/update/install': fixtureRes('update-install.forbidden-origin.json') })
+    mockByPath({ '/api/system/update/apply': fixtureRes('update-install.forbidden-origin.json') })
     await expect(apiMod.systemApi.installUpdate()).rejects.toMatchObject({
       status: 403, code: 'forbidden_origin', message: 'forbidden_origin',
     })
@@ -250,7 +250,7 @@ describe('SYSTEM_ERRORS 错误码常量表（§7 冻结：11 码 + HTTP 状态�
       artifact_invalid: 422,
       insufficient_space: 507,
       schema_incompatible: 422,
-      launcher_unreachable: 502,
+      updater_unavailable: 502,
       rollback_unavailable: 409,
       manual_recovery_required: 409,
     }

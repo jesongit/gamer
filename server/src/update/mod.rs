@@ -17,7 +17,13 @@ pub mod coordinator;
 pub mod gate;
 pub mod ipc;
 pub mod model;
-pub mod pipe;
 pub mod policy;
 pub mod service;
 pub mod workload;
+
+#[cfg(windows)]
+pub mod local;
+
+pub mod barrier;
+
+pub mod plugins;

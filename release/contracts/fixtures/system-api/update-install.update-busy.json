@@ -1,9 +1,9 @@
 {
   "scenario": "已有升级/回滚事务进行中（或对 install 的并发第二个请求）→ 409 update_busy；两个 install 只有一个取得事务（计划 §11.4）",
-  "endpoint": "POST /api/system/update/install",
+  "endpoint": "POST /api/system/update/apply",
   "request": {
     "method": "POST",
-    "path": "/api/system/update/install",
+    "path": "/api/system/update/apply",
     "headers": {
       "Accept": "application/json",
       "Content-Type": "application/json",

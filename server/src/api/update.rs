@@ -79,6 +79,48 @@ pub(super) async fn api_update_policy(
     }
 }
 
+/// Only the candidate worker can apply a pinned bundle while all business writes are paused.
+pub(super) async fn api_apply_plugins(
+    State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if !crate::update::barrier::paused()
+        || std::env::var("GAMER_ACTIVATION_GATE").as_deref() != Ok("1")
+    {
+        return StatusCode::CONFLICT.into_response();
+    }
+    let expected = std::env::var("GAMER_ADMIN_TOKEN").unwrap_or_default();
+    if expected.is_empty()
+        || headers.get("X-Admin-Token").and_then(|v| v.to_str().ok()) != Some(expected.as_str())
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    #[cfg(windows)]
+    match crate::update::plugins::apply(&st.extensions).await {
+        Ok(()) => Json(serde_json::json!({"ok":true})).into_response(),
+        Err(error) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error":error.to_string()})),
+        )
+            .into_response(),
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = st;
+        StatusCode::NOT_IMPLEMENTED.into_response()
+    }
+}
+
+pub(super) async fn api_apply_update(State(st): State<AppState>) -> Response {
+    handle_action(st.update.request_apply().await)
+}
+pub(super) async fn api_cancel_apply(State(st): State<AppState>) -> Response {
+    match st.update.cancel_apply() {
+        Ok(()) => Json(serde_json::json!({"cancelled":true})).into_response(),
+        Err(e) => error_response(&e),
+    }
+}
+
 #[cfg(test)]
 mod contract_tests {
     use super::*;
@@ -88,7 +130,7 @@ mod contract_tests {
     use crate::scheduler::Scheduler;
     use crate::store::Db;
     use crate::update::controller::mock::MockController;
-    use crate::update::ipc::{Candidate, LastErrorCodeMessage, LauncherUpdateStatus};
+    use crate::update::ipc::{Candidate, LastErrorCodeMessage, UpdateStatus};
     use crate::update::model::{UpdateErrorCode, UpdateState};
     use crate::update::policy::{PolicyStore, PolicyValidationError, UpdatePolicy};
     use crate::update::service::{status_json, UpdateService, UpdateTxn, WorkloadProvider};
@@ -156,7 +198,7 @@ mod contract_tests {
     /// GET 200 staged 形态（system-update.success）
     #[test]
     fn get_body_matches_success_fixture_field_set() {
-        let status = LauncherUpdateStatus {
+        let status = UpdateStatus {
             state: Some(UpdateState::Staged),
             detail: Some("staged".into()),
             update_id: Some(UPD_ID.into()),
@@ -185,7 +227,7 @@ mod contract_tests {
                 "artifact_invalid",
             ),
         ] {
-            let status = LauncherUpdateStatus {
+            let status = UpdateStatus {
                 state: Some(UpdateState::Failed),
                 detail: Some("failed".into()),
                 update_id: Some(UPD_ID.into()),
@@ -205,7 +247,7 @@ mod contract_tests {
     /// GET 200 manual_recovery（唯一无自动迁出终态）
     #[test]
     fn get_body_matches_manual_recovery_fixture_field_set() {
-        let status = LauncherUpdateStatus {
+        let status = UpdateStatus {
             state: Some(UpdateState::ManualRecovery),
             detail: Some("manual_recovery_required".into()),
             update_id: Some(UPD_ID.into()),
@@ -323,11 +365,11 @@ mod contract_tests {
         );
     }
 
-    /// 502 launcher_unreachable（无 details）
+    /// 502 updater_unavailable（无 details）
     #[test]
-    fn launcher_unreachable_body_matches_fixture_field_set() {
+    fn updater_unavailable_body_matches_fixture_field_set() {
         let err = crate::update::ipc::UpdateError::new(
-            UpdateErrorCode::LauncherUnreachable,
+            UpdateErrorCode::UpdaterUnavailable,
             "无法连接升级器，请确认 launcher 正在运行后重试",
         );
         let body = error_json(&err);
@@ -654,7 +696,7 @@ mod contract_tests {
     #[tokio::test]
     async fn get_update_aggregates_launcher_status() {
         let controller = Arc::new(MockController::new());
-        controller.set_status(LauncherUpdateStatus {
+        controller.set_status(UpdateStatus {
             state: Some(UpdateState::Staged),
             detail: Some("staged".into()),
             update_id: Some(UPD_ID.into()),

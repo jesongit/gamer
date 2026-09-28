@@ -40,14 +40,14 @@ pub enum Mode {
     /// 直跑（本机手动启动）
     Direct,
     /// launcher 便携托管（managed 更新策略）
-    Launcher,
+    Portable,
 }
 
 impl Mode {
     pub fn as_str(self) -> &'static str {
         match self {
             Mode::Direct => "direct",
-            Mode::Launcher => "launcher",
+            Mode::Portable => "portable",
         }
     }
 
@@ -55,7 +55,7 @@ impl Mode {
     /// direct→unsupported）
     pub fn update_strategy(self) -> &'static str {
         match self {
-            Mode::Launcher => "managed",
+            Mode::Portable => "managed",
             Mode::Direct => "unsupported",
         }
     }
@@ -77,24 +77,21 @@ impl Mode {
             .map(|v| v.to_ascii_lowercase())
             .as_deref()
         {
-            Some("launcher") => return Mode::Launcher,
+            Some("portable") => return Mode::Portable,
             Some("direct") => return Mode::Direct,
             _ => {}
         }
-        // launcher 启动 server 时注入 IPC 环境变量（任一存在即托管模式）
-        if non_empty(getenv("GAMER_LAUNCHER_PIPE")).is_some()
-            || non_empty(getenv("GAMER_LAUNCHER_IPC_TOKEN")).is_some()
-        {
-            return Mode::Launcher;
+        if non_empty(getenv("GAMER_INSTALL_ROOT")).is_some() {
+            return Mode::Portable;
         }
         Mode::Direct
     }
 
-    /// launcher 托管且 IPC 通道已建立（以 GAMER_LAUNCHER_IPC_TOKEN 注入为
+    /// launcher 托管且 IPC 通道已建立（以 GAMER_INSTALL_ROOT 注入为
     /// 准据）：契约 §2.1 capability「launcher 模式且 IPC 通道建立 → 全 true」
-    pub fn managed_ipc_provisioned(self, getenv: impl Fn(&str) -> Option<String>) -> bool {
-        self == Mode::Launcher
-            && getenv("GAMER_LAUNCHER_IPC_TOKEN")
+    pub fn portable_update_available(self, getenv: impl Fn(&str) -> Option<String>) -> bool {
+        self == Mode::Portable
+            && getenv("GAMER_INSTALL_ROOT")
                 .map(|v| !v.trim().is_empty())
                 .unwrap_or(false)
     }
@@ -207,7 +204,7 @@ fn path_str(p: &Path) -> &str {
 /// source/binding 判定（纯函数，契约 §2.1 枚举；不含任何路径输出）
 fn classify(component: Component, mode: Mode, configured: &str) -> (&'static str, &'static str) {
     match mode {
-        Mode::Launcher => match component {
+        Mode::Portable => match component {
             // scrcpy jar 随应用版本目录分发（versions/<semver>/assets），恒 application
             Component::Scrcpy => ("managed", "application"),
             // launcher 管理的 runtime/<id>/<version>/ 独立组件目录
@@ -344,62 +341,58 @@ mod tests {
     fn mode_detection_follows_injection_precedence() {
         assert_eq!(Mode::detect_from(getenv(&[])), Mode::Direct);
         assert_eq!(
-            Mode::detect_from(getenv(&[("GAMER_LAUNCHER_PIPE", "pipe")])),
-            Mode::Launcher
+            Mode::detect_from(getenv(&[("GAMER_INSTALL_ROOT", "pipe")])),
+            Mode::Portable
         );
         assert_eq!(
-            Mode::detect_from(getenv(&[("GAMER_LAUNCHER_IPC_TOKEN", "token")])),
-            Mode::Launcher
+            Mode::detect_from(getenv(&[("GAMER_INSTALL_ROOT", "token")])),
+            Mode::Portable
         );
         assert_eq!(
-            Mode::detect_from(getenv(&[("GAMER_LAUNCHER_PIPE", "   ")])),
+            Mode::detect_from(getenv(&[("GAMER_INSTALL_ROOT", "   ")])),
             Mode::Direct
         );
         assert_eq!(
             Mode::detect_from(getenv(&[
                 ("GAMER_DEPLOYMENT_MODE", "direct"),
-                ("GAMER_LAUNCHER_PIPE", "pipe")
+                ("GAMER_INSTALL_ROOT", "pipe")
             ])),
             Mode::Direct
         );
         assert_eq!(
-            Mode::detect_from(getenv(&[("GAMER_DEPLOYMENT_MODE", "Launcher")])),
-            Mode::Launcher
+            Mode::detect_from(getenv(&[("GAMER_DEPLOYMENT_MODE", "Portable")])),
+            Mode::Portable
         );
     }
 
     #[test]
     fn mode_strategy_mapping_is_frozen() {
-        assert_eq!(Mode::Launcher.as_str(), "launcher");
+        assert_eq!(Mode::Portable.as_str(), "portable");
         assert_eq!(Mode::Direct.as_str(), "direct");
-        assert_eq!(Mode::Launcher.update_strategy(), "managed");
+        assert_eq!(Mode::Portable.update_strategy(), "managed");
         assert_eq!(Mode::Direct.update_strategy(), "unsupported");
     }
 
     #[test]
     fn managed_ipc_gate_requires_launcher_and_token() {
-        assert!(
-            Mode::Launcher.managed_ipc_provisioned(getenv(&[("GAMER_LAUNCHER_IPC_TOKEN", "t")]))
-        );
+        assert!(Mode::Portable.portable_update_available(getenv(&[("GAMER_INSTALL_ROOT", "t")])));
         // 非 launcher 模式（即使 token 在）不构成 managed
-        assert!(!Mode::Direct.managed_ipc_provisioned(getenv(&[("GAMER_LAUNCHER_IPC_TOKEN", "t")])));
-        assert!(!Mode::Launcher.managed_ipc_provisioned(getenv(&[])));
-        assert!(
-            !Mode::Launcher.managed_ipc_provisioned(getenv(&[("GAMER_LAUNCHER_IPC_TOKEN", "  ")]))
-        );
+        assert!(!Mode::Direct.portable_update_available(getenv(&[("GAMER_INSTALL_ROOT", "t")])));
+        assert!(!Mode::Portable.portable_update_available(getenv(&[])));
+        assert!(!Mode::Portable.portable_update_available(getenv(&[("GAMER_INSTALL_ROOT", "  ")])));
     }
 
     #[test]
     fn source_and_binding_follow_contract_enums() {
         // launcher：managed + runtime（scrcpy 恒 application）
         assert_eq!(
-            classify(Component::Adb, Mode::Launcher, "adb"),
+            classify(Component::Adb, Mode::Portable, "adb"),
             ("managed", "runtime")
         );
         assert_eq!(
             classify(
                 Component::Ffmpeg,
-                Mode::Launcher,
+                Mode::Portable,
                 "/runtime/ffmpeg/7.1/bin/ffmpeg"
             ),
             ("managed", "runtime")
@@ -407,7 +400,7 @@ mod tests {
         assert_eq!(
             classify(
                 Component::Scrcpy,
-                Mode::Launcher,
+                Mode::Portable,
                 "/app/versions/0.2.0/assets/scrcpy-server.jar"
             ),
             ("managed", "application")

@@ -1,9 +1,9 @@
 {
   "scenario": "install 门禁未满足（活动脚本运行 + 距下次 cron 触发在冻结窗口内）→ 409 update_not_ready，details.blocking 列出全部未满足门禁",
-  "endpoint": "POST /api/system/update/install",
+  "endpoint": "POST /api/system/update/apply",
   "request": {
     "method": "POST",
-    "path": "/api/system/update/install",
+    "path": "/api/system/update/apply",
     "headers": {
       "Accept": "application/json",
       "Content-Type": "application/json",

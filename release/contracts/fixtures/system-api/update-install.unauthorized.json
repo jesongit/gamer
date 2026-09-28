@@ -1,9 +1,9 @@
 {
-  "scenario": "未登录 POST /api/system/update/install → 401（状态变更方法同样要求登录）",
-  "endpoint": "POST /api/system/update/install",
+  "scenario": "未登录 POST /api/system/update/apply → 401（状态变更方法同样要求登录）",
+  "endpoint": "POST /api/system/update/apply",
   "request": {
     "method": "POST",
-    "path": "/api/system/update/install",
+    "path": "/api/system/update/apply",
     "headers": {
       "Accept": "application/json",
       "Content-Type": "application/json",

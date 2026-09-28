@@ -18,7 +18,7 @@
         "channel": "stable",
         "target": "x86_64-pc-windows-msvc"
       },
-      "deployment": { "mode": "launcher", "update_strategy": "managed" },
+      "deployment": { "mode": "portable", "update_strategy": "managed" },
       "schema": { "db": 1, "file": 1, "rollback_floor": 1 },
       "dependencies": {
         "adb": { "status": "ready", "version": "34.0.5", "source": "managed", "binding": "runtime" },

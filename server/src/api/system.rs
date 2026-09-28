@@ -79,10 +79,10 @@ pub(super) fn system_info_body(mode: Mode, deps: &Snapshot, boot_id: &str) -> se
 }
 
 /// capability 仅由 deployment 决定（契约 §2.1 冻结）：launcher 托管且 IPC
-/// 通道建立（以 GAMER_LAUNCHER_IPC_TOKEN 注入为准）→ 全 true；direct
+/// 通道建立（以 GAMER_UPDATE_TOKEN 注入为准）→ 全 true；direct
 /// → 全 false。策略 off 只关自动行为，不影响此处。
 fn capabilities(mode: Mode) -> serde_json::Value {
-    let managed = mode.managed_ipc_provisioned(|key| std::env::var(key).ok());
+    let managed = mode.portable_update_available(|key| std::env::var(key).ok());
     serde_json::json!({
         "check": managed,
         "download": managed,
@@ -748,7 +748,7 @@ mod contract_tests {
     /// adb/ffmpeg 的 binding 随模式由探针装配给出：launcher=runtime、direct=external。
     fn ready_snapshot(mode: Mode) -> Snapshot {
         let binding = match mode {
-            Mode::Launcher => "runtime",
+            Mode::Portable => "runtime",
             Mode::Direct => "external",
         };
         let dep = |version: &str, binding: &'static str| Dependency {
@@ -767,8 +767,8 @@ mod contract_tests {
     #[test]
     fn info_body_matches_success_fixture_field_set() {
         let body = system_info_body(
-            Mode::Launcher,
-            &ready_snapshot(Mode::Launcher),
+            Mode::Portable,
+            &ready_snapshot(Mode::Portable),
             "3f2c9a58-6d1e-4b7f-9a30-5c8b2e7d1f04",
         );
         assert_same_field_sets(&fixture_body("system-info.success.json"), &body, "$");
@@ -810,7 +810,7 @@ mod contract_tests {
 
     #[test]
     fn info_body_never_leaks_paths_tokens_or_usernames() {
-        let body = system_info_body(Mode::Launcher, &ready_snapshot(Mode::Launcher), boot_id());
+        let body = system_info_body(Mode::Portable, &ready_snapshot(Mode::Portable), boot_id());
         let serialized = body.to_string();
         for forbidden in [
             "C:\\",
@@ -820,7 +820,7 @@ mod contract_tests {
             "scrcpy-server.jar",
             ".exe",
             "password",
-            "GAMER_LAUNCHER_IPC_TOKEN",
+            "GAMER_UPDATE_TOKEN",
         ] {
             assert!(
                 !serialized.contains(forbidden),
@@ -844,7 +844,7 @@ mod contract_tests {
     }
 
     #[test]
-    fn capabilities_false_unless_managed_ipc_provisioned() {
+    fn capabilities_false_unless_portable_update_available() {
         // direct：全 false（值不依赖真实环境变量——装配函数不含环境读取）
         for mode in [Mode::Direct] {
             let body = system_info_body(mode, &ready_snapshot(mode), boot_id());
@@ -859,10 +859,10 @@ mod contract_tests {
         }
         // launcher 模式的能力门在 capabilities()：以 IPC token 注入为准。
         // 进程环境无 token（测试进程）→ false；tokio 单测不安全改进程级环境，
-        // managed_ipc_provisioned 的注入矩阵已在 deps_probe 单测覆盖
-        let body = system_info_body(Mode::Launcher, &ready_snapshot(Mode::Launcher), boot_id());
+        // portable_update_available 的注入矩阵已在 deps_probe 单测覆盖
+        let body = system_info_body(Mode::Portable, &ready_snapshot(Mode::Portable), boot_id());
         let managed_expected =
-            Mode::Launcher.managed_ipc_provisioned(|key| std::env::var(key).ok());
+            Mode::Portable.portable_update_available(|key| std::env::var(key).ok());
         assert_eq!(body["capabilities"]["check"], managed_expected);
     }
 

@@ -127,11 +127,28 @@ impl Coordinator {
             Err(error) => {
                 // Keep the last known journal state when the launcher is
                 // temporarily unreachable. Action requests still surface
-                // launcher_unreachable, while the next evaluation retries.
+                // updater_unavailable, while the next evaluation retries.
                 tracing::debug!(code = error.code.as_str(), "update status refresh failed");
                 self.service.cached_state()
             }
         };
+        if self.service.apply_requested() {
+            match state {
+                UpdateState::Available => {
+                    let _ = self.service.request_download().await;
+                }
+                UpdateState::Staged | UpdateState::Waiting => {
+                    if self.service.request_install().await.is_ok() {
+                        let _ = self.service.set_apply_requested(false);
+                    }
+                }
+                UpdateState::Failed | UpdateState::ManualRecovery | UpdateState::Idle => {
+                    let _ = self.service.set_apply_requested(false);
+                }
+                _ => {}
+            }
+            return Tick::Noop;
+        }
         let workload = self.service.workload_snapshot().await;
         let decision = decide(
             policy.strategy,
@@ -199,7 +216,7 @@ mod tests {
     use super::*;
     use crate::store::Db;
     use crate::update::controller::mock::MockController;
-    use crate::update::ipc::{Candidate, LauncherUpdateStatus};
+    use crate::update::ipc::{Candidate, UpdateStatus};
     use crate::update::policy::{PolicyStore, UpdatePolicy};
     use crate::update::service::{UpdateService, UpdateTxn, WorkloadProvider};
     use crate::update::workload::Workload;
@@ -223,8 +240,8 @@ mod tests {
         }
     }
 
-    fn staged_status() -> LauncherUpdateStatus {
-        LauncherUpdateStatus {
+    fn staged_status() -> UpdateStatus {
+        UpdateStatus {
             state: Some(UpdateState::Staged),
             detail: Some("staged".into()),
             update_id: Some("upd-coord-1".into()),
@@ -281,6 +298,54 @@ mod tests {
             strategy: UpdateStrategy::Notify,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn manual_apply_downloads_and_installs_even_when_automatic_updates_are_off() {
+        let controller = Arc::new(MockController::new());
+        let (service, _txn, dir) = service_with(
+            controller.clone(),
+            UpdatePolicy {
+                strategy: UpdateStrategy::Off,
+                ..Default::default()
+            },
+        )
+        .await;
+        controller.set_status(UpdateStatus {
+            state: Some(UpdateState::Available),
+            ..staged_status()
+        });
+        service.request_apply().await.unwrap();
+        assert!(service.status_body().await["apply_requested"]
+            .as_bool()
+            .unwrap());
+        let coordinator = Coordinator::new(service.clone(), Arc::new(FixedClock(12 * 60)));
+        coordinator.tick().await;
+        assert!(controller.calls().contains(&"download".into()));
+        controller.set_status(staged_status());
+        coordinator.tick().await;
+        tokio::task::yield_now().await;
+        assert!(controller.calls().contains(&"prepare_install".into()));
+        assert!(!service.apply_requested());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn cancelled_manual_apply_does_not_install_downloaded_candidate() {
+        let controller = Arc::new(MockController::new());
+        let (service, _txn, dir) = service_with(controller.clone(), notify_policy()).await;
+        controller.set_status(staged_status());
+        service.request_apply().await.unwrap();
+        assert!(
+            service.request_check().await.is_err(),
+            "accepted candidate must remain pinned"
+        );
+        service.cancel_apply().unwrap();
+        let coordinator = Coordinator::new(service.clone(), Arc::new(FixedClock(12 * 60)));
+        coordinator.tick().await;
+        assert!(!controller.calls().contains(&"prepare_install".into()));
+        assert!(!service.apply_requested());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     // ---------- decide 纯函数矩阵（SYS-005 注入时钟场景） ----------
@@ -471,7 +536,7 @@ mod tests {
         let coordinator = Coordinator::new(service, Arc::new(FixedClock(3 * 60)));
 
         // available → 自动下载
-        controller.set_status(LauncherUpdateStatus {
+        controller.set_status(UpdateStatus {
             state: Some(UpdateState::Available),
             detail: Some("checked".into()),
             update_id: Some("upd-n1".into()),

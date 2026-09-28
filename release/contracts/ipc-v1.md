@@ -1,5 +1,7 @@
 # Launcher IPC protocol v1 契约（ARC-003）
 
+> 2026-09-28：以下为历史启动器传输协议。当前便携版已删除 named pipe 服务端与独立启动器，更新控制使用进程内调用；部分操作、状态及错误字段仍由内部 dispatcher 和测试 fixture 复用。本文的 pipe、DACL、握手与连接规则不再适用于当前实现。当前行为以 `docs/guides/UPDATE_CONTRACT.md` 为准。
+
 > 状态：**冻结**（批次 0 契约；帧格式、字段、操作枚举、上限/超时建议值只能以版本化契约变更——任何变更必须 bump 到 `ipc-v2` 并单独提交 fixture，通知 server/launcher/web 三轨同步）。
 > 依据：`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §6.4（Launcher IPC 与 System API）、§6.6（持久化升级状态机）；`docs/guides/UPDATE_CONTRACT.md` §3.1（launcher 职责：Windows named pipe IPC server，protocol v1，仅当前用户 DACL，只接受内部枚举操作）。
 > 产出位置登记于 `docs/guides/UPDATE_CONTRACT.md` §6 文件地图（`release/contracts/ipc-v1.md`）。
@@ -111,7 +113,7 @@
 
 ```json
 {
-  "launcher_version": "0.1.0",
+  "updater_version": "0.1.0",
   "installation_id": "a1b2c3d4e5f6a7b8",
   "protocol_version": 1,
   "versions": { "current": "0.2.0", "previous": "0.1.0" },
@@ -170,7 +172,7 @@
 
 ### 6.1 业务错误码（与 HTTP API 共享，11 个）
 
-`update_not_managed`、`update_busy`、`update_not_available`、`update_not_ready`、`manifest_invalid`、`artifact_invalid`、`insufficient_space`、`schema_incompatible`、`launcher_unreachable`、`rollback_unavailable`、`manual_recovery_required`——触发条件见 `system-api-v1.md` §7；launcher 侧产生、经错误帧回传后由 server 1:1 映射为 HTTP 错误或 `last_error`。
+`update_not_managed`、`update_busy`、`update_not_available`、`update_not_ready`、`manifest_invalid`、`artifact_invalid`、`insufficient_space`、`schema_incompatible`、`updater_unavailable`、`rollback_unavailable`、`manual_recovery_required`——触发条件见 `system-api-v1.md` §7；launcher 侧产生、经错误帧回传后由 server 1:1 映射为 HTTP 错误或 `last_error`。
 
 ### 6.2 协议级错误码（仅 IPC，冻结）
 
@@ -185,7 +187,7 @@
 ## 7. 降级：UnsupportedUpdateController（冻结）
 
 - **直跑 server 模式无 launcher**：不注入 `GAMER_LAUNCHER_PIPE`/`GAMER_LAUNCHER_IPC_TOKEN`，server 以 `UnsupportedUpdateController`降级——**从不创建 IPC 连接**，所有更新动作 API 返回 `update_not_managed`（HTTP 409），capability 全 false（UPDATE_CONTRACT §3.3、计划 §6.4）。
-- launcher 模式下 launcher 进程死亡/pipe 消失：server 的 UpdateController 降级为「不可达」态——更新动作返回 `launcher_unreachable`（502），`/api/system/info` 的 capability 按 IPC 通道实际健康置 false；**server 不因 launcher 不在而启动失败、不退出、不自动拉起 launcher**。
+- launcher 模式下 launcher 进程死亡/pipe 消失：server 的 UpdateController 降级为「不可达」态——更新动作返回 `updater_unavailable`（502），`/api/system/info` 的 capability 按 IPC 通道实际健康置 false；**server 不因 launcher 不在而启动失败、不退出、不自动拉起 launcher**。
 
 ## 8. fixture 索引（`release/contracts/fixtures/ipc/`）
 

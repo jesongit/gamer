@@ -8,7 +8,7 @@ use super::*;
 mod update_flow_tests {
     use super::*;
     use crate::update::controller::mock::MockController;
-    use crate::update::ipc::{Candidate, LauncherUpdateStatus, UpdateError as IpcUpdateError};
+    use crate::update::ipc::{Candidate, UpdateError as IpcUpdateError, UpdateStatus};
     use crate::update::model::{UpdateErrorCode, UpdateState};
     use crate::update::policy::{PolicyStore, UpdatePolicy};
     use crate::update::service::{UpdateService, UpdateTxn, WorkloadProvider};
@@ -59,14 +59,18 @@ mod update_flow_tests {
             .uri("/api/packages")
             .header(axum::http::header::COOKIE, sid)
             .header(axum::http::header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"id":"com.test.app","targets":{"android":{"packages":["*"]}}}"#))
+            .body(Body::from(
+                r#"{"id":"com.test.app","targets":{"android":{"packages":["*"]}}}"#,
+            ))
             .unwrap();
         let _ = t.app.clone().oneshot(request).await.unwrap();
         // PUT 文本资源（force = 夹具直写语义）
         let body = serde_json::json!({ "content": content, "force": true }).to_string();
         let request = HttpRequest::builder()
             .method("PUT")
-            .uri(format!("/api/packages/com.test.app/plugins/gamer-yaml/resources/automations/{name}"))
+            .uri(format!(
+                "/api/packages/com.test.app/plugins/gamer-yaml/resources/automations/{name}"
+            ))
             .header(axum::http::header::COOKIE, sid)
             .header(axum::http::header::CONTENT_TYPE, "application/json")
             .body(Body::from(body))
@@ -100,10 +104,7 @@ mod update_flow_tests {
             _request: &'a crate::core::RunRequest,
             _realtime_logs: bool,
             _stop: Arc<AtomicBool>,
-        ) -> futures_util::future::BoxFuture<
-            'a,
-            anyhow::Result<Vec<(String, String)>>,
-        > {
+        ) -> futures_util::future::BoxFuture<'a, anyhow::Result<Vec<(String, String)>>> {
             self.started.fetch_add(1, Ordering::SeqCst);
             Box::pin(async {
                 std::future::pending::<()>().await;
@@ -159,11 +160,13 @@ mod update_flow_tests {
             .register_runner_for_tests(
                 "gamer-yaml",
                 "gamer-yaml",
-                Arc::new(crate::extensions::gamer_yaml::timer_yaml::YamlTimerRunner::new(
-                    db.clone(),
-                    runs.clone(),
-                    scripts.clone(),
-                )),
+                Arc::new(
+                    crate::extensions::gamer_yaml::timer_yaml::YamlTimerRunner::new(
+                        db.clone(),
+                        runs.clone(),
+                        scripts.clone(),
+                    ),
+                ),
             )
             .unwrap();
         let auth = Arc::new(auth::AuthState::new(
@@ -220,8 +223,8 @@ mod update_flow_tests {
         }
     }
 
-    fn staged_status(update_id: &str) -> LauncherUpdateStatus {
-        LauncherUpdateStatus {
+    fn staged_status(update_id: &str) -> UpdateStatus {
+        UpdateStatus {
             state: Some(UpdateState::Staged),
             detail: Some("staged".into()),
             update_id: Some(update_id.into()),
@@ -237,8 +240,8 @@ mod update_flow_tests {
         }
     }
 
-    fn fail_status(code: &str) -> LauncherUpdateStatus {
-        LauncherUpdateStatus {
+    fn fail_status(code: &str) -> UpdateStatus {
+        UpdateStatus {
             state: Some(UpdateState::Failed),
             detail: Some("failed".into()),
             update_id: Some("upd-f1".into()),
@@ -277,7 +280,11 @@ mod update_flow_tests {
         assert_eq!(body["update_id"], "upd-sys6");
         tokio::task::yield_now().await;
         assert_eq!(
-            t.controller.calls().iter().filter(|c| *c == "prepare_install").count(),
+            t.controller
+                .calls()
+                .iter()
+                .filter(|c| *c == "prepare_install")
+                .count(),
             1,
             "202 返回时 prepare_install 已被后台发起"
         );
@@ -317,7 +324,11 @@ mod update_flow_tests {
             serde_json::json!({}),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::CONFLICT, "prepare 完成后事务仍被占用");
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "prepare 完成后事务仍被占用"
+        );
         assert_eq!(json_body(resp).await["code"], "update_busy");
     }
 
@@ -328,7 +339,8 @@ mod update_flow_tests {
         let t = build_update_rig("rejected");
         let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
         t.controller.set_status(staged_status("upd-rej"));
-        t.controller.fail_prepare_with(UpdateErrorCode::SchemaIncompatible);
+        t.controller
+            .fail_prepare_with(UpdateErrorCode::SchemaIncompatible);
 
         let resp = post_json(
             &t,
@@ -519,8 +531,7 @@ mod update_flow_tests {
     async fn install_at_idle_is_not_available() {
         let t = build_update_rig("idle");
         let sid = sid_of(&t).await;
-        t.controller
-            .set_status(LauncherUpdateStatus::default()); // idle
+        t.controller.set_status(UpdateStatus::default()); // idle
         let resp = post_json(
             &t,
             &sid,
@@ -529,10 +540,7 @@ mod update_flow_tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::CONFLICT);
-        assert_eq!(
-            json_body(resp).await["code"],
-            "update_not_available"
-        );
+        assert_eq!(json_body(resp).await["code"], "update_not_available");
     }
 
     /// 未使用的导入消解（保留断言语义所需的类型引用）

@@ -1273,6 +1273,20 @@ function onVideoWrapMounted(el) { videoWrap.value = el }
 
 // ---------- 生命周期 ----------
 
+watch(connected, value => { if (value && store.deviceId) sessionStorage.setItem('gamer-update-device', store.deviceId) })
+function saveUpdateConnection() {
+  if (connected.value && store.deviceId) sessionStorage.setItem('gamer-update-device', store.deviceId)
+}
+watch([manualClose, superseded], ([manual, replaced]) => {
+  if (manual || replaced) sessionStorage.removeItem('gamer-update-device')
+})
+function restoreUpdateConnection() {
+  const id = sessionStorage.getItem('gamer-update-device')
+  if (!manualClose.value && !superseded.value && id && id === store.deviceId && !connected.value && !connecting.value) {
+    sessionStorage.removeItem('gamer-update-device')
+    connect(false)
+  }
+}
 onMounted(async () => {
   navigationReady.value = !!document.getElementById('gamer-main-navigation')
   // SPA 内跳转（store 存活）→ 自动重连恢复画面；页面刷新 → localStorage 恢复设备选择；
@@ -1291,6 +1305,9 @@ onMounted(async () => {
   else { mode.value = 'edit'; store.deviceId = null }
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('beforeunload', onBeforeUnload)
+  window.addEventListener('gamer-before-update-reload', onBeforeUnload)
+  window.addEventListener('gamer-update-reload', saveUpdateConnection)
+  window.addEventListener('gamer-service-restored', restoreUpdateConnection)
 
   // 刷新恢复运行态：刷新前发起的脚本在服务端继续执行——按设备查询当前活动 run。
   // 当前契约为 active:false 或 active:true + 嵌套完整 RunRecord，含来源标签；
@@ -1298,7 +1315,8 @@ onMounted(async () => {
   if (store.deviceId) await restoreRunState()
   // 画面恢复：SPA 内返回（store 存活）或刷新后脚本运行中/设备会话在线（此前正在
   // 投屏）→ 自动连接；设备空闲离线则保持首次进入行为；遇 conflict 不抢（connect 内处理）
-  if (store.deviceId && (spaPreselected || store.running || current.value?.status === 'online')) connect(false)
+  if (store.deviceId && (spaPreselected || store.running || current.value?.status === 'online' || sessionStorage.getItem('gamer-update-device') === store.deviceId)) connect(false)
+  sessionStorage.removeItem('gamer-update-device')
   // 其他页面已启动脚本时，本页接管状态轮询（脚本结束后复位运行状态）
   if (store.running && store.runId) startRunStatusPoll()
   window.addEventListener('blur', onWindowBlur)
@@ -1308,6 +1326,9 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('beforeunload', onBeforeUnload)
+  window.removeEventListener('gamer-before-update-reload', onBeforeUnload)
+  window.removeEventListener('gamer-update-reload', saveUpdateConnection)
+  window.removeEventListener('gamer-service-restored', restoreUpdateConnection)
   window.removeEventListener('blur', onWindowBlur)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   keymap.releaseAll()

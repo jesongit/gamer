@@ -152,6 +152,7 @@ async fn source_file(
     }
 }
 pub async fn start(devices: Arc<DeviceManager>, req: OutputRequest) -> Result<OutputHandle> {
+    let update_activity = crate::update::barrier::activity().map_err(anyhow::Error::msg)?;
     req.validate()?;
     ensure!(
         crate::targets::capabilities(&devices, &req.device_id)?.media_output,
@@ -209,6 +210,7 @@ pub async fn start(devices: Arc<DeviceManager>, req: OutputRequest) -> Result<Ou
     let report = status.clone();
     let finished = stop.clone();
     let task = tokio::spawn(async move {
+        let _update_activity = update_activity;
         let _lease = lease;
         for attempt in 0..=5 {
             if *stopped.borrow() {

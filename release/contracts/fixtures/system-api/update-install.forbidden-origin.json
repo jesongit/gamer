@@ -1,9 +1,9 @@
 {
   "scenario": "已登录但 Origin 与 Host 不一致（跨站状态变更）→ 403 forbidden_origin（body 与现有 auth 中间件一致）",
-  "endpoint": "POST /api/system/update/install",
+  "endpoint": "POST /api/system/update/apply",
   "request": {
     "method": "POST",
-    "path": "/api/system/update/install",
+    "path": "/api/system/update/apply",
     "headers": {
       "Accept": "application/json",
       "Content-Type": "application/json",

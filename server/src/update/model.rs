@@ -104,7 +104,7 @@ pub enum UpdateErrorCode {
     ArtifactInvalid,
     InsufficientSpace,
     SchemaIncompatible,
-    LauncherUnreachable,
+    UpdaterUnavailable,
     RollbackUnavailable,
     ManualRecoveryRequired,
 }
@@ -120,7 +120,7 @@ impl UpdateErrorCode {
             UpdateErrorCode::ArtifactInvalid => "artifact_invalid",
             UpdateErrorCode::InsufficientSpace => "insufficient_space",
             UpdateErrorCode::SchemaIncompatible => "schema_incompatible",
-            UpdateErrorCode::LauncherUnreachable => "launcher_unreachable",
+            UpdateErrorCode::UpdaterUnavailable => "updater_unavailable",
             UpdateErrorCode::RollbackUnavailable => "rollback_unavailable",
             UpdateErrorCode::ManualRecoveryRequired => "manual_recovery_required",
         }
@@ -136,7 +136,7 @@ impl UpdateErrorCode {
             "artifact_invalid" => UpdateErrorCode::ArtifactInvalid,
             "insufficient_space" => UpdateErrorCode::InsufficientSpace,
             "schema_incompatible" => UpdateErrorCode::SchemaIncompatible,
-            "launcher_unreachable" => UpdateErrorCode::LauncherUnreachable,
+            "updater_unavailable" => UpdateErrorCode::UpdaterUnavailable,
             "rollback_unavailable" => UpdateErrorCode::RollbackUnavailable,
             "manual_recovery_required" => UpdateErrorCode::ManualRecoveryRequired,
             _ => return None,
@@ -150,19 +150,13 @@ impl UpdateErrorCode {
             | UpdateErrorCode::ArtifactInvalid
             | UpdateErrorCode::SchemaIncompatible => 422,
             UpdateErrorCode::InsufficientSpace => 507,
-            UpdateErrorCode::LauncherUnreachable => 502,
+            UpdateErrorCode::UpdaterUnavailable => 502,
             _ => 409,
         }
     }
-
-    /// 从 IPC 错误帧 `code` 解析；协议级错误码 / 未知码统一视为通道损伤
-    /// （launcher_unreachable，ipc-v1 §7 降级语义）
-    pub fn from_ipc_frame_code(value: &str) -> Self {
-        Self::parse(value).unwrap_or(UpdateErrorCode::LauncherUnreachable)
-    }
 }
 
-/// §4.3 install 门禁枚举（blocking 数组元素，冻结全集；launcher_unreachable /
+/// §4.3 install 门禁枚举（blocking 数组元素，冻结全集；updater_unavailable /
 /// insufficient_space 由 launcher 侧判定，server 本地门禁不产出）
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -171,7 +165,7 @@ pub enum InstallBlocking {
     ActiveRun,
     UpdateTransaction,
     CronFreezeWindow,
-    LauncherUnreachable,
+    UpdaterUnavailable,
     InsufficientSpace,
 }
 
@@ -182,7 +176,7 @@ impl InstallBlocking {
             InstallBlocking::ActiveRun => "active_run",
             InstallBlocking::UpdateTransaction => "update_transaction",
             InstallBlocking::CronFreezeWindow => "cron_freeze_window",
-            InstallBlocking::LauncherUnreachable => "launcher_unreachable",
+            InstallBlocking::UpdaterUnavailable => "updater_unavailable",
             InstallBlocking::InsufficientSpace => "insufficient_space",
         }
     }
@@ -291,7 +285,7 @@ mod tests {
         assert_eq!(UpdateErrorCode::ArtifactInvalid.http_status(), 422);
         assert_eq!(UpdateErrorCode::SchemaIncompatible.http_status(), 422);
         assert_eq!(UpdateErrorCode::InsufficientSpace.http_status(), 507);
-        assert_eq!(UpdateErrorCode::LauncherUnreachable.http_status(), 502);
+        assert_eq!(UpdateErrorCode::UpdaterUnavailable.http_status(), 502);
         assert_eq!(UpdateErrorCode::RollbackUnavailable.http_status(), 409);
         assert_eq!(UpdateErrorCode::ManualRecoveryRequired.http_status(), 409);
     }

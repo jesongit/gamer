@@ -13,6 +13,8 @@
 //!   全部延后到 `POST /api/system/activate` 校验通过后执行，完成后换入完整
 //!   路由并置 startup.stage=ready（/health/ready 翻转 200）。
 
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod api;
 mod browser;
 mod build_info;
@@ -59,8 +61,30 @@ use tracing::{info, warn};
 
 use update::gate::StartupGate;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    let result = run_application();
+    #[cfg(windows)]
+    if std::env::args_os().len() == 1
+        && std::env::var_os("GAMER_PORTABLE_CHILD").is_none()
+        && gamer_updater::portable::layout().is_some()
+    {
+        if let Err(error) = &result {
+            gamer_updater::portable::report_startup_error(&error.to_string());
+        }
+    }
+    result
+}
+
+fn run_application() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    let _portable_lock = gamer_updater::portable::prepare().map_err(anyhow::Error::msg)?;
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     // DATA-005：维护子命令最前分支（schema-policy §7 零后台服务）——inspect /
     // migrate 在任何 adb / scheduler / HTTP / 设备扫描 / DeviceManager 初始化
     // 之前执行完即退出；无子命令时走既有启动流程，行为逐字节不变
@@ -167,6 +191,9 @@ async fn main() -> anyhow::Result<()> {
 
     // activation gate（OPS-004）：GAMER_ACTIVATION_GATE=1 → 闸内启动
     let gate = StartupGate::from_env();
+    if gate.enabled() {
+        update::barrier::pause();
+    }
     let gate_shared = Arc::new(api::gate::GateShared::default());
 
     // 统一停机协调器（OPS-001）：drain 依赖（runs/viewers/devices）在闸内路径
@@ -482,9 +509,16 @@ fn spawn_update_stack(
         })
         .snapshot()
     });
-    let service = Arc::new(update::service::UpdateService::new(
-        controller, policy, txn, workload, db,
-    ));
+    let guard_runs = ctx.runs.clone();
+    let guard_recording = recording::service(cfg);
+    let service = Arc::new(
+        update::service::UpdateService::new(controller, policy, txn, workload, db)
+            .with_install_guard(Arc::new(move || {
+                update::barrier::freeze_if_idle(|| {
+                    guard_runs.active_count() == 0 && guard_recording.active_count() == 0
+                })
+            })),
+    );
     update::coordinator::Coordinator::spawn(service.clone());
     info!(
         mode = mode.as_str(),

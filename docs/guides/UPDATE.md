@@ -1,57 +1,42 @@
-# Gamer 安装、修复与升级
+# Gamer 便携版与软件更新
 
-当前启动器提供图形安装/更新、托盘运行和命令行维护。正式发行版为 [Gamer 0.2.0](https://github.com/jesongit/gamer/releases/tag/v0.2.0)，支持独立启动器在线安装和完整包离线安装。使用入口见 [启动器快速上手](launcher-quickstart.md)，正式发行验收范围见 [0.2.0 记录](../evidence/RELEASE_0_2_0_2026_09_25.md)。
+本页描述当前开发版，不适用于历史启动器发行包；不提供旧启动器迁移。
 
-## 安装和日常使用
+## 启动
 
-1. 将完整包解压到可写目录，双击 `gamer-launcher.exe`。
-2. 首次点击“安装”，从包内 seeds 安装本体与锁定的 ADB、FFmpeg/FFprobe、scrcpy-server。
-3. 首次选择官方插件并设置管理员密码；个人配置包在软件中导入。
+将完整包解压到可写目录，双击 `Gamer.exe`。程序直接启动服务并打开浏览器，无独立启动器界面或常驻监督进程。首次使用在网页设置管理员密码，插件在插件页按需安装。托盘提供打开工作台和退出；关闭网页不退出服务。
 
-正常启动在后台完成检查，进入托盘并打开网页；发现更新则显示小窗口，提供“更新 / 取消”。托盘右键仅“打开 Gamer / 退出 Gamer”。运行数据在 `data/`，配置在 `config/`；这些目录不随本体升级替换。
+## 更新
 
-0.2.0 支持在“设置 → 软件更新”中检查、下载并安装已确认的版本，安装失败自动恢复旧版和升级前快照；beta.4 及更早启动器须先通过启动器更新到 beta.6。插件页独立发现官方插件新版本，安装或更新仍由用户确认。
+在「设置 → 软件更新」检查版本，点击「更新并重启」。确认后由服务端持久保存更新预约，关闭网页也会继续执行；安装开始前可以取消预约（已下载文件保留）。
 
-不要将新版完整包直接覆盖已有安装的 `config/` 或 `data/`。离线升级先退出启动器并备份这两个目录，再将新包的 `seeds/`、`manifests/` 合并到原安装目录，并替换根目录 `gamer-launcher.exe`；随后使用下方 `upgrade --manifest` 指定新版清单。完整包的新配置模板仅供首次安装使用。
+1. 下载并校验清单锁定的应用归档与运行依赖。应用归档包括服务端、前端、宿主内置插件代码及 scrcpy 资源。
+2. 等待运行任务、录制和媒体输出结束，并避开即将触发的定时任务。手动预约不受维护时段限制；自动安装遵守设置的维护时段。
+3. 暂停新业务，启动同一程序的临时内部更新进程。原服务优雅退出且释放实例锁后，备份数据库、配置及文件数据。
+4. 切换版本，启动候选服务。业务写入继续暂停，验证版本、启动身份、schema、就绪与前端入口；更新已安装的发行配套官方插件。
+5. 原子更新 `Gamer.exe` 入口、提交更新记录，再恢复业务写入。浏览器自动检测、刷新到新前端并重连此前的投屏；被其他页面接管的连接不会抢占。
 
-## 完整性与来源
+未保存编辑内容会阻止自动刷新。页面提供「保存后刷新」提示；服务端运行任务不会从中断位置自动续跑，因为正常更新会等待它们结束。
 
-发行清单默认从官方 GitHub HTTPS 下载，按 size/SHA256 校验归档和组件文件，再安全解压。
-不需要 `.sig`、公钥、密钥轮换或签名 secrets。SHA256 保证文件与清单一致；清单来源依赖 GitHub 账号与发布权限，不能用 SHA256 认证发布者。
+已安装的官方插件保持安装/启用意图，只有清单内的较新配套版本参与更新。第三方插件及未安装插件不自动安装。插件新增权限时，在停止旧服务前拒绝安装，提示先在插件页确认该插件更新。
 
-离线种子和下载缓存同样校验。下载可中断恢复，校验缓存可复用未变化文件的校验结果，变化后重新计算。需要强制全量哈希检查时使用 `doctor --deep`。
+源码直跑/容器模式保留手动部署，不提供便携安装更新能力。
 
-## 命令行维护
+## 失败与恢复
 
-在安装目录运行：
+下载或校验失败保留当前可运行版本。候选验证失败，在开放业务写入前恢复更新前快照及版本指针并重启旧版。提交完成后不再自动恢复旧快照，避免覆盖新产生的数据。
 
-```powershell
-.\gamer-launcher.exe status
-.\gamer-launcher.exe doctor
-.\gamer-launcher.exe doctor --deep --probe
-.\gamer-launcher.exe doctor --manifest manifests/<版本>.json
-.\gamer-launcher.exe repair --probe
-.\gamer-launcher.exe upgrade --manifest <新版本清单路径或HTTPS地址>
-```
+断电/进程中断后再次双击 `Gamer.exe`，按 `state/update-journal.json` 的持久阶段恢复。若无法自动恢复，查看 `logs/update-worker-error.txt`、`logs/startup-error.txt`、`state/update-journal.json`，保留 `backups/` 与隔离证据，不要反复覆盖个人数据。
 
-`repair` 用已有发行清单从 seeds/cache/远端修复；`upgrade` 要求明确候选清单。
-`start` 用于命令行监管服务；日常双击使用图形入口。
-没有 CLI `stop` 子命令；日常退出使用托盘“退出 Gamer”。
+整份 `data/` 会进入离线快照，媒体较多时需要相应磁盘空间和时间。当前未实现热更新或设备任务断点续跑。
 
-## 安装目录
+## 本机模式
 
-| 目录 | 用途 |
-|---|---|
-| `versions/<版本>/` | 应用与 Web 静态资源 |
-| `runtime/<组件>/<版本>/` | 锁定的运行依赖 |
-| `manifests/` | 已校验发行清单 JSON |
-| `seeds/`、`cache/`、`staging/` | 离线归档、下载缓存、安装暂存 |
-| `state/` | 版本指针、安装库存、升级 journal |
-| `backups/`、`quarantine/` | 升级快照与故障现场 |
-| `data/`、`config/` | 用户数据与配置 |
+在 `config/config.toml` 设置 `local_only = true`，HTTP 与 WebRTC 限制为回环地址；USB ADB 可用，其他电脑无法访问。测试可用 `GAMER_LOCAL_ONLY=1` 和 `ADB_MDNS=0`。
 
-升级异常时保留 journal、快照与 quarantine，先关闭仍占用旧版本目录的进程再修复。
-`manifest_invalid` 表示清单结构/语义错误，`artifact_invalid` 表示文件哈希、大小或归档检查失败。
-自动回滚也失败会进入 `manual_recovery_required`，按 [发布与人工恢复手册](RELEASE.md) 处理。
+## 开发验证
 
-维护者使用 [安装目录契约](UPDATE_CONTRACT.md)、[发行清单契约](../../release/contracts/manifest-v1.md) 和 [发布资产验证](../../release/docs/ATTESTATION.md)。旧计划与签名演练记录仅作为历史资料。
+- `cargo test --manifest-path updater/Cargo.toml`：状态机、路径安全、校验、快照及恢复矩阵。
+- `cargo test --manifest-path server/Cargo.toml update`：更新 API、协调器与门禁。
+- `release/packaging/test-portable-start.ps1 -Root <临时安装目录>`：真实启动、前端、更新能力和退出。
+- `python release/packaging/test-portable-update.py`：当前 debug 程序、本地依赖包、隔离临时数据的真实升级与候选身份失败回退。基线使用当前程序配旧版本指针，验证更新事务而非历史二进制兼容性。

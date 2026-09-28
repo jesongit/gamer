@@ -1,9 +1,9 @@
 {
   "scenario": "候选目标 schema 超出当前 binary 兼容范围 → 422 schema_incompatible（需等待兼容的新版本）",
-  "endpoint": "POST /api/system/update/install",
+  "endpoint": "POST /api/system/update/apply",
   "request": {
     "method": "POST",
-    "path": "/api/system/update/install",
+    "path": "/api/system/update/apply",
     "headers": {
       "Accept": "application/json",
       "Content-Type": "application/json",

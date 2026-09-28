@@ -61,7 +61,7 @@ export const BLOCKING_LABELS = Object.freeze({
   active_run:          '存在运行中的脚本任务',
   update_transaction:  '存在其他升级/回滚/备份/迁移/维护事务',
   cron_freeze_window:  '下一次定时任务触发时间在冻结窗口内',
-  launcher_unreachable:'升级器（launcher）不可达',
+  updater_unavailable:'更新服务暂不可用',
   insufficient_space:  '磁盘空间不足',
 })
 
@@ -98,7 +98,7 @@ export function formatBytes(n) {
 // ---- §2.1 /api/system/info 枚举的中文标签 ----
 
 export const DEPLOYMENT_LABELS = Object.freeze({
-  launcher: '便携托管（launcher）',
+  portable: '便携版',
   direct: '直跑',
 })
 
