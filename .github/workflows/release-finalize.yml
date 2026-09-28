@@ -1,0 +1,63 @@
+# Recover a draft whose immutable assets were already uploaded, without rebuilding
+# or overwriting them. Repeat the complete external verification before publishing.
+name: Finalize Verified Release Draft
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing draft release tag (v<semver>)
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: release-refs/tags/${{ inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  verify-and-publish:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify existing tag, product version and draft
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pwsh -NoProfile -File ./tools/check-version.ps1 -Tag $env:TAG
+          if ($LASTEXITCODE -ne 0) { throw 'Version gate failed' }
+          $sha = (& git rev-parse "$($env:TAG)^{commit}" | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Release tag not found' }
+          pwsh -NoProfile -File ./release/packaging/check-immutable-release.ps1 -Mode GitHub -Tag $env:TAG -CommitSha $sha -Repository $env:GH_REPO
+          if ($LASTEXITCODE -ne 0) { throw 'Immutable release preflight failed' }
+      - name: Re-download and verify every asset, manifest, SBOM and actual startup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:TAG.Substring(1)
+          $channel = if ($version.Contains('-')) { 'beta' } else { 'stable' }
+          pwsh -NoProfile -File ./tools/verify-external-release.ps1 -Repository $env:GH_REPO -Tag $env:TAG -Version $version -Channel $channel -DownloadDir (Join-Path $env:RUNNER_TEMP 'verified-assets')
+          if ($LASTEXITCODE -ne 0) { throw 'External release verification failed' }
+      - name: Publish verified draft
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $draft = (& gh release view $env:TAG --repo $env:GH_REPO --json isDraft --jq .isDraft | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $draft -ne 'true') { throw 'Expected an existing draft release' }
+          $flags = if ($env:TAG.Contains('-')) { @('--prerelease', '--latest=false') } else { @('--latest') }
+          gh release edit $env:TAG --repo $env:GH_REPO --draft=false @flags
+          if ($LASTEXITCODE -ne 0) { throw 'Publication failed' }
+          $draft = (& gh release view $env:TAG --repo $env:GH_REPO --json isDraft --jq .isDraft | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $draft -ne 'false') { throw 'Release is not public' }
