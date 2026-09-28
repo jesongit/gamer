@@ -67,7 +67,7 @@ export default defineConfig({
     docFooter: { prev: '上一篇', next: '下一篇' },
     editLink: {
       pattern: ({ relativePath }) => {
-        const shared = ['reference/YAML.md', 'reference/KEYMAP_SCHEMA.md', 'guides/yaml-tutorial.md']
+        const shared = ['reference/YAML.md', 'reference/KEYMAP_SCHEMA.md', 'guides/yaml-tutorial.md', 'guides/browser-targets.md']
         // VitePress serializes this function for the browser; it must not capture config variables.
         return `https://github.com/jesongit/gamer/edit/main/docs/${shared.includes(relativePath) ? '' : 'site/'}${relativePath}`
       },

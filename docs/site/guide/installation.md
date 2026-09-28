@@ -2,25 +2,15 @@
 
 Gamer 可以从源码运行，也支持使用 Windows x64 完整包。设备连接发生在运行服务端的电脑上，浏览器负责操作界面。
 
-## Windows 启动器与完整包
+## Windows 完整便携包
 
-正式发行版为 [Gamer 0.2.0](https://github.com/jesongit/gamer/releases/tag/v0.2.0)。下载独立 `gamer-launcher.exe` 放入专用可写目录可在线安装；也可将 `Gamer-0.2.0-windows-x64-full.zip` 全部解压后离线安装。首次双击显示“安装 / 取消”，安装完成后选择官方插件，再打开网页设置密码。
+从 [GitHub Releases](https://github.com/jesongit/gamer/releases) 下载 `Gamer-<版本>-windows-x64-full.zip`，全部解压到可写目录，双击 `Gamer.exe`。程序直接启动服务并打开网页，首次使用在网页设置管理员密码。托盘提供打开工作台和退出；关闭网页不退出服务。
 
-完整包带齐本体、启动器、ADB、FFmpeg/FFprobe、scrcpy 和官方插件归档，无需预装 Rust、Node.js 或 pnpm。解开 ZIP 后仍需点击“安装”，把组件展开到运行目录。安装文件使用 HTTPS + SHA256 校验，不要求签名或公钥。
+完整包带齐本体、前端、ADB、FFmpeg/FFprobe、scrcpy 和官方插件归档，无需预装 Rust、Node.js 或 pnpm。安装文件使用 HTTPS + SHA256 校验。
 
-以后双击会在后台检查；没有更新时进入托盘并打开网页，有更新时显示“更新 / 取消”。托盘仅提供“打开 Gamer / 退出 Gamer”。无参数为图形入口，显式 `start` 为命令行监管服务：
+在「设置 → 软件更新」检查版本并点击「更新并重启」。程序自动下载前后端和配套依赖，等待当前任务、录制及媒体输出结束后安装，重启后页面自动恢复。未保存编辑会阻止自动刷新，安装开始前可取消预约；候选验证失败自动恢复旧版本和数据快照。
 
-在解压目录也可执行：
-
-```powershell
-.\gamer-launcher.exe start
-.\gamer-launcher.exe status
-.\gamer-launcher.exe doctor
-```
-
-缺失依赖时使用 `gamer-launcher.exe repair --probe`。已有版本随包说明的修正以对应 Release 勘误和当前更新指南为准。
-
-0.2.0 支持在“设置 → 软件更新”完成下载和实际版本切换，失败时回滚；beta.4 及更早版本先用启动器完成升级。保留已有安装的 `config/` 和 `data/`，不要用新包默认配置直接覆盖。详细离线升级步骤见[更新指南](https://github.com/jesongit/gamer/blob/main/docs/guides/UPDATE.md)。
+从 0.2.5 起不再提供独立启动器，也不提供旧启动器迁移。旧版用户请使用新的完整包，勿经旧启动器覆盖安装。缺失运行依赖时重新下载完整包。完整更新行为见[更新指南](https://github.com/jesongit/gamer/blob/main/docs/guides/UPDATE.md)。
 
 ## 从源码启动
 
@@ -67,7 +57,7 @@ pnpm --dir web install --frozen-lockfile
 
 本地构建产物在 `web/public/plugins/`，可直接导入 `.gplugin`。安装前查看权限；安装成功后自动启用。新安装或更新 UI 后，保存编辑内容并刷新页面。
 
-启动器首装使用发行清单锁定的官方插件合集，完整包携带相同归档。插件页则独立发现插件仓的最新公开目录，手动刷新立即检查；网络失败回退缓存或随包列表，不自动安装或覆盖插件。新增宿主原生能力仍需同步更新 Gamer。
+完整包携带发行清单锁定的官方插件合集，首次启动不自动安装插件。插件页则独立发现插件仓的最新公开目录，手动刷新立即检查；网络失败回退缓存或随包列表，不自动安装或覆盖插件。新增宿主原生能力仍需同步更新 Gamer。
 
 ## 仅本机使用
 
