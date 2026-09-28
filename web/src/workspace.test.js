@@ -118,7 +118,7 @@ describe('Frontend Plugin Workspace', () => {
     expect(registry.resolve('script')?.key).toBe('gamer-yaml:automation')
     expect(registry.resolve('keymap')?.key).toBe('gamer-keymap:keymaps')
     // getProps 从 workspace core context 提取对应上下文
-    expect(automation?.getProps?.({ scriptRunner: { scripts: { kind: 'runner' } } })).toEqual({ context: { kind: 'runner' } })
+    expect(automation?.getProps?.({ scriptRunner: { scripts: { kind: 'runner' } } })).toEqual({ context: { scripts: { kind: 'runner' } } })
 
     // 扩展停用 → 服务端贡献消失 → 面板从注册表移除（生命周期跟随）
     load.mockResolvedValueOnce({ ui_contributions: [] })
@@ -163,8 +163,6 @@ describe('Frontend Plugin Workspace', () => {
     registerCoreContributions(registry)
     const gamerYamlPanels = [
       { plugin_id: 'gamer-yaml', panel_id: 'automation', title: '自动化', runtime: 'core', location: 'console.right', component: 'console.scripts' },
-      { plugin_id: 'gamer-yaml', panel_id: 'functions', title: '函数', runtime: 'core', location: 'console.right', component: 'console.functions' },
-      { plugin_id: 'gamer-yaml', panel_id: 'templates', title: '模板', runtime: 'core', location: 'console.right', component: 'console.templates' },
     ]
     const keymapPanel = { plugin_id: 'gamer-keymap', panel_id: 'keymaps', title: '映射', runtime: 'core', location: 'console.right', component: 'console.keymaps' }
     const load = vi.fn()
@@ -177,7 +175,7 @@ describe('Frontend Plugin Workspace', () => {
     await adapter.refresh()
     expect(registry.getPanels().map(panel => panel.key)).toEqual([
       'gamer.core:tasks', 'gamer.core:logs', 'gamer.core:settings',
-      'gamer-yaml:automation', 'gamer-yaml:functions', 'gamer-yaml:templates', 'gamer-keymap:keymaps',
+      'gamer-yaml:automation', 'gamer-keymap:keymaps',
     ])
 
     await adapter.refresh()

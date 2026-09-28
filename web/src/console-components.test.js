@@ -391,9 +391,9 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(layout).toContain('api.cancelRun(rid)')
     expect(consoleImpl).toContain('api.getRun(rid)')
     expect(taskBoard).toContain('api.runTaskNow(')
-    expect(consoleImpl).toContain('putTemplateBytes(t.name, b64, pkg, expectedVersion)')
+    expect(consoleImpl).toContain('putTemplateBytes(existing.name, payload.dataB64, payload.pkg, expectedVersion, targetName)')
     expect(consoleImpl).not.toContain('api.replaceTemplateImage(')
-    expect(capture).toContain('ctx.replaceTemplateImage(target, file)')
+    expect(capture).toContain('ctx.replaceTemplate(t)')
   })
 
   it('Package 上下文条（导入/导出/新建/复制/删除）落在 PackageContextBar，逻辑收敛在 usePackageContext', () => {

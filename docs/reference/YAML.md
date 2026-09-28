@@ -76,7 +76,7 @@ automations/ 内其他 .yaml                            → 自动化脚本
 前端「函数」页面按函数展示，默认在 `_function.yaml` 新建；额外拆分的
 `_function*.yaml` 同样可在画布中编辑，并按实际定义文件保存。
 
-浏览器目标沿用这些函数和任务入口，不新增 YAML 关键字。`key` 支持浏览器逻辑键名（如 `W`、`Enter`、`Escape`、`ArrowLeft`、`Control`、`Shift`、`F1`）及 `press/down/up`；Android 数字键码仍只用于 Android。`input_text` 插入文本，`tap/swipe` 使用现有归一化坐标。`launch/stop_app` 为 Android 应用操作，浏览器不支持；浏览器初始网址由目标配置提供，登录、排队、进入游戏由脚本处理。
+浏览器目标沿用这些函数和任务入口，不新增 YAML 关键字。`key` 支持浏览器逻辑键名（如 `W`、`Enter`、`Escape`、`ArrowLeft`、`Control`、`Shift`、`F1`）及 `press/down/up`；Android 数字键码仍只用于 Android。编辑器的按键字段支持主题下拉和「录入按键」：点击按钮后按一次键即可填入物理键名（如 `KeyW`、`Digit1`、`Space`、`ArrowLeft`），也可继续手工输入命名键或 Android 数字键码。`input_text` 插入文本，`tap/swipe` 使用现有归一化坐标。`launch/stop_app` 为 Android 应用操作，浏览器不支持；浏览器初始网址由目标配置提供，登录、排队、进入游戏由脚本处理。
 
 浏览器 `find/wait_find/find_any` 的命中对象及其 `center` 带内部 `_frame` 来源标记；直接 `tap: $result` 或 `tap: $result.center` 会拒绝导航、改绑或坐标映射变化前的旧结果。不要修改该标记；主动拆为裸 `x/y` 数值会失去来源校验。定时任务选择浏览器目标时不填写 `android_package`，配置包仍独立选择。配置与使用见 [CDP 浏览器目标](../guides/browser-targets.md)。
 
@@ -115,6 +115,8 @@ run:                      # 必有（可为空列表）：执行入口
 参数类型：`any / boolean / integer / number / string / list / object /
 duration / point / template / key`（别名 bool/int/float/text 解析期归一）。
 默认值按类型校验（`yaml.param.default.invalid`）。
+
+工作台手动运行自动化或函数时直接采用声明的默认值，不弹出覆盖选项；只有缺少必填参数时才提示补填。任务表单仍可显式配置自己的参数值。
 
 ## 3. 步骤与表达式
 
@@ -321,10 +323,10 @@ run:
 Core API：`GET /api/runs?device_id=...&entrypoint=...` 返回最近运行，`GET /api/runs/:run_id/events?after=0` 返回 `{events,next,has_more}`（每页最多 500 条）；事件 ID 作为增量游标，均需登录。结构化记录不再依赖 WebRTC 事件缓存。
 
 
-### 自动化点击前后延迟
+### 自动化点击/按键前后延迟
 
-设置 → 自动化提供「点击前延迟」「点击后延迟」，默认均为 **300ms**；可配置 0～60000ms 的整数，0 关闭对应等待。设置持久化，每次运行开始冻结，保存后从下一次运行生效，无需重启。步骤中不提供对应参数。
+设置 → 自动化提供「点击/按键前延迟」「点击/按键后延迟」，默认均为 **300ms**；可配置 0～60000ms 的整数，0 关闭对应等待。设置持久化，每次运行开始冻结，保存后从下一次运行生效，无需重启。步骤中不提供对应参数。
 
 `tap`、`wait_find` 的目标自动点击、`tap_template`、障碍模板点击共用同一逻辑：确定位置 → 点击前等待 → 按下/松开 → 点击后等待。不会重复追加原先模板点击后的固定 300ms。点击前等待不会重新匹配；匹配等待成功后的点击延迟会增加函数总耗时，障碍处理中的延迟计入本轮轮询耗时。
 
-只匹配而不点击（包括无障碍的 `wait_find(click: false)`）不增加点击延迟；滑动、按键、投屏手动点击不受影响。等待期间支持取消，运行详情显示实际的前后等待时间。
+`key` 复用这两个延迟设置：动作前等待 → 发送按键 → 动作后等待，适用于 `press/down/up`；原有保存值保持有效。只匹配而不点击（包括无障碍的 `wait_find(click: false)`）不增加延迟；滑动、投屏手动点击和手动按键不受影响。等待期间支持取消，运行详情显示实际的前后等待时间。

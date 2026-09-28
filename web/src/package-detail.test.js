@@ -153,7 +153,7 @@ describe('PackageDetailModal（plan §18/§21/§37 + §17）', () => {
     api.packageCompatibility.mockResolvedValueOnce({
       android_package: 'com.other.app', compatible: false, android_targets: [],
     })
-    await wrapper.find('input[list="pkg-compat-candidates"]').setValue('com.other.app')
+    await wrapper.find('input[aria-label="检查目标"]').setValue('com.other.app')
     await wrapper.findAll('button').find(b => b.text() === '检查').trigger('click')
     await flushPromises()
 
@@ -163,7 +163,7 @@ describe('PackageDetailModal（plan §18/§21/§37 + §17）', () => {
     api.packageCompatibility.mockResolvedValueOnce({
       android_package: 'com.miHoYo.hkrpg', compatible: true, android_targets: ['com.miHoYo.hkrpg'],
     })
-    await wrapper.find('input[list="pkg-compat-candidates"]').setValue('com.miHoYo.hkrpg')
+    await wrapper.find('input[aria-label="检查目标"]').setValue('com.miHoYo.hkrpg')
     await wrapper.findAll('button').find(b => b.text() === '检查').trigger('click')
     await flushPromises()
     expect(wrapper.find('.compat-ok').text()).toContain('在配置声明的兼容列表中')

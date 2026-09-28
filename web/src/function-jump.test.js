@@ -6,7 +6,7 @@ import { api } from './api'
 import { scriptsData, store } from './store'
 import { WORKSPACE_CONTEXT_KEY } from './workspace/context'
 import { useConsoleScriptRunner } from '../../plugins/gamer-yaml/ui/src/components/console/useConsoleScriptRunner'
-import ScriptRunner from '../../plugins/gamer-yaml/ui/src/components/console/ScriptRunner.vue'
+import AutomationWorkbench from '../../plugins/gamer-yaml/ui/src/components/console/AutomationWorkbench.vue'
 import catalog from '../../tools/yaml-tests/native-functions.json'
 import { createCall, createControl } from '../../plugins/gamer-yaml/ui/src/script-editor/factories'
 
@@ -30,7 +30,7 @@ async function setup() {
   wrapper = mount(defineComponent({ setup() {
     provide(WORKSPACE_CONTEXT_KEY, { uiBridge: { workspace: { openPanel } } })
     runner = useConsoleScriptRunner({ packageId: ref('qa'), toast: vi.fn(), consoleRuntime: {}, templateNames: ref([]), tplShortName: x => x, loadData: vi.fn() })
-    return () => h(ScriptRunner, { key: panel.value, context: panel.value.endsWith('functions') ? runner.functionsPanel : runner.scriptPanel })
+    return () => h(AutomationWorkbench, { context: { scripts: runner.scriptPanel, functions: runner.functionsPanel } })
   } }))
   await runner.fnLib.refresh('qa')
   await flushPromises()
@@ -47,7 +47,8 @@ it('跳转位于运行前，仅自定义函数显示，保存后跨文件/同文
   await flushPromises()
   expect(order.indexOf('save-script')).toBeLessThan(order.indexOf('load-function'))
   expect(script.content).toContain('edited')
-  expect(openPanel).toHaveBeenLastCalledWith('gamer-yaml:functions')
+  expect(openPanel).toHaveBeenLastCalledWith('gamer-yaml:automation')
+  expect(wrapper.get('.tab-btn.active').text()).toBe('函数')
   expect(wrapper.get('input[aria-label="函数名称"]').element.value).toBe('helper')
   expect(runner.scriptShell.jumpStack).toHaveLength(1)
   await wrapper.get('.jump-function').trigger('click')
@@ -64,6 +65,7 @@ it('跳转位于运行前，仅自定义函数显示，保存后跨文件/同文
   await flushPromises()
   expect(openPanel).toHaveBeenLastCalledWith('gamer-yaml:automation')
   expect(runner.scriptShell.resourceId).toBe('qa/main.yaml')
+  expect(wrapper.get('.tab-btn.active').text()).toBe('脚本')
   expect(runner.scriptShell.selectedUuid).toBe(runner.scriptShell.model.run[0].uuid)
   expect(runner.scriptShell.selectedUuid).not.toBe(sourceStep.uuid)
 })

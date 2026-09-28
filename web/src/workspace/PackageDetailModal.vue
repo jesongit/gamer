@@ -79,17 +79,15 @@
           <button class="btn btn-sm" :disabled="ctx.detailModal.compat.checking" @click="ctx.checkCompatibility(undefined, true)">检查当前目标</button>
           <div class="compat-row">
             <select v-model="ctx.detailModal.compat.kind" class="select" aria-label="检查目标类型"><option value="android">Android 包名</option><option value="web">网页网址</option></select>
-            <input
+            <ThemedCombobox
               v-model="ctx.detailModal.compat.input"
               class="input mono"
-              list="pkg-compat-candidates"
+              :options="ctx.detailModal.compat.kind === 'android' ? androidCandidates : []"
+              aria-label="检查目标"
               :placeholder="ctx.detailModal.compat.kind === 'web' ? 'https://sr.mihoyo.com/cloud' : 'Android 包名，如 com.miHoYo.hkrpg'"
               spellcheck="false"
-              @keydown.enter.prevent="runCompat"
+              @commit="runCompat"
             />
-            <datalist id="pkg-compat-candidates">
-              <option v-for="c in androidCandidates" :key="`cand-${c}`" :value="c" />
-            </datalist>
             <button
               class="btn btn-sm"
               :disabled="!ctx.detailModal.compat.input.trim() || ctx.detailModal.compat.checking"
@@ -144,6 +142,7 @@
 import { computed, reactive } from 'vue'
 import { formatBytes } from '../composables/usePackageContext'
 import PackageTargetsEditor from './PackageTargetsEditor.vue'
+import ThemedCombobox from '../../../plugins/ui-shared/ThemedCombobox.vue'
 
 const props = defineProps({
   context: { type: Object, required: true },

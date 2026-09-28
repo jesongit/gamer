@@ -10,7 +10,6 @@ const mocks = vi.hoisted(() => ({
   importTemplateBytes: vi.fn(),
   deleteTemplate: vi.fn(),
   createTemplate: vi.fn(),
-  replaceTemplateImage: vi.fn(),
 }))
 const videoMocks = vi.hoisted(() => ({
   mediaFrameUrl: vi.fn(() => '/api/media/m1/frame?index=5'),
@@ -29,7 +28,8 @@ function createTemplate(name = 'hero#100_200_500_500.png', version = 'v-old') {
   return { name, pkg: 'pkg-a', version, updated_at: '', size: 3 }
 }
 
-function mountTemplates() {
+function mountTemplates({ stage = null } = {}) {
+  const packageId = ref('pkg-a')
   let templates
   const wrapper = mount(defineComponent({
     setup() {
@@ -37,7 +37,8 @@ function mountTemplates() {
         toast: vi.fn(),
         store: reactiveStore(),
         templatesData: ref([]),
-        packageId: ref('pkg-a'),
+        packageId,
+        stage,
         connected: ref(false),
         videoElement: ref(null),
         videoWrap: ref(null),
@@ -46,7 +47,7 @@ function mountTemplates() {
       return () => h('div')
     },
   }))
-  return { templates, wrapper }
+  return { templates, wrapper, packageId }
 }
 
 function reactiveStore() {
@@ -104,35 +105,53 @@ describe('模板资源替换安全性（P1-T）', () => {
     wrapper.unmount()
   })
 
-  it('替换上传也携带列表中的资源版本，上传失败时不触碰旧模板', async () => {
-    const existing = createTemplate()
+  it('替换进入框选并继承短名与颜色，重新框选后用新区域条件覆盖', async () => {
+    const existing = createTemplate('hero#100_200_500_500#1.png')
     mocks.listTemplates.mockResolvedValue([existing])
-    const { templates, wrapper } = mountTemplates()
+    const ctx = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage: vi.fn() })
+    const png = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/png;base64,QUJD')
+    const stage = { ready: () => true, generation: () => 1, displaySize: () => ({ width: 100, height: 100 }),
+      captureFrame: vi.fn(async () => ({ source: {}, width: 100, height: 100, generation: 1 })) }
+    const { templates, wrapper } = mountTemplates({ stage })
     await flushPromises()
-    const OriginalFileReader = globalThis.FileReader
-    vi.stubGlobal('FileReader', class {
-      readAsDataURL() {
-        this.result = 'data:image/png;base64,REVG'
-        this.onload?.()
-      }
-    })
-    mocks.putPluginResourceBytes.mockRejectedValueOnce(new Error('图片非法'))
-
-    await templates.replaceTemplateImage(existing, new Blob(['new-image'], { type: 'image/png' }))
-
-    expect(mocks.putPluginResourceBytes).toHaveBeenCalledWith(
-      'pkg-a',
-      'gamer-yaml',
-      `templates/${existing.name}`,
-      new Uint8Array([68, 69, 70]),
-      { expectedVersion: 'v-old' },
-    )
+    templates.replaceTemplate(existing)
+    expect(templates.picking.value).toBe(true)
+    expect(mocks.putPluginResourceBytes).not.toHaveBeenCalled()
+    await templates.openCrop({ x: 5, y: 5, w: 10, h: 10 }); await flushPromises()
+    expect(templates.crop.name).toBe('hero#050_050_150_150')
+    expect(templates.crop.preserveColor).toBe(true)
+    templates.repick()
+    await templates.openCrop({ x: 20, y: 30, w: 20, h: 20 }); await flushPromises()
+    expect(templates.crop.name).toBe('hero#200_300_400_500')
+    await templates.saveTemplate()
+    expect(templates.crop.conflict.name).toBe(existing.name)
+    await templates.overwriteTemplate()
+    expect(mocks.putPluginResourceBytes).toHaveBeenCalledWith('pkg-a', 'gamer-yaml', `templates/${existing.name}`,
+      new Uint8Array([65, 66, 67]), { expectedVersion: 'v-old', newPath: 'templates/hero#200_300_400_500#1.png' })
     expect(mocks.deleteTemplate).not.toHaveBeenCalled()
-    expect(mocks.createTemplate).not.toHaveBeenCalled()
-    vi.stubGlobal('FileReader', OriginalFileReader)
-    wrapper.unmount()
+    expect(templates.crop.replacement).toBeNull()
+    wrapper.unmount(); ctx.mockRestore(); png.mockRestore()
   })
 
+  it('取消替换或切换配置包使迟到的框选无效，不带旧名称进入新建', async () => {
+    let finish
+    const stage = { ready: () => true, generation: () => 1, displaySize: () => ({ width: 100, height: 100 }),
+      captureFrame: vi.fn(() => new Promise(resolve => { finish = resolve })) }
+    const { templates, wrapper, packageId } = mountTemplates({ stage })
+    templates.replaceTemplate(createTemplate())
+    const pending = templates.openCrop({ x: 1, y: 2, w: 20, h: 20 })
+    packageId.value = 'pkg-b'
+    finish({ source: {}, width: 100, height: 100, generation: 1 }); await pending
+    expect(templates.crop.active).toBe(false)
+    expect(templates.crop.replacement).toBeNull()
+    expect(templates.picking.value).toBe(false)
+    packageId.value = 'pkg-a'
+    templates.replaceTemplate(createTemplate())
+    templates.cancelCrop()
+    expect(templates.crop.replacement).toBeNull()
+    expect(mocks.putPluginResourceBytes).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
   it('列表缺少二进制模板版本时读取服务端版本，再执行条件 PUT', async () => {
     const existing = createTemplate()
     existing.version = null

@@ -6,6 +6,21 @@ import TemplateCapture from '../../plugins/gamer-yaml/ui/src/components/console/
 let wrapper
 afterEach(() => { wrapper?.unmount(); vi.restoreAllMocks() })
 
+it('更多中的替换直接重新框选所选模板，不打开文件选择器', async () => {
+  const target = { name: 'button#100_100_300_300.png', pkg: 'default' }
+  const replaceTemplate = vi.fn()
+  wrapper = mount(TemplateCapture, { props: { context: {
+    packageId: 'default', templates: [target], tplSearch: '', stageReady: true,
+    tplThumbUrl: () => '', tplShortName: name => name, tplRegionBadge: () => '', replaceTemplate,
+  } }, attachTo: document.body })
+  await wrapper.get('button[aria-haspopup="menu"]').trigger('click'); await flushPromises()
+  const button = [...document.body.querySelectorAll('[role="menuitem"]')].find(el => el.textContent === '替换')
+  button.click(); await flushPromises()
+  expect(replaceTemplate).toHaveBeenCalledWith(target)
+  expect(wrapper.findAll('input[type="file"]')).toHaveLength(1)
+  expect(document.body.querySelector('[role="menu"]')).toBeNull()
+})
+
 it('模板菜单脱离列表裁切、贴近窗口底部向上展开，Esc 恢复焦点且滚动时关闭', async () => {
   const context = {
     packageId: 'default', templates: [{ name: 'button.png' }],

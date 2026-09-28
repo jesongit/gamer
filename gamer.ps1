@@ -175,7 +175,13 @@ function Start-BackgroundProcess {
     # "-WindowStyle Hidden" 之前先弹出来（前后端各一个，即启动时闪两个黑框的来源）。
     # 从创建时刻就隐藏，窗口完全不出现。
     # 注意 ShowWindow 必须是 UInt16：直接写 0 会被推断成 Int32，WMI 报「类型不匹配」
-    $startup = New-CimInstance -ClassName Win32_ProcessStartup -Property @{ ShowWindow = [UInt16]0 } -ClientOnly
+    # WMI 默认继承 wmiprvse 的环境，而非当前终端；显式传递环境块，保留代理、
+    # PATH 和 GAMER_LOCAL_ONLY/ADB_MDNS。使用独立字段，避免把值拼进 shell 命令。
+    $processEnvironment = [string[]](Get-ChildItem Env: | ForEach-Object { '{0}={1}' -f $_.Name, $_.Value })
+    $startup = New-CimInstance -ClassName Win32_ProcessStartup -Property @{
+        ShowWindow = [UInt16]0
+        EnvironmentVariables = $processEnvironment
+    } -ClientOnly
     $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
         CommandLine               = $wmiCmd
         ProcessStartupInformation = $startup
