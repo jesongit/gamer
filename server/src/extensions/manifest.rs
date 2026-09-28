@@ -28,7 +28,11 @@ mod host_ui_permission_tests {
         assert!(parse_manifest(source.as_bytes()).is_ok());
         for invalid in [
             source.replace("\"ui.host\", ", ""),
-            source.replace("ui = \"^1.0\"", ""),
+            source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("ui ="))
+                .collect::<Vec<_>>()
+                .join("\n"),
         ] {
             assert!(parse_manifest(invalid.as_bytes())
                 .unwrap_err()

@@ -772,8 +772,8 @@ mod contract_tests {
             "3f2c9a58-6d1e-4b7f-9a30-5c8b2e7d1f04",
         );
         assert_same_field_sets(&fixture_body("system-info.success.json"), &body, "$");
-        // launcher + IPC 注入 → 契约冻结的全 true 能力
-        assert_eq!(body["deployment"]["mode"], "launcher");
+        // Portable installation exposes the managed update contract.
+        assert_eq!(body["deployment"]["mode"], "portable");
         assert_eq!(body["deployment"]["update_strategy"], "managed");
     }
 

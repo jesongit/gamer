@@ -63,7 +63,7 @@
     "params": [
       {
         "default": null,
-        "desc": "按键名或 keycode",
+        "desc": "按键名（浏览器支持字母/方向键等）或 Android keycode",
         "name": "key",
         "required": true,
         "type": "key"
