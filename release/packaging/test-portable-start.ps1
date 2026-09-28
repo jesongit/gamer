@@ -42,3 +42,6 @@ try {
     foreach ($key in $saved.Keys) { [Environment]::SetEnvironmentVariable($key, $saved[$key]) }
     [IO.File]::WriteAllText($config, $original, (New-Object Text.UTF8Encoding($false)))
 }
+# Script callers inspect LASTEXITCODE, including fresh PowerShell sessions where
+# no native command has set it yet. Exceptions above must still fail the caller.
+exit 0

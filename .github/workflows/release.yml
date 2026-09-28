@@ -518,7 +518,7 @@ jobs:
           $zip = Join-Path (Get-Location) ("assets\Gamer-$env:VERSION-windows-x64-full.zip")
           if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
           Expand-Archive -LiteralPath $zip -DestinationPath $root
-          & ./release/packaging/test-portable-start.ps1 -Root $root
+          pwsh -NoProfile -File ./release/packaging/test-portable-start.ps1 -Root $root
           if ($LASTEXITCODE -ne 0) { throw 'portable startup smoke failed' }
 
   # ---------- job7 publish：draft → 正式（smoke 全过后自动执行） ----------

@@ -96,6 +96,7 @@ Assert-Text $workflow 'gen-manifest\.ps1\s+-Channel \$env:CHANNEL' 'manifest 必
 Assert-True ($workflow -notmatch 'sign-manifest|verify-key-rotation|RELEASE_MANIFEST_PRIVATE_KEY|RELEASE_MANIFEST_KEY_ID|release-sign|\.sig') '发行流程不应依赖签名、密钥或签名文件'
 Assert-Text $workflow 'sha256sum \*\.zip \*\.json' '全部发行资产必须生成 SHA256SUMS（Gamer.exe 位于完整包内）'
 Assert-Text $workflow 'validate-manifest\.mjs check' '重新下载的发行清单必须校验结构与语义'
+Assert-Text $workflow 'pwsh -NoProfile -File ./release/packaging/test-portable-start\.ps1 -Root \$root' '启动烟测必须用独立进程返回退出码，不能读取空值或历史 LASTEXITCODE'
 
 $draftPos = $workflow.IndexOf("`n  draft-release:")
 $uploadPos = $workflow.IndexOf("`n  upload-assets:")
