@@ -1,17 +1,17 @@
 {
   "schema_version": 1,
-  "tag": "gamer-live-v0.2.5",
-  "plugin_commit": "3d570dc72c8925739d453cf42730537006f94d3e",
+  "tag": "gamer-yaml-v0.1.2",
+  "plugin_commit": "63aec831899f07c47d2e647eefe3a5bd1375f78b",
   "registry": {
     "name": "registry.json",
-    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-live-v0.2.5/registry.json",
-    "size": 7078,
-    "sha256": "c18b2c9149e1eda5c6c37be78f6ef2f054c9455a6de15abc9b25b2c5269a9eb9"
+    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-yaml-v0.1.2/registry.json",
+    "size": 6336,
+    "sha256": "a367668dafd8a1531e1bab6d138c547e27d61e65481bca562b4fe4f98b433049"
   },
   "bundle": {
-    "name": "gamer-official-plugins-0.2.5-windows-x64.zip",
-    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-live-v0.2.5/gamer-official-plugins-0.2.5-windows-x64.zip",
-    "size": 674212,
-    "sha256": "c866f825d3214ad20d7851eb74792f5d0cfc7dcfeefd9e864f34693cc9f240ae"
+    "name": "gamer-official-plugins-0.1.2-windows-x64.zip",
+    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-yaml-v0.1.2/gamer-official-plugins-0.1.2-windows-x64.zip",
+    "size": 681222,
+    "sha256": "72966dc21c5dda7e38ec9a7fcf418e8a8d250f8c7da19aff173b31e594e98319"
   }
 }
