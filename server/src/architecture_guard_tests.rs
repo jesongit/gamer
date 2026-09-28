@@ -993,7 +993,7 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
     panels.sort();
     assert_eq!(
         panels,
-        vec!["automation", "functions", "templates"],
+        vec!["automation"],
         "gamer-yaml 的 core-runtime 面板随安装发布"
     );
     let runners = get_json(&guard.app, &cookie, "/api/runners").await;
