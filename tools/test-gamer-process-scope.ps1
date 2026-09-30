@@ -7,7 +7,7 @@ $ast = [Management.Automation.Language.Parser]::ParseFile(
     (Join-Path $repoRoot 'gamer.ps1'), [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
 $functions = @('Get-NormalizedProcessPath', 'Test-BackendProcess', 'Get-BackendProcs',
-    'Test-BackendPortOwned', 'Get-FrontendProcs', 'Stop-Backend', 'Stop-Frontend')
+    'Test-BackendPortOwned', 'Get-FrontendProcs', 'Stop-Backend', 'Stop-Frontend', 'Start-BackgroundProcess')
 foreach ($name in $functions) {
     $node = $ast.Find({ param($item)
         $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name
@@ -103,3 +103,28 @@ $script:Stopped = @()
 $null = Stop-Frontend
 Assert (($script:Stopped -join ',') -eq '11') 'Foreign Vite, arbitrary node and unreadable command lines must survive'
 Write-Host 'PASS: repository process ownership, shutdown API, shared ADB and Vite isolation'
+
+function New-CimInstance {
+    param($ClassName, $Property, [switch]$ClientOnly)
+    $Property
+}
+function Invoke-CimMethod {
+    param($ClassName, $MethodName, $Arguments)
+    $script:BackgroundArguments = $Arguments
+    @{ ReturnValue = 0; ProcessId = 123 }
+}
+$previousProbe = $env:GAMER_ENV_PROBE
+try {
+    # 引号、美元符号和等号必须原样传递，不能作为命令执行。
+    $env:GAMER_ENV_PROBE = 'value="quoted"; $()=''literal''=中文'
+    $null = Start-BackgroundProcess -FilePath 'server.exe' -WorkingDirectory 'D:\gamer' `
+        -OutputFile 'out.log' -ErrorFile 'err.log' -InputFile 'empty.txt'
+    $startup = $script:BackgroundArguments.ProcessStartupInformation
+    Assert ($startup.ShowWindow -eq 0) 'Background processes must remain hidden'
+    Assert ($startup.EnvironmentVariables -contains "GAMER_ENV_PROBE=$env:GAMER_ENV_PROBE") 'WMI child must inherit current environment literally'
+    Assert ($startup.EnvironmentVariables -contains "PATH=$env:PATH" -or $startup.EnvironmentVariables -contains "Path=$env:PATH") 'Preserve executable discovery'
+    Assert (-not $script:BackgroundArguments.CommandLine.Contains($env:GAMER_ENV_PROBE)) 'Environment values must not be shell command text'
+} finally {
+    $env:GAMER_ENV_PROBE = $previousProbe
+}
+Write-Host 'PASS: hidden WMI startup inherits environment without shell interpolation'

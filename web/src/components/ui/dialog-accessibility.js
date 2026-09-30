@@ -27,6 +27,9 @@ export function installDialogAccessibility(root = document) {
     }
   }
   function keydown(event) {
+    // Focused capture fields own Escape/Tab; an expanded combobox closes its own popup first.
+    if (event.target?.closest?.('[data-key-recording="true"]')) return
+    if (event.key === 'Escape' && event.target?.matches?.('[role="combobox"][aria-expanded="true"]')) return
     const masks = [...root.querySelectorAll(selector)].filter(visible)
     const top = masks.at(-1)
     if (!top) {
