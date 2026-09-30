@@ -10,6 +10,8 @@
 
 用户已有 `docs/PITFALLS.md` 和 `web/public/registry.json` 改动保留。产物输出到 `server/target/ai-release/`，未覆盖公开市场目录或已发行插件锁。插件工作树起始固定提交为 `837184e50331824573b58271c5b143f06ffc920b`，未跟随远端。
 
+本地插件提交固定为 `beaa32958a1081651b4b9a6400f68ed6ffd783fc`（`codex/gamer-ai`），SDK 宿主来源固定为 `3c42176cd33eb6072a3d0ff018be58bb05b29466`。最终 `gamer-ai-0.1.0.gplugin` 为 13,053 字节，SHA256 = `8235d842d1c7f89b344b99a45b56451eb7082631e23f1c4dd9ea37e0962598aa`，完整来源与校验清单在隔离 registry 及 `sha256sums.txt`。尚未推送，两仓提交需要一并推送后才能进行远端 CI/发布验收。
+
 ## 自动验证
 
 | 检查 | 证据 |
