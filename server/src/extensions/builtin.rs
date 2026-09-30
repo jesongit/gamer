@@ -28,6 +28,12 @@ pub(crate) struct BuiltinExtensionDescriptor {
 /// 宿主预置扩展注册表（编译期固定；下载包不可扩展）。gamer-video 是首个注册项。
 pub(crate) const BUILTIN_EXTENSIONS: &[BuiltinExtensionDescriptor] = &[
     BuiltinExtensionDescriptor {
+        id: super::notify::ID,
+        name: "通知助手",
+        description: "全局通知通道与任务、脚本通知",
+        host_version: ">=0.2.6",
+    },
+    BuiltinExtensionDescriptor {
         id: super::live::ID,
         name: "直播助手",
         description: "本机音视频素材、RTMP 输出与直播互动",

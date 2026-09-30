@@ -160,6 +160,7 @@
               <span class="track"></span>
             </label>
           </div>
+          <TaskNotifications v-model="form.extensions" />
         </div>
         <div class="modal-foot">
           <button class="btn" @click="showAdd = false">取消</button>
@@ -198,6 +199,7 @@ import { OPERATION_FEEDBACK_KEY, operationReporter } from '../workspace/operatio
 import { tasksData, devicesData, useToast, pushRunConflict } from '../store'
 import { api } from '../api'
 import RunConflictModal from './RunConflictModal.vue'
+import TaskNotifications from './task/TaskNotifications.vue'
 import { shortRunId, isDeviceBusyConflict } from '../runs'
 import {
   getRunnerEditor, listRunnerEditors,
@@ -235,6 +237,7 @@ const form = reactive({
   runnerId: '',
   entrypoint: '',
   payload: {},
+  extensions: {},
 })
 // 编辑既有任务时保留原 app 包名（runner 无法推导包名时回退，不因表单重写丢数据）
 const originalApp = ref(null)
@@ -366,6 +369,7 @@ function adaptTaskRow(t) {
     runner: t.runner && typeof t.runner === 'object'
       ? t.runner
       : { runner_id: '', entrypoint: '', payload: {} },
+    extensions: t.extensions && typeof t.extensions === 'object' ? t.extensions : {},
     schedule: t.schedule && typeof t.schedule === 'object'
       ? t.schedule
       : { provider_id: '', config: {} },
@@ -398,6 +402,7 @@ function resetForm() {
     runnerId: defaultRunnerId(),
     entrypoint: '',
     payload: {},
+    extensions: {},
   })
   originalApp.value = null
   manualProvider.value = false
@@ -424,6 +429,7 @@ function fillForm(t) {
     runnerId: t.runner?.runner_id ?? '',
     entrypoint: t.runner?.entrypoint ?? '',
     payload: t.runner?.payload && typeof t.runner.payload === 'object' ? t.runner.payload : {},
+    extensions: JSON.parse(JSON.stringify(t.extensions || {})),
   })
   originalApp.value = {
     android_package: t.app?.android_package ?? '',
@@ -448,6 +454,7 @@ function buildTaskSaveBody() {
   return {
     ...(form.id ? { id: form.id } : {}),
     name: form.name.trim(),
+    extensions: form.extensions,
     enabled: form.enabled,
     app: {
       device_id: form.device_id,

@@ -19,7 +19,8 @@
       }
     ],
     "returns": "null",
-    "source": "plugin"
+    "source": "plugin",
+    "optional_extension": null
   },
   {
     "description": "从起点滑动到终点",
@@ -55,7 +56,8 @@
       }
     ],
     "returns": "null",
-    "source": "plugin"
+    "source": "plugin",
+    "optional_extension": null
   },
   {
     "description": "发送按键（HOME/BACK/…或数字 keycode）",
@@ -84,7 +86,8 @@
       }
     ],
     "returns": "null",
-    "source": "plugin"
+    "source": "plugin",
+    "optional_extension": null
   },
   {
     "description": "向设备输入文本",
@@ -106,7 +109,8 @@
       }
     ],
     "returns": "null",
-    "source": "plugin"
+    "source": "plugin",
+    "optional_extension": null
   },
   {
     "description": "冷启动应用（缺省为设备配置的应用）",
@@ -128,7 +132,8 @@
       }
     ],
     "returns": "null",
-    "source": "plugin"
+    "source": "plugin",
+    "optional_extension": null
   },
   {
     "description": "停止应用（缺省为设备配置的应用）",
@@ -150,7 +155,8 @@
       }
     ],
     "returns": "null",
-    "source": "plugin"
+    "source": "plugin",
+    "optional_extension": null
   },
   {
     "description": "等待指定时长（取消可达）",
@@ -172,7 +178,8 @@
       }
     ],
     "returns": "null",
-    "source": "plugin"
+    "source": "plugin",
+    "optional_extension": null
   },
   {
     "description": "写运行日志（非字符串值自动转 JSON 文本）",
@@ -201,7 +208,8 @@
       }
     ],
     "returns": "null",
-    "source": "plugin"
+    "source": "plugin",
+    "optional_extension": null
   },
   {
     "description": "单次模板匹配；未找到返回 null（等待轮询用 wait_find）",
@@ -237,7 +245,8 @@
       }
     ],
     "returns": "match?",
-    "source": "plugin"
+    "source": "plugin",
+    "optional_extension": null
   },
   {
     "name": "find_any",
@@ -269,7 +278,8 @@
         "desc": "可视化显示名称"
       }
     ],
-    "returns": "match?"
+    "returns": "match?",
+    "optional_extension": null
   },
   {
     "description": "等待模板出现，默认点击命中中心（click: false 仅等待）；超时返回 null",
@@ -336,7 +346,8 @@
       }
     ],
     "returns": "match?",
-    "source": "plugin"
+    "source": "plugin",
+    "optional_extension": null
   },
   {
     "description": "查找模板并点击其中心（未找到不点击，返回 null）",
@@ -386,7 +397,8 @@
       }
     ],
     "returns": "match?",
-    "source": "plugin"
+    "source": "plugin",
+    "optional_extension": null
   },
   {
     "description": "等待模板消失；超时仍存在返回 false",
@@ -436,7 +448,8 @@
       }
     ],
     "returns": "boolean",
-    "source": "plugin"
+    "source": "plugin",
+    "optional_extension": null
   },
   {
     "description": "相等比较（数字跨整型/浮点，其余按值）",
@@ -465,7 +478,8 @@
       }
     ],
     "returns": "boolean",
-    "source": "plugin"
+    "source": "plugin",
+    "optional_extension": null
   },
   {
     "description": "不等比较",
@@ -494,7 +508,8 @@
       }
     ],
     "returns": "boolean",
-    "source": "plugin"
+    "source": "plugin",
+    "optional_extension": null
   },
   {
     "description": "大于（仅数字）",
@@ -523,7 +538,8 @@
       }
     ],
     "returns": "boolean",
-    "source": "plugin"
+    "source": "plugin",
+    "optional_extension": null
   },
   {
     "description": "大于等于（仅数字）",
@@ -552,7 +568,8 @@
       }
     ],
     "returns": "boolean",
-    "source": "plugin"
+    "source": "plugin",
+    "optional_extension": null
   },
   {
     "description": "小于（仅数字）",
@@ -581,7 +598,8 @@
       }
     ],
     "returns": "boolean",
-    "source": "plugin"
+    "source": "plugin",
+    "optional_extension": null
   },
   {
     "description": "小于等于（仅数字）",
@@ -610,6 +628,44 @@
       }
     ],
     "returns": "boolean",
-    "source": "plugin"
+    "source": "plugin",
+    "optional_extension": null
+  },
+  {
+    "name": "notify",
+    "description": "提交通知后继续运行；通知插件不可用时跳过并返回原因",
+    "source": "plugin",
+    "optional_extension": "gamer-notify",
+    "params": [
+      {
+        "name": "content",
+        "type": "string",
+        "required": true,
+        "default": null,
+        "desc": "通知正文"
+      },
+      {
+        "name": "title",
+        "type": "string",
+        "required": false,
+        "default": "",
+        "desc": "通知标题"
+      },
+      {
+        "name": "channel",
+        "type": "string",
+        "required": false,
+        "default": "",
+        "desc": "全局通道 ID；留空使用默认通道"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "发送通知",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "object"
   }
 ]

@@ -39,3 +39,5 @@ export const VIDEO_PROJECT_DIR = 'projects'
  * gamer-yaml manifest 声明，此 key 仅作跨面板导航目标使用。
  */
 export const GAMER_YAML_AUTOMATION_PANEL_KEY = `${GAMER_YAML_PLUGIN_ID}:automation`
+
+export const GAMER_NOTIFY_PLUGIN_ID = 'gamer-notify'

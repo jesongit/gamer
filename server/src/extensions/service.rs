@@ -237,7 +237,7 @@ pub(crate) struct ExtensionService {
     keymap_running: std::sync::Mutex<HashMap<ExtensionId, KeymapWasmInstanceHandle>>,
     ui: UiContributionRegistry,
     runner_registrar: Option<Arc<dyn TimerRunnerRegistrar>>,
-    builtin_service: Option<Arc<dyn BuiltinService>>,
+    builtin_service: Vec<Arc<dyn BuiltinService>>,
     shutting_down: std::sync::atomic::AtomicBool,
 }
 
@@ -270,7 +270,7 @@ impl ExtensionService {
             keymap_running: std::sync::Mutex::new(HashMap::new()),
             ui: UiContributionRegistry::default(),
             runner_registrar: None,
-            builtin_service: None,
+            builtin_service: Vec::new(),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -287,14 +287,14 @@ impl ExtensionService {
     }
 
     pub(crate) fn with_builtin_service(mut self, service: Arc<dyn BuiltinService>) -> Self {
-        self.builtin_service = Some(service);
+        self.builtin_service.push(service);
         self
     }
 
     pub(crate) async fn shutdown_builtin_service(&self) {
         self.shutting_down
             .store(true, std::sync::atomic::Ordering::Release);
-        if let Some(service) = &self.builtin_service {
+        for service in &self.builtin_service {
             if let Ok(id) = ExtensionId::parse(service.extension_id()) {
                 let gate = self.call_gate(&id);
                 let _lease = gate.write().await;
@@ -573,8 +573,8 @@ impl ExtensionService {
             }
             if let Some(service) = self
                 .builtin_service
-                .as_ref()
-                .filter(|s| s.extension_id() == id.as_str())
+                .iter()
+                .find(|s| s.extension_id() == id.as_str())
             {
                 return service.call(action, values).await;
             }
@@ -670,7 +670,9 @@ impl ExtensionService {
     ) -> ExtensionResult<serde_json::Value> {
         let caller = &context.caller;
         let caller_gate = self.call_gate(caller);
-        let _caller_lease = caller_gate.read().await;
+        let _caller_lease = caller_gate
+            .try_read()
+            .map_err(|_| ExtensionError::CallRejected("调用方正在停止".into()))?;
         let caller_app_context = {
             let process_running = self
                 .process_running
@@ -684,6 +686,18 @@ impl ExtensionService {
         };
         let caller_snapshot = self.snapshot_for(caller)?;
         self.require_current_process_running(caller, caller_snapshot.state(), "call")?;
+        if let Some(dependency) = caller_snapshot
+            .manifest()
+            .dependencies()
+            .iter()
+            .find(|dep| dep.id() == target)
+        {
+            if !self.dependency_status(dependency).satisfied {
+                return Err(ExtensionError::CallRejected(
+                    "目标插件依赖未就绪或版本不兼容".into(),
+                ));
+            }
+        }
         let caller_host = HostApi::for_manifest(
             self.capabilities.clone(),
             self.host_api.clone(),
@@ -2169,8 +2183,8 @@ impl ExtensionService {
         if self.instance_free(id) {
             if let Some(service) = self
                 .builtin_service
-                .as_ref()
-                .filter(|s| s.extension_id() == id.as_str())
+                .iter()
+                .find(|s| s.extension_id() == id.as_str())
             {
                 service.stop().await;
             }

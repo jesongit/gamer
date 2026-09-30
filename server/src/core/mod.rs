@@ -2,6 +2,7 @@ pub mod activity;
 pub mod events;
 pub(crate) mod fs;
 pub mod models;
+pub(crate) mod secrets;
 
 #[allow(unused_imports)]
 pub use activity::{ActivityKind, ActivityLease, DeviceActivity, DeviceLease, NoopLease};

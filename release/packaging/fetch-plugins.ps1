@@ -31,7 +31,7 @@ $registry = Get-Content -LiteralPath $registryPath -Raw | ConvertFrom-Json
 if ($registry.provenance.plugin_commit -ne $lock.plugin_commit) { throw '插件 registry 来源提交不一致' }
 $plugins = @($registry.plugins)
 $requiredIds = @('gamer-keymap', 'gamer-video', 'gamer-yaml')
-$allowedIds = $requiredIds + @('gamer-package-publisher', 'gamer-live')
+$allowedIds = $requiredIds + @('gamer-package-publisher', 'gamer-live', 'gamer-notify')
 if (@($plugins.id | Sort-Object -Unique).Count -ne $plugins.Count -or
     @($requiredIds | Where-Object { $_ -notin $plugins.id }).Count -gt 0 -or
     @($plugins.id | Where-Object { $_ -notin $allowedIds }).Count -gt 0) { throw '官方插件目录缺项、重复或含未知插件' }
