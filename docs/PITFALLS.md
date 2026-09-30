@@ -514,3 +514,4 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - 新插件本地构建成功仍可能被发行白名单拒绝；同步检查 prepare-release、reuse-published、插件 Release 工作流和宿主 fetch-plugins 的插件 ID 列表，并验证包含新插件的完整目录。
 - 插件 CI 从 sdk/lock.json 固定提交检出宿主，新增 host 能力后仅核对 SDK 文件哈希不足以保证集成可编译；先提交宿主实现再固定新基线，正式发行前让该提交可供 CI 检出。
 - 插件构建传入相对 OutputDir 时，清理逻辑若与 Get-ChildItem.FullName 比较会误删刚生成的归档；先将输出路径归一为绝对路径，再验收最终归档存在且哈希匹配 registry，不能只看 staging 自检。
+- Vite dev 动态导入 public/plugin-ui 的预构建模块会携带 ?import 并被当作源码拒绝而报 500；仅对该目录的 JS 请求移除 import 标记，保留版本参数并交给静态服务。
