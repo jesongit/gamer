@@ -29,6 +29,8 @@ pub(crate) enum Permission {
     MediaStream,
     LiveConnect,
     NotifySend,
+    AiInfer,
+    AiSearch,
     MediaRead,
     MediaImport,
     MediaRecord,
@@ -60,6 +62,8 @@ impl Permission {
             "media.stream" => Ok(Self::MediaStream),
             "live.connect" => Ok(Self::LiveConnect),
             "notify.send" => Ok(Self::NotifySend),
+            "ai.infer" => Ok(Self::AiInfer),
+            "ai.search" => Ok(Self::AiSearch),
             "media.read" => Ok(Self::MediaRead),
             "media.import" => Ok(Self::MediaImport),
             "media.record" => Ok(Self::MediaRecord),
@@ -104,6 +108,8 @@ impl Permission {
             Self::MediaStream => "media.stream",
             Self::LiveConnect => "live.connect",
             Self::NotifySend => "notify.send",
+            Self::AiInfer => "ai.infer",
+            Self::AiSearch => "ai.search",
             Self::MediaRead => "media.read",
             Self::MediaImport => "media.import",
             Self::MediaRecord => "media.record",
@@ -123,7 +129,11 @@ impl Permission {
             Self::Touch => HostApiDomain::Touch,
             Self::ResourceRead | Self::PackagePublish => HostApiDomain::Resource,
             Self::RunSubmit | Self::RunControl => HostApiDomain::Run,
-            Self::RuntimeSleep | Self::LiveConnect | Self::NotifySend => HostApiDomain::Runtime,
+            Self::RuntimeSleep
+            | Self::LiveConnect
+            | Self::NotifySend
+            | Self::AiInfer
+            | Self::AiSearch => HostApiDomain::Runtime,
             Self::LogWrite => HostApiDomain::Log,
             Self::MediaStream
             | Self::MediaRead

@@ -2,19 +2,60 @@ use super::*;
 
 #[tokio::test]
 async fn package_sources_are_authenticated_persistent_settings_independent_of_packages() {
-    let t = build_app("package-sources",test_credential("admin123"),Default::default());
+    let t = build_app(
+        "package-sources",
+        test_credential("admin123"),
+        Default::default(),
+    );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
-    let response = post_json(&t,&sid,"/api/package-sources",serde_json::json!({"repository":"git@github.com:Owner/Repo.git","enabled":true})).await;
-    assert_eq!(response.status(),StatusCode::OK);
-    let sources=json_body(response).await;
-    let source=sources.as_array().unwrap().iter().find(|s|s["repository"]=="owner/repo").unwrap();
-    let id=source["id"].as_str().unwrap();
-    let bad=post_json(&t,&sid,"/api/package-sources",serde_json::json!({"repository":"https://evil.invalid/o/r","enabled":true})).await;
-    assert_eq!(bad.status(),StatusCode::BAD_REQUEST);
-    let removed=send(&t.app,req("DELETE",&format!("/api/package-sources/{id}"),None,&[("cookie".into(),sid.clone())],None)).await;
-    assert_eq!(removed.status(),StatusCode::OK);
-    let missing=send(&t.app,req("GET",&format!("/api/package-sources/{id}/archives/demo/1.0.0?sha256=abc"),None,&[("cookie".into(),sid)],None)).await;
-    assert_eq!(missing.status(),StatusCode::BAD_GATEWAY);
+    let response = post_json(
+        &t,
+        &sid,
+        "/api/package-sources",
+        serde_json::json!({"repository":"git@github.com:Owner/Repo.git","enabled":true}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let sources = json_body(response).await;
+    let source = sources
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["repository"] == "owner/repo")
+        .unwrap();
+    let id = source["id"].as_str().unwrap();
+    let bad = post_json(
+        &t,
+        &sid,
+        "/api/package-sources",
+        serde_json::json!({"repository":"https://evil.invalid/o/r","enabled":true}),
+    )
+    .await;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    let removed = send(
+        &t.app,
+        req(
+            "DELETE",
+            &format!("/api/package-sources/{id}"),
+            None,
+            &[("cookie".into(), sid.clone())],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(removed.status(), StatusCode::OK);
+    let missing = send(
+        &t.app,
+        req(
+            "GET",
+            &format!("/api/package-sources/{id}/archives/demo/1.0.0?sha256=abc"),
+            None,
+            &[("cookie".into(), sid)],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::BAD_GATEWAY);
 }
 
 // Package REST 冒烟（plan §2-§15 / §23 验收链）：建包 → 写资源 → 读资源 →
@@ -30,7 +71,9 @@ fn resource_url(pkg: &str, plugin: &str, path: &str) -> String {
 }
 
 async fn create_package(t: &TestApp, sid: &str, mut body: serde_json::Value) -> HttpResponse<Body> {
-    if body.get("targets").is_none() { body["targets"] = serde_json::json!({"android":{"packages":["*"]}}); }
+    if body.get("targets").is_none() {
+        body["targets"] = serde_json::json!({"android":{"packages":["*"]}});
+    }
     post_json(t, sid, "/api/packages", body).await
 }
 
@@ -423,6 +466,11 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
 async fn package_import_conflicts_then_atomic_overwrite() {
     let t = build_app("pkgimport", test_credential("admin123"), Default::default());
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    let identities = crate::resources::PackageStore::open(&crate::config::Config {
+        data_dir: t.dir.clone(),
+        ..Default::default()
+    })
+    .unwrap();
 
     // 造一个归档：先建包 + 写资源 + 导出
     let resp = create_package(&t, &sid, serde_json::json!({"id": "official.imp"})).await;
@@ -569,6 +617,7 @@ async fn package_import_conflicts_then_atomic_overwrite() {
         );
     }
 
+    let previous_instance = identities.instance_generation("official.imp").unwrap();
     // ?overwrite=true → 原子替换成功（v1 归档整体替换 v2 磁盘内容）
     let resp = send(
         &t.app,
@@ -577,7 +626,7 @@ async fn package_import_conflicts_then_atomic_overwrite() {
             "/api/packages/import?overwrite=true",
             None,
             &[(axum::http::header::COOKIE.to_string(), sid.clone())],
-            archive_v1,
+            archive_v1.clone(),
         ),
     )
     .await;
@@ -595,6 +644,28 @@ async fn package_import_conflicts_then_atomic_overwrite() {
             .unwrap()
             .contains("v1"),
         "overwrite 后内容必须替换为归档版本"
+    );
+    let replaced_instance = identities.instance_generation("official.imp").unwrap();
+    assert_ne!(
+        previous_instance, replaced_instance,
+        "未安装消费插件时覆盖也必须更换本机实例"
+    );
+    let same = send(
+        &t.app,
+        req_bytes(
+            "POST",
+            "/api/packages/import?overwrite=true",
+            None,
+            &[(axum::http::header::COOKIE.to_string(), sid.clone())],
+            archive_v1,
+        ),
+    )
+    .await;
+    assert_eq!(same.status(), StatusCode::OK);
+    assert_ne!(
+        identities.instance_generation("official.imp").unwrap(),
+        replaced_instance,
+        "同 ID 同字节覆盖不能继承本机验证信任"
     );
 
     // X-Expected-Sha256 摘要不匹配 → 400，不落盘

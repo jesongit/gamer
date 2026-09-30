@@ -89,6 +89,8 @@ pub struct ScrcpySession {
     pub meta: Mutex<Option<VideoMeta>>,
     /// tokio Mutex：控制 socket 写入可能跨 await
     control: tokio::sync::Mutex<Option<TcpStream>>,
+    held_touches: Mutex<std::collections::BTreeMap<u64, (f32, f32)>>,
+    held_keys: Mutex<std::collections::BTreeSet<u32>>,
     /// 设备分辨率（虚拟屏模式下 = 虚拟屏分辨率）
     pub width: Mutex<u32>,
     pub height: Mutex<u32>,
@@ -323,6 +325,8 @@ impl ScrcpySession {
             adb: adb.clone(),
             meta: Mutex::new(Some(meta)),
             control: tokio::sync::Mutex::new(Some(control)),
+            held_touches: Mutex::new(Default::default()),
+            held_keys: Mutex::new(Default::default()),
             width: Mutex::new(width),
             height: Mutex::new(height),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -469,6 +473,14 @@ impl ScrcpySession {
     // ---------- 控制消息注入 ----------
 
     async fn send_control(&self, msg: &[u8]) -> anyhow::Result<()> {
+        let _input = if msg
+            .first()
+            .is_some_and(|kind| matches!(kind, 0 | 1 | 2 | 3 | 4 | 8 | 11 | 16 | 17))
+        {
+            Some(crate::core::input_ownership::admit(&self.device.id)?)
+        } else {
+            None
+        };
         let mut guard = self.control.lock().await;
         if let Some(sock) = guard.as_mut() {
             sock.write_all(msg).await?;
@@ -495,15 +507,49 @@ impl ScrcpySession {
         // 统一输入观察（录制合同 §2.1）：所有来源（REST/投屏 DataChannel 直发、
         // keymap、runner、插件能力层）的触控都经此进入设备发送路径；已被接受
         // 的注入按 pointer 压缩为语义 tap/swipe 记录。无活动录制会话时直通。
+        {
+            let mut held = self.held_touches.lock();
+            if action == ACTION_UP {
+                held.remove(&pointer_id);
+            } else {
+                held.insert(pointer_id, (x as f32, y as f32));
+            }
+        }
         crate::recording::observe_touch(&self.device.id, action, pointer_id, x, y);
         Ok(())
     }
 
+    /// Host cleanup after cancellation/takeover, including interrupted gestures.
+    pub async fn release_inputs(&self) -> anyhow::Result<()> {
+        let touches = self.held_touches.lock().clone();
+        let keys = self.held_keys.lock().clone();
+        let mut failure = None;
+        for (id, (x, y)) in touches {
+            if let Err(e) =
+                crate::core::input_ownership::cleanup(self.inject_touch(ACTION_UP, id, x, y, 0.0))
+                    .await
+            {
+                failure = Some(e);
+            }
+        }
+        for key in keys {
+            if let Err(e) =
+                crate::core::input_ownership::cleanup(self.inject_keycode(1, key, 0, 0)).await
+            {
+                failure = Some(e);
+            }
+        }
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        Ok(())
+    }
     /// 单击（DOWN+UP）
     pub async fn tap(&self, x: f32, y: f32) -> anyhow::Result<()> {
+        let _operation = crate::core::input_ownership::admit(&self.device.id)?;
         self.inject_touch(ACTION_DOWN, 0, x, y, 1.0).await?;
         tokio::time::sleep(Duration::from_millis(60)).await;
-        self.inject_touch(ACTION_UP, 0, x, y, 0.0).await
+        crate::core::input_ownership::cleanup(self.inject_touch(ACTION_UP, 0, x, y, 0.0)).await
     }
 
     /// 滑动
@@ -515,16 +561,23 @@ impl ScrcpySession {
         y2: f32,
         duration_ms: u64,
     ) -> anyhow::Result<()> {
+        let _operation = crate::core::input_ownership::admit(&self.device.id)?;
         self.inject_touch(ACTION_DOWN, 0, x1, y1, 1.0).await?;
         let steps = 20u64;
         for i in 1..=steps {
             let t = i as f32 / steps as f32;
             let x = x1 + (x2 - x1) * t;
             let y = y1 + (y2 - y1) * t;
-            self.inject_touch(ACTION_MOVE, 0, x, y, 1.0).await?;
+            if let Err(error) = self.inject_touch(ACTION_MOVE, 0, x, y, 1.0).await {
+                let _ = crate::core::input_ownership::cleanup(
+                    self.inject_touch(ACTION_UP, 0, x, y, 0.0),
+                )
+                .await;
+                return Err(error);
+            }
             tokio::time::sleep(Duration::from_millis(duration_ms / steps)).await;
         }
-        self.inject_touch(ACTION_UP, 0, x2, y2, 0.0).await
+        crate::core::input_ownership::cleanup(self.inject_touch(ACTION_UP, 0, x2, y2, 0.0)).await
     }
 
     /// 按键注入（Android keycode）
@@ -543,15 +596,24 @@ impl ScrcpySession {
         buf[10..14].copy_from_slice(&meta.to_be_bytes());
         self.send_control(&buf).await?;
         // 统一输入观察：key down/up 在观察侧按 keycode 配对为一次 key 事件
+        {
+            let mut held = self.held_keys.lock();
+            if action == 1 {
+                held.remove(&keycode);
+            } else {
+                held.insert(keycode);
+            }
+        }
         crate::recording::observe_key(&self.device.id, action, keycode);
         Ok(())
     }
 
     /// 按键（按下+释放），如 HOME=3, BACK=4, APP_SWITCH=187
     pub async fn press_key(&self, keycode: u32) -> anyhow::Result<()> {
+        let _operation = crate::core::input_ownership::admit(&self.device.id)?;
         self.inject_keycode(0, keycode, 0, 0).await?;
         tokio::time::sleep(Duration::from_millis(40)).await;
-        self.inject_keycode(1, keycode, 0, 0).await
+        crate::core::input_ownership::cleanup(self.inject_keycode(1, keycode, 0, 0)).await
     }
 
     /// 文本输入（UTF-8）
@@ -877,6 +939,8 @@ mod tests {
             adb: Adb::new(&cfg),
             meta: parking_lot::Mutex::new(None),
             control: tokio::sync::Mutex::new(None),
+            held_touches: Mutex::new(Default::default()),
+            held_keys: Mutex::new(Default::default()),
             width: parking_lot::Mutex::new(1920),
             height: parking_lot::Mutex::new(1080),
             connected: Arc::new(AtomicBool::new(true)),

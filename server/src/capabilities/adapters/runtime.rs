@@ -22,7 +22,16 @@ impl RuntimeService for RuntimeAdapter {
         if self.cancelled() {
             return Err(CapabilityError::Cancelled);
         }
-        tokio::time::sleep(duration).await;
+        let deadline = tokio::time::Instant::now() + duration;
+        while tokio::time::Instant::now() < deadline {
+            if self.cancelled() {
+                return Err(CapabilityError::Cancelled);
+            }
+            tokio::time::sleep_until(
+                (tokio::time::Instant::now() + Duration::from_millis(25)).min(deadline),
+            )
+            .await;
+        }
         if self.cancelled() {
             Err(CapabilityError::Cancelled)
         } else {

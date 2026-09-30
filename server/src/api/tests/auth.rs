@@ -124,7 +124,10 @@ async fn unauthenticated_high_risk_endpoints_are_all_401() {
         ("POST", "/api/package-sources"),
         ("DELETE", "/api/package-sources/missing"),
         ("GET", "/api/package-sources/missing/catalog"),
-        ("GET", "/api/package-sources/missing/archives/demo/1.0.0?sha256=abc"),
+        (
+            "GET",
+            "/api/package-sources/missing/archives/demo/1.0.0?sha256=abc",
+        ),
     ];
     for (method, uri) in cases {
         let resp = send(&t.app, req(method, uri, None, &[], None)).await;
@@ -801,3 +804,36 @@ async fn unconfigured_credentials_fail_closed() {
 }
 
 // ---------- Wave 2：输入与资源限额（SEC-004） ----------
+
+#[tokio::test]
+async fn scoped_mcp_bearer_cannot_access_administrator_routes() {
+    let t = build_app(
+        "mcp-isolation",
+        test_credential(TEST_PASSWORD),
+        Default::default(),
+    );
+    let headers = [(
+        "authorization".to_string(),
+        "Bearer gamer_mcp_scoped_test_credential".to_string(),
+    )];
+    for (method, path, body) in [
+        ("GET", "/api/system/settings", None),
+        (
+            "POST",
+            "/api/devices/unknown/control",
+            Some(r#"{"type":"tap","x":1,"y":1}"#),
+        ),
+        (
+            "POST",
+            "/api/extensions/gamer-ai/call",
+            Some(r#"{"action":"approvals.resolve","values":{"decision":"approve"}}"#),
+        ),
+    ] {
+        let result = send(
+            &t.app,
+            req(method, path, None, &headers, body.map(str::to_string)),
+        )
+        .await;
+        assert_eq!(result.status(), StatusCode::UNAUTHORIZED, "{path}");
+    }
+}

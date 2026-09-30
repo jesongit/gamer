@@ -139,13 +139,12 @@ impl TouchService for TouchAdapter {
 
     async fn end(&self, touch: &TouchHandle) -> CapabilityResult<()> {
         let state = self.active(touch)?;
-        let result = self
-            .inject(
-                &state,
-                ACTION_UP,
-                TouchPoint::new(state.point.x(), state.point.y(), 0.0),
-            )
-            .await;
+        let result = crate::core::input_ownership::cleanup(self.inject(
+            &state,
+            ACTION_UP,
+            TouchPoint::new(state.point.x(), state.point.y(), 0.0),
+        ))
+        .await;
         self.active
             .lock()
             .map_err(|_| CapabilityError::Failed("touch state poisoned".into()))?

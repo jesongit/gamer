@@ -920,6 +920,7 @@ pub(super) async fn api_import_package(
                 })));
             }
             // 原子替换：旧目录先移出，再换入 staging，最后删旧目录
+            store.invalidate_instance(&manifest.id).map_err(internal)?;
             let trash = store
                 .staging_root()
                 .join(uuid::Uuid::new_v4().simple().to_string());
@@ -940,6 +941,7 @@ pub(super) async fn api_import_package(
             let _ = std::fs::remove_dir_all(&staging);
             return Err(ApiError::internal(format!("配置安装失败: {error}")));
         }
+        store.invalidate_instance(&manifest.id).map_err(internal)?;
         // 5) 发布包内预设（plugins/*/presets/*.yaml，幂等）；失败即整体失败
         //    （避免半套预设静默生效），回滚本次新建素材。
         if let Err(error) = publish_package_presets(&store, st.db.clone(), &manifest.id) {
