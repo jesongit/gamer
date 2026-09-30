@@ -95,6 +95,10 @@ impl Scheduler {
         }
     }
 
+    pub fn set_result_hook(&self, hook: crate::timer_core::TaskResultHook) {
+        self.core.set_result_hook(hook);
+    }
+
     /// ADR-13: register a runner on behalf of its owning extension and resume
     /// the tasks that entered `DependencyMissing` because this runner was
     /// missing (wakeup cursors recomputed through the schedule registry).

@@ -14,6 +14,40 @@ fn task_body(name: &str, runner_id: &str, entrypoint: &str) -> serde_json::Value
     })
 }
 
+#[tokio::test]
+async fn optional_task_configuration_survives_without_plugin_and_omitted_update() {
+    let t = build_app(
+        "task-optional-config",
+        test_credential("admin123"),
+        Default::default(),
+    );
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    let mut body = task_body("通知任务", YAML_RUNNER, "example/daily.yaml");
+    let extensions = serde_json::json!({"gamer-notify":{"enabled":true,"results":{"success":{"enabled":true,"channels":["wechat"],"content":"{{task.name}}"}}}});
+    body["extensions"] = extensions.clone();
+    let resp = post_json(&t, &sid, "/api/tasks", body).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = json_body(resp).await;
+    assert_eq!(created["extensions"], extensions);
+    assert_eq!(created["state"], "active");
+    let id = created["id"].as_str().unwrap();
+    let resp = send(
+        &t.app,
+        req(
+            "PUT",
+            &format!("/api/tasks/{id}"),
+            None,
+            &json_headers(sid.to_string()),
+            Some(task_body("改名", YAML_RUNNER, "example/daily.yaml").to_string()),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(json_body(resp).await["extensions"], extensions);
+    let resp = get_json(&t, &sid, &format!("/api/tasks/{id}")).await;
+    assert_eq!(json_body(resp).await["extensions"], extensions);
+}
+
 /// CRUD 全链路 + enable/disable 生命周期：嵌套 runner/schedule 形状回读一致，
 /// enable/disable 走显式状态迁移（Active ↔ Suspended+"disabled"）。
 #[tokio::test]
