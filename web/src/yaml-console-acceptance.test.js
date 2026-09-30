@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { defineComponent, h, ref } from 'vue'
 import { mount, flushPromises } from '@vue/test-utils'
 import { api } from './api'
@@ -9,6 +9,7 @@ import ScriptRunner from '../../plugins/gamer-yaml/ui/src/components/console/Scr
 import catalog from '../../tools/yaml-tests/native-functions.json'
 
 let wrapper
+beforeEach(() => { vi.spyOn(api, 'listExtensions').mockResolvedValue([]) })
 afterEach(() => { wrapper?.unmount(); vi.restoreAllMocks(); scriptsData.value = []; templatesData.value = [] })
 
 function mountRunner(packageId) {
@@ -20,6 +21,21 @@ function mountRunner(packageId) {
   } }))
   return runner
 }
+
+it('通知插件缺失仍可加入通知步骤，提示无法发送但不移除函数', async () => {
+  vi.spyOn(api, 'getRunnerFunctions').mockResolvedValue({ functions: catalog })
+  vi.spyOn(api, 'listExtensions').mockResolvedValue([])
+  vi.spyOn(api, 'listScripts').mockResolvedValue([])
+  mountRunner(ref('qa')); await flushPromises()
+  await wrapper.findAll('button').find(b => b.text() === '新建脚本').trigger('click'); await flushPromises()
+  await wrapper.get('button[title="添加步骤"]').trigger('click')
+  const button = document.body.querySelector('[aria-label="调用 notify"]')
+  expect(button).not.toBeNull()
+  expect(button.disabled).toBe(false)
+  expect(button.title).toContain('不可用')
+  button.click(); await flushPromises()
+  expect(wrapper.text()).toContain('发送通知')
+})
 
 it('Package 在页面挂载后才加载：脚本列表与摘要自动出现，切换包不保留旧结果', async () => {
   vi.spyOn(api, 'getRunnerFunctions').mockResolvedValue({ functions: catalog })

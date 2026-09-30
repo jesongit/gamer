@@ -483,6 +483,7 @@ fn route_validation_rejects_path_like_template_names() {
 #[test]
 fn route_validation_bounds_run_and_task_requests() {
     let task = SaveTaskReq {
+        extensions: None,
         id: None,
         name: "daily".into(),
         app: crate::core::AppContext::for_test("device-1", "com.example.game").unwrap(),

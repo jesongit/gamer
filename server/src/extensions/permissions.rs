@@ -28,6 +28,7 @@ pub(crate) enum Permission {
     LogWrite,
     MediaStream,
     LiveConnect,
+    NotifySend,
     MediaRead,
     MediaImport,
     MediaRecord,
@@ -58,6 +59,7 @@ impl Permission {
             "log.write" => Ok(Self::LogWrite),
             "media.stream" => Ok(Self::MediaStream),
             "live.connect" => Ok(Self::LiveConnect),
+            "notify.send" => Ok(Self::NotifySend),
             "media.read" => Ok(Self::MediaRead),
             "media.import" => Ok(Self::MediaImport),
             "media.record" => Ok(Self::MediaRecord),
@@ -101,6 +103,7 @@ impl Permission {
             Self::LogWrite => "log.write",
             Self::MediaStream => "media.stream",
             Self::LiveConnect => "live.connect",
+            Self::NotifySend => "notify.send",
             Self::MediaRead => "media.read",
             Self::MediaImport => "media.import",
             Self::MediaRecord => "media.record",
@@ -120,7 +123,7 @@ impl Permission {
             Self::Touch => HostApiDomain::Touch,
             Self::ResourceRead | Self::PackagePublish => HostApiDomain::Resource,
             Self::RunSubmit | Self::RunControl => HostApiDomain::Run,
-            Self::RuntimeSleep | Self::LiveConnect => HostApiDomain::Runtime,
+            Self::RuntimeSleep | Self::LiveConnect | Self::NotifySend => HostApiDomain::Runtime,
             Self::LogWrite => HostApiDomain::Log,
             Self::MediaStream
             | Self::MediaRead

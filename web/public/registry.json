@@ -1,21 +1,21 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-09-28T12:27:53Z",
+  "generated_at": "2026-09-30T17:27:14Z",
   "host_api": "1.0.0",
   "provenance": {
-    "plugin_commit": "3d570dc72c8925739d453cf42730537006f94d3e",
-    "sdk_host_commit": "3de0c7e7e21ef3ad78f3c8604fd09f225bc5ee73"
+    "plugin_commit": "3af25baf38fa4ec23dc81660c5d663eb6a3845f2",
+    "sdk_host_commit": "95c666403fa30d902f52e637ffec7e4cb10d3b00"
   },
   "plugins": [
     {
       "id": "gamer-keymap",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "name": "键盘映射",
       "description": "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-keymap-0.1.3.gplugin",
-      "sha256": "f62ac46f8953d13ac455c40785ff42cb61d3131e60aa8336b8d88196e3c086ea",
-      "size": 131898,
+      "download_url": "/plugins/gamer-keymap-0.1.4.gplugin",
+      "sha256": "57b9b06ffe74ac259ae8ad295d48f7125a9459a626a2ee5161afdbef29e0788a",
+      "size": 131897,
       "permissions": [
         "ui.host",
         "input.tap",
@@ -40,7 +40,7 @@
             "preferred_width": 360,
             "requires_device": true,
             "runtime": "core",
-            "title": "映射"
+            "title": "键盘映射"
           }
         ]
       },
@@ -87,7 +87,44 @@
         ]
       },
       "execution": {
-        "kind": "builtin"
+        "kind": "builtin",
+        "host_version": ">=0.2.5"
+      }
+    },
+    {
+      "id": "gamer-notify",
+      "version": "0.1.0",
+      "name": "通知助手",
+      "description": "全局通知通道、任务结果通知与自动化通知",
+      "publisher": "gamer.dev",
+      "download_url": "/plugins/gamer-notify-0.1.0.gplugin",
+      "sha256": "e5006ef20a8110498b531e6c3ed0cc1b1d5e28aeb2603f4ad434c8ffc7ba3794",
+      "size": 5994,
+      "permissions": [
+        "ui.host",
+        "notify.send"
+      ],
+      "host_api": {
+        "runtime": "^1.0",
+        "ui": "^1.1"
+      },
+      "ui": {
+        "contributions": [
+          {
+            "component": "NotifyWorkspace",
+            "entry": "ui/plugin.js",
+            "location": "console.right",
+            "order": 55,
+            "panel_id": "notify",
+            "requires_device": false,
+            "runtime": "core",
+            "title": "通知助手"
+          }
+        ]
+      },
+      "execution": {
+        "kind": "builtin",
+        "host_version": ">=0.2.7"
       }
     },
     {
@@ -122,18 +159,19 @@
         ]
       },
       "execution": {
-        "kind": "builtin"
+        "kind": "builtin",
+        "host_version": ">=0.2.1"
       }
     },
     {
       "id": "gamer-video",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "name": "视频工作台",
       "description": "视频工作台：媒体素材库、设备录制与操作草稿生成",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-video-0.1.1.gplugin",
-      "sha256": "ac63e6251be2ac87ba8d797f3b433e83b381f18d6d90e7e13fa8243b887dea5d",
-      "size": 63386,
+      "download_url": "/plugins/gamer-video-0.1.2.gplugin",
+      "sha256": "d6900e731affe8ba2c572238d027be17a46b8f2d2bfda6dd4bee1f4c750e0058",
+      "size": 65527,
       "permissions": [
         "ui.host",
         "media.read",
@@ -167,13 +205,13 @@
     },
     {
       "id": "gamer-yaml",
-      "version": "0.1.1",
+      "version": "0.1.3",
       "name": "自动化",
       "description": "自动化：YAML V1 脚本、函数库与模板的制作与运行",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-yaml-0.1.1.gplugin",
-      "sha256": "59eb9071a7bf2022e042e433ecb174d196d0c93635ee76feebb2e0893ef2cedc",
-      "size": 451819,
+      "download_url": "/plugins/gamer-yaml-0.1.3.gplugin",
+      "sha256": "09c51dc32d13d74d7aa0e7d37a6d72e830ce3574fc9c30aec1db5bc370e7bc05",
+      "size": 456945,
       "permissions": [
         "ui.host",
         "device.read",
@@ -186,7 +224,8 @@
         "vision.color",
         "resource.read",
         "runtime.sleep",
-        "log.write"
+        "log.write",
+        "notify.send"
       ],
       "host_api": {
         "device": "^1.0",
@@ -210,35 +249,12 @@
             "requires_device": true,
             "runtime": "core",
             "title": "自动化"
-          },
-          {
-            "component": "console.functions",
-            "entry": "ui/plugin.js",
-            "icon": "ƒ",
-            "location": "console.right",
-            "order": 30,
-            "panel_id": "functions",
-            "preferred_width": 440,
-            "requires_device": false,
-            "runtime": "core",
-            "title": "函数"
-          },
-          {
-            "component": "console.templates",
-            "entry": "ui/plugin.js",
-            "icon": "🖼️",
-            "location": "console.right",
-            "order": 35,
-            "panel_id": "templates",
-            "preferred_width": 440,
-            "requires_device": true,
-            "runtime": "core",
-            "title": "模板"
           }
         ]
       },
       "execution": {
-        "kind": "wasm"
+        "kind": "wasm",
+        "host_version": ">=0.2.7"
       }
     }
   ]

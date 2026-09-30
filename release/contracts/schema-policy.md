@@ -1,6 +1,6 @@
 # Gamer DB/文件 Schema 兼容与回滚承诺契约（ARC-004）
 
-> 当前代码（2026-09-26）：min=1 / max=6 / target=6；v3→v4 移除 devices.kind，v4→v5 新增运行记录，v5→v6 新增 browser_targets 并允许 timer_tasks.android_package 为空，保留全部 Android 任务及索引。旧 binary 不能直接读取 v6，回退需恢复完整升级前快照。下方 v1/v2 示意表仅作历史契约示例。
+> 当前代码（2026-09-30）：min=1 / max=7 / target=7；6→7 为任务增加 extensions_json，默认空对象，保存可选插件配置；保留全部既有任务。旧 binary 不能直接读取 v7，回退需恢复完整升级前快照。下方 v1/v2 示意表仅作历史契约示例。
 > 状态：**冻结**（批次 0 契约；变更须按 §8 与 DATA 轨代码、manifest 字段同步提交）
 > 编制日期：2026-08-31
 > 依据：`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §6.6/§6.7/§6.8/§11.3/§15/§17.2（ARC-004 两个 checklist 项）；目录属主见 `docs/guides/UPDATE_CONTRACT.md` §1，本文即其 §6 文件地图登记的 `release/contracts/schema-policy.md`
@@ -53,7 +53,9 @@
 
 | schema v5 | 1 | 5 | 5 | 4→5 新增运行记录与结构化事件，支持历史查询及按日志保留天数清理；DB≥6 拒绝 |
 
-| 当前 schema v6 | 1 | 6 | 6 | 5→6 新增浏览器目标（独占 profile_id），任务 Android 上下文可空；Android 任务原值保留；DB≥7 拒绝；降级须恢复升级前快照 |
+| schema v6 | 1 | 6 | 6 | 5→6 新增浏览器目标（独占 profile_id），任务 Android 上下文可空；Android 任务原值保留；DB≥7 拒绝；降级须恢复升级前快照 |
+
+| 当前 schema v7 | 1 | 7 | 7 | 6→7 为任务增加独立的 extensions_json（默认空对象），保留插件缺失时的可选配置；任务、Runner 和调度原值保留；DB≥8 拒绝；降级须恢复升级前快照 |
 
 manifest 对应：`release.data_schema` = `target_schema`；`release.rollback_floor` 语义见 §6。
 

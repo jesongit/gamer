@@ -139,7 +139,7 @@ export!(MyPlugin);
 | `name` | string | ✅ | 显示名，非空 ≤256B、无控制字符 |
 | `description` | string | — | 可选说明 |
 | `entry` | string | wasm ✅ | 包内 `.wasm` 路径（惯例 `plugin.wasm`）；安装时校验存在 + `\0asm` magic。**builtin 执行类型必须缺省** |
-| `permissions` | [string] | — | 权限闭集 21 项（见 §5）；缺省 = 无权限。写 `filesystem.*`/`network`/`shell`/`process`/`device.shell` 直接拒绝 |
+| `permissions` | [string] | — | 权限闭集 24 项（见 §5）；缺省 = 无权限。写 `filesystem.*`/`network`/`shell`/`process`/`device.shell` 直接拒绝 |
 | `[host_api]` | table | — | 声明用到的 Host API 域版本要求：`device`/`vision`/`input`/`touch`/`resource`/`run`/`runtime`/`log`/`media`，值是 SemVer range（如 `"^1.0"`）；宿主 input/resource 域为 `1.1.0`，其余域 `1.0.0`，不满足 → 安装期结构化报错。`media` 是 Core Media/Recording 保留域，当前不在公开 third-party `extension-host` world 中；`gamer-video` 由 builtin 宿主实现 |
 | `[targets.android].packages` | [string] | — | 支持的 Android 应用包名列表；`*` = 通用（全部应用），**缺省/空声明等价 `*`**。仅作运行目标声明，宿主不做硬门禁：Console 壳按当前设备应用过滤插件入口（`*` 恒显示，具体包名需命中）。与 package.toml 的 `[targets.android]` 同形 |
 | `[[dependencies]]` | array | — | 插件依赖声明（简化计划 Phase 3）：`id`（目标插件 id，禁自引用/重复）+ `version`（SemVer range，缺省 `*`）+ `required`（缺省 `true`，可选依赖必须显式 `false`）。**必需依赖 = 启动门禁**（缺失/版本不兼容/未启用 → enable 拒绝启动并保留错误；必需依赖循环拒绝启动）；**可选依赖 = 能力降级提示**（缺失不阻止启动，你的基础功能必须可独立工作）。不自动下载/自动启用；依赖声明不授予任何权限。与 package.toml `[plugins]`（Package 依赖）是两个概念。调用其他插件能力走 `GET /api/extensions/:id/capabilities` 能力发现 + `POST /api/extensions/:id/call`（参考 gamer-video 对 gamer-yaml 的可选依赖：缺 YAML 时视频基础功能不受影响，仅模板创建/草稿生成入口降级） |
@@ -216,6 +216,7 @@ capability 边界收到 `kind=denied`。
 | `run.submit` | `run.submit` | 稳定 |
 | `run.control` | `run.cancel` / `status` | 稳定 |
 | `runtime.sleep` | `runtime.sleep`（上限 1h/次，随取消位中断） | 稳定 |
+| `notify.send` | 通知助手原生通道与发送动作（runtime 域） | gamer-yaml 可选依赖消费，不开放任意网络；见[通知助手](notifications.md) |
 | `log.write` | `log.write`（级别：trace/debug/info/warn/error） | 稳定 |
 | `media.read` | Core media 域查询 | Core 保留域；当前不在公开 third-party `extension-host` world 中，普通 WASM guest 不可直接消费 |
 | `media.import` | Core media 导入 | Core 保留域；由宿主侧 builtin 工作台使用 |

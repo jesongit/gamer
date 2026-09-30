@@ -1,6 +1,6 @@
 //! SQLite 持久化：设备、定时任务、运行日志。
 //!
-//! 数据库从当前 schema v6 空库创建（无 legacy `tasks` 表）；v1 历史库经
+//! 数据库从当前 schema v7 空库创建（无 legacy `tasks` 表）；v1 历史库经
 //! v1→v2（Timer Core 泛化）与 v2→v3（Task 模型收口）逐级迁移，user_version=0
 //! 仍拒绝自动补齐。
 
@@ -63,6 +63,7 @@ pub(crate) struct TaskStorage {
     pub content_package: Option<String>,
     pub runner_id: String,
     pub entrypoint: String,
+    pub extensions_json: String,
     pub payload_json: String,
     pub schedule_json: String,
     pub state: String,
@@ -87,6 +88,7 @@ impl TaskStorage {
             content_package: task.app.content_package.as_ref().map(ToString::to_string),
             runner_id: task.runner_id.clone(),
             entrypoint: task.entrypoint.clone(),
+            extensions_json: serde_json::to_string(&task.extensions)?,
             payload_json: serde_json::to_string(&task.payload)?,
             schedule_json: serde_json::to_string(&task.schedule)?,
             state: task.state.as_str().to_string(),
@@ -275,16 +277,17 @@ fn ensure_schema(conn: &mut Connection, is_new_database: bool) -> anyhow::Result
         conn.execute_batch(journal::DDL)?;
         let tx = conn.transaction()?;
         migrate_v5_to_v6(&tx)?;
+        migrate_v6_to_v7(&tx)?;
         tx.commit()?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        return validate_schema_v6(conn);
+        return validate_schema_v7(conn);
     }
 
     match version {
         0 => anyhow::bail!(
-            "database schema is unversioned (user_version=0); back up and remove gamer.db to rebuild schema v6"
+            "database schema is unversioned (user_version=0); back up and remove gamer.db to rebuild schema v7"
         ),
-        SCHEMA_VERSION => validate_schema_v6(conn),
+        SCHEMA_VERSION => validate_schema_v7(conn),
         other => apply_schema_migrations(conn, other),
     }
 }
@@ -295,12 +298,12 @@ fn ensure_schema(conn: &mut Connection, is_new_database: bool) -> anyhow::Result
 /// is rejected before this function is ever reached.
 fn apply_schema_migrations(conn: &mut Connection, from_version: i64) -> anyhow::Result<()> {
     crate::migrations::run_migrations(conn, from_version, crate::migrations::MIGRATIONS)?;
-    validate_schema_v6(conn)
+    validate_schema_v7(conn)
 }
 
 /// v3 结构校验。启动路径与 maintenance CLI（DATA-005 migrate 迁移后校验）
 /// 共用同一实现，保证「迁移后开放」的判定一致。
-pub(crate) fn validate_schema_v6(conn: &Connection) -> anyhow::Result<()> {
+pub(crate) fn validate_schema_v7(conn: &Connection) -> anyhow::Result<()> {
     let mut stmt = conn.prepare(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     )?;
@@ -322,7 +325,7 @@ pub(crate) fn validate_schema_v6(conn: &Connection) -> anyhow::Result<()> {
     .collect::<Vec<_>>();
     anyhow::ensure!(
         tables == expected_tables,
-        "schema v6 is incomplete: expected tables {expected_tables:?}, found {tables:?}; back up and rebuild gamer.db"
+        "schema v7 is incomplete: expected tables {expected_tables:?}, found {tables:?}; back up and rebuild gamer.db"
     );
 
     validate_table(
@@ -433,6 +436,7 @@ pub(crate) fn validate_schema_v6(conn: &Connection) -> anyhow::Result<()> {
             ("updated_at", "TEXT", 1, 0),
             ("preset_id", "TEXT", 0, 0),
             ("suspend_reason", "TEXT", 0, 0),
+            ("extensions_json", "TEXT", 1, 0),
         ],
     )?;
     validate_table(
@@ -492,7 +496,7 @@ pub(crate) fn validate_schema_v6(conn: &Connection) -> anyhow::Result<()> {
 /// Compatibility name retained for maintenance callers while the validator
 /// now checks the complete v3 schema.
 pub(crate) fn validate_schema_v1(conn: &Connection) -> anyhow::Result<()> {
-    validate_schema_v6(conn)
+    validate_schema_v7(conn)
 }
 
 /// v1→v2 migration.  Legacy rows are copied into generic timer rows; the old
@@ -641,7 +645,7 @@ fn validate_table(
         .collect::<Vec<_>>();
     anyhow::ensure!(
         actual == expected,
-        "schema v6 is incomplete: table {table} has unexpected columns; back up and rebuild gamer.db"
+        "schema v7 is incomplete: table {table} has unexpected columns; back up and rebuild gamer.db"
     );
     Ok(())
 }
@@ -664,12 +668,12 @@ fn validate_index(
         .find(|(name, _)| name == index);
     let Some((_, is_unique)) = found else {
         anyhow::bail!(
-            "schema v6 is incomplete: missing index {index}; back up and rebuild gamer.db"
+            "schema v7 is incomplete: missing index {index}; back up and rebuild gamer.db"
         );
     };
     anyhow::ensure!(
         is_unique == expected_unique,
-        "schema v6 is incomplete: index {index} has unexpected uniqueness; back up and rebuild gamer.db"
+        "schema v7 is incomplete: index {index} has unexpected uniqueness; back up and rebuild gamer.db"
     );
     let pragma = format!("PRAGMA index_info('{index}')");
     let mut stmt = conn.prepare(&pragma)?;
@@ -682,12 +686,19 @@ fn validate_index(
         .collect::<Vec<_>>();
     anyhow::ensure!(
         actual_columns == expected_columns,
-        "schema v6 is incomplete: index {index} has unexpected columns; back up and rebuild gamer.db"
+        "schema v7 is incomplete: index {index} has unexpected columns; back up and rebuild gamer.db"
     );
     Ok(())
 }
 
-const TIMER_TASK_SELECT: &str = "SELECT id, name, device_id, android_package, content_package, runner_id, entrypoint, payload_json, schedule_json, state, enabled, next_wakeup, last_result, last_run_at, created_at, updated_at, preset_id, suspend_reason FROM timer_tasks";
+pub(crate) fn migrate_v6_to_v7(tx: &rusqlite::Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch(
+        "ALTER TABLE timer_tasks ADD COLUMN extensions_json TEXT NOT NULL DEFAULT '{}';",
+    )?;
+    Ok(())
+}
+
+const TIMER_TASK_SELECT: &str = "SELECT id, name, device_id, android_package, content_package, runner_id, entrypoint, payload_json, schedule_json, state, enabled, next_wakeup, last_result, last_run_at, created_at, updated_at, preset_id, suspend_reason, extensions_json FROM timer_tasks";
 
 fn timer_tasks_from_conn(conn: &Connection, suffix: &str) -> anyhow::Result<Vec<Task>> {
     let sql = format!("{TIMER_TASK_SELECT} {suffix}");
@@ -719,6 +730,7 @@ fn timer_task_storage_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskSt
         updated_at: r.get(15)?,
         preset_id: r.get(16)?,
         suspend_reason: r.get(17)?,
+        extensions_json: r.get(18)?,
     })
 }
 
@@ -754,14 +766,14 @@ fn write_timer_task(conn: &Connection, row: &TaskStorage) -> anyhow::Result<()> 
         r#"INSERT INTO timer_tasks
            (id, name, device_id, android_package, content_package, runner_id,
             entrypoint, payload_json, schedule_json, state, enabled, next_wakeup,
-            last_result, last_run_at, created_at, updated_at, preset_id, suspend_reason)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+            last_result, last_run_at, created_at, updated_at, preset_id, suspend_reason, extensions_json)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
            ON CONFLICT(id) DO UPDATE SET
             name=?2, device_id=?3, android_package=?4, content_package=?5,
             runner_id=?6, entrypoint=?7, payload_json=?8, schedule_json=?9,
             state=?10, enabled=?11, next_wakeup=?12, last_result=?13,
             last_run_at=?14, created_at=?15, updated_at=?16, preset_id=?17,
-            suspend_reason=?18"#,
+            suspend_reason=?18, extensions_json=?19"#,
         rusqlite::params![
             row.id,
             row.name,
@@ -781,6 +793,7 @@ fn write_timer_task(conn: &Connection, row: &TaskStorage) -> anyhow::Result<()> 
             row.updated_at,
             row.preset_id,
             row.suspend_reason,
+            row.extensions_json,
         ],
     )?;
     Ok(())
@@ -2632,12 +2645,12 @@ PRAGMA user_version = 2;
         fs::remove_dir_all(dir).unwrap();
     }
 
-    /// DATA-002：全新建库得到**确定的 schema v6**——表/列（含顺序、类型、
+    /// DATA-002：全新建库得到**确定的 schema v7**——表/列（含顺序、类型、
     /// NOT NULL、PK）与索引（含唯一性、列序）的完整快照与硬编码期望逐一比对。
     /// 任何 DDL 漂移（新增列、改类型、动索引）都必须显式更新此快照并同步
     /// schema-policy 契约，防止「新库 schema」悄悄分叉。
     #[test]
-    fn new_database_schema_matches_v6_snapshot() {
+    fn new_database_schema_matches_v7_snapshot() {
         let (cfg, dir) = temp_config("schema-snapshot");
         let db_path = dir.join("gamer.db");
         let store = Store::open(&cfg).unwrap();
@@ -2646,7 +2659,7 @@ PRAGMA user_version = 2;
         let conn = Connection::open(&db_path).unwrap();
         let actual = dump_schema(&conn);
         let expected = serde_json::json!({
-            "user_version": 6,
+            "user_version": 7,
             "tables": [
                 {"name":"browser_targets","columns":[
                     {"name":"id","type":"TEXT","notnull":0,"pk":1},
@@ -2723,7 +2736,8 @@ PRAGMA user_version = 2;
                         { "name": "created_at", "type": "TEXT", "notnull": 1, "pk": 0 },
                         { "name": "updated_at", "type": "TEXT", "notnull": 1, "pk": 0 },
                         { "name": "preset_id", "type": "TEXT", "notnull": 0, "pk": 0 },
-                        { "name": "suspend_reason", "type": "TEXT", "notnull": 0, "pk": 0 }
+                        { "name": "suspend_reason", "type": "TEXT", "notnull": 0, "pk": 0 },
+                        { "name": "extensions_json", "type": "TEXT", "notnull": 1, "pk": 0 }
                     ]
                 }
             ],
@@ -2838,7 +2852,7 @@ PRAGMA user_version = 2;
             Ok(_) => panic!("incomplete database must fail fast"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("schema v6 is incomplete"));
+        assert!(error.to_string().contains("schema v7 is incomplete"));
 
         fs::remove_dir_all(dir).unwrap();
     }

@@ -29,6 +29,8 @@ pub(crate) mod live;
 mod manifest;
 pub(crate) mod market;
 mod model;
+#[path = "../../../plugins/gamer-notify/host/mod.rs"]
+pub(crate) mod notify;
 #[path = "../../../plugins/gamer-package-publisher/host/mod.rs"]
 pub(crate) mod package_publisher;
 mod permissions;
@@ -105,7 +107,8 @@ pub(crate) fn native_call_action(
 /// Side-effect-free native action lookup used by the lifecycle gate before
 /// invoking `native_call_action`.
 pub(crate) fn is_public_native_action(id: &ExtensionId, action: &str) -> bool {
-    live::accepts(id.as_str(), action)
+    notify::accepts(id.as_str(), action)
+        || live::accepts(id.as_str(), action)
         || package_publisher::accepts(id.as_str(), action)
         || gamer_yaml::is_public_native_action(id.as_str(), action)
 }
@@ -114,6 +117,9 @@ pub(crate) fn native_action_expected_caller(
     id: &ExtensionId,
     action: &str,
 ) -> Option<&'static str> {
+    if id.as_str() == notify::ID && action == notify::SEND {
+        return Some(gamer_yaml::YAML_EXTENSION_ID);
+    }
     gamer_yaml::native_action_expected_caller(id.as_str(), action)
 }
 
@@ -125,7 +131,8 @@ pub(crate) fn native_action_required_permissions(
     id: &ExtensionId,
     action: &str,
 ) -> Option<&'static [Permission]> {
-    live::permissions(id.as_str(), action)
+    notify::permissions(id.as_str(), action)
+        .or_else(|| live::permissions(id.as_str(), action))
         .or_else(|| package_publisher::permissions(id.as_str(), action))
         .or_else(|| gamer_yaml::native_action_required_permissions(id.as_str(), action))
 }
@@ -134,6 +141,9 @@ pub(crate) fn native_action_caller_permissions(
     id: &ExtensionId,
     action: &str,
 ) -> Option<&'static [Permission]> {
+    if id.as_str() == notify::ID && action == notify::SEND {
+        return Some(&[Permission::NotifySend]);
+    }
     gamer_yaml::native_action_caller_permissions(id.as_str(), action)
 }
 
@@ -142,6 +152,9 @@ pub(crate) fn native_action_caller_permissions(
 /// 集合由 `service.rs::declarative_actions` 从 manifest 读出，两条目录在
 /// `service.capability_actions` 合并。
 pub(crate) fn native_public_actions(id: &ExtensionId) -> Vec<serde_json::Value> {
+    if id.as_str() == notify::ID {
+        return notify::ACTIONS.iter().map(|action| serde_json::json!({"action":action,"version":1,"surface":"native","permissions":["notify.send"]})).collect();
+    }
     if id.as_str() == live::ID {
         return live::ACTIONS.iter().map(|action| serde_json::json!({"action":action,"version":1,"surface":"native","permissions":live::permissions(id.as_str(),action).unwrap_or_default().iter().map(|p|p.as_str()).collect::<Vec<_>>()})).collect();
     }

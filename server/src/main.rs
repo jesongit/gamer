@@ -398,6 +398,9 @@ impl RuntimeServices {
         let extensions = Arc::new(
             extensions::ExtensionService::for_data_root(cfg.data_dir.clone(), capabilities)
                 .with_runner_registrar(runner_registrar)
+                .with_builtin_service(Arc::new(extensions::notify::NotifyService::new(
+                    &cfg.data_dir,
+                )?))
                 .with_builtin_service(Arc::new(extensions::live::LiveService::new(
                     extensions::live::runtime::Runtime {
                         devices: devices.clone(),
@@ -409,6 +412,10 @@ impl RuntimeServices {
                     &cfg.data_dir,
                 )?)),
         );
+        scheduler.set_result_hook(extensions::notify::task::result_hook(
+            Arc::downgrade(&extensions),
+            db.clone(),
+        ));
         let ctx = Self {
             packages,
             viewers,

@@ -230,7 +230,7 @@ mod tests {
         conn.execute("INSERT INTO logs(time,device_id,script_id,level,msg) VALUES ('now','d','s','info','keep')", []).unwrap();
         conn.pragma_update(None, "user_version", 4).unwrap();
         crate::migrations::run_migrations(&mut conn, 4, crate::migrations::MIGRATIONS).unwrap();
-        super::super::validate_schema_v6(&conn).unwrap();
+        super::super::validate_schema_v7(&conn).unwrap();
         assert_eq!(
             conn.query_row("SELECT msg FROM logs", [], |r| r.get::<_, String>(0))
                 .unwrap(),
@@ -240,6 +240,36 @@ mod tests {
             conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
             crate::migrations::TARGET_SCHEMA
+        );
+    }
+
+    #[test]
+    fn v6_tasks_gain_empty_optional_configuration_without_data_loss() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(super::super::SCHEMA_V4_DDL).unwrap();
+        conn.pragma_update(None, "user_version", 4).unwrap();
+        let before_v7: Vec<_> = crate::migrations::MIGRATIONS
+            .iter()
+            .filter(|m| m.to <= 6)
+            .map(|m| crate::migrations::Migration {
+                from: m.from,
+                to: m.to,
+                description: m.description,
+                apply: m.apply,
+            })
+            .collect();
+        crate::migrations::run_migrations(&mut conn, 4, &before_v7).unwrap();
+        conn.execute("INSERT INTO timer_tasks(id,name,device_id,runner_id,entrypoint,payload_json,schedule_json,enabled,state,created_at,updated_at) VALUES ('keep','原任务','device','runner','entry','{}','{}',1,'active','2026-09-30','2026-09-30')", []).unwrap();
+        crate::migrations::run_migrations(&mut conn, 6, crate::migrations::MIGRATIONS).unwrap();
+        super::super::validate_schema_v7(&conn).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT name,extensions_json FROM timer_tasks WHERE id='keep'",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            )
+            .unwrap(),
+            ("原任务".into(), "{}".into())
         );
     }
 

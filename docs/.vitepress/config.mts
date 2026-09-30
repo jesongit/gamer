@@ -41,6 +41,7 @@ export default defineConfig({
         { text: '按键映射', link: '/guide/keymap' },
         { text: '视频与录制', link: '/guide/video' },
         { text: '任务与日志', link: '/guide/tasks' },
+        { text: '通知助手', link: '/guides/notifications' },
         { text: '配置包与插件', link: '/guide/packages' },
         { text: '常见问题', link: '/guide/troubleshooting' },
       ] },
@@ -67,7 +68,7 @@ export default defineConfig({
     docFooter: { prev: '上一篇', next: '下一篇' },
     editLink: {
       pattern: ({ relativePath }) => {
-        const shared = ['reference/YAML.md', 'reference/KEYMAP_SCHEMA.md', 'guides/yaml-tutorial.md', 'guides/browser-targets.md']
+        const shared = ['reference/YAML.md', 'reference/KEYMAP_SCHEMA.md', 'guides/yaml-tutorial.md', 'guides/browser-targets.md', 'guides/notifications.md']
         // VitePress serializes this function for the browser; it must not capture config variables.
         return `https://github.com/jesongit/gamer/edit/main/docs/${shared.includes(relativePath) ? '' : 'site/'}${relativePath}`
       },

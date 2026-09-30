@@ -52,6 +52,7 @@ fn task_json(task: &Task) -> Value {
             "payload": task.payload,
         },
         "schedule": task.schedule,
+        "extensions": task.extensions,
         "state": task.state,
         "enabled": task.enabled,
         "next_wakeup": task.next_wakeup,
@@ -209,6 +210,8 @@ pub(super) async fn api_list_schedule_providers(State(st): State<AppState>) -> R
 #[serde(deny_unknown_fields)]
 pub(super) struct SaveTaskReq {
     #[serde(default)]
+    pub(super) extensions: Option<Value>,
+    #[serde(default)]
     pub(super) id: Option<String>,
     pub(super) name: String,
     #[serde(alias = "app_context")]
@@ -264,6 +267,12 @@ pub(super) fn build_task(
         req.schedule,
     )
     .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    task.extensions = req
+        .extensions
+        .or_else(|| existing.as_ref().map(|t| t.extensions.clone()))
+        .unwrap_or_else(|| serde_json::json!({}));
+    task.validate()
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
     if let Some(previous) = existing {
         task.created_at = previous.created_at;
         task.last_result = previous.last_result;

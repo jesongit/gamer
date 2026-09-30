@@ -105,6 +105,9 @@ pub struct Task {
     pub runner_id: String,
     pub entrypoint: String,
     pub payload: Value,
+    /// Opaque optional extension settings; absence never affects task schedulability.
+    #[serde(default = "empty_extensions")]
+    pub extensions: Value,
     pub schedule: TaskSchedule,
     pub state: TaskState,
     /// Compatibility flag for disabled tasks.  New callers should use
@@ -139,6 +142,7 @@ impl Task {
             runner_id: runner_id.into(),
             entrypoint: entrypoint.into(),
             payload,
+            extensions: empty_extensions(),
             schedule,
             state: TaskState::Active,
             enabled: true,
@@ -167,6 +171,10 @@ impl Task {
                 "{field} contains a control character"
             );
         }
+        anyhow::ensure!(
+            self.extensions.is_object() && self.extensions.to_string().len() <= 64 * 1024,
+            "task extensions must be a JSON object of at most 64 KiB"
+        );
         self.schedule.validate()?;
         Ok(())
     }
@@ -202,6 +210,7 @@ impl Task {
             runner_id: row.runner_id,
             entrypoint: row.entrypoint,
             payload,
+            extensions: serde_json::from_str(&row.extensions_json)?,
             schedule,
             state,
             enabled: row.enabled,
@@ -216,6 +225,10 @@ impl Task {
         task.validate()?;
         Ok(task)
     }
+}
+
+fn empty_extensions() -> Value {
+    serde_json::json!({})
 }
 
 fn parse_timestamp(value: String) -> anyhow::Result<DateTime<Utc>> {
@@ -707,7 +720,19 @@ impl TimerRunner for TimerRunnerRegistry {
 
 /// Timer Core service.  All state transitions are persisted before the next
 /// wakeup is awaited, so a process restart can reconstruct its schedule.
+#[derive(Clone, Debug)]
+pub struct TaskResult {
+    pub event_id: String,
+    pub run_id: Option<String>,
+    pub state: String,
+    pub error: Option<String>,
+    pub finished_at: DateTime<Utc>,
+    pub elapsed_secs: u64,
+}
+pub type TaskResultHook = Arc<dyn Fn(Task, TaskResult) + Send + Sync>;
+
 pub struct TimerCore {
+    result_hook: Mutex<Option<TaskResultHook>>,
     db: Db,
     clock: Arc<dyn Clock>,
     wakeup: Notify,
@@ -732,6 +757,7 @@ impl TimerCore {
 
     pub fn with_clock(db: Db, clock: Arc<dyn Clock>) -> Arc<Self> {
         Arc::new(Self {
+            result_hook: Mutex::new(None),
             db,
             clock,
             wakeup: Notify::new(),
@@ -741,6 +767,10 @@ impl TimerCore {
             active_runs: Arc::new(Mutex::new(HashMap::new())),
             completed_before_registration: Arc::new(Mutex::new(HashSet::new())),
         })
+    }
+
+    pub fn set_result_hook(&self, hook: TaskResultHook) {
+        *self.result_hook.lock().expect("task result hook poisoned") = Some(hook);
     }
 
     pub fn db(&self) -> &Db {
@@ -996,7 +1026,7 @@ impl TimerCore {
             }
         };
         let run_id = task.id.clone();
-        let completion = self.completion_hook(task.id.clone(), scheduled_at);
+        let completion = self.completion_hook(task.clone(), scheduled_at);
         match runner
             .submit(request, &task.id, scheduled_at, completion)
             .await
@@ -1101,6 +1131,26 @@ impl TimerCore {
                 .finish_scheduled_run_async(&task.id, scheduled_at, state, run_id, error)
                 .await;
         }
+        if let Some(hook) = self
+            .result_hook
+            .lock()
+            .expect("task result hook poisoned")
+            .clone()
+        {
+            hook(
+                task.clone(),
+                TaskResult {
+                    event_id: scheduled_at
+                        .map(|t| format!("schedule:{}:{t}", task.id))
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    run_id: run_id.map(str::to_string),
+                    state: state.into(),
+                    error: error.map(str::to_string),
+                    finished_at: Utc::now(),
+                    elapsed_secs: 0,
+                },
+            );
+        }
         let label = if state == "success" {
             "成功"
         } else {
@@ -1112,13 +1162,37 @@ impl TimerCore {
             .await;
     }
 
-    fn completion_hook(&self, _task_id: String, _scheduled_at: Option<i64>) -> TimerCompletionHook {
+    fn completion_hook(&self, task: Task, _scheduled_at: Option<i64>) -> TimerCompletionHook {
+        let result_hook = self
+            .result_hook
+            .lock()
+            .expect("task result hook poisoned")
+            .clone();
+        let started = std::time::Instant::now();
         let db = self.db.clone();
         let active_runs = self.active_runs.clone();
         let completed_before_registration = self.completed_before_registration.clone();
         let completion_generation = self.completion_generation.clone();
         let completion_notify = self.completion_notify.clone();
         Arc::new(move |completion| {
+            if let Some(hook) = &result_hook {
+                let (state, error) = match &completion.outcome {
+                    TimerOutcome::Success => ("success", None),
+                    TimerOutcome::Failed(error) => ("failed", Some(error.clone())),
+                    TimerOutcome::Cancelled => ("cancelled", None),
+                };
+                hook(
+                    task.clone(),
+                    TaskResult {
+                        event_id: format!("run:{}", completion.run_id),
+                        run_id: Some(completion.run_id.clone()),
+                        state: state.into(),
+                        error,
+                        finished_at: Utc::now(),
+                        elapsed_secs: started.elapsed().as_secs(),
+                    },
+                );
+            }
             let db = db.clone();
             let active_runs = active_runs.clone();
             let completed_before_registration = completed_before_registration.clone();
@@ -1183,6 +1257,8 @@ impl TimerCore {
                 .update_timer_task_result_async(&task.id, "失败", Some(&reason))
                 .await
                 .map_err(|error| TimerRunnerError::Other(error.to_string()))?;
+            self.finish_rejected(&task, None, "failed", None, Some(&reason))
+                .await;
             self.notify_changed();
             return Err(TimerRunnerError::DependencyMissing(reason));
         }
@@ -1191,14 +1267,20 @@ impl TimerCore {
                 "timer task is not active".to_string(),
             ));
         }
-        let request = RunRequest::for_app(
+        let request = match RunRequest::for_app(
             task.app.clone(),
             task.runner_id.clone(),
             task.entrypoint.clone(),
             RunPayload::new(task.payload.clone()),
-        )
-        .map_err(|error| TimerRunnerError::Invalid(error.to_string()))?;
-        let completion = self.completion_hook(task.id.clone(), None);
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                let error = TimerRunnerError::Invalid(error.to_string());
+                self.handle_runner_error(&task, None, error.clone()).await;
+                return Err(error);
+            }
+        };
+        let completion = self.completion_hook(task.clone(), None);
         let run = match runner.submit(request, &task.id, None, completion).await {
             Ok(run) => run,
             // runner 已注册但运行依赖缺失（如入口资源不存在）：与 runner 缺失
@@ -1215,7 +1297,10 @@ impl TimerCore {
                     .await;
                 return Err(TimerRunnerError::DependencyMissing(reason));
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                self.handle_runner_error(&task, None, error.clone()).await;
+                return Err(error);
+            }
         };
         let mut active_runs_guard = self
             .active_runs
@@ -1694,6 +1779,53 @@ mod tests {
         core.cancel_task("task-1", runner.clone()).await.unwrap();
         assert_eq!(runner.cancellations.load(Ordering::SeqCst), 0);
         assert_eq!(run.run_id, "run-1");
+        drop(core);
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn optional_configuration_is_opaque_and_result_hook_observes_final_outcomes() {
+        let (db, dir) = test_db("optional-result");
+        let mut task = test_task();
+        task.extensions =
+            serde_json::json!({"optional-plugin":{"enabled":true,"channels":["missing"]}});
+        db.upsert_timer_task_async(&task).await.unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let core = TimerCore::new(db.clone());
+        core.set_result_hook(Arc::new(move |task, result| {
+            captured.lock().unwrap().push((task, result))
+        }));
+        let runner = Arc::new(FakeRunner {
+            id: "fake.runner",
+            submissions: AtomicUsize::new(0),
+            cancellations: AtomicUsize::new(0),
+            complete_immediately: true,
+            submit_error: None,
+        });
+        let generation = core.completion_generation();
+        core.submit_now(task.clone(), runner).await.unwrap();
+        core.wait_for_completion(generation).await;
+        assert_eq!(events.lock().unwrap()[0].0.extensions, task.extensions);
+        assert_eq!(events.lock().unwrap()[0].1.state, "success");
+        assert_eq!(
+            db.get_timer_task_async("task-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            TaskState::Active
+        );
+        let runner = Arc::new(FakeRunner {
+            id: "fake.runner",
+            submissions: AtomicUsize::new(0),
+            cancellations: AtomicUsize::new(0),
+            complete_immediately: false,
+            submit_error: Some(TimerRunnerError::ShuttingDown),
+        });
+        assert!(core.submit_now(task, runner).await.is_err());
+        assert_eq!(events.lock().unwrap()[1].1.state, "skipped");
         drop(core);
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();

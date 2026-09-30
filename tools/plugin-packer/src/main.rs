@@ -152,6 +152,10 @@ fn meta_from_manifest(text: &str) -> Result<Value, String> {
         .and_then(|t| t.get("builtin_id"))
         .and_then(|value| value.as_str())
         .map(|s| s.to_string());
+    let host_version = execution
+        .and_then(|t| t.get("host_version"))
+        .and_then(|value| value.as_str())
+        .map(|s| s.to_string());
     let entry = optional_string("entry").or_else(|| {
         execution
             .and_then(|t| t.get("entry"))
@@ -188,7 +192,7 @@ fn meta_from_manifest(text: &str) -> Result<Value, String> {
         "description": optional_string("description"),
         "publisher": optional_string("publisher"),
         "entry": entry,
-        "execution": { "kind": kind, "builtin_id": builtin_id },
+        "execution": { "kind": kind, "builtin_id": builtin_id, "host_version": host_version },
         "permissions": permissions,
         "host_api": host_api,
         "ui": { "contributions": contributions },
