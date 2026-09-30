@@ -6,7 +6,7 @@
 
 自动化使用 `notify` 普通函数，语法见 [YAML 参考](../reference/YAML.md)。缺少通知插件时，该步骤仍可加入、编辑和保存；执行返回 skipped，后续步骤继续。自动化通知和任务结果通知是两条独立消息。
 
-留空的任务标题和正文使用默认摘要，可使用以下变量：`{{task.name}}`、`{{task.id}}`、`{{device.name}}`、`{{device.id}}`、`{{result}}`、`{{time}}`、`{{elapsed}}`、`{{error}}`、`{{entrypoint}}`、`{{run.id}}`。
+留空的任务标题和正文使用默认摘要，可使用以下变量：<code v-pre>{{task.name}}</code>、<code v-pre>{{task.id}}</code>、<code v-pre>{{device.name}}</code>、<code v-pre>{{device.id}}</code>、<code v-pre>{{result}}</code>、<code v-pre>{{time}}</code>、<code v-pre>{{elapsed}}</code>、<code v-pre>{{error}}</code>、<code v-pre>{{entrypoint}}</code>、<code v-pre>{{run.id}}</code>。
 
 「发送记录」区分已提交、发送中、接口已接受、部分成功、处理中、失败、未知和未发送。「接口已接受」不代表手机已收到；结果未知不会自动重发，获得远端记录 ID 时可以查询结果。
 
@@ -20,7 +20,7 @@
 
 触发数据库迁移的是宿主升级启动，安装或卸载通知插件不会触发迁移。全局通道、调用密钥和发送记录保存在 `data/extension-data/gamer-notify/`，不在主数据库中，也不随配置包导入导出。以后添加发送渠道无需再次修改任务表。
 
-通过内置更新流程升级时，更新器先停止旧服务，备份并校验完整数据目录和配置，再切换候选版本；候选启动或激活失败时尝试恢复升级前快照和旧版本。快照或恢复失败会明确报错，不应通过删除数据库处理。流程见 [便携安装与更新契约](UPDATE_CONTRACT.md)。
+通过内置更新流程升级时，更新器先停止旧服务，备份并校验完整数据目录和配置，再切换候选版本；候选启动或激活失败时尝试恢复升级前快照和旧版本。快照或恢复失败会明确报错，不应通过删除数据库处理。流程见 [便携安装与更新契约](https://github.com/jesongit/gamer/blob/main/docs/guides/UPDATE_CONTRACT.md)。
 
 手动替换程序时，先停止服务并备份完整 `data/` 和配置文件，再替换宿主与配套前端并启动。直接启动服务端不会自动创建完整备份。开发目录通常对应 `server/data/` 和 `server/config.toml`；使用自定义路径时以实际生效配置为准。
 
