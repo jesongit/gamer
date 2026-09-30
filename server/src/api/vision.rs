@@ -384,7 +384,7 @@ mod tests {
                 "-i",
                 "testsrc=duration=1:size=64x64:rate=30",
                 "-c:v",
-                "libx264",
+                "mpeg4",
                 "-pix_fmt",
                 "yuv420p",
             ])
