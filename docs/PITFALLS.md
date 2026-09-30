@@ -504,3 +504,13 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - Windows 并行 Rust 链接可能因页面文件不足报 os error 1455 或无法 mmap 元数据，未必是缓存损坏；等待其他编译结束后用 -j 1 和所需 --lib/--bin 目标重试，避免直接清空缓存或修改系统设置。
 - 视频快捷键只接收播放器根元素焦点时，鼠标点击进度条或播放按钮会把焦点留在原生控件而失效；鼠标操作播放控件后恢复播放器焦点，下拉框和键盘激活仍保留原生焦点，并用组件实际焦点与冒泡按键事件回归。
 - 新工作树只安装 web 依赖时，舞台测试跨目录加载插件源码可能报缺少 pinyin-pro；先执行 `node tools/build-plugin-ui.mjs --install-only` 安装固定插件快照的 UI 依赖，不修改解析别名或跟随插件仓最新提交。
+
+- YAML WASM 每次宿主函数调用会创建临时 Tokio runtime，通知后台任务若在其中 spawn 会随调用结束被取消；通知服务必须捕获长期服务 runtime，并通过“调用已返回后仍完成发送”的测试验证。
+- Rust 测试报 E0786 invalid metadata / Unsupported archive identifier 或 rlib 缺失时，已有目标缓存可能损坏；仅 cargo clean 对报错的具体依赖清理后重建，保留其他产物。
+- Scoop rust-gnu 的 cargo/rustc shim 可用但 cargo fmt 不在 PATH 时，直接调用该安装 bin 内 cargo-fmt/rustfmt，无需重复安装 Rust。
+- 新插件 UI 的 pnpm install 因 esbuild 未授权构建退出时，按现有插件的 pnpm-workspace.yaml 仅声明 allowBuilds.esbuild，随后按锁文件重装。
+- 本机 loopback HTTP 测试在 listener 关闭后收到 502 而非连接失败时，系统代理可能接管了请求；只对测试进程设置 NO_PROXY=localhost,127.0.0.1,::1，不改全局代理。
+- Windows 测试 exe 正在运行时重链接同名产物会报 Permission denied；测试结束后再执行构建，不能同时运行旧测试程序并覆盖它。
+- 新插件本地构建成功仍可能被发行白名单拒绝；同步检查 prepare-release、reuse-published、插件 Release 工作流和宿主 fetch-plugins 的插件 ID 列表，并验证包含新插件的完整目录。
+- 插件 CI 从 sdk/lock.json 固定提交检出宿主，新增 host 能力后仅核对 SDK 文件哈希不足以保证集成可编译；先提交宿主实现再固定新基线，正式发行前让该提交可供 CI 检出。
+- 插件构建传入相对 OutputDir 时，清理逻辑若与 Get-ChildItem.FullName 比较会误删刚生成的归档；先将输出路径归一为绝对路径，再验收最终归档存在且哈希匹配 registry，不能只看 staging 自检。

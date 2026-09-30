@@ -70,9 +70,24 @@ automations/ 内其他 .yaml                            → 自动化脚本
 原子：tap / swipe / key / input_text / launch / stop_app / sleep / log / find
 便利：wait_find / tap_template / wait_disappear
 比较：eq / ne / gt / ge / lt / le
+通知：notify（可选 gamer-notify 发送能力）
 ```
 
 `GET /api/runners/gamer-yaml/functions` 返回原生函数目录（Schema 唯一前端来源）。
+
+`notify` 是普通函数，参数 `content`（必填字符串）、`title`（可选字符串）、`channel`（可选全局通道 ID，空值使用默认通道），返回 `{accepted,id?,status,reason}`。提交后继续执行，实际结果查看通知助手发送记录；插件缺失、停用、版本不兼容或通道不可用时返回未发送原因，不中断流程。函数目录始终包含它，编辑器可以添加、编辑和保存。gamer-yaml 声明可选依赖并通过 `notify.send` 权限调用，通知通道不属于 Package。
+
+```yaml
+run:
+  - notify:
+      title: 备份完成
+      content: 数据库备份已完成
+      channel: wechat
+    as: delivery
+  - log: 后续步骤继续
+```
+
+任务结果通知另在任务编辑页按结果配置，不要求脚本含 `notify`。详见[通知助手](../guides/notifications.md)。
 前端「函数」页面按函数展示，默认在 `_function.yaml` 新建；额外拆分的
 `_function*.yaml` 同样可在画布中编辑，并按实际定义文件保存。
 
