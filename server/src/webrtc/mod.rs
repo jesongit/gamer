@@ -1260,23 +1260,6 @@ pub(crate) async fn handle_control_msg(
 ) -> anyhow::Result<()> {
     let msg: serde_json::Value = serde_json::from_slice(data)?;
     let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    let _input = if matches!(
-        t,
-        "input_event"
-            | "tap"
-            | "touch"
-            | "key"
-            | "text"
-            | "scroll"
-            | "start_app"
-            | "stop_app"
-            | "rotate"
-            | "clipboard"
-    ) {
-        Some(crate::core::input_ownership::admit(&session.device.id)?)
-    } else {
-        None
-    };
     match t {
         "input_event" => {
             // Phase 6 E2E trace：信封可选 trace_id/client_send_ts（epoch µs）。

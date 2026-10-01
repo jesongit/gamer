@@ -218,7 +218,6 @@ const HISTORY_CAP: usize = 256;
 pub struct RunManager {
     journal: Option<crate::store::Db>,
     executor: Arc<dyn RunExecutor>,
-    executors: std::sync::RwLock<HashMap<String, Arc<dyn RunExecutor>>>,
     /// 设备级互斥：device_id → 活动 run_id
     active_by_device: Mutex<HashMap<String, String>>,
     /// run_id → 活动条目（终态后摘入 history）
@@ -237,7 +236,6 @@ impl RunManager {
     pub fn new(executor: Arc<dyn RunExecutor>) -> Self {
         Self {
             executor,
-            executors: std::sync::RwLock::new(HashMap::new()),
             journal: None,
             active_by_device: Mutex::new(HashMap::new()),
             runs: Mutex::new(HashMap::new()),
@@ -251,27 +249,6 @@ impl RunManager {
     pub fn with_journal(mut self, db: crate::store::Db) -> Self {
         self.journal = Some(db);
         self
-    }
-
-    pub fn register_executor(&self, runner: &str, executor: Arc<dyn RunExecutor>) {
-        self.executors
-            .write()
-            .unwrap()
-            .insert(runner.into(), executor);
-    }
-
-    pub fn cancel_runner(&self, runner: &str) {
-        let ids: Vec<_> = self
-            .runs
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|r| r.record.runner_id == runner)
-            .map(|r| r.record.run_id.clone())
-            .collect();
-        for id in ids {
-            self.cancel(&id);
-        }
     }
 
     fn persist(&self, record: &RunRecord) {
@@ -449,15 +426,7 @@ impl RunManager {
             drop(finish);
             return;
         }
-        // Pin the selected executor for prepare/acquire/execute in this run.
-        let executor = self
-            .executors
-            .read()
-            .unwrap()
-            .get(&req.request.runner_id)
-            .cloned()
-            .unwrap_or_else(|| self.executor.clone());
-        let prepare = executor.prepare(&context, &req.request).await;
+        let prepare = self.executor.prepare(&context, &req.request).await;
         if let Err(e) = prepare {
             warn!(run_id = %run_id, err = %format!("{e:#}"), "run prepare (connect) failed");
             if self.is_cancelled(&run_id) {
@@ -473,7 +442,7 @@ impl RunManager {
         }
         // 活动租约：RAII 配对 release，
         // panic 展开时 Drop 必然归还
-        let _lease = match executor.acquire(&context) {
+        let _lease = match self.executor.acquire(&context) {
             Ok(lease) => lease,
             Err(e) => {
                 finish.complete(
@@ -491,7 +460,7 @@ impl RunManager {
             return; // _lease → finish → _inflight 逆序 drop
         }
 
-        let outcome = self.execute(executor, req, context, run_id.clone()).await;
+        let outcome = self.execute(req, context, run_id.clone()).await;
         finish.complete(&run_id, outcome);
         // finish / lease / inflight 依声明逆序自动释放
     }
@@ -499,7 +468,6 @@ impl RunManager {
     /// 执行主体（独立函数便于阅读）：入口已过取消闸，出口把结果归类
     async fn execute(
         self: &Arc<Self>,
-        executor: Arc<dyn RunExecutor>,
         req: Arc<StartRequest>,
         context: RunContext,
         run_id: String,
@@ -514,7 +482,8 @@ impl RunManager {
             return RunOutcome::Failed("注册表条目丢失".into(), vec![]);
         };
         let was_cancelled = || self.cancel_requested(&run_id);
-        match executor
+        match self
+            .executor
             .execute(&context, &req.request, req.realtime_logs, stop.clone())
             .await
         {
@@ -1005,38 +974,6 @@ mod tests {
 
     async fn settled(mgr: &Arc<RunManager>) {
         mgr.wait_settled(std::time::Duration::from_secs(5)).await;
-    }
-
-    #[tokio::test]
-    async fn runner_dispatch_pins_same_executor_across_prepare_and_registration_change() {
-        let fallback = Arc::new(FakeExecutor::default());
-        let (selected, gate) = FakeExecutor::starting();
-        let selected = Arc::new(selected);
-        let replacement = Arc::new(FakeExecutor::default());
-        let mgr = Arc::new(RunManager::new(fallback.clone()));
-        mgr.register_executor("test.runner", selected.clone());
-        mgr.submit(
-            req("dispatch-pinned", "pkg/goal.json", RunSource::Manual),
-            None,
-        )
-        .unwrap();
-        selected.prepare_started.notified().await;
-        mgr.register_executor("test.runner", replacement.clone());
-        gate.notify_one();
-        settled(&mgr).await;
-        assert_eq!(
-            selected.stats(|s| (s.prepare_calls, s.occupies, s.executes, s.releases)),
-            (1, 1, 1, 1)
-        );
-        assert_eq!(replacement.stats(|s| s.executes), 0);
-        assert_eq!(fallback.stats(|s| s.executes), 0);
-        mgr.submit(
-            req("dispatch-next", "pkg/task.yaml", RunSource::Manual),
-            None,
-        )
-        .unwrap();
-        settled(&mgr).await;
-        assert_eq!(replacement.stats(|s| s.executes), 1);
     }
 
     // 九项必测之一：同设备两个不同脚本，第二个 409

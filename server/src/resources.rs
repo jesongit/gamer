@@ -686,43 +686,6 @@ impl PackageStore {
         self.root.parent().expect("package store has a data root")
     }
 
-    /// Local identity is outside Packages and never appears in an archive.
-    /// Replaced directories conservatively lose local evidence trust even while plugins are dormant.
-    pub fn instance_generation(&self, pkg: &str) -> anyhow::Result<String> {
-        let _lock = RESOURCE_WRITE_LOCK.lock();
-        self.manifest(pkg)?;
-        let metadata = std::fs::metadata(self.package_dir(pkg)?)?;
-        let identity = format!("{:?}", metadata.created().or_else(|_| metadata.modified())?);
-        let path = self.data_root().join("state/package-instances.json");
-        let mut records: BTreeMap<String, (String, String)> = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(e) => return Err(e.into()),
-        };
-        if let Some((generation, recorded)) = records.get(pkg) {
-            if recorded == &identity {
-                return Ok(generation.clone());
-            }
-        }
-        let generation = uuid::Uuid::new_v4().to_string();
-        records.insert(pkg.into(), (generation.clone(), identity));
-        atomic_write(&path, &serde_json::to_vec(&records)?)?;
-        Ok(generation)
-    }
-
-    pub fn invalidate_instance(&self, pkg: &str) -> anyhow::Result<()> {
-        let _lock = RESOURCE_WRITE_LOCK.lock();
-        validate_scope_id("package id", pkg)?;
-        let path = self.data_root().join("state/package-instances.json");
-        let mut records: BTreeMap<String, (String, String)> = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(e) => return Err(e.into()),
-        };
-        records.remove(pkg);
-        atomic_write(&path, &serde_json::to_vec(&records)?)
-    }
-
     pub fn package_dir(&self, pkg: &str) -> anyhow::Result<PathBuf> {
         validate_scope_id("package id", pkg)?;
         Ok(self.root.join(pkg))
@@ -757,7 +720,6 @@ impl PackageStore {
             &dir.join("package.toml"),
             serialize_package_toml(&manifest).as_bytes(),
         )?;
-        self.invalidate_instance(&manifest.id)?;
         Ok(manifest)
     }
 
@@ -872,7 +834,6 @@ impl PackageStore {
         }
         std::fs::remove_dir_all(&dir)
             .map_err(|e| anyhow::anyhow!("删除配置失败: {} ({})", e, dir.display()))?;
-        self.invalidate_instance(pkg)?;
         Ok(true)
     }
 
@@ -888,7 +849,6 @@ impl PackageStore {
             ..source
         };
         copy_dir_contents(&self.package_dir(src)?, &target_dir)?;
-        self.invalidate_instance(new_id)?;
         atomic_write(
             &target_dir.join("package.toml"),
             serialize_package_toml(&manifest).as_bytes(),

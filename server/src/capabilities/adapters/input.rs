@@ -22,14 +22,9 @@ impl InputAdapter {
     }
 
     async fn tap_touch(&self, device: &DeviceHandle, point: TouchPoint) -> CapabilityResult<()> {
-        crate::core::input_ownership::operation(device.id().as_str(), async {
-            let touch = self.touch.begin(device, point).await?;
-            tokio::time::sleep(Duration::from_millis(60)).await;
-            self.touch.end(&touch).await?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| CapabilityError::Failed(e.to_string()))
+        let touch = self.touch.begin(device, point).await?;
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        self.touch.end(&touch).await
     }
 }
 
@@ -131,8 +126,6 @@ impl InputService for InputAdapter {
                 "画面目标与输入目标不一致".into(),
             ));
         }
-        let _operation = crate::core::input_ownership::admit(device.id().as_str())
-            .map_err(|e| CapabilityError::Failed(e.to_string()))?;
         let touch = self.touch.begin(device, gesture.start()).await?;
         let result = async {
             for i in 1..=20u64 {

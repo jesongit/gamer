@@ -91,37 +91,6 @@ impl FrameAdapter {
 
 #[async_trait]
 impl FrameService for FrameAdapter {
-    async fn png(
-        &self,
-        frame: FrameHandle,
-        max_side: u32,
-    ) -> CapabilityResult<(Vec<u8>, FrameSize)> {
-        let frame = self.store.get(frame)?;
-        let result = crate::matcher::compute::run(move || -> anyhow::Result<_> {
-            let (w, h) = frame.dimensions();
-            let pixels = if max_side > 0 && w.max(h) > max_side {
-                let scale = max_side as f64 / w.max(h) as f64;
-                image::imageops::resize(
-                    frame.image(),
-                    (w as f64 * scale).round() as u32,
-                    (h as f64 * scale).round() as u32,
-                    image::imageops::FilterType::Triangle,
-                )
-            } else {
-                frame.image().clone()
-            };
-            let size = FrameSize::new(pixels.width(), pixels.height());
-            let mut bytes = Vec::new();
-            pixels.write_to(
-                &mut std::io::Cursor::new(&mut bytes),
-                image::ImageFormat::Png,
-            )?;
-            Ok((bytes, size))
-        })
-        .await
-        .map_err(|e| super::super::CapabilityError::Failed(e.to_string()))?;
-        result.map_err(|e| super::super::CapabilityError::Failed(e.to_string()))
-    }
     async fn coordinate_space(
         &self,
         device: &DeviceHandle,

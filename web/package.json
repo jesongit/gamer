@@ -12,7 +12,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest",
-    "test:run": "node ../tools/build-plugin-ui.mjs --install-only && vitest run && pnpm --dir ../plugins/gamer-yaml/ui test && pnpm --dir ../plugins/gamer-keymap/ui test && pnpm --dir ../plugins/gamer-video/ui test && pnpm --dir ../plugins/gamer-package-publisher/ui test && pnpm --dir ../plugins/gamer-live/ui test && pnpm --dir ../plugins/gamer-notify/ui test && pnpm --dir ../plugins/gamer-ai/ui test"
+    "test:run": "node ../tools/build-plugin-ui.mjs --install-only && vitest run && pnpm --dir ../plugins/gamer-yaml/ui test && pnpm --dir ../plugins/gamer-keymap/ui test && pnpm --dir ../plugins/gamer-video/ui test && pnpm --dir ../plugins/gamer-package-publisher/ui test && pnpm --dir ../plugins/gamer-live/ui test && pnpm --dir ../plugins/gamer-notify/ui test"
   },
   "dependencies": {
     "fflate": "^0.8.3",

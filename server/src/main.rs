@@ -308,7 +308,6 @@ struct RuntimeServices {
     runs: Arc<run_manager::RunManager>,
     scheduler: Arc<scheduler::Scheduler>,
     extensions: Arc<extensions::ExtensionService>,
-    plugin_routes: axum::Router,
 }
 
 impl RuntimeServices {
@@ -336,7 +335,6 @@ impl RuntimeServices {
             update,
             self.extensions.clone(),
         )
-        .merge(self.plugin_routes.clone())
     }
 }
 
@@ -389,17 +387,6 @@ impl RuntimeServices {
             db.clone(),
             runs.clone(),
         );
-        let ai = Arc::new(extensions::ai::AiService::new(
-            &cfg.data_dir,
-            packages.clone(),
-            capabilities.clone(),
-            devices.clone(),
-            executor.clone(),
-            runs.clone(),
-            db.clone(),
-        )?);
-        runs.register_executor(extensions::gamer_yaml::YAML_EXTENSION_ID, executor.clone());
-        runs.register_executor(extensions::ai::ID, ai.clone());
         let runner_registrar = Arc::new(
             extensions::gamer_yaml::timer_yaml::YamlTimerRunnerRegistrar::new(
                 scheduler.clone(),
@@ -410,14 +397,7 @@ impl RuntimeServices {
         );
         let extensions = Arc::new(
             extensions::ExtensionService::for_data_root(cfg.data_dir.clone(), capabilities)
-                .with_runner_registrar(Arc::new(extensions::CompositeRunnerRegistrar(vec![
-                    runner_registrar,
-                    Arc::new(extensions::ai::Registrar {
-                        service: ai.clone(),
-                        scheduler: scheduler.clone(),
-                    }),
-                ])))
-                .with_builtin_service(ai.clone())
+                .with_runner_registrar(runner_registrar)
                 .with_builtin_service(Arc::new(extensions::notify::NotifyService::new(
                     &cfg.data_dir,
                 )?))
@@ -432,7 +412,6 @@ impl RuntimeServices {
                     &cfg.data_dir,
                 )?)),
         );
-        ai.attach(&extensions);
         scheduler.set_result_hook(extensions::notify::task::result_hook(
             Arc::downgrade(&extensions),
             db.clone(),
@@ -444,7 +423,6 @@ impl RuntimeServices {
             runs,
             scheduler,
             extensions,
-            plugin_routes: extensions::ai::mcp::router(ai),
         };
         // 与常规路径一致：在任何设备扫描/保活启动前接入统一 drain，避免
         // activation 后初始化窗口收到 SIGTERM 时漏掉已创建的运行依赖。

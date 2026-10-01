@@ -772,10 +772,6 @@ pub(super) async fn api_control(
     Path(id): Path<String>,
     Json(req): Json<ControlReq>,
 ) -> Response {
-    let _input = match crate::core::input_ownership::admit(&id) {
-        Ok(lease) => lease,
-        Err(error) => return err_response(StatusCode::CONFLICT, &error.to_string()),
-    };
     // 先纯校验（与设备无关，离线设备也能拿到明确 400），再取会话执行
     let ctl = match parse_ctl(&req) {
         Ok(c) => c,

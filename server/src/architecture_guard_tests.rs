@@ -456,39 +456,10 @@ fn architecture_guard_source_boundary_core_free_of_yaml_keymap_semantics() {
 
 /// Core 模块禁止出现的扩展内部路径（`use` 语句与内联路径同等对待；
 /// `crate::extensions::X` 门面再导出不算违规——那是机制层定义的窄缝）。
-const DEPENDENCY_PATTERNS: &[&str] = &[
-    "extensions::gamer_yaml",
-    "extensions::keymap",
-    "extensions::ai",
-];
+const DEPENDENCY_PATTERNS: &[&str] = &["extensions::gamer_yaml", "extensions::keymap"];
 
 /// §14.2 白名单：组合根装配点 + cfg(test) 夹具，逐条申报。
 const DEPENDENCY_ALLOWS: &[Allow] = &[
-    Allow {
-        file: "main.rs",
-        snippet: "extensions::ai::AiService::new",
-        reason: "组合根装配 builtin AI 业务；Core 不解释 AI 决策",
-    },
-    Allow {
-        file: "main.rs",
-        snippet: "extensions::ai::ID",
-        reason: "组合根注册 AI runner 的通用执行器",
-    },
-    Allow {
-        file: "main.rs",
-        snippet: "extensions::ai::Registrar",
-        reason: "组合根注入插件生命周期注册器",
-    },
-    Allow {
-        file: "main.rs",
-        snippet: "extensions::ai::mcp::router",
-        reason: "组合根装配独立凭据的插件路由",
-    },
-    Allow {
-        file: "main.rs",
-        snippet: "extensions::gamer_yaml::YAML_EXTENSION_ID",
-        reason: "组合根为已构造 YAML 执行器注册通用 runner 分发",
-    },
     // —— 生产：组合根（main.rs 的 RuntimeServices::start）是唯一装配点 ——
     Allow {
         file: "main.rs",

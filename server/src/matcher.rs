@@ -76,7 +76,7 @@ impl DecodedFrame {
         self.rgb.get_pixel_checked(x, y).map(|pixel| pixel.0)
     }
 
-    pub(crate) fn image(&self) -> &RgbImage {
+    fn image(&self) -> &RgbImage {
         &self.rgb
     }
 }

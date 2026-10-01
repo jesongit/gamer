@@ -34,8 +34,6 @@ use super::{
 /// router) can run without a scheduler.
 #[async_trait]
 pub(crate) trait TimerRunnerRegistrar: Send + Sync {
-    /// Called before waiting for a lifecycle write lease, without a lifecycle lock.
-    fn cancel_owned(&self, _extension_id: &str) {}
     /// The extension entered `Running`: register every runner it owns
     /// (owner = extension id) and resume tasks that were suspended because
     /// those runners were missing.
@@ -57,52 +55,6 @@ pub(crate) trait TimerRunnerRegistrar: Send + Sync {
 }
 
 /// Process-owned builtin jobs, called only behind the normal permission and lifecycle gates.
-pub(crate) struct CompositeRunnerRegistrar(pub Vec<Arc<dyn TimerRunnerRegistrar>>);
-#[async_trait]
-impl TimerRunnerRegistrar for CompositeRunnerRegistrar {
-    fn cancel_owned(&self, id: &str) {
-        for registrar in &self.0 {
-            registrar.cancel_owned(id);
-        }
-    }
-    async fn extension_started(&self, id: &str) -> anyhow::Result<()> {
-        for registrar in &self.0 {
-            registrar.extension_started(id).await?;
-        }
-        Ok(())
-    }
-    async fn extension_stopped(&self, id: &str) -> anyhow::Result<()> {
-        for registrar in &self.0 {
-            registrar.extension_stopped(id).await?;
-        }
-        Ok(())
-    }
-    fn executes_without_instance(&self, id: &str) -> bool {
-        self.0.iter().any(|r| r.executes_without_instance(id))
-    }
-}
-type LongCalls =
-    Arc<std::sync::Mutex<HashMap<Uuid, (ExtensionId, Arc<std::sync::atomic::AtomicBool>)>>>;
-pub(crate) struct LongCallLease {
-    _lease: tokio::sync::OwnedRwLockReadGuard<()>,
-    registry: LongCalls,
-    key: Uuid,
-}
-impl Drop for LongCallLease {
-    fn drop(&mut self) {
-        self.registry.lock().unwrap().remove(&self.key);
-    }
-}
-struct Revocation<'a> {
-    service: &'a ExtensionService,
-    id: ExtensionId,
-}
-impl Drop for Revocation<'_> {
-    fn drop(&mut self) {
-        self.service.revoking.lock().unwrap().remove(&self.id);
-    }
-}
-
 #[async_trait]
 pub(crate) trait BuiltinService: Send + Sync {
     fn extension_id(&self) -> &str;
@@ -273,8 +225,6 @@ pub(crate) struct ExtensionService {
     /// before changing lifecycle state. This drains in-flight calls without
     /// holding the global lifecycle lock across long-running work.
     call_gates: std::sync::Mutex<HashMap<ExtensionId, Arc<RwLock<()>>>>,
-    revoking: std::sync::Mutex<BTreeSet<ExtensionId>>,
-    long_calls: LongCalls,
     /// Startup reconciliation is a process-level recovery pass. Once it has
     /// run, a later call must not reinterpret the now-live Running records as
     /// stale and create duplicate instances or runner registrations.
@@ -314,8 +264,6 @@ impl ExtensionService {
             host_api: HostApiCatalog::default(),
             operation_lock: Mutex::new(()),
             call_gates: std::sync::Mutex::new(HashMap::new()),
-            revoking: std::sync::Mutex::new(BTreeSet::new()),
-            long_calls: Arc::new(std::sync::Mutex::new(HashMap::new())),
             startup_reconciled: std::sync::atomic::AtomicBool::new(false),
             process_running: std::sync::Mutex::new(HashMap::new()),
             running: std::sync::Mutex::new(HashMap::new()),
@@ -346,16 +294,8 @@ impl ExtensionService {
     pub(crate) async fn shutdown_builtin_service(&self) {
         self.shutting_down
             .store(true, std::sync::atomic::Ordering::Release);
-        // Revoke every long-running guest before waiting for any lifecycle gate.
-        for (id, stop) in self.long_calls.lock().unwrap().values() {
-            stop.store(true, std::sync::atomic::Ordering::Release);
-            if let Some(registrar) = &self.runner_registrar {
-                registrar.cancel_owned(id.as_str());
-            }
-        }
         for service in &self.builtin_service {
             if let Ok(id) = ExtensionId::parse(service.extension_id()) {
-                let _revocation = self.revoke_calls(&id);
                 let gate = self.call_gate(&id);
                 let _lease = gate.write().await;
                 service.shutdown().await;
@@ -409,44 +349,6 @@ impl ExtensionService {
             .lock()
             .expect("process running set poisoned")
             .contains_key(id)
-    }
-
-    fn revoke_calls(&self, id: &ExtensionId) -> Revocation<'_> {
-        self.revoking.lock().unwrap().insert(id.clone());
-        for (owner, stop) in self.long_calls.lock().unwrap().values() {
-            if owner == id {
-                stop.store(true, std::sync::atomic::Ordering::Release);
-            }
-        }
-        if let Some(registrar) = &self.runner_registrar {
-            registrar.cancel_owned(id.as_str());
-        }
-        Revocation {
-            service: self,
-            id: id.clone(),
-        }
-    }
-    pub(crate) async fn long_call(
-        &self,
-        id: &ExtensionId,
-        stop: Arc<std::sync::atomic::AtomicBool>,
-    ) -> ExtensionResult<LongCallLease> {
-        // Public builtin calls already hold a read lease. Waiting behind a
-        // pending writer here would deadlock that writer with our outer lease.
-        let lease = self
-            .call_gate(id)
-            .try_read_owned()
-            .map_err(|_| ExtensionError::CallRejected("插件生命周期正在切换".into()))?;
-        let snapshot = self.snapshot_for(id)?;
-        let mut calls = self.long_calls.lock().unwrap();
-        self.require_current_process_running(id, snapshot.state(), "run")?;
-        let key = Uuid::new_v4();
-        calls.insert(key, (id.clone(), stop));
-        Ok(LongCallLease {
-            _lease: lease,
-            registry: self.long_calls.clone(),
-            key,
-        })
     }
 
     fn mark_process_running(
@@ -520,11 +422,6 @@ impl ExtensionService {
         state: ExtensionState,
         operation: &'static str,
     ) -> ExtensionResult<()> {
-        if self.revoking.lock().unwrap().contains(id) {
-            return Err(ExtensionError::CallRejected(
-                "插件正在停止，调用准入已撤销".into(),
-            ));
-        }
         if state != ExtensionState::Running {
             return Err(invalid_transition(id, operation, state));
         }
@@ -596,22 +493,6 @@ impl ExtensionService {
     {
         let gate = self.call_gate(id);
         let _call_lease = gate.read().await;
-        let (wasm, host) = self.load_guest_for_run(id).await?;
-        operation(wasm, host).await
-    }
-
-    /// Dispatch an input envelope to the running keymap extension. A missing
-    pub(crate) async fn with_guest_for_run_cancel<F, Fut, T>(
-        &self,
-        id: &ExtensionId,
-        stop: Arc<std::sync::atomic::AtomicBool>,
-        operation: F,
-    ) -> ExtensionResult<T>
-    where
-        F: FnOnce(Vec<u8>, HostApi) -> Fut,
-        Fut: std::future::Future<Output = ExtensionResult<T>>,
-    {
-        let _lease = self.long_call(id, stop).await?;
         let (wasm, host) = self.load_guest_for_run(id).await?;
         operation(wasm, host).await
     }
@@ -828,7 +709,7 @@ impl ExtensionService {
                 target
             ))
         })?;
-        if !expected.split('|').any(|id| id == caller.as_str()) {
+        if expected != caller.as_str() {
             return Err(ExtensionError::CallRejected(format!(
                 "插件调用方 {} 不匹配动作 {action} 要求的调用方 {expected}",
                 caller
@@ -1250,7 +1131,6 @@ impl ExtensionService {
         context: &ExtensionInstallContext,
     ) -> ExtensionResult<ExtensionSnapshot> {
         let incoming_manifest = self.inspect_compatible(archive)?;
-        let _revocation = self.revoke_calls(incoming_manifest.id());
         let call_gate = self.call_gate(incoming_manifest.id());
         let _call_gate = call_gate.write().await;
 
@@ -1523,8 +1403,6 @@ impl ExtensionService {
     /// rejecting disable-while-running. 简化计划 Phase 3：目标被运行中插件的
     /// 必需依赖引用时拒绝（提示先停用依赖方，不做自动级联停用）。
     pub(crate) async fn disable(&self, id: &ExtensionId) -> ExtensionResult<ExtensionSnapshot> {
-        self.ensure_provider_transition(id, None)?;
-        let _revocation = self.revoke_calls(id);
         let call_gate = self.call_gate(id);
         let _call_gate = call_gate.write().await;
         let _guard = self.operation_lock.lock().await;
@@ -1740,8 +1618,6 @@ impl ExtensionService {
     }
 
     pub(crate) async fn stop(&self, id: &ExtensionId) -> ExtensionResult<ExtensionSnapshot> {
-        self.ensure_provider_transition(id, None)?;
-        let _revocation = self.revoke_calls(id);
         let call_gate = self.call_gate(id);
         let _call_gate = call_gate.write().await;
         let _guard = self.operation_lock.lock().await;
@@ -1933,9 +1809,6 @@ impl ExtensionService {
         id: &ExtensionId,
         version: &ExtensionVersion,
     ) -> ExtensionResult<bool> {
-        let snapshot = self.snapshot_for(id)?;
-        let active = snapshot.active_version() == version;
-        let _revocation = active.then(|| self.revoke_calls(id));
         let call_gate = self.call_gate(id);
         let _call_gate = call_gate.write().await;
 
@@ -3909,41 +3782,6 @@ entry = "plugin.wasm"
         drop(lease);
         assert_eq!(
             stop.await.unwrap().unwrap().state(),
-            ExtensionState::Disabled
-        );
-    }
-
-    #[tokio::test]
-    async fn long_call_is_cancelled_before_lifecycle_writer_waits() {
-        let temp = tempfile::tempdir().unwrap();
-        let service = Arc::new(dependency_service(temp.path()));
-        let id = ExtensionId::parse("com.example.long").unwrap();
-        service
-            .install(&wasm_archive_with_deps(id.as_str(), "1.0.0", ""))
-            .await
-            .unwrap();
-        service.enable(&id).await.unwrap();
-        service.start(&id).await.unwrap();
-        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let lease = service.long_call(&id, cancel.clone()).await.unwrap();
-        let next = service.clone();
-        let target = id.clone();
-        let transition = tokio::spawn(async move { next.disable(&target).await });
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while !cancel.load(std::sync::atomic::Ordering::Acquire) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        assert!(!transition.is_finished());
-        assert!(service
-            .long_call(&id, Arc::new(std::sync::atomic::AtomicBool::new(false)))
-            .await
-            .is_err());
-        drop(lease);
-        assert_eq!(
-            transition.await.unwrap().unwrap().state(),
             ExtensionState::Disabled
         );
     }
