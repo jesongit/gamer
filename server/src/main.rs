@@ -387,7 +387,18 @@ impl RuntimeServices {
             db.clone(),
             runs.clone(),
         );
-        let runner_registrar = Arc::new(
+        let ai_service = Arc::new(extensions::ai::AiService::new(
+            extensions::ai::Runtime {
+                devices: devices.clone(),
+                packages: packages.clone(),
+                runs: runs.clone(),
+                scheduler: scheduler.clone(),
+                capabilities: capabilities.clone(),
+            },
+            &cfg.data_dir,
+        )?);
+        runs.register_executor(extensions::ai::ID, ai_service.executor());
+        let yaml_registrar = Arc::new(
             extensions::gamer_yaml::timer_yaml::YamlTimerRunnerRegistrar::new(
                 scheduler.clone(),
                 db.clone(),
@@ -395,9 +406,14 @@ impl RuntimeServices {
                 packages.clone(),
             ),
         );
+        let runner_registrar = Arc::new(extensions::CompositeTimerRunnerRegistrar::new(vec![
+            yaml_registrar,
+            ai_service.registrar(),
+        ]));
         let extensions = Arc::new(
             extensions::ExtensionService::for_data_root(cfg.data_dir.clone(), capabilities)
                 .with_runner_registrar(runner_registrar)
+                .with_builtin_service(ai_service.clone())
                 .with_builtin_service(Arc::new(extensions::notify::NotifyService::new(
                     &cfg.data_dir,
                 )?))
@@ -412,6 +428,7 @@ impl RuntimeServices {
                     &cfg.data_dir,
                 )?)),
         );
+        ai_service.attach(&extensions);
         scheduler.set_result_hook(extensions::notify::task::result_hook(
             Arc::downgrade(&extensions),
             db.clone(),

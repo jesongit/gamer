@@ -218,6 +218,7 @@ const HISTORY_CAP: usize = 256;
 pub struct RunManager {
     journal: Option<crate::store::Db>,
     executor: Arc<dyn RunExecutor>,
+    executors: std::sync::RwLock<HashMap<String, Arc<dyn RunExecutor>>>,
     /// 设备级互斥：device_id → 活动 run_id
     active_by_device: Mutex<HashMap<String, String>>,
     /// run_id → 活动条目（终态后摘入 history）
@@ -236,6 +237,7 @@ impl RunManager {
     pub fn new(executor: Arc<dyn RunExecutor>) -> Self {
         Self {
             executor,
+            executors: std::sync::RwLock::new(HashMap::new()),
             journal: None,
             active_by_device: Mutex::new(HashMap::new()),
             runs: Mutex::new(HashMap::new()),
@@ -249,6 +251,23 @@ impl RunManager {
     pub fn with_journal(mut self, db: crate::store::Db) -> Self {
         self.journal = Some(db);
         self
+    }
+
+    /// Composition-root registration; payload semantics remain in the runner.
+    pub fn register_executor(&self, runner_id: &str, executor: Arc<dyn RunExecutor>) {
+        self.executors
+            .write()
+            .unwrap()
+            .insert(runner_id.to_owned(), executor);
+    }
+
+    fn executor_for(&self, runner_id: &str) -> Arc<dyn RunExecutor> {
+        self.executors
+            .read()
+            .unwrap()
+            .get(runner_id)
+            .cloned()
+            .unwrap_or_else(|| self.executor.clone())
     }
 
     fn persist(&self, record: &RunRecord) {
@@ -273,7 +292,7 @@ impl RunManager {
             .cloned()
     }
 
-    /// Wait for a run to reach a terminal state without polling the registry.
+    /// Wait for terminal state and release of the active run/activity lease.
     /// The notification is registered before each snapshot, so a completion
     /// racing with the snapshot cannot be missed.  Terminal records remain in
     /// the bounded history and are returned just like active records.
@@ -285,7 +304,12 @@ impl RunManager {
         loop {
             let notified = self.state_changed.notified();
             match self.get_run(run_id) {
-                Some(record) if record.state.is_terminal() => return Some(record),
+                Some(record)
+                    if record.state.is_terminal()
+                        && !self.runs.lock().unwrap().contains_key(run_id) =>
+                {
+                    return Some(record)
+                }
                 Some(_) => {}
                 None => return None,
             }
@@ -426,7 +450,8 @@ impl RunManager {
             drop(finish);
             return;
         }
-        let prepare = self.executor.prepare(&context, &req.request).await;
+        let executor = self.executor_for(&req.request.runner_id);
+        let prepare = executor.prepare(&context, &req.request).await;
         if let Err(e) = prepare {
             warn!(run_id = %run_id, err = %format!("{e:#}"), "run prepare (connect) failed");
             if self.is_cancelled(&run_id) {
@@ -442,7 +467,7 @@ impl RunManager {
         }
         // 活动租约：RAII 配对 release，
         // panic 展开时 Drop 必然归还
-        let _lease = match self.executor.acquire(&context) {
+        let _lease = match executor.acquire(&context) {
             Ok(lease) => lease,
             Err(e) => {
                 finish.complete(
@@ -460,7 +485,7 @@ impl RunManager {
             return; // _lease → finish → _inflight 逆序 drop
         }
 
-        let outcome = self.execute(req, context, run_id.clone()).await;
+        let outcome = self.execute(executor, req, context, run_id.clone()).await;
         finish.complete(&run_id, outcome);
         // finish / lease / inflight 依声明逆序自动释放
     }
@@ -468,6 +493,7 @@ impl RunManager {
     /// 执行主体（独立函数便于阅读）：入口已过取消闸，出口把结果归类
     async fn execute(
         self: &Arc<Self>,
+        executor: Arc<dyn RunExecutor>,
         req: Arc<StartRequest>,
         context: RunContext,
         run_id: String,
@@ -482,8 +508,7 @@ impl RunManager {
             return RunOutcome::Failed("注册表条目丢失".into(), vec![]);
         };
         let was_cancelled = || self.cancel_requested(&run_id);
-        match self
-            .executor
+        match executor
             .execute(&context, &req.request, req.realtime_logs, stop.clone())
             .await
         {
@@ -976,6 +1001,26 @@ mod tests {
         mgr.wait_settled(std::time::Duration::from_secs(5)).await;
     }
 
+    #[tokio::test]
+    async fn runner_override_dispatches_prepare_acquire_and_execute_together() {
+        let fallback = Arc::new(FakeExecutor::default());
+        let selected = Arc::new(FakeExecutor::default());
+        let manager = Arc::new(RunManager::new(fallback.clone()));
+        manager.register_executor("test.runner", selected.clone());
+        manager
+            .submit(req("d", "package/interactive", RunSource::Manual), None)
+            .unwrap();
+        settled(&manager).await;
+        assert_eq!(
+            selected.stats(|s| (s.prepare_calls, s.occupies, s.executes, s.releases)),
+            (1, 1, 1, 1)
+        );
+        assert_eq!(
+            fallback.stats(|s| (s.prepare_calls, s.occupies, s.executes)),
+            (0, 0, 0)
+        );
+    }
+
     // 九项必测之一：同设备两个不同脚本，第二个 409
     #[tokio::test]
     async fn second_start_on_same_device_conflicts_with_current_record() {
@@ -1206,7 +1251,8 @@ mod tests {
 
     #[tokio::test]
     async fn wait_terminal_resolves_from_state_notification() {
-        let mgr = Arc::new(RunManager::new(Arc::new(FakeExecutor::default())));
+        let executor = Arc::new(FakeExecutor::default());
+        let mgr = Arc::new(RunManager::new(executor.clone()));
         let run = mgr
             .submit(req("d1", "p/s.yaml", RunSource::Scheduled), None)
             .unwrap();
@@ -1219,6 +1265,8 @@ mod tests {
         .expect("run record should remain queryable");
         assert_eq!(record.run_id, run.run_id);
         assert_eq!(record.state, RunState::Success);
+        assert!(mgr.active_for_device("d1").is_none());
+        assert_eq!(executor.stats(|s| (s.occupies, s.releases)), (1, 1));
     }
 
     #[tokio::test]

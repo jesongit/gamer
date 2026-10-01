@@ -70,6 +70,8 @@ pub(crate) enum ExtensionError {
     Runtime(String),
     #[error("插件调用被拒绝: {0}")]
     CallRejected(String),
+    #[error("插件协议连接凭据无效或已撤销")]
+    ProtocolUnauthorized,
     #[error("插件权限错误: {0}")]
     Permission(#[from] PermissionError),
     #[error("插件状态文件无效: {0}")]

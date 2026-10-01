@@ -46,7 +46,7 @@
         <div class="tb-row tb-operation-row" :class="{ 'tb-browser-row': isBrowser }">
           <div v-if="isBrowser" class="tb-group tb-browser-group" role="group" aria-label="浏览器标签页">
             <span class="tb-label">网页</span>
-            <select class="select tb-page-select" :value="browserPages.bound" :disabled="!connected" aria-label="目标标签页" @change="bindBrowserPage($event.target.value)">
+            <select class="select tb-page-select" :value="browserPages.bound" :disabled="!connected || manualInputLocked" aria-label="目标标签页" @change="bindBrowserPage($event.target.value)">
               <option value="">当前绑定标签页</option>
               <option v-for="p in browserPages.pages" :key="p.id" :value="p.id">{{ p.title || p.url }}</option>
             </select>
@@ -59,7 +59,7 @@
             <select
               class="select mono tb-app-select"
               :value="current?.pkg || ''"
-              :disabled="!current || appSelectSaving"
+              :disabled="!current || appSelectSaving || manualInputLocked"
               aria-label="应用（Android 运行目标）"
               title="当前应用目标；选中即保存为设备配置，启动按钮与脚本共用"
               @change="onAppSelect"
@@ -68,16 +68,17 @@
               <option v-for="p in pkgOptions" :key="p" :value="p">{{ packageOptionLabel(p) }}</option>
             </select>
             <button class="btn btn-sm" :disabled="!store.deviceId || appLoading" :title="appLoading ? '正在读取已安装应用…' : '读取设备已安装应用列表（填充应用下拉，强制刷新缓存）'" @click="loadApps({ force: true })"><UiIcon name="refresh" />{{ appLoading ? '读取中…' : '读取列表' }}</button>
-            <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (current?.pkg || '未选择应用')"><UiIcon name="play" />启动</button>
-            <button class="btn btn-sm btn-danger" @click="stopGame()" :title="'停止应用：' + (current?.pkg || '未选择应用')"><UiIcon name="stop" />停止应用</button>
+            <button class="btn btn-sm" :disabled="!connected || manualInputLocked" @click="launchGame" :title="'启动到虚拟屏：' + (current?.pkg || '未选择应用')"><UiIcon name="play" />启动</button>
+            <button class="btn btn-sm btn-danger" :disabled="!connected || manualInputLocked" @click="stopGame()" :title="'停止应用：' + (current?.pkg || '未选择应用')"><UiIcon name="stop" />停止应用</button>
           </div>
           <div class="tb-group tb-control-group" role="group" aria-label="投屏操作">
             <button class="btn btn-sm" title="截图" aria-label="截图" :disabled="!connected" @click="shot"><UiIcon name="image" />截图</button>
-            <button v-if="isBrowser" class="btn btn-sm" :disabled="!connected" title="粘贴文字到网页" @click="clipboard()"><UiIcon name="copy" />粘贴</button>
-            <button v-if="!isBrowser" class="btn btn-sm" title="返回" aria-label="返回" :disabled="!connected" @click="key('BACK')"><UiIcon name="back" />返回</button>
+            <button v-if="isBrowser" class="btn btn-sm" :disabled="!connected || manualInputLocked" title="粘贴文字到网页" @click="clipboard()"><UiIcon name="copy" />粘贴</button>
+            <button v-if="!isBrowser" class="btn btn-sm" title="返回" aria-label="返回" :disabled="!connected || manualInputLocked" @click="key('BACK')"><UiIcon name="back" />返回</button>
             <button class="btn btn-sm" title="全屏" aria-label="全屏" @click="fullscreen"><UiIcon name="expand" />全屏</button>
             <button
               class="btn btn-sm keyboard-mode-btn"
+              :disabled="manualInputLocked"
               :class="{ active: keyboardMode === 'text' }"
               :title="keyboardMode === 'text' ? '当前为文本模式，字母和空格按文本发送' : '当前为游戏模式，保留按下/释放按键语义'"
               @click="toggleKeyboardMode"
@@ -97,6 +98,7 @@
           </div>
         </div>
       </div>
+      <div v-if="inputControlMessage" class="input-control-hint" :class="{ paused: !manualInputLocked }" role="status" aria-live="polite">{{ inputControlMessage }}</div>
 
       <!-- 菜单脱离横向滚动行挂到 body，避免窄窗口下被工具条裁掉 -->
       <Teleport to="body">
@@ -114,14 +116,14 @@
           <button v-if="isBrowser" class="tb-more-item action-menu-item danger" role="menuitem" @click="closeToolbarMenu(); removeBrowserTarget()">删除浏览器目标</button>
         </div>
         <div v-if="toolbarMenuOpen === 'actions'" class="tb-more-dropdown tb-more-dropdown-fixed action-menu" :style="toolbarMenuStyle" role="menu">
-          <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); clipboard()">粘贴</button>
+          <button class="tb-more-item action-menu-item" role="menuitem" :disabled="manualInputLocked" @click="closeToolbarMenu(); clipboard()">粘贴</button>
           <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); shot()">截图</button>
-          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('HOME')">主屏幕</button>
-          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('BACK')">返回</button>
-          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); rotate()">旋转</button>
-          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('APP_SWITCH')">最近应用</button>
-          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('VOL_UP')">增大音量</button>
-          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); key('VOL_DOWN')">减小音量</button>
+          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" :disabled="manualInputLocked" @click="closeToolbarMenu(); key('HOME')">主屏幕</button>
+          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" :disabled="manualInputLocked" @click="closeToolbarMenu(); key('BACK')">返回</button>
+          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" :disabled="manualInputLocked" @click="closeToolbarMenu(); rotate()">旋转</button>
+          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" :disabled="manualInputLocked" @click="closeToolbarMenu(); key('APP_SWITCH')">最近应用</button>
+          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" :disabled="manualInputLocked" @click="closeToolbarMenu(); key('VOL_UP')">增大音量</button>
+          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" :disabled="manualInputLocked" @click="closeToolbarMenu(); key('VOL_DOWN')">减小音量</button>
           <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" :title="audioMuted ? '取消静音（听游戏声音）' : '静音'" @click="closeToolbarMenu(); toggleAudio()">{{ audioMuted ? '取消静音' : '静音' }}</button>
         </div>
       </Teleport>
@@ -278,6 +280,7 @@ import { createKeyboardController, shouldIgnoreKeyboardTarget } from '../keyboar
 import { buildTouchPhase, createKeymapController } from '../keymap-control'
 import { useConsolePanelResize } from '../components/console/useConsolePanelResize'
 import { useConsoleDeviceManager } from '../components/console/useConsoleDeviceManager'
+import { useConsoleInputControl } from '../components/console/useConsoleInputControl'
 import { useConsoleStage } from '../components/console/useConsoleStage'
 import { useConsoleBridgeOverlays } from '../components/console/useConsoleBridgeOverlays'
 import { useWebrtcStats } from '../components/console/useWebrtcStats'
@@ -359,6 +362,11 @@ async function loadData() {
   await consoleRuntime.loadData()
 }
 
+// 通用目标控制租约：按钮态和所有舞台输入使用同一服务端状态，服务端再次仲裁。
+const inputControl = useConsoleInputControl({ deviceId: () => store.deviceId, toast })
+const manualInputLocked = computed(() => !inputControl.manualAllowed.value)
+const inputControlMessage = inputControl.message
+
 // ---------- 设备管理（工具条设备控件 + 设置弹窗 + 工具条快捷动作） ----------
 const {
   devices, current, currentName, currentApplication,
@@ -387,6 +395,7 @@ const {
   connect,
   cleanup,
   sendControl,
+  guardManualInput: inputControl.requireManual,
 })
 
 // ---------- 键盘与按键映射控制器（映射层命中时消费事件，未命中才交给 keyboard） ----------
@@ -428,6 +437,7 @@ async function refreshBrowserPages() {
 }
 async function bindBrowserPage(id) {
   if (!id) return
+  if (!inputControl.requireManual()) return
   try { await api.bindBrowser(store.deviceId, id); cleanup(true); await connect(true); await refreshBrowserPages() } catch (e) { toast(e.message, 'error') }
 }
 const browserPreview = useBrowserPreview({
@@ -459,7 +469,9 @@ const coreStatuses = computed(() => {
   if (stage.kind === 'media' && stage.mediaId) {
     statuses.push(`视频 · ${stage.mediaSizeLabel || '读取尺寸…'} · ${stage.playing ? '播放中' : '已暂停'} · ${stage.timeText} / ${stage.durationText}`)
   } else if (connected.value) {
-    if (keyboardFocused.value && stage.canDeviceInput && !picking.value && !cellPick.mode) statuses.push('键盘控制已启用')
+    if (inputControl.manualAllowed.value) {
+      if (keyboardFocused.value && stage.canDeviceInput && !picking.value && !cellPick.mode) statuses.push('键盘控制已启用')
+    }
     if (isBrowser.value) {
       statuses.push(`${browserPreview.view.width}×${browserPreview.view.height} · ${browserPreview.view.fps ? `${browserPreview.view.fps} 帧/秒` : '等待画面更新'}`)
       if (errorMsg.value) statuses.push(errorMsg.value)
@@ -822,6 +834,7 @@ const REST_FALLBACK_CONTROL_TYPES = new Set([
 /** 键盘是有状态的 DOWN/UP 流，只允许走 DataChannel；不能复用 sendControl 的
  * REST fallback，否则通道断开时一次 keydown 会被错误降级为不兼容的 press。 */
 function sendKeyboardControl(obj) {
+  if (!inputControl.guardDeviceInput(obj)) return false
   // 安全红线：视频来源（媒体模式）为离线只读，舞台产生的键盘/按键映射输入一律拒绝
   if (!stageCtl.guardDeviceInput(obj)) return false
   if (isBrowser.value) {
@@ -847,6 +860,7 @@ function sendKeyboardControl(obj) {
 }
 
 function sendControl(obj) {
+  if (!inputControl.guardDeviceInput(obj)) return false
   // 安全红线：视频来源（媒体模式）为离线只读——鼠标触控/滚轮/按键/启停应用等
   // 舞台产生的设备输入在统一输入路由处拒绝（含 REST fallback 之前的全部路径）
   if (!stageCtl.guardDeviceInput(obj)) return false
@@ -905,7 +919,7 @@ let mediaStream = null
 
 function onStageFocusIn(e) {
   // 视频来源模式不捕获键盘焦点（键盘/按键映射属设备输入，媒体模式拒绝）
-  if (!connected.value || !stageCtl.view.canDeviceInput || shouldIgnoreKeyboardTarget(e?.target)) return
+  if (!connected.value || manualInputLocked.value || !stageCtl.view.canDeviceInput || shouldIgnoreKeyboardTarget(e?.target)) return
   keyboardFocused.value = true
 }
 
@@ -920,7 +934,7 @@ function onStageFocusOut(e) {
 }
 
 function onStageKeyDown(e) {
-  if (!connected.value || !stageCtl.view.canDeviceInput || picking.value || selecting.value || cellPick.mode || isGlobalEscapeConsumed(e)) return
+  if (!connected.value || manualInputLocked.value || !stageCtl.view.canDeviceInput || picking.value || selecting.value || cellPick.mode || isGlobalEscapeConsumed(e)) return
   if (keyboardMode.value === 'game') {
     const mapped = keymap.handleKeyDown(e)
     syncKeymapPressed()
@@ -932,7 +946,7 @@ function onStageKeyDown(e) {
 }
 
 function onStageKeyUp(e) {
-  if (!connected.value || !stageCtl.view.canDeviceInput) return
+  if (!connected.value || manualInputLocked.value || !stageCtl.view.canDeviceInput) return
   const mapped = keymap.handleKeyUp(e)
   syncKeymapPressed()
   if (mapped?.handled || mapped === true) return
@@ -1145,7 +1159,7 @@ function onMouseDown(e) {
     return
   }
   // 设备输入（触控/按键映射）：视频来源为只读，统一拒绝（触控终不发）
-  if (!connected.value || !stageCtl.view.canDeviceInput) return
+  if (!connected.value || manualInputLocked.value || !stageCtl.view.canDeviceInput) return
   cancelPendingMove()
   const { x, y } = stageControlPoint(e)
   if (remoteKeymapRunning.value) {
@@ -1176,6 +1190,7 @@ function onMouseMove(e) {
     updateLoupe(e.clientX, e.clientY, toDeviceCoord(e.clientX, e.clientY), 2.5, [])
     return
   }
+  if (manualInputLocked.value) return
   if (remoteKeymapRunning.value && connected.value && stageCtl.view.canDeviceInput) {
     const { x, y } = stageControlPoint(e)
     keymap.handleInputEvent({
@@ -1207,6 +1222,7 @@ function onMouseUp(e) {
     else toast('框选区域太小，请重新框选', 'warn')
     return
   }
+  if (manualInputLocked.value) { cancelPendingMove(); touchState.active = false; return }
   if (remoteKeymapRunning.value && connected.value && stageCtl.view.canDeviceInput) {
     const { x, y } = stageControlPoint(e)
     keymap.handleInputEvent({ type: 'mouseup', button: e.button, x, y }, 'up', e)
@@ -1233,7 +1249,7 @@ function onVideoMouseLeave() {
 
 function onWheel(e) {
   // 滚轮 = 设备输入：视频来源（媒体模式）为只读，统一拒绝
-  if (!connected.value || !stageCtl.view.canDeviceInput) return
+  if (!connected.value || manualInputLocked.value || !stageCtl.view.canDeviceInput) return
   const { x, y } = stageControlPoint(e)
   if (remoteKeymapRunning.value) {
     keymap.handleInputEvent({
@@ -1243,6 +1259,18 @@ function onWheel(e) {
   }
   sendControl({ type: 'scroll', x, y, scroll_x: e.deltaX, scroll_y: e.deltaY })
 }
+
+// 取得自动控制权后清空本页的本地按住状态。实际输入释放由服务端 owner 屏障负责。
+watch(inputControl.manualAllowed, allowed => {
+  if (allowed) return
+  cancelPendingMove()
+  touchState.active = false
+  gestureOrigin = null
+  keymap.releaseAll()
+  syncKeymapPressed()
+  keyboard.releaseAll()
+  keyboardFocused.value = false
+}, { flush: 'sync' })
 
 // ---------- 舞台来源切换清理（合同 §4.2）----------
 // 切换实时/视频时：绝不自动恢复按键按下状态，清指针（拖拽/待发 move）、键盘焦点
@@ -1365,6 +1393,8 @@ onUnmounted(() => {
   background: rgba(4, 6, 10, .85); border: 1px solid var(--border); border-radius: var(--radius-sm);
   font-size: 12px; color: var(--text-1); backdrop-filter: blur(2px);
 }
+.input-control-hint { flex:none; padding:7px 10px; border-bottom:1px solid var(--border); background:var(--bg-2); color:var(--accent); font-size:12px; line-height:1.5; }
+.input-control-hint.paused { color:#77cbb4; }
 
 /* 二次裁切区 */
 .crop-stage {

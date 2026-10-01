@@ -125,9 +125,9 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(toolbar).toContain('loadApps({ force: true })')
     expect(consoleImpl).toContain('async function loadApps({ silent = false, force = false } = {})')
     expect(consoleSource).toContain('loadApps({ silent: true })')
-    // 停止应用与启动同属应用区，保留原控制回调。
+    // 停止应用与启动同属应用区；AI 控制期间需先暂停，禁用人工动作。
     const stopBtnOpen = toolbar.slice(toolbar.lastIndexOf('<button', stopIdx), stopIdx)
-    expect(stopBtnOpen).not.toContain('disabled')
+    expect(stopBtnOpen).toContain(':disabled="!connected || manualInputLocked"')
     expect(stopBtnOpen).toContain('stopGame()')
     expect(stopIdx).toBeLessThan(toolbar.indexOf('tb-control-group'))
     // 静音开关必须有定义（曾出现模板引用未定义 toggleAudio 的回归）

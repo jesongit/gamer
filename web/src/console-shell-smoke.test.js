@@ -17,6 +17,7 @@ vi.mock('./api', () => {
     api: new Proxy({}, {
       get(_target, name) {
         if (name === 'listDevices') return _target[name] ||= vi.fn().mockResolvedValue([])
+        if (name === 'getInputControl') return _target[name] ||= vi.fn().mockResolvedValue({ phase: 'idle', owner: null, generation: 0, manual_allowed: true })
         if (name in listResponses) return vi.fn().mockResolvedValue(listResponses[name])
         if (name === 'listExtensions') return vi.fn().mockResolvedValue({ extensions: [], ui_contributions: [] })
         return vi.fn().mockResolvedValue({})
@@ -188,9 +189,23 @@ describe('浏览器投屏的真实舞台输入接线', () => {
       expect(socket.sent.at(-1)).toEqual({ type: 'release' })
       await stage.trigger('focusout', { relatedTarget: document.body })
       expect(socket.sent.at(-1)).toEqual({ type: 'release' })
+      // UI 输入锁必须覆盖浏览器直接 WS 的指针和键盘路径，而不只是工具条按钮。
+      api.getInputControl.mockResolvedValue({ phase: 'pausing', owner: 'ai-session', generation: 1, manual_allowed: false })
+      await vi.advanceTimersByTimeAsync(1200)
+      expect(wrapper.find('.input-control-hint').text()).toContain('完成前不能人工操作')
+      const beforeLockedInput = socket.sent.length
+      await img.trigger('mousedown', { clientX: 110, clientY: 190, button: 0 })
+      await stage.trigger('keydown', { key: 'w' })
+      expect(socket.sent.length).toBe(beforeLockedInput)
+      api.getInputControl.mockResolvedValue({ phase: 'paused', owner: 'ai-session', generation: 2, manual_allowed: true })
+      await vi.advanceTimersByTimeAsync(1200)
+      expect(wrapper.find('.input-control-hint').text()).toContain('可以人工操作')
+      await img.trigger('mousedown', { clientX: 110, clientY: 190, button: 0 })
+      expect(socket.sent.at(-1)).toMatchObject({ type: 'pointer', action: 'down', x: 200, y: 220 })
     } finally {
       wrapper.unmount()
       store.deviceId = null
+      api.getInputControl.mockResolvedValue({ phase: 'idle', owner: null, generation: 0, manual_allowed: true })
       vi.unstubAllGlobals()
       vi.useRealTimers()
     }

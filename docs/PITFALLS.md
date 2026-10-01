@@ -516,3 +516,6 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - 插件构建传入相对 OutputDir 时，清理逻辑若与 Get-ChildItem.FullName 比较会误删刚生成的归档；先将输出路径归一为绝对路径，再验收最终归档存在且哈希匹配 registry，不能只看 staging 自检。
 - Vite dev 动态导入 public/plugin-ui 的预构建模块会携带 ?import 并被当作源码拒绝而报 500；仅对该目录的 JS 请求移除 import 标记，保留版本参数并交给静态服务。
 - 自动审批可能以“blocked by policy”拒绝本机递归删除，即使用户已授权且路径已核对；停止重试删除，将安装文件可恢复地移出加载目录，并提供精确 PowerShell 命令由用户清理。
+- 固定发行的 LGPL FFmpeg 不含 libx264，展示帧/B-frame 回归 fixture 会报 Unknown encoder；仅在测试进程使用同日官方 GPL 临时工具并校验 SHA，不修改发行锁或真实媒体编码契约。
+- 本机 HTTP fixture 关闭后即使设置 NO_PROXY 仍可能收到代理 502；测试客户端显式使用 reqwest 的 no_proxy()，避免系统代理接管回环连接，不改变产品代理设置。
+- Run 先写终态再由 RAII 摘除活动槽时，停止后立即关闭目标仍可能报任务占用；wait_terminal 须同时等待活动注册项退出，确保活动租约也已释放，不能用固定 sleep 掩盖竞态。

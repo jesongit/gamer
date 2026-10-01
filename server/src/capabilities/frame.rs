@@ -40,6 +40,8 @@ pub struct FrameStamp {
 #[async_trait]
 pub trait FrameService: Send + Sync {
     /// Size and identity read together, for converting literal relative coordinates.
+    /// Android and browser adapters identify the live session epoch and its
+    /// coordinate revision. Equal dimensions do not imply the same session.
     async fn coordinate_space(
         &self,
         device: &DeviceHandle,

@@ -54,6 +54,197 @@ pub(crate) trait TimerRunnerRegistrar: Send + Sync {
     }
 }
 
+/// The composition root can assemble several plugin-owned runner providers
+/// without teaching the extension lifecycle service their implementation IDs.
+pub(crate) struct CompositeTimerRunnerRegistrar {
+    registrars: Vec<Arc<dyn TimerRunnerRegistrar>>,
+}
+
+impl CompositeTimerRunnerRegistrar {
+    pub(crate) fn new(registrars: Vec<Arc<dyn TimerRunnerRegistrar>>) -> Self {
+        Self { registrars }
+    }
+}
+
+#[async_trait]
+impl TimerRunnerRegistrar for CompositeTimerRunnerRegistrar {
+    async fn extension_started(&self, extension_id: &str) -> anyhow::Result<()> {
+        for (index, registrar) in self.registrars.iter().enumerate() {
+            if let Err(error) = registrar.extension_started(extension_id).await {
+                for previous in self.registrars[..=index].iter().rev() {
+                    if let Err(cleanup_error) = previous.extension_stopped(extension_id).await {
+                        tracing::warn!(extension = extension_id, %cleanup_error, "runner registration rollback failed");
+                    }
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    async fn extension_stopped(&self, extension_id: &str) -> anyhow::Result<()> {
+        let mut first_error = None;
+        for registrar in self.registrars.iter().rev() {
+            if let Err(error) = registrar.extension_stopped(extension_id).await {
+                first_error.get_or_insert(error);
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn executes_without_instance(&self, extension_id: &str) -> bool {
+        self.registrars
+            .iter()
+            .any(|registrar| registrar.executes_without_instance(extension_id))
+    }
+}
+
+#[cfg(test)]
+mod protocol_seam_tests {
+    use super::*;
+    use std::{
+        io::Write,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    struct McpBuiltin {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl BuiltinService for McpBuiltin {
+        fn extension_id(&self) -> &str {
+            "gamer-video"
+        }
+        async fn call(&self, _: &str, _: serde_json::Value) -> ExtensionResult<serde_json::Value> {
+            Err(ExtensionError::CallRejected("unused".into()))
+        }
+        async fn stop(&self) {}
+        async fn mcp(
+            &self,
+            request: serde_json::Value,
+            token: &str,
+        ) -> ExtensionResult<Option<serde_json::Value>> {
+            if token != "test-only" {
+                return Err(ExtensionError::ProtocolUnauthorized);
+            }
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(request))
+        }
+    }
+
+    #[tokio::test]
+    async fn protocol_dispatch_requires_running_and_rechecks_token_per_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let builtin = Arc::new(McpBuiltin {
+            calls: AtomicUsize::new(0),
+        });
+        let service =
+            ExtensionService::for_data_root(directory.path(), CapabilityRegistry::default())
+                .with_builtin_service(builtin.clone());
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file("manifest.toml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"manifest_version = 2\nid = \"gamer-video\"\nname = \"Test\"\nversion = \"1.0.0\"\n[execution]\nkind = \"builtin\"\nbuiltin_id = \"gamer-video\"\n").unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        let snapshot = service.install(&bytes).await.unwrap();
+        let id = snapshot.id();
+        assert!(service
+            .call_builtin_mcp(id, serde_json::json!({}), "test-only")
+            .await
+            .is_err());
+        service.enable(id).await.unwrap();
+        assert!(service
+            .call_builtin_mcp(id, serde_json::json!({}), "test-only")
+            .await
+            .is_err());
+        service.start(id).await.unwrap();
+        assert_eq!(
+            service
+                .call_builtin_mcp(id, serde_json::json!({"id":1}), "test-only")
+                .await
+                .unwrap(),
+            Some(serde_json::json!({"id":1}))
+        );
+        assert!(matches!(
+            service
+                .call_builtin_mcp(id, serde_json::json!({}), "revoked")
+                .await,
+            Err(ExtensionError::ProtocolUnauthorized)
+        ));
+        service.disable(id).await.unwrap();
+        assert!(service
+            .call_builtin_mcp(id, serde_json::json!({}), "test-only")
+            .await
+            .is_err());
+        assert_eq!(builtin.calls.load(Ordering::SeqCst), 1);
+    }
+
+    struct Registrar {
+        name: &'static str,
+        events: Arc<std::sync::Mutex<Vec<String>>>,
+        fail_start: bool,
+        fail_stop: bool,
+    }
+
+    #[async_trait]
+    impl TimerRunnerRegistrar for Registrar {
+        async fn extension_started(&self, _: &str) -> anyhow::Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("{}:start", self.name));
+            anyhow::ensure!(!self.fail_start, "start failed");
+            Ok(())
+        }
+        async fn extension_stopped(&self, _: &str) -> anyhow::Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("{}:stop", self.name));
+            anyhow::ensure!(!self.fail_stop, "stop failed");
+            Ok(())
+        }
+        fn executes_without_instance(&self, id: &str) -> bool {
+            id == self.name
+        }
+    }
+
+    #[tokio::test]
+    async fn composite_registration_rolls_back_and_stops_all_members_on_error() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let composite = CompositeTimerRunnerRegistrar::new(vec![
+            Arc::new(Registrar {
+                name: "first",
+                events: events.clone(),
+                fail_start: false,
+                fail_stop: false,
+            }),
+            Arc::new(Registrar {
+                name: "second",
+                events: events.clone(),
+                fail_start: true,
+                fail_stop: true,
+            }),
+        ]);
+        assert!(composite.executes_without_instance("first"));
+        assert!(composite.executes_without_instance("second"));
+        assert!(!composite.executes_without_instance("unregistered"));
+        assert!(composite.extension_started("example").await.is_err());
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["first:start", "second:start", "second:stop", "first:stop"]
+        );
+        events.lock().unwrap().clear();
+        assert!(composite.extension_stopped("example").await.is_err());
+        assert_eq!(*events.lock().unwrap(), vec!["second:stop", "first:stop"]);
+    }
+}
+
 /// Process-owned builtin jobs, called only behind the normal permission and lifecycle gates.
 #[async_trait]
 pub(crate) trait BuiltinService: Send + Sync {
@@ -64,6 +255,13 @@ pub(crate) trait BuiltinService: Send + Sync {
         values: serde_json::Value,
     ) -> ExtensionResult<serde_json::Value>;
     async fn stop(&self);
+    async fn mcp(
+        &self,
+        _request: serde_json::Value,
+        _token: &str,
+    ) -> ExtensionResult<Option<serde_json::Value>> {
+        Err(ExtensionError::CallRejected("该插件未提供 MCP 服务".into()))
+    }
     async fn shutdown(&self) {
         self.stop().await;
     }
@@ -612,6 +810,33 @@ impl ExtensionService {
         let result = runtime.call(handle, action, &values.to_string()).await?;
         serde_json::from_str::<serde_json::Value>(&result)
             .map_err(|error| ExtensionError::Runtime(format!("插件 call 返回值不是 JSON: {error}")))
+    }
+
+    /// A separately authenticated protocol surface, with the same short
+    /// lifecycle lease as builtin calls. Plugins own their bearer-token and
+    /// per-tool capability checks; this method only admits a live builtin.
+    pub(crate) async fn call_builtin_mcp(
+        &self,
+        id: &ExtensionId,
+        request: serde_json::Value,
+        token: &str,
+    ) -> ExtensionResult<Option<serde_json::Value>> {
+        let gate = self.call_gate(id);
+        let _call_lease = gate.read().await;
+        if self
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(ExtensionError::CallRejected("服务正在停止".into()));
+        }
+        let snapshot = self.snapshot_for(id)?;
+        self.require_current_process_running(id, snapshot.state(), "mcp")?;
+        let service = self
+            .builtin_service
+            .iter()
+            .find(|service| service.extension_id() == id.as_str())
+            .ok_or(ExtensionError::RuntimeUnavailable("该插件 MCP 服务未装配"))?;
+        service.mcp(request, token).await
     }
 
     /// Issue an opaque cross-extension call context from the current live

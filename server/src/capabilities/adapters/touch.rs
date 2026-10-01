@@ -15,6 +15,8 @@ struct ActiveTouch {
     device: DeviceHandle,
     pointer_id: u64,
     point: TouchPoint,
+    identity: crate::core::control::ControlIdentity,
+    android_session: Option<Arc<crate::device::scrcpy::ScrcpySession>>,
 }
 
 // Capability adapters may be recreated while a browser session survives.
@@ -45,11 +47,31 @@ impl TouchAdapter {
                 device: state.device.clone(),
                 pointer_id: state.pointer_id,
                 point: state.point,
+                identity: state.identity.clone(),
+                android_session: state.android_session.clone(),
             })
             .ok_or_else(|| CapabilityError::NotFound("touch handle".into()))
     }
 
     async fn inject(
+        &self,
+        state: &ActiveTouch,
+        action: u8,
+        point: TouchPoint,
+    ) -> CapabilityResult<()> {
+        let permit = self
+            .device
+            .devices
+            .controls
+            .admit_identity(state.device.id().as_str(), &state.identity)
+            .await
+            .map_err(|e| CapabilityError::Failed(e.to_string()))?;
+        permit
+            .scope(self.inject_admitted(state, action, point))
+            .await
+    }
+
+    async fn inject_admitted(
         &self,
         state: &ActiveTouch,
         action: u8,
@@ -62,6 +84,13 @@ impl TouchAdapter {
                 .browsers
                 .session(state.device.id().as_str())
                 .map_err(|e| CapabilityError::Failed(e.to_string()))?;
+            if action != ACTION_UP {
+                if let Some(expected) = state.device.expected_frame() {
+                    session
+                        .validate(expected)
+                        .map_err(|e| CapabilityError::Failed(e.to_string()))?;
+                }
+            }
             let action = match action {
                 ACTION_DOWN => "down",
                 ACTION_UP => "up",
@@ -82,10 +111,18 @@ impl TouchAdapter {
         // （扩展能力输入的历史缺省语义），精确归属由调用方
         // `with_caller_input_source` 声明。
         super::with_capability_input_source(async {
-            let session = match self.device.session(&state.device) {
-                Ok(session) => session,
-                Err(error) => return Err(error),
-            };
+            let session = state
+                .android_session
+                .as_ref()
+                .ok_or_else(|| CapabilityError::Failed("touch session unavailable".into()))?;
+            if action != ACTION_UP {
+                let current = self.device.session(&state.device)?;
+                if !Arc::ptr_eq(&current, session) {
+                    return Err(CapabilityError::Failed(
+                        "stale_frame: 原触点的设备连接已结束".into(),
+                    ));
+                }
+            }
             match session
                 .inject_touch(
                     action,
@@ -111,18 +148,30 @@ impl TouchService for TouchAdapter {
         device: &DeviceHandle,
         point: TouchPoint,
     ) -> CapabilityResult<TouchHandle> {
-        let state = ActiveTouch {
-            device: device.clone(),
-            pointer_id: NEXT_POINTER_ID.fetch_add(1, Ordering::Relaxed),
-            point,
-        };
-        self.inject(&state, ACTION_DOWN, point).await?;
-        let handle = TouchHandle::new();
-        self.active
-            .lock()
-            .map_err(|_| CapabilityError::Failed("touch state poisoned".into()))?
-            .insert(handle, state);
-        Ok(handle)
+        let permit = self.device.admit(device).await?;
+        permit
+            .scope(async {
+                let android_session = if crate::targets::is_browser(device.id().as_str()) {
+                    None
+                } else {
+                    Some(self.device.session(device)?)
+                };
+                let state = ActiveTouch {
+                    device: device.clone(),
+                    pointer_id: NEXT_POINTER_ID.fetch_add(1, Ordering::Relaxed),
+                    point,
+                    identity: self.device.devices.controls.identity(device.id().as_str()),
+                    android_session,
+                };
+                self.inject(&state, ACTION_DOWN, point).await?;
+                let handle = TouchHandle::new();
+                self.active
+                    .lock()
+                    .map_err(|_| CapabilityError::Failed("touch state poisoned".into()))?
+                    .insert(handle, state);
+                Ok(handle)
+            })
+            .await
     }
 
     async fn move_touch(&self, touch: &TouchHandle, point: TouchPoint) -> CapabilityResult<()> {

@@ -50,15 +50,21 @@ pub struct BrowserManager {
     sessions: parking_lot::RwLock<HashMap<String, Arc<CdpSession>>>,
     gate: Mutex<()>,
     pub events: tokio::sync::broadcast::Sender<crate::core::RuntimeEvent>,
+    pub controls: Arc<crate::core::control::ControlRegistry>,
 }
 impl BrowserManager {
-    pub fn new(db: Db, cfg: Config) -> Self {
+    pub fn with_controls(
+        db: Db,
+        cfg: Config,
+        controls: Arc<crate::core::control::ControlRegistry>,
+    ) -> Self {
         Self {
             db,
             cfg,
             sessions: Default::default(),
             gate: Mutex::new(()),
             events: tokio::sync::broadcast::channel(256).0,
+            controls,
         }
     }
     pub fn get(&self, id: &str) -> anyhow::Result<BrowserTarget> {
@@ -90,8 +96,13 @@ impl BrowserManager {
         }
         self.close_inner(id).await;
         let target = self.get(id)?;
-        let session =
-            CdpSession::launch(&target, &self.cfg, browser_executable(&self.cfg)?).await?;
+        let session = CdpSession::launch_with_controls(
+            &target,
+            &self.cfg,
+            browser_executable(&self.cfg)?,
+            self.controls.clone(),
+        )
+        .await?;
         self.sessions
             .write()
             .insert(id.to_string(), session.clone());
@@ -210,11 +221,19 @@ impl crate::core::ActivityLease for BrowserRunLease {}
 impl Drop for BrowserRunLease {
     fn drop(&mut self) {
         let session = self.0.clone();
+        let controls = session.controls.clone();
+        let ticket = controls.manual_lease(&session.id);
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                if tokio::time::timeout(Duration::from_secs(3), session.release_inputs())
-                    .await
-                    .is_err()
+                if tokio::time::timeout(
+                    Duration::from_secs(3),
+                    controls.cleanup_manual(&ticket, async {
+                        session.release_inputs().await;
+                        Ok(())
+                    }),
+                )
+                .await
+                .is_err()
                 {
                     session.invalidate();
                 }
