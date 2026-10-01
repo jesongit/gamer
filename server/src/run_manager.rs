@@ -1492,12 +1492,13 @@ mod tests {
                 RunState::Cancelled
             );
             assert!(manager.get_run(&record.run_id).unwrap().error.is_none());
-            let calls = calls.lock();
-            assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].0, RunState::Cancelled);
-            assert!(matches!(&calls[0].1, RunOutcome::Cancelled(_)));
-            assert_eq!(calls[0].1.logs(), expected_logs.as_slice());
-            drop(calls);
+            {
+                let calls = calls.lock();
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].0, RunState::Cancelled);
+                assert!(matches!(&calls[0].1, RunOutcome::Cancelled(_)));
+                assert_eq!(calls[0].1.logs(), expected_logs.as_slice());
+            }
             drop(finish);
             let archived = manager.wait_terminal(&record.run_id).await.unwrap();
             assert_eq!(archived.state, RunState::Cancelled);

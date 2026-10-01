@@ -547,16 +547,18 @@ async fn official_plugin_market_end_to_end_with_committed_artifacts() {
             req_bytes("POST", "/api/extensions", None, &headers, artifact),
         )
         .await;
+        let installed_status = installed.status();
+        let installed_body = json_body(installed).await;
         assert_eq!(
-            installed.status(),
+            installed_status,
             StatusCode::CREATED,
-            "{id} 官方安装被拒绝"
+            "{id} 官方安装被拒绝: {installed_body}"
         );
         // 安装即用（2026-09-05）：官方安装自动 enable → start。keymap 长驻实例
         // 真实启动 → Running；gamer-yaml 为无实例模型（start 仅注册 timer
         // runner），测试装配未接 registrar 走通用实例路径失败 → 降级 Enabled
         // （生产 main.rs 接线 registrar 后即 Running）。
-        let state = json_body(installed).await["state"].clone();
+        let state = installed_body["state"].clone();
         if id == "gamer-yaml" {
             assert_eq!(state, "enabled", "{id} 安装后应降级为 Enabled");
         } else {
