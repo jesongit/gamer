@@ -24,6 +24,7 @@ use super::adb::Adb;
 pub const SCRCPY_VERSION: &str = "3.3.3";
 const DEVICE_NAME_LEN: usize = 64;
 const VIDEO_META_LEN: usize = 12;
+const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 
 // 视频包标志位
 const PACKET_FLAG_CONFIG: u64 = 1 << 63;
@@ -541,11 +542,29 @@ impl ScrcpySession {
             self.connected.load(std::sync::atomic::Ordering::Acquire),
             "设备连接已结束"
         );
-        if let Some(sock) = guard.as_mut() {
-            sock.write_all(msg).await?;
-            Ok(())
-        } else {
-            anyhow::bail!("control socket closed")
+        let result = match guard.as_mut() {
+            Some(sock) => tokio::time::timeout(CONTROL_WRITE_TIMEOUT, sock.write_all(msg)).await,
+            None => {
+                self.connected
+                    .store(false, std::sync::atomic::Ordering::Release);
+                anyhow::bail!("control socket closed")
+            }
+        };
+        match result {
+            Ok(Ok(())) => Ok(()),
+            failed => {
+                // A failed or partial write cannot be reused. Invalidate only
+                // this session and close its old socket before cleanup releases
+                // the owner; the watchdog can then reconnect a fresh session.
+                self.connected
+                    .store(false, std::sync::atomic::Ordering::Release);
+                guard.take();
+                match failed {
+                    Ok(Err(error)) => Err(error.into()),
+                    Err(_) => anyhow::bail!("control socket write timed out"),
+                    Ok(Ok(())) => unreachable!(),
+                }
+            }
         }
     }
 
@@ -638,6 +657,9 @@ impl ScrcpySession {
 
     /// Exclusive control barriers call this after all admitted actions drain.
     pub async fn release_inputs(&self) -> anyhow::Result<()> {
+        if self.discard_disconnected_inputs().await {
+            return Ok(());
+        }
         let (touches, keys) = {
             let held = self.held_inputs.lock().await;
             (
@@ -659,10 +681,24 @@ impl ScrcpySession {
                 error.get_or_insert(e);
             }
         }
+        // Video EOF or an UP write failure may have invalidated this session
+        // while releasing. Its closed socket cannot inject into a replacement.
+        if self.discard_disconnected_inputs().await {
+            return Ok(());
+        }
         match error {
             Some(e) => Err(e),
             None => Ok(()),
         }
+    }
+
+    async fn discard_disconnected_inputs(&self) -> bool {
+        if self.connected.load(std::sync::atomic::Ordering::Acquire) {
+            return false;
+        }
+        self.control.lock().await.take();
+        *self.held_inputs.lock().await = HeldInputs::default();
+        true
     }
 
     /// 按键（按下+释放），如 HOME=3, BACK=4, APP_SWITCH=187
@@ -1057,6 +1093,180 @@ mod tests {
             },
         );
         (manager, session, dir)
+    }
+
+    async fn attach_test_control(session: &ScrcpySession) -> TcpStream {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let writer = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (reader, _) = listener.accept().await.unwrap();
+        *session.control.lock().await = Some(writer);
+        reader
+    }
+
+    #[tokio::test]
+    async fn dead_control_write_releases_ai_owner_without_touching_replacement() {
+        let (manager, old, _dir) = online_test_manager(ScreenMode::Mirror);
+        let mut reader = attach_test_control(&old).await;
+        let id = old.device.id.clone();
+        let lease = manager.controls.claim(&id, "ai-session").await.unwrap();
+        manager
+            .controls
+            .execute(&lease, async {
+                old.inject_touch(ACTION_DOWN, 7, 30.0, 40.0, 1.0).await?;
+                old.inject_keycode(0, 4, 0, 0).await
+            })
+            .await
+            .unwrap();
+        let mut injected = [0u8; 46];
+        reader.read_exact(&mut injected).await.unwrap();
+        assert_eq!(injected[1], ACTION_DOWN);
+        assert_eq!(injected[33], 0);
+
+        let new = input_test_session(old.device.clone(), &manager.cfg);
+        *new.controls.write() = manager.controls.clone();
+        let mut new_reader = attach_test_control(&new).await;
+        // Closing this real TCP write half makes the next UP fail while video
+        // still reports connected; another session with the same ID stays live.
+        old.control
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .shutdown()
+            .await
+            .unwrap();
+        assert!(manager
+            .controls
+            .execute(&lease, old.inject_keycode(1, 4, 0, 0))
+            .await
+            .is_err());
+        assert!(!old.connected.load(Ordering::Acquire));
+        assert!(old.control.lock().await.is_none());
+        assert!(new.connected.load(Ordering::Acquire));
+        manager
+            .controls
+            .release(&lease, manager.release_control_inputs(&id))
+            .await
+            .unwrap();
+        assert!(manager.controls.status(&id).owner.is_none());
+        assert!(manager.controls.status(&id).manual_allowed);
+        assert!(old.held_inputs.lock().await.touches.is_empty());
+        assert!(old.held_inputs.lock().await.keys.is_empty());
+        assert_eq!(reader.read(&mut injected).await.unwrap(), 0);
+
+        manager.devices.write().get_mut(&id).unwrap().session = Some(new.clone());
+        manager
+            .controls
+            .manual(&id, new.inject_keycode(0, 3, 0, 0))
+            .await
+            .unwrap();
+        let mut key = [0u8; 14];
+        new_reader.read_exact(&mut key).await.unwrap();
+        assert_eq!(key[1], 0);
+        old.release_inputs().await.unwrap();
+        assert!(new.held_inputs.lock().await.keys.contains(&3));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), new_reader.read(&mut key))
+                .await
+                .is_err(),
+            "old cleanup must not send UP into the replacement"
+        );
+        manager
+            .controls
+            .manual(&id, new.inject_keycode(1, 3, 0, 0))
+            .await
+            .unwrap();
+        new_reader.read_exact(&mut key).await.unwrap();
+        assert_eq!(key[1], 1);
+    }
+
+    #[tokio::test]
+    async fn video_eof_pause_closes_old_control_before_allowing_manual() {
+        let (manager, session, _dir) = online_test_manager(ScreenMode::Mirror);
+        let mut reader = attach_test_control(&session).await;
+        let id = session.device.id.clone();
+        let lease = manager.controls.claim(&id, "ai-session").await.unwrap();
+        manager
+            .controls
+            .execute(
+                &lease,
+                session.inject_touch(ACTION_DOWN, 0, 30.0, 40.0, 1.0),
+            )
+            .await
+            .unwrap();
+        let mut touch = [0u8; 32];
+        reader.read_exact(&mut touch).await.unwrap();
+        assert_eq!(touch[1], ACTION_DOWN);
+        // This is the exact flag set by the video reader on EOF. The old
+        // control socket is still present and must be closed, not reused.
+        session.connected.store(false, Ordering::Release);
+        let paused = manager
+            .controls
+            .pause(&lease, manager.release_control_inputs(&id))
+            .await
+            .unwrap();
+        assert!(manager.controls.status(&id).manual_allowed);
+        assert!(session.control.lock().await.is_none());
+        assert!(session.held_inputs.lock().await.touches.is_empty());
+        assert_eq!(reader.read(&mut touch).await.unwrap(), 0);
+        manager
+            .controls
+            .release(&paused, manager.release_control_inputs(&id))
+            .await
+            .unwrap();
+        assert!(manager.controls.status(&id).owner.is_none());
+    }
+
+    #[tokio::test]
+    async fn watchdog_removes_control_dead_session_before_any_video_frame() {
+        let (manager, session, _dir) = online_test_manager(ScreenMode::Mirror);
+        let mut reader = attach_test_control(&session).await;
+        let id = session.device.id.clone();
+        let lease = manager.controls.claim(&id, "ai-session").await.unwrap();
+        manager
+            .controls
+            .execute(&lease, session.inject_keycode(0, 4, 0, 0))
+            .await
+            .unwrap();
+        let mut key = [0u8; 14];
+        reader.read_exact(&mut key).await.unwrap();
+        assert_eq!(key[1], 0);
+        session.control.lock().await.take();
+        assert!(manager
+            .controls
+            .execute(&lease, session.inject_keycode(1, 4, 0, 0))
+            .await
+            .is_err());
+        assert!(!session.connected.load(Ordering::Acquire));
+        assert_eq!(session.video_idle_ms(), 0);
+        manager
+            .controls
+            .release(&lease, manager.release_control_inputs(&id))
+            .await
+            .unwrap();
+        assert_eq!(reader.read(&mut key).await.unwrap(), 0);
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+        // Mirror, no Run/viewer and an explicitly invalid adb_path: this
+        // exercises real watchdog teardown without starting any ADB process.
+        crate::api::system::spawn_watchdog(
+            manager.clone(),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            metrics.clone(),
+        );
+        tokio::time::timeout(Duration::from_secs(7), async {
+            while manager.session(&id).is_some() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(metrics.snapshot().scrcpy_reconnect_watchdog_dead_total, 1);
+        assert_eq!(
+            manager.snapshot(&id).unwrap().1,
+            crate::device::DeviceStatus::Offline
+        );
     }
 
     #[tokio::test]

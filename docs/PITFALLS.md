@@ -518,4 +518,5 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - 自动审批可能以“blocked by policy”拒绝本机递归删除，即使用户已授权且路径已核对；停止重试删除，将安装文件可恢复地移出加载目录，并提供精确 PowerShell 命令由用户清理。
 - 固定发行的 LGPL FFmpeg 不含 libx264，展示帧/B-frame 回归 fixture 会报 Unknown encoder；仅在测试进程使用同日官方 GPL 临时工具并校验 SHA，不修改发行锁或真实媒体编码契约。
 - 本机 HTTP fixture 关闭后即使设置 NO_PROXY 仍可能收到代理 502；测试客户端显式使用 reqwest 的 no_proxy()，避免系统代理接管回环连接，不改变产品代理设置。
-- Run 先写终态再由 RAII 摘除活动槽时，停止后立即关闭目标仍可能报任务占用；wait_terminal 须同时等待活动注册项退出，确保活动租约也已释放，不能用固定 sleep 掩盖竞态。
+- Run 先写终态再由 RAII 后台清理浏览器输入时，停止后立即关闭目标仍可能报任务占用；正常出口须等待 ActivityLease::release，再原子摘槽与归档，wait_terminal 等待活动注册项退出。旧租约冻结 acquire 时的输入票据，不能清理新人工输入；不能用固定 sleep 掩盖竞态。
+- scrcpy 控制 socket 写入失败而视频仍推帧时，仅靠视频循环标记 connected 会让停止清理持续失败；控制写入失败/超时须关闭旧 socket 并标记失效，死链处理必须先于看门狗的视频静默过滤，旧 session 清理不得向新连接发送 UP。

@@ -531,7 +531,7 @@ pub(super) async fn api_metrics(State(st): State<AppState>) -> Response {
 
 /// 视频静默看门狗：设备在线但视频流超过阈值无新帧时的处置。
 ///
-/// 判死以 `session.connected`（video socket 读取循环退出即 false）为准，
+/// 判死以 `session.connected`（视频读取退出或控制写入失败即 false）为准，
 /// **视频静默 ≠ 链路死亡**：虚拟屏无应用/静态画面时编码器 0 帧是正常态。
 /// - 会话确死（connected=false）：拆会话；有脚本或 viewer 在跑则立即重连
 ///   （脚本引擎逐步重新取 session，可接续；无消费者则等下次触发连接）
@@ -566,18 +566,14 @@ pub(crate) fn spawn_watchdog(
             tokio::time::sleep(Duration::from_secs(5)).await;
             for (id, session) in devices.online_sessions() {
                 let idle = session.video_idle_ms();
-                if idle < VIDEO_IDLE_RECONNECT_MS {
-                    nudged.remove(&id);
-                    continue;
-                }
                 let running = devices
                     .activity()
                     .has_kind(&id, crate::core::ActivityKind::Run);
-                // 会话确死（video socket 已关）：唯一允许脚本运行中强拆重连的
-                // 路径——控制 socket 同链路已死，不重连脚本会永远卡死
+                // 死会话先于视频静默过滤处理：控制链路单独死亡或首帧前
+                // 断连也必须回收；活会话仍按原有静默策略处置。
                 if !session.connected.load(std::sync::atomic::Ordering::SeqCst) {
                     metrics.scrcpy_reconnect(crate::metrics::ReconnectReason::WatchdogDead);
-                    warn!(device = %id, idle_ms = idle, "session dead (video socket closed), tearing down");
+                    warn!(device = %id, idle_ms = idle, "session dead (video/control socket closed), tearing down");
                     nudged.remove(&id);
                     // 踢 viewer：旧 pusher 挂在旧帧通道上，重连建新通道后不会
                     // 自动迁移；踢掉让前端 onclose 立即重连到新会话
@@ -597,6 +593,10 @@ pub(crate) fn spawn_watchdog(
                             warn!(device = %id, err = %e, "auto-reconnect failed");
                         }
                     }
+                    continue;
+                }
+                if idle < VIDEO_IDLE_RECONNECT_MS {
+                    nudged.remove(&id);
                     continue;
                 }
                 // 脚本运行中 + 静默 = 静态屏正常态（虚拟屏编码器 0 帧），
