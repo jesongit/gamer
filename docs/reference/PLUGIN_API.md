@@ -1,7 +1,5 @@
 # 插件 API 参考（gamer:host / manifest v2 / 权限闭集）
 
-2026-10-01 AI builtin 接入：新增封闭权限 `ai.infer`、`ai.search`，映射到现有 runtime 域，用于用户配置的多模态推理和搜索；没有新增公共 WIT 网络接口。`gamer-ai` 通过现有 `POST /api/extensions/gamer-ai/call` 提供管理员管理动作，独立 `/mcp/gamer-ai` 仅接受受限 bearer，与管理员 Cookie/回环凭据隔离。模型及 MCP 不提供批准、配置或原始设备控制工具。协议与使用见 [AI 助手说明](../../plugins/gamer-ai/README.md)。
-
 资源字节 `GET /api/packages/:pkg/plugins/:plugin/resources/*path` 返回 `ETag`（带引号的内容版本）。覆盖并改名可使用同一路径的 `PUT ?new_path=<编码后的插件内新路径>`，提交图片字节并携带原资源的 `X-Expected-Version`，不允许 `force`。服务端先按新路径校验、归一化并暂存字节，再执行改名及引用更新；发布失败时尝试恢复原名称和引用。版本不符或目标已存在返回 409。模板覆盖由此同步更新搜索区域和 `#1` 颜色标记；带 `#1` 的模板保存时保留颜色。
 
 2026-09-19 UI 补充：可选主题与 `gamer-ui@1` 客户端见 [SDK UI](../../sdk/ui/README.md)，沿用专属 MessagePort、宿主提供的面板身份、`context.get` 和 `status.set/clear`；不扩大沙盒或权限。构建后的单文件示例带 CSP 哈希，原生按钮使用 click 而非被沙盒禁用的表单提交。
