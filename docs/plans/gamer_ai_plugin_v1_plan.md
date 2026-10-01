@@ -1,6 +1,6 @@
 # AI 插件 V1 实施计划
 
-日期：2026-10-02。状态：功能实现、Rust 整仓、UI/包装及浏览器端到端验收已完成；`glm-5.3-flash` 的 Responses 与 Chat Completions 真实协议检查均通过。宿主构建及隔离二进制安装验收正在收尾，实际 Android 设备与真实游戏效果由用户自测。
+日期：2026-10-02。状态：功能实现、Rust 整仓、UI/包装、浏览器端到端、宿主构建及隔离二进制安装验收全部完成；`glm-5.3-flash` 的 Responses 与 Chat Completions 真实协议检查均通过。实际 Android 设备与真实游戏效果由用户自测。
 
 新增通用插件 `gamer-ai`，同时提供标准 MCP 服务和内置 AI 自动游玩。两者共用工具定义、执行器和控制权规则，复用 Core 的画面、输入、目标连接及运行机制。首测模型为 `glm-5.3-flash`，优先使用智谱 Responses 接口；用户已接受在能力不兼容时显式选择 Chat Completions。
 
@@ -230,8 +230,10 @@ API key 和连接令牌保存在宿主 `extension-data/gamer-ai/private/` 等插
 | Rust 默认 WASM 整仓测试 | 通过，807 项，19 ignored | 最终 Windows 复验使用 `--test-threads=1`；包含真实 WASM guest、架构守卫、控制清理及生命周期 |
 | 浏览器 MCP / 内置模式端到端 | 通过，显式 opt-in 两项 | 真实隔离 Chrome + 本机合成页面；模型循环用 Responses fixture；终止后立即关闭目标通过 |
 | Android 输入与断连 | 通过 | 真实回环 TCP 验证包注入、连接 epoch、旧 UP 与新 socket 隔离；未连接实际 Android 游戏 |
-| 宿主默认配置二进制构建与安装 smoke | 待验 | 收尾构建后使用临时配置/数据、禁用外部工具连接，真实 HTTP 安装归档并验证 Runner/UI/MCP |
+| 宿主默认配置二进制构建与安装 smoke | 通过，15 项检查 | 默认 WASM debug 二进制；临时配置/数据且不连接设备或模型，真实 HTTP 安装归档，验证 Running、Runner/UI/资产、独立只读 MCP、Cookie 不替代令牌、停用注销及正常退出 |
 | 真实游戏 | 用户自测 | 不指定游戏或预设坐标流程 |
+
+最终宿主为 `server/target/debug/gamer-server.exe`，版本 `0.2.6`，编译来源 `f40be77c87a4829cc28f1ce858c82d5882b8480a`；之后的文档验收提交不改变执行代码。最终插件归档为 `plugins/dist/plugins/gamer-ai-0.1.0.gplugin`，SHA256 为 `bf538e139f64f31a77ef7daa61d3272328c4480c34eb162d3fdb5455d7278ed6`。宿主启动入口为 `./gamer.ps1 start` 或 `./gamer.ps1 restart`，安装上述归档后按插件 README 配置模型并选择目标。
 
 ## 11 当前源码依据与外部资料
 
