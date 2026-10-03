@@ -260,7 +260,9 @@ API key 和连接令牌保存在宿主 `extension-data/gamer-ai/private/` 等插
 
 可用宿主为 `server/target/ai-chat-candidate/debug/gamer-server.exe`，版本 `0.2.6`，编译来源 `170e3d3e7311dfa6acdaab22899b6fdbeaac1236`；后续修改仅为格式与验收文档。最终插件 commit 为 `c571433`，归档 `plugins/dist/plugins/gamer-ai-0.2.0.gplugin`，SHA256 `2358dd26764bd47e8402f714751a887f0dc460b19fe6a8f67f9bc0eaa77e2295`。安装验收结果保存在本机临时目录的 `gamer-ai-chat-binary-smoke-uyrJbb/result.json`。
 
-当前用户的旧宿主进程与暂停会话保留，未部署到正在运行的进程。使用新版需先停止宿主，替换为以上候选二进制并启动，再在插件页导入以上归档；重启后需要开始新对话，旧内存聊天不会自动恢复。
+2026-10-03 17:02 用户明确要求代为导入后，已完成本机部署：先结束旧 AI 会话并通过 `/api/shutdown` 优雅退出旧宿主，再将以上候选二进制替换到 `server/target/debug/gamer-server.exe` 并启动（新 PID 28888）。通过 `POST /api/extensions/gamer-ai/update` 导入以上归档，确认 `version`/`active_version` 为 `0.2.0`、`state=running`、无 `last_error`，能力目录已包含 `session.message`，Runner、界面注册和持续对话资产正常。
+
+API 配置的公开版本、`has_key`、模型及协议均与更新前一致，其他插件版本及状态保持；未调用真实模型或开始新的游玩。原宿主二进制保留在 `server/target/debug/gamer-server.before-ai-chat-ca72fc0674db493b889f7bb72522d663.exe`，部署验收记录在本机临时目录 `gamer-ai-local-update-91adb1f20774489eb57e19f3fae91ae9/result.json`。页面刷新后即可使用新版，需开始新对话；旧内存聊天不会自动恢复。
 
 ## 11 当前源码依据与外部资料
 
