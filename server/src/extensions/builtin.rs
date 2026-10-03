@@ -30,8 +30,8 @@ pub(crate) const BUILTIN_EXTENSIONS: &[BuiltinExtensionDescriptor] = &[
     BuiltinExtensionDescriptor {
         id: super::ai::ID,
         name: "AI 助手",
-        description: "通用视觉游玩与本机 MCP 控制",
-        host_version: ">=0.2.6",
+        description: "Agent 对话、攻略记忆混合检索与本机 MCP 游玩",
+        host_version: ">=0.2.7",
     },
     BuiltinExtensionDescriptor {
         id: super::notify::ID,

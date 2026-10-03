@@ -1,6 +1,71 @@
 use super::*;
 
 #[tokio::test]
+async fn package_activity_rejects_delete_and_overwrite_with_conflict_without_changing_content() {
+    let t = build_app(
+        "package-activity",
+        test_credential("admin123"),
+        Default::default(),
+    );
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    let created = create_package(
+        &t,
+        &sid,
+        serde_json::json!({"id":"active.game","version":"1.0.0"}),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let lease = t.packages.acquire_activity("active.game").unwrap();
+    let deleted = send(
+        &t.app,
+        req(
+            "DELETE",
+            "/api/packages/active.game",
+            None,
+            &json_headers(sid.clone()),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::CONFLICT);
+    assert!(json_body(deleted)
+        .await
+        .to_string()
+        .contains("package_busy"));
+    let archive = craft_zip(vec![(
+        "package.toml",
+        b"id = \"active.game\"\nversion = \"9.0.0\"\n[targets.android]\npackages = [\"*\"]\n"
+            .to_vec(),
+    )]);
+    let imported = send(
+        &t.app,
+        req_bytes(
+            "POST",
+            "/api/packages/import?overwrite=true",
+            None,
+            &zip_headers(sid.clone()),
+            archive,
+        ),
+    )
+    .await;
+    assert_eq!(imported.status(), StatusCode::CONFLICT);
+    assert_eq!(t.packages.manifest("active.game").unwrap().version, "1.0.0");
+    drop(lease);
+    let deleted = send(
+        &t.app,
+        req(
+            "DELETE",
+            "/api/packages/active.game",
+            None,
+            &json_headers(sid),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
 async fn package_sources_are_authenticated_persistent_settings_independent_of_packages() {
     let t = build_app("package-sources",test_credential("admin123"),Default::default());
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));

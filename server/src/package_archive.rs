@@ -588,6 +588,7 @@ pub fn export_package(
     media: Option<&MediaService>,
     include_media: bool,
 ) -> Result<BuiltPackage, ArchiveError> {
+    let _snapshot = store.snapshot_barrier();
     let manifest = store
         .try_manifest(pkg)
         .map_err(|e| ArchiveError::Invalid(e.to_string()))?

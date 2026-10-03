@@ -609,6 +609,21 @@ pub trait ResourceHandler: Send + Sync {
     ) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Prepare only this plugin's staged directory before an atomic Package replacement.
+    /// Unregistered plugin data retains the archive's ordinary dormant-data semantics.
+    fn prepare_package_replace(
+        &self,
+        _package: &str,
+        _current: Option<&Path>,
+        _incoming: &Path,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Invalidate plugin-owned private caches after the authoritative package is gone.
+    fn after_package_delete(&self, _package: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -649,6 +664,24 @@ pub struct PackageStore {
     /// 数据根（`<data>/packages`），一级子目录 = package-id。
     root: PathBuf,
     handlers: std::sync::RwLock<BTreeMap<String, std::sync::Arc<dyn ResourceHandler>>>,
+    activities: std::sync::Arc<parking_lot::Mutex<BTreeMap<String, usize>>>,
+}
+
+/// Keeps a data context alive while a consumer is using it, including while paused.
+pub struct PackageActivity {
+    package: String,
+    activities: std::sync::Arc<parking_lot::Mutex<BTreeMap<String, usize>>>,
+}
+impl Drop for PackageActivity {
+    fn drop(&mut self) {
+        let mut activities = self.activities.lock();
+        if let Some(count) = activities.get_mut(&self.package) {
+            *count -= 1;
+            if *count == 0 {
+                activities.remove(&self.package);
+            }
+        }
+    }
 }
 
 impl PackageStore {
@@ -661,6 +694,7 @@ impl PackageStore {
         let store = Self {
             root,
             handlers: std::sync::RwLock::new(BTreeMap::new()),
+            activities: Default::default(),
         };
         store.reject_foreign_layout()?;
         Ok(store)
@@ -679,6 +713,57 @@ impl PackageStore {
     }
 
     // ---------- 目录解析 ----------
+
+    /// A short, synchronous snapshot. Never hold this barrier across network awaits.
+    pub fn with_package_read<T>(
+        &self,
+        pkg: &str,
+        read: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let _guard = RESOURCE_WRITE_LOCK.lock();
+        self.manifest(pkg)?;
+        read()
+    }
+
+    /// Multi-file plugin transactions share the same barrier as replacement and export.
+    pub fn with_package_write<T>(
+        &self,
+        pkg: &str,
+        write: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        self.with_package_read(pkg, write)
+    }
+
+    pub fn acquire_activity(&self, pkg: &str) -> anyhow::Result<PackageActivity> {
+        let _guard = RESOURCE_WRITE_LOCK.lock();
+        self.manifest(pkg)?;
+        *self.activities.lock().entry(pkg.to_owned()).or_default() += 1;
+        Ok(PackageActivity {
+            package: pkg.to_owned(),
+            activities: self.activities.clone(),
+        })
+    }
+
+    pub(crate) fn snapshot_barrier(&self) -> impl std::ops::Deref<Target = ()> + '_ {
+        RESOURCE_WRITE_LOCK.lock()
+    }
+
+    pub(crate) fn prepare_replacement(&self, pkg: &str, incoming: &Path) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.activities.lock().contains_key(pkg),
+            "package_busy: 配置包正在使用中，请先停止相关会话"
+        );
+        let current = self.package_dir(pkg)?;
+        for (plugin, handler) in self.handlers.read().unwrap().iter() {
+            let previous = current.join("plugins").join(plugin);
+            handler.prepare_package_replace(
+                pkg,
+                previous.exists().then_some(previous.as_path()),
+                &incoming.join("plugins").join(plugin),
+            )?;
+        }
+        Ok(())
+    }
 
     /// 包目录（package-id 严格校验，非法 id 直接报错而非映射哨兵——所有
     /// 调用方都应显式处理非法输入）。
@@ -711,6 +796,7 @@ impl PackageStore {
 
     /// 新建包：写 package.toml + 建 shared/、plugins/ 目录。已存在 → 报错。
     pub fn create_package(&self, input: PackageInput) -> anyhow::Result<PackageManifest> {
+        let _guard = RESOURCE_WRITE_LOCK.lock();
         let manifest = input.into_manifest(1)?;
         let dir = self.package_dir(&manifest.id)?;
         anyhow::ensure!(!dir.exists(), "配置已存在: {}", manifest.id);
@@ -801,6 +887,7 @@ impl PackageStore {
         expected_revision: Option<u64>,
         force: bool,
     ) -> anyhow::Result<PackageManifest> {
+        let _guard = RESOURCE_WRITE_LOCK.lock();
         anyhow::ensure!(
             input.id == pkg,
             "package id 不可变（{} ≠ 路径 {}）",
@@ -828,17 +915,28 @@ impl PackageStore {
 
     /// 删除包（整目录递归删除）。返回是否发生了删除。
     pub fn delete_package(&self, pkg: &str) -> anyhow::Result<bool> {
+        let _guard = RESOURCE_WRITE_LOCK.lock();
+        anyhow::ensure!(
+            !self.activities.lock().contains_key(pkg),
+            "package_busy: 配置包正在使用中，请先停止相关会话"
+        );
         let dir = self.package_dir(pkg)?;
         if !dir.exists() {
             return Ok(false);
         }
         std::fs::remove_dir_all(&dir)
             .map_err(|e| anyhow::anyhow!("删除配置失败: {} ({})", e, dir.display()))?;
+        for handler in self.handlers.read().unwrap().values() {
+            if let Err(error) = handler.after_package_delete(pkg) {
+                tracing::warn!(%error,package=pkg,"配置已删除，插件私有数据清理失败");
+            }
+        }
         Ok(true)
     }
 
     /// 复制包为新包（深拷贝 shared/ + plugins/；manifest 换 id、revision 归 1）。
     pub fn duplicate_package(&self, src: &str, new_id: &str) -> anyhow::Result<PackageManifest> {
+        let _guard = RESOURCE_WRITE_LOCK.lock();
         validate_scope_id("package id", new_id)?;
         let source = self.manifest(src)?;
         let target_dir = self.package_dir(new_id)?;
@@ -1449,6 +1547,30 @@ mod tests {
             android_targets: vec!["*".into()],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn package_activity_blocks_replacement_and_delete_until_released() {
+        let (store, root) = temp_store("activity");
+        store.create_package(input("game")).unwrap();
+        store.create_package(input("other")).unwrap();
+        let first = store.acquire_activity("game").unwrap();
+        let second = store.acquire_activity("game").unwrap();
+        assert!(store
+            .delete_package("game")
+            .unwrap_err()
+            .to_string()
+            .contains("package_busy"));
+        assert!(store.delete_package("other").unwrap());
+        assert!(store
+            .prepare_replacement("game", &root.join("staged"))
+            .is_err());
+        drop(first);
+        assert!(store.delete_package("game").is_err());
+        drop(second);
+        assert!(store.delete_package("game").unwrap());
+        assert!(store.with_package_write("game", || Ok(())).is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
