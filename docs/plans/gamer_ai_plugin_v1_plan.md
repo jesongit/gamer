@@ -349,6 +349,16 @@ AI 导入与索引的具体执行路径（2026-10-03，按用户最新要求调�
 
 资料：[FastEmbed-rs支持模型与本地文件加载](https://github.com/anush008/fastembed-rs)、[中文小模型ONNX文件集合](https://huggingface.co/Qdrant/bge-small-zh-v1.5/tree/main)、[ONNX Runtime安装与Windows运行库要求](https://onnxruntime.ai/docs/install/)。以上为满足简化部署的建议，尚未编译集成、下载模型、验证性能或改变运行中的插件。
 
+免费远程Embedding评估（2026-10-03，用户接受API方案并询问免费服务，尚未选定账户或接入）：
+
+- **优先推荐硅基流动**：官方当前价格页将普通版`BAAI/bge-m3`与`BAAI/bge-large-zh-v1.5`列为免费，官方规则明确认证后可用免费模型、调用账单为0、限速固定。它们不是一次性赠金试用，也不构成永久免费承诺。优先评估bge-m3（8192-token单文本上限），中文large型号为512-token上限；真实中文攻略召回仍需验收。用户需注册、实名认证并取得该平台独立Key，不能使用现有智谱Key。
+- **接入预设**：完整URL`https://api.siliconflow.cn/v1/embeddings`，模型ID严格使用`BAAI/bge-m3`；`Pro/BAAI/bge-m3`为收费型号，不自动替换。可以将接口与模型作为插件预设，使用户只填写Key；模型、维度、输入规则、提供方指纹与向量缓存依旧独立于游玩模型。官方免费规则未列充值门槛，但尚未验证具体零余额账户行为；不承诺未核实的RPM/TPM或免费期限。
+- **持续免费额度备选**：Cloudflare Workers AI提供每天10000 Neurons的免费额度（按账号共享，不是10000 tokens），有BGE-M3模型与REST接口；免费计划耗尽后拒绝后续操作，升级付费计划才超额计费。需Cloudflare账号、Account ID与API Token，比单Key预设增加配置项。
+- **试用额度区别**：Jina Embedding API为新用户提供免费tokens，耗尽后可购买，属于试用而非每天自动恢复的免费额度。Gemini Embedding 2官方Free Tier也标注免费，受账户速率、可用地区及免费数据使用条款约束；当前用户需求优先推荐国内单Key服务，暂不增加额外提供方适配。
+- **费用与故障**：本机不需要下载模型或运行独立服务。限流时有界退避、批量建索引限速并优先处理查询；未就绪时FTS5保持可用并显示降级。只重算变化内容、缓存查询，不自动切换付费型号或其他提供方；更换服务不能假定同名模型向量兼容。免费向量化不取消远程游玩/总结/导入合并的聊天模型费用。
+
+资料：[硅基流动当前价格](https://siliconflow.cn/pricing)、[免费模型和限速规则](https://docs.siliconflow.cn/docs/userguide/faqs/rate-limit-and-upgradation)、[Embedding接口](https://docs.siliconflow.cn/docs/api/embeddings-post)、[Cloudflare免费额度](https://developers.cloudflare.com/workers-ai/platform/pricing/)、[Jina试用规则](https://jina.ai/embeddings/)、[Gemini价格](https://ai.google.dev/gemini-api/docs/pricing)。尚未注册账户、使用密钥、调用API或修改运行配置。
+
 其他方案比较（2026-10-03，用户询问，候选评估而非新增实施决定）：
 
 | 方案 | 对当前项目的价值与代价 |
