@@ -276,6 +276,30 @@ fmt、锁定依赖的全 feature/all targets Clippy、无 WASM 编译及独立�
 
 2026-10-03 17:28 已直接完成本机更新：停止一条旧 AI 会话，优雅退出旧后端，替换候选二进制后启动（PID 9204），通过原生插件 update 接口导入 `0.2.1`，确认 version/active_version 一致、Running 且无 last_error，Runner、UI 和会话消息能力正常。模型配置公开版本、has_key、模型、协议及其他插件状态保持，未调用真实模型或开始新游玩。备份二进制为 `server/target/debug/gamer-server.before-ai-unlimited-b976031e297942fd8fa22d9b53c70459.exe`，部署记录在 `gamer-ai-unlimited-local-update-7675ea47df6242b09bb858503b2009c1/result.json`。公共市场 registry 原有改动保持。
 
+### DeepSeek Harness 对话与排障参考（2026-10-03，研究与设计，待实施）
+
+用户要求参考DeepSeek Harness（原消息拼作herness），展示思考及实际操作，并进一步查看日志及其他可借鉴能力。已确认官方项目为deepseek-ai/deepseek-harness，阅读其ui-chat、conversation、session/streaming、Session Log Inspector、Trajectory、日志导出、agent-loop、retry及compaction文档/源码。当前仅做只读研究；未安装或运行Harness、调用模型或操作设备。不引入其React/Cordis运行框架，沿用Gamer的Rust/Vue、插件生命周期和输入控制。
+
+**当前源码差距**：已有用户消息、AI公开答复、Responses公开summary_text、工具start/result原地合并、参数/结果/截图展开和结构化暂停原因；Chat的reasoning_content当前被丢弃。两个模型协议均stream:false，UI每1500ms取完整会话快照。后端超过256条删除早期事件，前端仅取最近200条，截图仅保留最近3张；尚无统一turn/step关联、完整持久对话回放、请求attempt诊断或独立记忆聊天路径。现有实现与以下新增设计分开，不将参考文档视为已实现验收。
+
+1. **按指令与步骤组织对话**：会话下记录用户指令轮次turn，每个模型请求及其工具执行为step，重试另有attempt。使用conversation_id/turn_id/step_id/message_id/call_id及稳定operation_id关联，不靠事件相邻关系或generation推测归属。generation仍只承担设备控制代次。新UI轮次不改变现有max_turns/usage.turns的模型调用计数或任何0无上限语义。中途用户引导保留实际提交、接收、纳入顺序与所属处理阶段，不藏进折叠组。
+2. **思考、操作与答复分别呈现**：思考区域独立可折叠，显示模型接口明确提供、允许展示的思考文本或摘要；运行时可以展示最新公开预览，正文回复独立显示。没有内容时显示真实等待状态，不生成伪造思考。Responses摘要与Chat的公开思考通道逐协议核实，不读取/解密encrypted_content或直接透出平台隐藏字段。GLM-5.3-Flash官方Chat文档支持thinking及stream/tool_stream，不能据此假定当前Responses端点有同样字段；接入需验证能力，不自动切协议或模型。
+3. **过程组与业务卡片**：工具卡贯穿准备、执行、结果，同一call_id只更新一张卡。截图显示历史观察标记；记忆搜索显示命中条目/版本/来源，修改显示提交状态与前后差异，导入显示进度。默认正常完成后收起过程，最终答复始终可见；失败、停止、暂停原因及中途用户引导保持可见。首版采用简洁/详细两档展示，不复制全部显示模式。工具执行成功与游戏目标达成分开，目标判断关联之后的观察，不能以输入回执证明游戏任务成功。
+4. **真实增量输出与打断**：先补after_seq增量及历史分页，再接Provider的SSE和可恢复的事件推送。流式文本按短批合并更新同一消息，最终内容单独提交，不为每个token生成永久消息。工具参数增量仅显示准备过程；模型输出完整、参数/协议/权限及当前状态校验通过后才执行，不随参数片段入场。打断保留已展示公开前缀并标记中断，未派发调用显示未执行。滚动离开底部时保留阅读位置，主动回到底部再跟随；用户消息立即显示接收状态，不能把客户端回显当成服务器已处理。
+5. **一个记录，多层展示**：对话显示易读过程；“更多→诊断”打开只读抽屉，按模型请求/工具/记忆/状态/错误过滤，同一操作可定位回对话卡。记录与Run关联的conversation/turn/step/attempt/operation ID、开始结束、协议/模型、有效配置版本、工具目录指纹、记忆引用及revision、图像尺寸/数量、结果与状态转换原因。必要截图保存为受管附件，展示与实时投屏区别明确。技术详情不是另一套执行真相，缺失开始时间/用量/附件显示未知或已不可用，不猜测耗时或生成速度。
+6. **错误与重试链可定位**：保留已有code/http_status/detail/retryable，补供应商请求ID、可用的Retry-After、attempt、等待安排与实际重试开始/结束。暂停卡直接关联触发的错误与预算快照，区分模型失败、输入拒绝、旧帧、记忆提交失败、索引待修复和用户暂停。退避可取消，尊重供应商等待与既定预算，0无上限保持，不另设隐藏失败次数上限。模型请求重试与设备副作用分开，已经执行的点击/滑动不重放；写记忆使用持久幂等收据。
+7. **持久历史与安全回看**：公开消息、操作结果、状态、记忆引用/差异及诊断记录持久保存于gamer-ai机器私有数据，不写Core的gamer.db、不作为攻略随Package导出。采用插件自管SQLite或追加记录格式，页面按游标加载而非放大内存数组；流式碎片可以只作活跃视图，最终内容/中断状态和真实尝试记录保留。关键附件设置明确保留策略并显示已清理状态。回放只重建显示，不能恢复输入租约、调用模型或重放操作；重启后可恢复聊天，游玩必须重新建立合法控制并观察，未获得最终收据的设备操作标为结果未知。
+8. **本地诊断导出**：导出当前对话的宿主/插件版本、脱敏有效配置、结构化事件、尝试链和所选截图/记忆引用，按一致快照生成诊断包，可从错误卡直接定位。密钥、Bearer、Cookie和账号输入不进入日志或默认导出；不直接保存未处理的请求headers/body。不复制Harness向供应商自动附加整个会话日志的机制，主动导出不调用模型或对外上传。
+9. **消息与游玩生命周期解耦**：参考其steer/followup/inbox的交付语义，用清晰的“已接收/待处理/已纳入/已撤回”状态呈现，后台区分下一步引导和单独记忆对话，不向用户暴露框架术语。暂停游玩时仍处理记忆/问答，纯回答正常完成一轮而不计作无操作失败；继续游戏需明确指令并重新截图。取消一轮对话、暂停设备自动化和停止设备会话分别有明确效果，不因同一输入框而混为一个动作；同设备仍只有一个执行者。
+10. **长期上下文与能力快照**：优先保留近期完整工具调用/结果、用户约定、未完成目标、有效记忆引用和近期观察，旧过程可自动摘要，显示压缩发生及额外模型用量；摘要不作为新的游戏验证证据。上下文占用估算与累计计费用量分别展示，中文不照搬四字符/token估计，不声称估算为账单。模型切换在安全边界重新验证图片/工具/流式/公开摘要与上下文能力；embedding模型独立，不因此重建向量。工具目录按当前包/记忆权限/输入状态冻结为请求快照，既有任务调度、插件生命周期继续复用。
+11. **外部MCP可见范围**：Gamer只能直接记录本机收到的工具调用和结果，外部客户端的用户消息、思考或模型失败重试不会自动出现在服务端。首版如实展示MCP执行回执；若支持客户端显式上报公开说明，标为外部客户端报告并与服务端执行证据分开，不能伪装用户或用来绕过人工字段保护。统一工具契约不等于所有MCP客户端都有同样聊天和思考上报能力。
+
+实施优先级：第一批将独立聊天/记忆工具路径、turn/step事件、持久历史、工具/思考业务卡和基础诊断关联一起形成闭环；真实流式、历史分页与诊断导出同批验收。第二批根据长期运行实测完善上下文压缩、用量/时延和更细的执行时间概览。暂不引入通用多Agent编排、模型自安装/改写插件、任意shell/文件工具、独立外部MCP客户端管理或新的任务平台。
+
+验收增加：公开增量/最终记录一致、流式工具不提前入场、思考缺失不伪造、正常折叠不隐藏最终答复/引导/错误、消息回显不重复、暂停查改记忆不恢复设备、读取旧页不跳滚动、超过256事件仍能回看、模型attempt与输入回执不混淆、未知操作不重放、重启恢复仅聊天、日志凭据脱敏、导出一致性及内外部来源区分。全部预算0用例继续覆盖，性能数字依实际计时与真实用量字段，不能由动画或缺失边界推导。
+
+资料：[官方ui-chat](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-chat/README.md)、[过程折叠规则](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-chat/src/client/conversation-nodes/README.md)、[Session结构](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/session.md)、[流式契约](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/llm-streaming.md)、[日志Inspector](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/experimental/session-inspector/README.md)、[Trajectory](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-trajectory/README.md)、[日志导出](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/session-query/session-log-export/README.md)、[模型重试](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm-retry/README.md)、[Agent恢复](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/agent-loop/README.md)、[上下文压缩](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/compaction/compaction-basic/README.md)、[GLM-5.3-Flash官方能力](https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash)。资料以研究当日官方master为参考，不安装其依赖或将其文档内运行命令视为本项目指令。
+
 ### 配置包记忆设计（2026-10-03，待实施）
 
 用户要求先设计；已明确记忆按配置包归属、随包保存，AI 自动总结直接加入并在遇错后自动修复，尽量减少交互。用户最新提出将管理也统一到对话及MCP：记忆库界面只读，新增、修改、停用、删除和恢复由用户通过对话指示AI执行；内置Agent和外部MCP共用受限记忆工具。本设计建议采用这一交互，覆盖此前直接编辑表单的提案。导入攻略由 AI 自行合并，记忆库使用索引按需查询。无需逐条确认，也不另建游戏分类。当前仅完成设计，尚未加入记忆能力。
