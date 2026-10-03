@@ -532,7 +532,7 @@ Cloudflare额度测算：官方每天10000 Neurons，BGE-M3和Qwen3-Embedding-0.
 
 用户实际会话在 22:45 至 23:01 运行 63 轮、63 次工具，只有一次记忆查询，没有记忆写入。旧实现到关停取消后才创建 3 片经历整理作业，此时后台也退出，作业 pending/processed=0；未配置 Embedding 不会阻止正文保存。两个真实用户纠错未命中显式“记住”门禁；结束原稿还只读取 256 条内存尾部，漏掉早期流程。实际 809 条输出增量全部为 text，公开摘要均为空；其中两轮 HTTP 200/output_limit 是单轮 2048 上限截断，不是无限累计预算失效。最后结束由真实 POST /api/shutdown 触发且正常 drain，未发现崩溃；两次短暂停与补充用户指令相关。
 
-本轮修复版本为 AI 0.3.1 / 宿主 0.2.8。主对话统一聊天、游玩与持续引导，取消独立游玩页签；顶部保留运行控制，模型/MCP/游玩预算收在设置，记忆与可选服务保持独立。借鉴 [DeepSeek Harness ui-chat](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-chat/README.md) 的正文/过程分离、紧凑工具行、底部输入和阅读位置保持；公开思考独立展开，完成工具组折叠不能隐藏思考或最终答复，Markdown 禁原始 HTML 与危险链接。
+本轮修复版本为 AI 0.3.2 / 宿主 0.2.8。主对话统一聊天、游玩与持续引导，取消独立游玩页签；顶部保留运行控制，模型/MCP/游玩预算收在设置，记忆与可选服务保持独立。借鉴 [DeepSeek Harness ui-chat](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-chat/README.md) 的正文/过程分离、紧凑工具行、底部输入和阅读位置保持；公开思考独立展开，完成工具组折叠不能隐藏思考或最终答复，Markdown 禁原始 HTML 与危险链接。
 
 智谱 [创建 Response 官方结构](https://docs.bigmodel.cn/api-reference/response/创建-response) 明确公开 output reasoning.content.reasoning_text 与 response.reasoning_text.delta/done；精确识别官方 HTTPS endpoint 与 GLM 模型后解析该通道，不读取加密内容，不把其他供应商同名字段默认公开。Chat 的公开 reasoning_content 默认开启，用户仍可关闭；已有未记录的思考不能从旧历史补回。单轮 max_output_tokens 默认16384，可选0省略参数采用供应商默认值，与五项累计预算独立；截断与未完成工具校验仍保留。
 
@@ -540,4 +540,8 @@ Cloudflare额度测算：官方每天10000 Neurons，BGE-M3和Qwen3-Embedding-0.
 
 启动补偿归档未完成的旧游戏记录及其确切作业来源，不自动恢复设备控制。删除、停用或人工编辑保护原稿会抑制自动重建，后台已经取得的作业也须在既有短提交屏障重新检查原稿与来源；换标题、换目标或晚到更新均不能绕过。游戏暂停递增代次后结算之前过程，工具日志按入场代次关联，普通聊天消息不能迁入恢复后的游戏组。对话、游玩、后台合并的用量和预算独立，游戏 journal 只同步独立游戏计账字段，不覆盖暂停期间普通聊天消耗；全部累计预算的0语义保持。
 
-本轮最终源码验证：默认 feature 与无默认 feature 的 AI 回归均为114通过/0失败；修正文本记忆整理分支后，隔离 Chrome 游玩/MCP闭环1项通过且无fixture异常。全目标/全feature Clippy -D warnings、cargo fmt检查、83项插件UI回归、390px/560px布局检查、壳与插件生产UI构建、版本/SDK固定快照校验和0.3.1归档完整性自检均通过。上述浏览器模型循环使用本机fixture，未据此推断实际供应商公开思考或游戏效果。
+真实部署后的整理进一步发现：模型把经历草稿当作已整理攻略去重，并保存了“双箭头是自动战斗”的旧错误推测。用户定义恢复改用独立持久游标，即使经历检查点已到1424也会补录真实用户事件1402；每片整理先提供少量当前受保护定义。导入写入与完成结果读取真实标签及提交收据，禁止原稿冒充攻略；错误完成结果反馈给模型在原预算内修正，最终提交仍重复校验。定义删除后不复建，来源匹配使用该作业固定修订的完整原文，避免跨片段遗漏。
+
+本轮源码验证：默认 feature 与无默认 feature 的 AI 回归均为118通过/0失败，包含上述四项恢复与自动纠错回归；隔离 Chrome 游玩/MCP闭环1项通过且无fixture异常。83项插件UI回归、390px/560px布局检查、壳与插件生产UI构建、版本/SDK固定快照校验均通过。真实GLM无设备短对话另收到74段公开思考增量（328字符）、正确答复且无工具执行；已有未记录的思考仍不能补回。浏览器模型循环使用本机fixture，未据此推断实际游戏效果。
+
+全目标/全feature Clippy -D warnings、cargo fmt检查和0.3.2归档完整性自检通过。插件修复使用新版本归档，沿用宿主0.2.8的本轮实现，不覆盖已安装的同版本插件归档。

@@ -1,20 +1,20 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-10-03T15:42:04Z",
+  "generated_at": "2026-10-03T16:11:14Z",
   "host_api": "1.0.0",
   "provenance": {
-    "plugin_commit": "91c465f8a9e8274b3cfa6c0bcb03fcf54841849a",
+    "plugin_commit": "f6db49a65e8cdd21309297b232ece9149e9445d2",
     "sdk_host_commit": "acdfbe0bd75b72eff52b4cd48de22df7277ef8b3"
   },
   "plugins": [
     {
       "id": "gamer-ai",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "name": "AI 助手",
       "description": "Agent 对话、配置包攻略记忆与混合检索，可选联网服务和本机 MCP 游玩接入",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-ai-0.3.1.gplugin",
-      "sha256": "12abea95a96db5e6cc4ac717dcdde17beb1c27ff9ac2ac74a17c9bc81b924592",
+      "download_url": "/plugins/gamer-ai-0.3.2.gplugin",
+      "sha256": "784f8a88c72e6d5a6009ab811299952890a0a4c94e262a19b50d0ba13941c260",
       "size": 101595,
       "permissions": [
         "ui.host",
