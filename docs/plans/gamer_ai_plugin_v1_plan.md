@@ -300,6 +300,23 @@ fmt、锁定依赖的全 feature/all targets Clippy、无 WASM 编译及独立�
 
 资料：[官方ui-chat](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-chat/README.md)、[过程折叠规则](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-chat/src/client/conversation-nodes/README.md)、[Session结构](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/session.md)、[流式契约](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/llm-streaming.md)、[日志Inspector](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/experimental/session-inspector/README.md)、[Trajectory](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-trajectory/README.md)、[日志导出](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/session-query/session-log-export/README.md)、[模型重试](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm-retry/README.md)、[Agent恢复](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/agent-loop/README.md)、[上下文压缩](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/compaction/compaction-basic/README.md)、[GLM-5.3-Flash官方能力](https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash)。资料以研究当日官方master为参考，不安装其依赖或将其文档内运行命令视为本项目指令。
 
+### Cloudflare 接入与独立联网搜索（2026-10-03，提供方研究，待实施）
+
+用户询问Cloudflare API所需配置，并要求考虑独立联网搜索，以避免绑定聊天模型的收费搜索功能。联网搜索与配置包记忆检索是两个能力，聊天、embedding和搜索分别配置、分别记录用量；当前未新增运行代码、注册服务或调用付费接口。
+
+- **Cloudflare配置**：用户准备Account ID与Workers AI API Token即可；官方控制台Workers AI→Use REST API→Create a Workers AI API Token提供预填模板和Account ID。官方入门文档自建Token要求Workers AI Read/Edit，执行模型API参考接受Read或Write之一；首版沿用官方模板并限定账号，不称模板权限为绝对最小权限。候选embedding为`@cf/baai/bge-m3`，插件预填模型和`https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/@cf/baai/bge-m3`，服务端Bearer认证。无需部署Worker、绑定域名或引入Cloudflare Vectorize；模型、维度和编码指纹仍由插件索引配置管理，调用前验证账户与响应。
+- **免费计划**：Workers AI每日10000 Neurons额度仍有效且账号共享，免费计划超额拒绝；付费计划超额计费。Cloudflare在此仅做embedding，不作为联网搜索引擎，不能把该免费额度用于抵扣其他搜索供应商或智谱聊天用量。凭证只保存机器私密配置，不进入配置包、MCP返回、对话或诊断导出。
+- **独立工具**：首版增加`web_search`与受控`web_read`工具；内置Agent和授权外部MCP共用插件处理器。通过HTTP适配搜索服务即可，不必引入任意外部MCP客户端管理框架。联网工具不依赖活动设备控制、不自动恢复暂停游戏；与记忆读取/写入、设备控制分开授权，未配置搜索服务时给出明确不可用状态，不隐式改用模型收费搜索或其他提供方。
+- **流程与边界**：先查当前配置包记忆，资料不足或需要最新版本时联网搜索，按需读取相关页面，并在答复/工具卡展示来源、查询时间及可获得的发布日期。发布日期不是游戏适用版本，未知版本继续标未知；搜索命中不是验证过的攻略，网页内容作为外部资料，不能自行获得工具权限或冒充用户定义。可复用结论经已有AI合并/记忆修订流程处理。此新增需求扩展原MD/TXT导入边界为少量指定网页读取，不发展全站抓取、登录站点采集或浏览器反爬绕过。
+- **费用控制**：首版建议Tavily basic、显式关闭auto_parameters与include_answer、按需少量结果，再由既有聊天模型阅读总结；不额外调用Research/Answers产品。搜索credit/次数、网页提取credit及聊天token独立展示，读取搜索结果仍消耗聊天token，不能承诺整条流程零费用。索引和搜索在外部额度耗尽时结构化降级，不自动开通付费或新增隐藏内部预算；所有内部预算0无上限语义保持，供应商配额另行显示。日志记录请求/错误/重试/实际可得用量，无法取得的费用标未知。
+- **Tavily候选**：官方当前每月1000免费credits、无需信用卡；basic搜索1 credit/次、advanced 2 credits/次，Extract另外按成功读取数量计费，免费credits是共享用量而不是无条件1000次全功能查询。单API Key接入，适合先验证；中文游戏攻略命中与本机连通性尚未实测，不能声称优于其他引擎。PAYG需另行启用，当前官方价格$0.008/credit。
+- **Brave候选**：当前Search $5/1000 requests、每月$5免费抵扣，约1000次Search；需信用卡激活，官方可预付$0使用抵扣，不能沿用旧2000次/月说法。另有Answers产品计费，不默认调用。官方FAQ明确API返回数据不得留存，存储需取得授权；未获授权前不能把返回正文/片段等持久化到会话、日志、缓存或RAG，只作临时展示。独立读取原网页的内容也须另按来源条款处理，不能把自动摘要当成绕过供应商留存限制。
+- **SearXNG候选**：开源自建服务通过HTTP JSON接入，需自管运行与上游限流，没有统一付费账号要求但有机器和维护成本。配置`search.formats`启用json；许多公共实例关闭该格式，不能把随机公共实例当稳定免费后端。保留提供方接缝即可，首版不随Gamer部署新服务。
+
+建议组合为现有聊天模型+Cloudflare embedding+Tavily basic联网搜索，尚待用户选择搜索提供方、提供私密配置并进行实际质量/连通性验收。缓存、历史及自动记忆落库应遵守所选供应商的返回数据留存规则，不对所有提供方承诺相同持久存储能力。
+
+资料：[Cloudflare REST入门](https://developers.cloudflare.com/workers-ai/get-started/rest-api/)、[BGE-M3模型](https://developers.cloudflare.com/workers-ai/models/bge-m3/)、[Workers AI定价](https://developers.cloudflare.com/workers-ai/platform/pricing/)、[Tavily credits与收费](https://docs.tavily.com/documentation/api-credits)、[Tavily Search参数](https://docs.tavily.com/documentation/api-reference/endpoint/search)、[Brave当前定价](https://api-dashboard.search.brave.com/documentation/pricing)、[Brave信用卡/留存规则](https://api-dashboard.search.brave.com/documentation/resources/help-feedback)、[SearXNG搜索API](https://docs.searxng.org/dev/search_api.html)。价格为2026-10-03核实的官方信息，不构成已接入或账户额度可用的验收。
+
 ### 配置包记忆设计（2026-10-03，待实施）
 
 用户要求先设计；已明确记忆按配置包归属、随包保存，AI 自动总结直接加入并在遇错后自动修复，尽量减少交互。用户最新提出将管理也统一到对话及MCP：记忆库界面只读，新增、修改、停用、删除和恢复由用户通过对话指示AI执行；内置Agent和外部MCP共用受限记忆工具。本设计建议采用这一交互，覆盖此前直接编辑表单的提案。导入攻略由 AI 自行合并，记忆库使用索引按需查询。无需逐条确认，也不另建游戏分类。当前仅完成设计，尚未加入记忆能力。
