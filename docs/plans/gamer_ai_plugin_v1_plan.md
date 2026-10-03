@@ -331,13 +331,23 @@ AI 导入与索引的具体执行路径（2026-10-03，按用户最新要求调�
 
 本地Embedding成本优化候选（2026-10-03，用户询问，尚未选择或安装）：
 
-- **优先接入方式**：插件新增独立Ollama embedding适配，通过`http://127.0.0.1:11434/api/embed`调用本机服务，允许无API key。主宿主已有reqwest/Tokio，可复用网络超时/取消等机制；现有聊天Provider与Settings强制非空密钥且只处理Responses/Chat，不能直接作为本地embedding实现。Ollama支持原生Windows，运行时和模型按机器配置保存，不装入游戏配置包。
+- **外部运行时接入方式**：插件可新增独立Ollama embedding适配，通过`http://127.0.0.1:11434/api/embed`调用本机服务，允许无API key。主宿主已有reqwest/Tokio，可复用网络超时/取消等机制；现有聊天Provider与Settings强制非空密钥且只处理Responses/Chat，不能直接作为本地embedding实现。Ollama支持原生Windows，运行时和模型按机器配置保存，不装入游戏配置包。用户随后强调部署简单，推荐转向下面的内置方案，不把独立运行时安装作为普通用户的前置步骤。
 - **候选模型**：优先评估`qwen3-embedding:0.6b`（官方Ollama Q8_0模型包约639MB，模型原始定义支持最多1024维、多语言含中文）；备选`bge-m3`（Ollama模型包约1.2GB，多语言、8K文本窗口），或更轻的`BAAI/bge-small-zh-v1.5`（中文、512维，官方safetensors权重约95.8MB，需另行选择并验证推理运行时）。模型包/权重下载体积不等于运行时内存，真实中文攻略召回与CPU延迟须测试。
 - **运行约束**：查询优先于后台批量建索引，控制并发和短批次，避免与游戏争用CPU/GPU；按照模型要求固定查询指令、分词/池化/归一规则及模型实际版本或摘要，纳入向量缓存指纹。Ollama默认可能截断超长输入，应显式禁止静默截断并按完整步骤拆分；响应校验数量、维度及有限数值。
 - **费用与故障**：本地生成向量和语义查询无远程embedding API调用费，仍消耗本机资源；游戏画面判断、记忆自动总结与AI导入合并若继续使用远程聊天模型，仍产生对应API费用。本机服务不可用时使用FTS5并展示降级原因，不自动切到收费接口。用户选择本地后仍可独立切换游玩模型，换embedding模型/维度需要重建向量。
-- **一体化备选**：Rust进程内ONNX推理可减少独立服务安装，但当前无ORT/Candle/tokenizers依赖，会新增分词器、模型文件管理、Windows CPU/GPU二进制和资源调度工作。只有要求一体化安装时再评估，不仅为本地推理提前建设平台。
+- **一体化方案**：用户已提出简化部署需求，优先评估Rust进程内CPU推理，将运行时与模型文件管理随Gamer提供；当前无ORT/Candle/tokenizers依赖，增加这些依赖与资源调度的成本由开发和发行承担，不转为用户的安装教程。
 
 资料：[Qwen3-Embedding-0.6B官方模型卡](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B)、[Ollama模型包](https://ollama.com/library/qwen3-embedding:0.6b)、[BGE-M3模型包](https://ollama.com/library/bge-m3)、[BGE中文小模型](https://huggingface.co/BAAI/bge-small-zh-v1.5)、[Ollama Windows](https://docs.ollama.com/windows)、[Ollama embedding API](https://docs.ollama.com/api/embed)。尚未安装运行时、下载模型、调用embedding或验证本机性能。
+
+部署简化建议（2026-10-03，待选定和实施）：
+
+- **用户路径**：AI插件中选择“内置本地检索”，首次在界面内准备模型，显示下载/加载进度，之后重启直接从本机缓存加载，无需独立服务、端口、Python环境或GPU配置。提供离线模型包导入；完整离线发行可附同一模型资产，避免目标机首次下载。模型尚未就绪时FTS5保持可用，并明确显示向量支路状态。
+- **最小技术方案**：首选评估`BAAI/bge-small-zh-v1.5`的CPU ONNX版本（512维）。Qdrant维护的ONNX仓库包含约94.8MB模型和分词配置，完整文件集合约95.3MB；这不包含推理运行时或实际内存用量。FastEmbed-rs支持该模型、Rust进程内推理及本地模型文件加载，可用作接缝候选；正式依赖、模型转换精度、池化/归一/查询指令、CPU耗时与Windows兼容性仍需验收。长攻略按完整步骤分段，遵守模型512-token窗口，不静默截断。
+- **发行与边界**：`gamer-ai/host`直接编译进主宿主，新增推理库需要宿主发布；仅更新`.gplugin`无法加入推理运行时。当前插件归档单文件上限10MiB，模型不能塞入普通插件归档，保持通用限制。ONNX CPU运行时及其Windows依赖由Gamer发行打包，模型位于插件私有机器数据目录，由gamer-ai管理，不放进游戏Package，不为此增加Core模型平台。
+- **模型准备**：固定已验证模型版本、所有模型/分词配置文件的摘要及许可，下载到临时目录并校验后原子就绪；失败保留可重试状态，不能启动不完整模型。开发时检查默认下载库的环境变量、全局缓存和隐式凭据行为，采用插件明确管理的缓存和受控下载/离线加载；安装包内运行时加载须固定绝对路径。已就绪模型不每次启动查远端更新。
+- **运行与成本**：CPU推理采用有界后台任务和线程，实时查询优先于批量建索引，停用插件后不继续创建推理任务；实际取消和有界收尾需验收。没有向量API调用费用，远程游玩/总结/攻略合并照常统计。远程embedding保留为独立选项，本地失败不自动切收费接口；变更推理模型/版本/维度/输入规则时重建向量，正文及FTS5不受影响。
+
+资料：[FastEmbed-rs支持模型与本地文件加载](https://github.com/anush008/fastembed-rs)、[中文小模型ONNX文件集合](https://huggingface.co/Qdrant/bge-small-zh-v1.5/tree/main)、[ONNX Runtime安装与Windows运行库要求](https://onnxruntime.ai/docs/install/)。以上为满足简化部署的建议，尚未编译集成、下载模型、验证性能或改变运行中的插件。
 
 其他方案比较（2026-10-03，用户询问，候选评估而非新增实施决定）：
 
