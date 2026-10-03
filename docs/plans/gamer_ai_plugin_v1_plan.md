@@ -328,6 +328,23 @@ RAG 可行性评估（2026-10-03，用户询问，尚未决定启用向量）：
 
 评估资料：[RAG原论文](https://arxiv.org/abs/2005.11401)、[混合检索的词项/向量互补](https://learn.microsoft.com/en-us/azure/search/hybrid-search-overview)、[排名融合RRF](https://learn.microsoft.com/en-us/azure/search/hybrid-search-ranking)。以上资料用于方法判断，未选用Azure服务。
 
+其他方案比较（2026-10-03，用户询问，候选评估而非新增实施决定）：
+
+| 方案 | 对当前项目的价值与代价 |
+| --- | --- |
+| JSON正文 + SQLite FTS5 | 保持当前基线，复用PackageStore和配置包导出；需可靠变更通知、缓存修复及版本复核。关键词和别名可精确检索，语义换词效果须验证。 |
+| JSON正文 + SQLite FTS5/向量混合检索 | 不增加独立数据库服务，以向量补充语义候选。sqlite-vec是支持Rust与Windows的候选，仍处于pre-v1，须固定版本并验证与现有bundled SQLite的构建、升级和查询兼容性；尚未选定。 |
+| JSON正文 + LanceDB本地索引 | OSS提供嵌入式Rust库、全文/向量/混合检索，可作为本地替代。需要另行验证本项目Windows构建、依赖与发行体积、并发修改和索引恢复，不能仅据支持Rust就认定可直接替换。 |
+| JSON正文 + Qdrant独立服务 | 可用于集中向量检索，增加进程/服务部署、备份及包导入删除同步成本。当前没有跨设备集中共享检索需求，不引入；未来有该真实需求再评估。 |
+| PostgreSQL + pgvector | 正文与向量可统一在SQL数据层，适合已经采用PostgreSQL的服务部署。当前会增加另一数据库与配置包导入导出接缝，收益不足。 |
+| 正文、修订与索引全部放插件SQLite | 能在同库事务中提交正文和索引，减少JSON与索引双写；需重做PackageStore资源编辑/导入导出接缝，在线打包采用一致性快照并处理WAL。只有文件规模或双写维护成为实测瓶颈时重评。 |
+
+当前推荐维持JSON权威正文与FTS5基线，向量作为可选增强。以同一组真实中文问题、相同候选数量，对比关键词、向量和混合检索的漏检、误检、延迟及费用，再决定是否启用；不能以更换数据库名称承诺更好效果。专有名词/别名、适用条件、步骤完整性、失效状态与人工保护同样影响攻略可用性。
+
+向量模型可另选远程embedding API（增加调用费用与网络依赖）或本地embedding模型（增加下载、资源占用和Windows发行验证），两者都需要中文游戏查询验收。现有glm-5.3-flash聊天模型不视为已验证的embedding接口。候选排序后仍按版本读取当前正文，由模型结合实时画面判断；相似度不能证明导入条目应合并或攻略正确。
+
+候选资料：[sqlite-vec官方仓库与pre-v1说明](https://github.com/asg017/sqlite-vec)、[LanceDB嵌入式OSS与Rust支持](https://docs.lancedb.com/)、[Qdrant本地服务部署](https://qdrant.tech/documentation/quickstart/)、[pgvector官方说明](https://github.com/pgvector/pgvector)。资料已读取，尚未引入上述依赖、运行性能对比或调用embedding接口。
+
 ## 11 当前源码依据与外部资料
 
 源码依据为当前 checkout：
