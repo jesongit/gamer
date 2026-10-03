@@ -317,6 +317,21 @@ fmt、锁定依赖的全 feature/all targets Clippy、无 WASM 编译及独立�
 
 资料：[Cloudflare REST入门](https://developers.cloudflare.com/workers-ai/get-started/rest-api/)、[BGE-M3模型](https://developers.cloudflare.com/workers-ai/models/bge-m3/)、[Workers AI定价](https://developers.cloudflare.com/workers-ai/platform/pricing/)、[Tavily credits与收费](https://docs.tavily.com/documentation/api-credits)、[Tavily Search参数](https://docs.tavily.com/documentation/api-reference/endpoint/search)、[Brave当前定价](https://api-dashboard.search.brave.com/documentation/pricing)、[Brave信用卡/留存规则](https://api-dashboard.search.brave.com/documentation/resources/help-feedback)、[SearXNG搜索API](https://docs.searxng.org/dev/search_api.html)。价格为2026-10-03核实的官方信息，不构成已接入或账户额度可用的验收。
 
+### GPT 与 GLM 工具收费及对话开关（2026-10-03，官方资料调查，待实施）
+
+用户将调查范围收敛为GPT/OpenAI与GLM/BigModel。以下为标准API与供应商工具/服务，不把ChatGPT网页订阅、智谱聊天应用或Coding Plan套餐权益当成Gamer API价格；未调用真实模型/工具，也未修改现有私密配置。
+
+- **普通函数与插件MCP**：Gamer当前Provider只传自定义function工具，没有主动注册供应商内置搜索、云端知识库或代码容器。普通调用的工具定义、模型输出、截图和回传结果消耗模型tokens；独立搜索/embedding/其他执行服务另计，不把MCP协议本身视为免费服务。供应商工具总开关`tool_choice:none`会同时关闭游戏函数，不能拿它实现单独禁止联网。
+- **GPT/OpenAI工具价格**：标准Responses `web_search`为$10/1000calls+搜索内容token；非推理preview搜索存在$25/1000calls的另一档，不能混用。File Search为$2.50/1000calls，存储$0.10/GB/day（1GB免费）；Hosted Shell/Code Interpreter容器1GB为$0.03/20分钟会话，4/16/64GB按对应档位，符合条件的会话可按分钟并有5分钟最低。图像生成按图片模型、图像用量等另收费，不列为普通函数固定单价。这些都不等于聊天模型token免费。
+- **GPT开关**：支持相应工具的普通Responses模型可逐请求增删`tools`中的指定项；`auto`只是允许模型自行决定，不能保证不调用。Chat Completions专用search模型会先搜索再响应，不能承诺同模型的通用搜索关闭开关，需用普通模型+可选工具。`external_web_access:false`仅让搜索用缓存/索引，不能当作禁止搜索或保证不收工具费。文件存储、已执行调用/容器的费用不能通过后续关闭工具抹去。
+- **GLM搜索价格**：官方当前Search-Std ¥0.01/次，Search-Pro ¥0.03/次，Search-Pro-Sogou/Quark各¥0.05/次，按实际调用次数收费；聊天模型费另外统计。Chat文档`web_search.enable`默认false，支持的模型可设true开启、false或移除该项关闭，`search_engine`选择引擎。独立`POST /api/paas/v4/web_search`也可明确选择引擎，不能把外置到插件调用解释成免费。
+- **GLM Responses边界**：官方声明`tools`支持function/namespace/custom/web_search、`tool_choice`支持none/auto；参数页搜索结构未声明引擎选择，不能直接把该入口价格对应到Std或Pro。文档示例为glm-5.3，没有明确glm-5.3-flash的内置搜索支持矩阵；Flash模型页仅明确Function Calling，Chat多模态schema列FunctionToolSchema，不外推为Responses一定支持或一定不支持原生搜索。用户当前Flash+Responses的原生搜索适配与价格先标未验证，不自动启用或实调。
+- **GLM知识库与生成服务**：云知识库向量化¥0.5/百万tokens、rerank¥0.8/百万tokens、深度解析¥0.12/页、容量扩容¥0.04/GB/小时（1GB内存储免费），是独立服务费用，不能套用OpenAI的file_search参数。GLM-Image当前¥0.1/次，是另一个图像服务而不是Flash的普通游戏函数。Gamer配置包记忆继续自管SQLite与独立embedding，不自动上云知识库或增加图像/代码服务。
+- **拟定交互**：对话输入区联网模式采用关闭/独立搜索/模型内置单选，默认供应商内置关闭，减少双路同时搜索；只有经过提供方+协议+模型验证的能力才显示可用，未知价格明确显示未确认。攻略记忆读取/维护与游戏控制分别按既定权限处理，不因关闭搜索一起失效。工具目录与有效模式按每次模型请求冻结为快照，后续请求/重试使用当前设置；本地调用派发前再校验当前授权。内置工具已经在供应商端执行时，开关只能禁止后续请求，不能承诺中止或免除在途费用；可取消的请求保持中断状态与实际回执，不能为追求立即关闭而重放动作。
+- **记录与预算**：模型token、搜索次数/引擎/返回credit、托管存储/容器等可得数据分开记录；一条用户输入可对应多个模型请求和多次工具执行。缺失计费字段标未知，不用一次消息算一次搜索，不硬编码未知GLM Responses档位。价格带核实日期与币种，供展示参考；所有内部预算0无上限语义保持，供应商配额与后台计费状态单列。
+
+资料：[OpenAI官方工具价格](https://developers.openai.com/api/docs/pricing)、[OpenAI工具配置](https://developers.openai.com/api/docs/guides/tools)、[搜索工具与专用模型限制](https://developers.openai.com/api/docs/guides/tools-web-search)、[智谱官方定价](https://docs.bigmodel.cn/cn/guide/start/pricing)、[智谱Chat工具参数](https://docs.bigmodel.cn/api-reference/模型-api/对话补全)、[智谱Responses兼容](https://docs.bigmodel.cn/cn/guide/develop/responses/introduction)、[智谱Responses参数](https://docs.bigmodel.cn/api-reference/response/创建-response)、[智谱独立搜索API](https://docs.bigmodel.cn/api-reference/工具-api/网络搜索)。本轮只读调查并更新设计，不增加真实接口调用或运行依赖。
+
 ### 配置包记忆设计（2026-10-03，待实施）
 
 用户要求先设计；已明确记忆按配置包归属、随包保存，AI 自动总结直接加入并在遇错后自动修复，尽量减少交互。用户最新提出将管理也统一到对话及MCP：记忆库界面只读，新增、修改、停用、删除和恢复由用户通过对话指示AI执行；内置Agent和外部MCP共用受限记忆工具。本设计建议采用这一交互，覆盖此前直接编辑表单的提案。导入攻略由 AI 自行合并，记忆库使用索引按需查询。无需逐条确认，也不另建游戏分类。当前仅完成设计，尚未加入记忆能力。
