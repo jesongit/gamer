@@ -243,7 +243,24 @@ API key 和连接令牌保存在宿主 `extension-data/gamer-ai/private/` 等插
 
 改版还修复自动暂停/失败计数的旧 generation 竞态；恢复清理失败保留真实屏障状态，不能谎报已暂停/人工可用。公开决策摘要只解析 Responses 的 `reasoning.summary[].summary_text`；供应商省略摘要时显示真实请求与工具进度，不读取私密推理字段。[公开摘要与不完整响应字段依据](https://developers.openai.com/api/docs/guides/reasoning)。
 
-当前 UI 回归 28 项、生产构建通过；Rust AI 回归、浏览器追加指令闭环、静态检查、宿主构建和最终归档验收收尾后补齐。
+改版最终验收（2026-10-03）：
+
+| 检查 | 结果 | 范围 |
+| --- | --- | --- |
+| AI 插件 UI Vitest | 28 项通过 | 持续消息、暂停发送/继续、实际用量下界、0 无上限、工具详情与公开摘要 |
+| Rust AI 模块（含 opt-in） | 32 项全部通过 | 本机 HTTP 模型 fixture、预算、消息收据、旧代次暂停/失败/租约竞态，以及真实隔离浏览器闭环 |
+| 架构边界 | 7 项通过 | Core 与插件业务边界、Runner/UI 生命周期 |
+| fmt / Clippy / 无 WASM 编译 | 通过 | `cargo fmt --all -- --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo check --no-default-features`，均使用锁定依赖 |
+| SDK 与 UI 生产构建 | 通过 | 固定 SDK 7 文件一致；单插件动态模块和资产同步 |
+| 单插件包装 | 通过 | staging 校验、registry/checksums 与最终归档一致；公共市场 registry 原有本地改动保留 |
+| 默认 WASM 宿主独立构建 | 通过 | `cargo build --locked -j 2 --target-dir server/target/ai-chat-candidate`；未覆盖正在运行的二进制 |
+| 真实二进制安装验收 | 18 项通过 | 临时配置/数据，真实 HTTP 安装 0.2.0；Runner、UI 资产、私密设置、独立 MCP 认证及版本、停用注销、正常退出 |
+
+浏览器闭环使用官方 Chrome for Testing `154.0.8037.92`，通过仅测试进程的 `GAMER_AI_TEST_BROWSER` 选定；页面、资料目录与 Responses API 均为本机 fixture，不操作用户游戏或真实模型。覆盖暂停后人工输入、提高预算/0 无上限继续、仅追加指令保持暂停、发送并继续、累计用量保留及结束后拒绝追问。当前 Core 并未增加业务接口。
+
+可用宿主为 `server/target/ai-chat-candidate/debug/gamer-server.exe`，版本 `0.2.6`，编译来源 `170e3d3e7311dfa6acdaab22899b6fdbeaac1236`；后续修改仅为格式与验收文档。最终插件 commit 为 `c571433`，归档 `plugins/dist/plugins/gamer-ai-0.2.0.gplugin`，SHA256 `2358dd26764bd47e8402f714751a887f0dc460b19fe6a8f67f9bc0eaa77e2295`。安装验收结果保存在本机临时目录的 `gamer-ai-chat-binary-smoke-uyrJbb/result.json`。
+
+当前用户的旧宿主进程与暂停会话保留，未部署到正在运行的进程。使用新版需先停止宿主，替换为以上候选二进制并启动，再在插件页导入以上归档；重启后需要开始新对话，旧内存聊天不会自动恢复。
 
 ## 11 当前源码依据与外部资料
 
