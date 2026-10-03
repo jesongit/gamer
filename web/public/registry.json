@@ -1,12 +1,63 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-09-28T12:27:53Z",
+  "generated_at": "2026-10-03T14:20:48Z",
   "host_api": "1.0.0",
   "provenance": {
-    "plugin_commit": "3d570dc72c8925739d453cf42730537006f94d3e",
-    "sdk_host_commit": "3de0c7e7e21ef3ad78f3c8604fd09f225bc5ee73"
+    "plugin_commit": "a4ec35398e88cf50cd22e9263401448b7d808037",
+    "sdk_host_commit": "90b4159c5f76604b150e8cea651d7a378c4f97a2"
   },
   "plugins": [
+    {
+      "id": "gamer-ai",
+      "version": "0.3.0",
+      "name": "AI 助手",
+      "description": "Agent 对话、配置包攻略记忆与混合检索，可选联网服务和本机 MCP 游玩接入",
+      "publisher": "gamer.dev",
+      "download_url": "/plugins/gamer-ai-0.3.0.gplugin",
+      "sha256": "6c72e691cd13443e54eab7eb25f38250344e1ff4b0793fa2d413bcff0e7c6e0f",
+      "size": 43099,
+      "permissions": [
+        "ui.host",
+        "ai.connect",
+        "resource.read",
+        "device.read",
+        "device.app",
+        "input.tap",
+        "input.swipe",
+        "input.key",
+        "input.text",
+        "touch",
+        "runtime.sleep",
+        "log.write"
+      ],
+      "host_api": {
+        "device": "^1.0",
+        "input": "^1.0",
+        "log": "^1.0",
+        "resource": "^1.0",
+        "runtime": "^1.0",
+        "touch": "^1.0",
+        "ui": "^1.0"
+      },
+      "ui": {
+        "contributions": [
+          {
+            "component": "AiWorkspace",
+            "entry": "ui/plugin.js",
+            "location": "console.right",
+            "order": 60,
+            "panel_id": "ai",
+            "requires_device": false,
+            "runtime": "core",
+            "title": "AI 助手"
+          }
+        ]
+      },
+      "execution": {
+        "kind": "builtin",
+        "host_version": ">=0.2.7"
+      }
+    },
     {
       "id": "gamer-keymap",
       "version": "0.1.3",

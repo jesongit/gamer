@@ -332,6 +332,26 @@ fmt、锁定依赖的全 feature/all targets Clippy、无 WASM 编译及独立�
 
 资料：[OpenAI官方工具价格](https://developers.openai.com/api/docs/pricing)、[OpenAI工具配置](https://developers.openai.com/api/docs/guides/tools)、[搜索工具与专用模型限制](https://developers.openai.com/api/docs/guides/tools-web-search)、[智谱官方定价](https://docs.bigmodel.cn/cn/guide/start/pricing)、[智谱Chat工具参数](https://docs.bigmodel.cn/api-reference/模型-api/对话补全)、[智谱Responses兼容](https://docs.bigmodel.cn/cn/guide/develop/responses/introduction)、[智谱Responses参数](https://docs.bigmodel.cn/api-reference/response/创建-response)、[智谱独立搜索API](https://docs.bigmodel.cn/api-reference/工具-api/网络搜索)。本轮只读调查并更新设计，不增加真实接口调用或运行依赖。
 
+### 官方订阅与 GLM MCP 禁用边界（2026-10-03，追加调查，待实施）
+
+用户确认 GPT 与 GLM 均为官方订阅，主要希望关闭 GLM 官方 MCP，避免消耗套餐工具额度；GPT 日常使用内置搜索的体验应按订阅入口解释，不能套用上一节的标准 API 按次收费。
+
+2026-10-03 用户决定暂时不处理 GLM 服务端 MCP 禁用问题。保留调查结论及未验证状态，不再追加禁用参数研究，也不将它作为 Agent 对话、配置包记忆、混合检索和独立搜索实现的前置条件；本轮不变更运行中的模型或客户端配置。
+
+- **GPT 订阅**：通过 ChatGPT 登录官方 ChatGPT/Codex 时，内置搜索是套餐提供的功能，不产生标准 API 的逐次搜索账单；仍受套餐用量、限制及用户另购 credits 影响，搜索上下文与工具结果并非不消耗用量。使用 OpenAI Platform API Key 时按 API 计费，`web_search` 当前为 $10/1000 次加搜索内容 tokens。Codex 本地配置 `web_search = "disabled"` 可关闭搜索，`live` 开启实时搜索；不是 Gamer Provider 的现有设置。
+- **OpenAI 应用接入**：当前官方另有 Sign in with ChatGPT 的 ChatGPT plan usage，面向符合条件的开源、本地托管应用，以 OAuth 用户授权使用套餐完成合格 Responses 请求，处于 preview 且有接口限制；商业或远程托管应用按官方申请流程处理。不能声称任何自建应用都绝对无法消费订阅，也不能把现有 API Key 字段等同官方订阅登录。Gamer 尚未实现该流程，本轮不导入任何客户端登录凭证、不新增订阅 Provider。
+- **GLM 手动 MCP**：客户端禁用或删除对应 MCP 连接可阻止该连接的调用，例如 `web-search-prime`、`web-reader`、`zai-mcp-server`；具体操作归所在客户端。不要因此关闭 Gamer 自己提供的截图、输入及后续记忆 MCP。
+- **GLM 服务端内置能力**：智谱搜索、读取、视觉 MCP 文档明确 Claude Code 使用 Coding Plan 时服务端已内置相应能力，无需安装。未找到官方公开的套餐级 `disable_mcp` 或保证关闭这些服务端能力的参数；删除手动连接不能被描述为统一禁用。文档也没有保证每次请求都会调用，不能从内置存在推断每次都扣工具额度。
+- **GLM 普通 API 请求**：Chat 原生搜索可设 `web_search.enable:false`；Responses 从 `tools` 移除 `type:web_search`，游戏 function 工具继续保留。`tool_choice:none` 禁用全部工具，不能作为单独关闭官方 MCP 的方案。现有 Gamer 仅发送自己的 function 工具，没有配置调用智谱 MCP 服务地址，也未主动注册原生搜索；该代码事实不证明 Coding Plan 在其他客户端的服务端行为可被关闭。Flash + Responses 及具体套餐的隐藏工具行为没有进行真实付费验收。
+- **社区禁用调查**：用户进一步要求扩大网上检索。截至 2026-10-03，未找到可复现且能只禁用套餐服务端内置 MCP 的成功参数。LINUX DO 2026-04-08 的同题讨论报告全局禁用无效，建议删除手动连接后楼主指出本来就没有该配置；Reddit 2026-06-14 的楼主报告清空 MCP 与全新 Windows 安装后仍有视觉/读取工具，并在回复中转述 Discord 当时没有关闭选项。后者是用户转述，不作为当前官方承诺；这些报告集中 Claude Code/兼容接入，不能据此认定 Gamer 的 Flash + Responses 同样自动注入。搜索中出现的第三方 `ZHIPU_USE_MCP=false` 是项目自身改用按量 REST 接口的选择，不是智谱服务端禁用开关，不能推荐为节费解决方案。
+- **后续实测记录**：claudish PR #18 的作者记录 2026-08-11 直连 Z.ai Anthropic 兼容入口的真实 SSE，包含服务端 `web_search_prime` 执行及返回结果；其修复过滤的是已经返回的 `server_tool_use/tool_result` 块，用于客户端兼容，不是禁止服务端执行或节省工具配额的证明。TideMux 2026-10-03 issue #106 仍报告服务端网页/视觉工具结果影响历史兼容，提供的是历史修正及改用客户端工具的建议，没有给出套餐禁用参数。两者不证明国内 BigModel Flash + Responses 的行为相同，不将响应过滤包装成收费控制。
+- **套餐额度**：新版 Coding Plan 模型与 MCP 共用积分，搜索/网页读取按基础 1.2 积分/次计算；历史 V1/V2 与旧团队套餐公告保留其原有权益和计算方式，不用新版规则覆盖所有存量账号。具体计费归属还取决于官方支持的客户端与套餐入口，不能只凭 base URL 推断。
+- **Gamer 交互约束**：GLM 官方云工具默认不注册、不派发；联网搜索、网页读取、云视觉分别可控，已有游戏截图/输入和配置包记忆独立。只对本插件能够控制的调用承诺开关生效；无法验证禁用的供应商端内置能力明确显示未验证，不用提示词充当硬开关，也不在关闭后隐式降级到其他付费服务。GPT 订阅入口与 API Key 模式显示不同计费说明，不统一标为“搜索收费”或“永久免费”。本轮仅调查并更新设计。
+
+资料：[ChatGPT/Codex 套餐与 API Key 计费](https://learn.chatgpt.com/docs/pricing)、[Codex 搜索开关](https://learn.chatgpt.com/docs/web-search)、[OpenAI API 工具价格](https://developers.openai.com/api/docs/pricing)、[ChatGPT plan usage](https://developers.openai.com/siwc/token-sharing-open-source)、[preview 限制](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)、[GLM 搜索 MCP](https://docs.bigmodel.cn/cn/coding-plan/mcp/search-mcp-server)、[GLM 读取 MCP](https://docs.bigmodel.cn/cn/coding-plan/mcp/reader-mcp-server)、[GLM 视觉 MCP](https://docs.bigmodel.cn/cn/coding-plan/mcp/vision-mcp-server)、[GLM 客户端 MCP 管理](https://docs.bigmodel.cn/cn/coding-plan/best-practice/claude-code)、[新版积分](https://docs.bigmodel.cn/cn/coding-plan/overview)、[历史套餐权益](https://docs.bigmodel.cn/cn/coding-plan/notice/usage-revision)。
+
+社区资料：[LINUX DO 同题报告](https://linux.do/t/topic/1920877)、[Reddit 重装仍出现及 Discord 回复转述](https://www.reddit.com/r/ZaiGLM/comments/1u5bnll/does_glm51_include_builtin_mcp_tools_glm45v/)、[claudish 服务端工具真实 SSE 记录](https://github.com/jsboige/claudish/pull/18)、[TideMux 兼容问题报告](https://github.com/hs3180/tidemux/issues/106)、[第三方 MCP/REST 切换参数原始项目](https://github.com/wnzzer/zhipu-tools-coding-plan)。论坛内容只用于记录当事人的观察及检索结果，不把猜测、转述或客户端开关提升为供应商 API 契约。本轮未使用真实密钥测试或修改客户端配置。
+
 ### 配置包记忆设计（2026-10-03，待实施）
 
 用户要求先设计；已明确记忆按配置包归属、随包保存，AI 自动总结直接加入并在遇错后自动修复，尽量减少交互。用户最新提出将管理也统一到对话及MCP：记忆库界面只读，新增、修改、停用、删除和恢复由用户通过对话指示AI执行；内置Agent和外部MCP共用受限记忆工具。本设计建议采用这一交互，覆盖此前直接编辑表单的提案。导入攻略由 AI 自行合并，记忆库使用索引按需查询。无需逐条确认，也不另建游戏分类。当前仅完成设计，尚未加入记忆能力。
@@ -438,6 +458,13 @@ AI 导入与索引的具体执行路径（2026-10-03，按用户最新要求调�
 - **并发、历史与停用**：用户请求与后台AI同改条目时，冲突后重新读当前版本并生成补丁，无法协调则保留请求并说明未提交，不force覆盖。每次修改有操作者/维护类型、用户指令或MCP调用来源、原因及修订历史。撤销或恢复旧版作为基于当前版本的新修订提交，不倒退资源版本或移除后续历史。停用/删除立即退出常规检索，保留最小禁自动复建标记，恢复由用户委托执行；旧模型响应、导入作业不能复活它。AI发现人工指定内容与观察冲突时写关联修正建议，保留人工字段。
 - **原稿修改与验收**：用户在对话附来源或明确要求替换原稿，完成后显示自动重新合并进度及新增/修订/冲突数量。仍保留旧来源修订和必要引用摘录，关联记忆待复核；人工保护内容另存关联补充，不因原稿变化被AI覆盖。新增验收覆盖内外部相同工具结果、只读令牌拒写、无设备和暂停中查改、混合指令不越权恢复、客户端伪造human标记、并发补丁/重试去重、指令撤回及恢复历史。首版不保留并行的手工编辑表单。
 
+实施前补齐的默认合同（2026-10-03，设计复核；实际交付以文末实施记录为准）：
+
+- **后台优先级**：用户对话和实时游玩决策优先，攻略合并/自动总结以短批次推进，在模型请求边界让出，索引实时查询优先于批量生成；显示排队/处理中状态，避免后台作业耗尽连接并发。作业进度持久保存，暂停/停止不重放已提交的结果，不增加独立通用任务平台。
+- **提交与导出快照**：选定当前正文中携带的修订与操作身份为单条记忆提交点，修订记录先不可变落盘，持久操作收据可依据提交点修复；多文件逐个原子写不等于整体完成。Package 导出与后台写入共用通用包保护，先取得短暂一致快照再打包，不在模型网络请求期间持有导出屏障，避免正文、来源和修订来自不同时间。
+- **保留与删除**：普通截图按可见期限/容量策略清理，已清理附件显示状态；文字历史、攻略正文及修订单独管理，清截图不删攻略证据摘要。用户明确永久删除记忆时同时清该条目的正文、修订和检索派生副本，旧引用显示已删除，保留最小禁自动复建标记。删除原始攻略与删除合并记忆仍按各自语义处理。
+- **接入配置（用户最终要求覆盖此前建议）**：Embedding、搜索、网页读取都是独立的可选接入，默认关闭，不指定必用供应商。提供 OpenAI Embeddings 兼容/Cloudflare 和 Tavily/Brave/SearXNG/自定义协议适配，可配置 URL、模型、账户、凭据及超时。供应商预设只帮助填表，不替用户启用服务或沿用聊天密钥；未配置时关键词检索继续可用并标明语义支路未就绪，没有付费回退。服务真实账户配置由用户选择，不阻止先完成可重复的本地协议和功能验收。
+
 Cloudflare额度测算：官方每天10000 Neurons，BGE-M3和Qwen3-Embedding-0.6B均按每百万输入tokens消耗1075 Neurons，单独用于这些embedding时约930万tokens/天。假设首次10000个分块各500tokens，占53.75%；日常1000次查询各100tokens加100个变更块各500tokens，占约1.61%。这些是假设的实际embedding输入tokens，不是中文字数。账号其他Workers AI调用共享额度，UTC零点即北京时间08:00重置，免费计划超额拒绝而不会自动升级。分批恢复和FTS降级保持可用；智谱游玩、总结及攻略合并费用另计。
 
 资料：[sqlite-vec Rust静态编译](https://alexgarcia.xyz/sqlite-vec/rust.html)、[vec0过滤约束](https://alexgarcia.xyz/sqlite-vec/features/vec0.html)、[普通表距离检索](https://alexgarcia.xyz/sqlite-vec/features/knn.html)、[Rust中文分词](https://github.com/messense/jieba-rs)、[BGE查询/文档编码说明](https://huggingface.co/BAAI/bge-small-zh-v1.5)、[Cloudflare BGE-M3](https://developers.cloudflare.com/workers-ai/models/bge-m3/)、[Cloudflare计费](https://developers.cloudflare.com/workers-ai/platform/pricing/)。仅更新设计，未新增运行依赖、注册账户、调用embedding或修改运行配置。
@@ -481,3 +508,22 @@ Cloudflare额度测算：官方每天10000 Neurons，BGE-M3和Qwen3-Embedding-0.
 - [MCP 传输规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)：Streamable HTTP、本机绑定及 Origin 规则。
 
 本文不包含用户测试密钥。真实模型检查证明指定账户与端点当时的图像/工具协议兼容；浏览器闭环与 Android socket 回归分别验证执行路径，实际设备和具体游戏效果由用户自测，不能据模型的完成自述推断游戏成功率。
+
+## 2026-10-03 实施记录：Agent 与配置包记忆
+
+用户已授权推进全部功能，并明确服务供应商可选。插件版本提升为 0.3.0，最低宿主 0.2.7；既有设计段落记录讨论过程，以下合同覆盖其中的“尚未实施”和默认供应商建议。
+
+- 对话支持无设备问答、持续引导、真实模型 SSE 增量、消息队列/撤回、取消、分页历史和本机脱敏诊断；游玩会话使用同一持久对话时间线，游戏暂停、恢复和输入屏障继续走现有 Core。聊天取消不会自动停止设备控制，明确恢复才转入游玩路径。
+- 当前配置包内保存记忆、不可变修订、来源和防复活标识；FTS5、Jieba 中文词项、sqlite-vec 0.1.6 与 RRF 组成可重建混合索引。两路检索先应用相同版本/状态/种类过滤；未配置 Embedding 显示关键词降级，切换编码配置重建向量，不混用模型。
+- UI 只读查看攻略、出处、历史、差异及来源冲突，编辑通过真实用户对话或独立授权的 MCP 工具完成。旧 MCP 令牌不获得新增 scope，无设备令牌可单独查改攻略；保护字段修改必须有可信委托，不能靠工具参数冒充人工。
+- Markdown/TXT 先保存原稿，再持久排队按片段由 AI 查重和合并。聊天、游玩和导入预算均提供轮数/工具/活动秒数/Token/连续失败，全部 0 表示无上限；已累计用量保留。前台优先，作业暂停/取消/源修订在提交屏障内核对，已提交操作有稳定收据。
+- 用户明确给出的定义先按原文保存受保护记忆，无需额外模型请求，再把经验原文交给后台合并；游玩结束时仅有实际操作回执才暂存经验，失败会明确标为未验证，截图像素、输入密文和已有记忆正文不成为递归总结材料。无可复用信息可跳过，不要求模型编造攻略。导入与游玩分别累计预算，界面展示独立作业。
+- 向量、搜索和网页读取默认关闭；供应商、协议、URL、完整 endpoint、模型、账户和独立凭据可选配置，完整 endpoint 优先。文档和查询支持分别编码前缀及 UTF-8 输入字节上限，全部纳入索引指纹；切换后正文保留、索引可重建。没有向量服务时关键词检索可用，不自动切换收费服务。
+- Core 新增内容无关的配置包活动租约与同步快照/替换钩子；配置包使用中（含游玩暂停）拒绝删除/覆盖，导出与多文件提交共用屏障。已安装 AI 插件在覆盖导入时保留本机记忆，把传入攻略交给合并；未安装插件数据仍按 dormant 契约保留。删除配置包清理派生缓存和作业、归档旧对话并撤销该包 MCP 令牌。
+- 模型默认仅展示公开回答/摘要；Chat Completions 可显式开启展示供应商公开返回的 reasoning_content，默认关闭，不解析 Responses 私密 reasoning 或 encrypted_content。该字段来自供应商 API，[智谱公开返回字段说明](https://docs.bigmodel.cn/api-reference/%E5%8A%A9%E7%90%86-api/%E5%8A%A9%E6%89%8B%E5%AF%B9%E8%AF%9D)，不表示读取本工具的隐藏推理。
+
+本轮用隔离的本机 HTTP/SSE 模拟端点测试服务适配和取消边界，未把测试密钥写入代码、文档、配置包或日志。可选服务的真实账户和游戏实测由用户后续按所选供应商配置。
+
+最终验证：`cargo fmt --all -- --check`、全目标/全 feature 的 Clippy `-D warnings`、`cargo check --locked --no-default-features` 通过。默认 feature 下 AI 93 项通过（含记忆 20 项），另显式运行隔离 Chrome 游玩/MCP 闭环 1 项通过；资源、配置包归档、架构及输入屏障 37 项，以及配置包 HTTP/状态/dormant 16 项通过。插件 UI 65 项、主壳相关 92 项回归通过，宽屏与 390px 窄屏对话/记忆/服务配置已视觉检查，壳与插件 UI 生产构建、SDK 固定快照校验和 `.gplugin` 完整性自检通过。
+
+检索回归使用三个中文问题与确定性的本机模拟向量：关键词命中 2/3，向量与混合各 3/3；本次并行测试累计耗时分别约 720/477/338ms。这只证明索引、过滤及融合链路，不代表真实 Embedding 模型召回率或实际游戏效果。覆盖导入另验证同来源 ID/修订但正文分叉时保留两份原稿、引用映射、操作收据隔离及删除抑制。
