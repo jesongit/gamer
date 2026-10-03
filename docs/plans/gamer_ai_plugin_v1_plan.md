@@ -329,6 +329,16 @@ AI 导入与索引的具体执行路径（2026-10-03，按用户最新要求调�
 
 设计资料：[RAG原论文](https://arxiv.org/abs/2005.11401)、[混合检索的词项/向量互补](https://learn.microsoft.com/en-us/azure/search/hybrid-search-overview)、[排名融合RRF](https://learn.microsoft.com/en-us/azure/search/hybrid-search-ranking)、[sqlite-vec静态编译与rusqlite注册](https://alexgarcia.xyz/sqlite-vec/rust.html)、[智谱Embedding-3官方模型和接口说明](https://docs.bigmodel.cn/cn/guide/models/embedding/embedding-3)。以上为设计依据，未选用Azure服务，尚未加入记忆运行代码或进行真实embedding调用。
 
+本地Embedding成本优化候选（2026-10-03，用户询问，尚未选择或安装）：
+
+- **优先接入方式**：插件新增独立Ollama embedding适配，通过`http://127.0.0.1:11434/api/embed`调用本机服务，允许无API key。主宿主已有reqwest/Tokio，可复用网络超时/取消等机制；现有聊天Provider与Settings强制非空密钥且只处理Responses/Chat，不能直接作为本地embedding实现。Ollama支持原生Windows，运行时和模型按机器配置保存，不装入游戏配置包。
+- **候选模型**：优先评估`qwen3-embedding:0.6b`（官方Ollama Q8_0模型包约639MB，模型原始定义支持最多1024维、多语言含中文）；备选`bge-m3`（Ollama模型包约1.2GB，多语言、8K文本窗口），或更轻的`BAAI/bge-small-zh-v1.5`（中文、512维，官方safetensors权重约95.8MB，需另行选择并验证推理运行时）。模型包/权重下载体积不等于运行时内存，真实中文攻略召回与CPU延迟须测试。
+- **运行约束**：查询优先于后台批量建索引，控制并发和短批次，避免与游戏争用CPU/GPU；按照模型要求固定查询指令、分词/池化/归一规则及模型实际版本或摘要，纳入向量缓存指纹。Ollama默认可能截断超长输入，应显式禁止静默截断并按完整步骤拆分；响应校验数量、维度及有限数值。
+- **费用与故障**：本地生成向量和语义查询无远程embedding API调用费，仍消耗本机资源；游戏画面判断、记忆自动总结与AI导入合并若继续使用远程聊天模型，仍产生对应API费用。本机服务不可用时使用FTS5并展示降级原因，不自动切到收费接口。用户选择本地后仍可独立切换游玩模型，换embedding模型/维度需要重建向量。
+- **一体化备选**：Rust进程内ONNX推理可减少独立服务安装，但当前无ORT/Candle/tokenizers依赖，会新增分词器、模型文件管理、Windows CPU/GPU二进制和资源调度工作。只有要求一体化安装时再评估，不仅为本地推理提前建设平台。
+
+资料：[Qwen3-Embedding-0.6B官方模型卡](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B)、[Ollama模型包](https://ollama.com/library/qwen3-embedding:0.6b)、[BGE-M3模型包](https://ollama.com/library/bge-m3)、[BGE中文小模型](https://huggingface.co/BAAI/bge-small-zh-v1.5)、[Ollama Windows](https://docs.ollama.com/windows)、[Ollama embedding API](https://docs.ollama.com/api/embed)。尚未安装运行时、下载模型、调用embedding或验证本机性能。
+
 其他方案比较（2026-10-03，用户询问，候选评估而非新增实施决定）：
 
 | 方案 | 对当前项目的价值与代价 |
