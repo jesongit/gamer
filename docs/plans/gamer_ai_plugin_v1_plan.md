@@ -545,3 +545,17 @@ Cloudflare额度测算：官方每天10000 Neurons，BGE-M3和Qwen3-Embedding-0.
 本轮源码验证：默认 feature 与无默认 feature 的 AI 回归均为118通过/0失败，包含上述四项恢复与自动纠错回归；隔离 Chrome 游玩/MCP闭环1项通过且无fixture异常。83项插件UI回归、390px/560px布局检查、壳与插件生产UI构建、版本/SDK固定快照校验均通过。真实GLM无设备短对话另收到74段公开思考增量（328字符）、正确答复且无工具执行；已有未记录的思考仍不能补回。浏览器模型循环使用本机fixture，未据此推断实际游戏效果。
 
 全目标/全feature Clippy -D warnings、cargo fmt检查和0.3.2归档完整性自检通过。插件修复使用新版本归档，沿用宿主0.2.8的本轮实现，不覆盖已安装的同版本插件归档。
+
+## 2026-10-04 普通对话拒绝控制与提示词可见性
+
+实际会话 `3237a038-98e3-4186-9396-8c0668de7426` 在07:34收到游玩目标，仍以普通对话执行；`game_session_id=null`，仅两次成功的 `memory_search`，没有设备工具。07:35最终回答称无设备权限并提示已删除的“游玩页”，来源是硬编码普通对话系统提示词。内置Agent复用同一工具目录/执行器，不依赖连接自身HTTP MCP；本次不是MCP断联。普通问答与需要显式选择设备的游玩授权仍保持分离，模式切换本身不启动设备，暂停仍需明确继续。
+
+新增账号级私密提示词配置 `prompts.get/save/reset`，普通对话、游玩、后台合并三份基础模板分别可编辑，各最多32 KiB UTF-8，配置版本与模型/可选服务独立。每次实际模型请求在历史压缩后刷新基础模板和固定动态上下文，既有对话不会继续使用过时提示词；正在发送的请求和历史快照保持原值。动态包/设备/代次、权限和记忆提交约束只读，实际工具及Core门禁始终执行。
+
+`prompt_snapshot` 在最终Responses/Chat Completions请求体组装后、HTTP发送前记录，保留实际输入顺序、全部工具schema和公开生成参数；不以设置文本或重构的历史假装完整请求。UI将每轮请求卡放在用户消息之前，默认展开最新系统/开发者指令，其余输入、工具和前几轮按需展开。既有未捕获轮次明确无法还原。密钥、认证、图片像素、输入工具文本和私密推理载荷脱敏，工具定义不会因为含同名属性而被删。
+
+后台攻略合并所有实际请求持久保存，`memory.job.prompts` 按包/作业及after_seq分页；相关游戏对话也记录同种事件。快照不进入游戏经验原稿或递归RAG材料。诊断查看/导出均保留脱敏后的完整快照，并保留公开reasoning设置与工具schema。界面借鉴 [Harness SystemPromptRow](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-chat/src/client/chat/SystemPromptRow.tsx) 与 [request-inspection](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-conversation/src/client/contract/request-inspection.ts) 的完整系统提示词和工具目录查看。
+
+同次日志检查发现旧经历整理作业在5/14片段处因“AI API流响应超过大小限制”失败。SSE累计传输原先复用普通JSON的2MiB上限，逐段封套使正常长输出也可能达到限制；改为独立32MiB累计传输保护，普通JSON与单事件仍分别有界，不取消预算、超时或设备暂停。续作从未完成片段推进，不重新提交既有攻略结果。
+
+修复交付版本为AI 0.3.3 / 宿主0.2.9。冻结源码的默认与无默认feature回归各128通过/0失败，隔离Chrome的游玩/MCP/暂停恢复闭环1项通过；UI101项通过，390px/560px/1240px请求与提示词布局检查通过。全目标/全feature Clippy `-D warnings`、fmt、版本与SDK快照校验、壳和插件UI生产构建及0.3.3归档完整性自检通过。协议fixture证明两种协议快照等于实际wire、在供应商输出前发出，205条导入请求分页重启不丢失，旧chat两轮配置更新生效、伪装schema/capture不豁免隐私；长SSE保留终态用量，超大单事件仍拒绝。
