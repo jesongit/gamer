@@ -1,5 +1,5 @@
 <template>
-  <div v-if="ctx.detailModal.open" class="modal-mask" @click.self="ctx.closeDetail">
+  <div v-if="ctx.detailModal.open" class="modal-mask" v-backdrop-dismiss="ctx.closeDetail">
     <div class="modal modal-wide">
       <h3>配置详情<template v-if="ctx.detailModal.packageId"> · <span class="mono">{{ ctx.detailModal.packageId }}</span></template></h3>
 
@@ -133,6 +133,7 @@
 </template>
 
 <script setup>
+import { vBackdropDismiss } from '../../../plugins/ui-shared/backdrop-dismiss.js'
 /**
  * Package 详情弹窗（plan §18/§21/§37 + §17）：manifest 全字段 + 插件依赖五态
  * 徽章 + 内容统计 + 兼容性检查 + 元数据编辑表单。状态与动作全部收敛在

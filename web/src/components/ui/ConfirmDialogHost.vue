@@ -1,6 +1,6 @@
 <template>
   <Teleport to="body">
-    <div v-if="confirmation" class="confirmation-mask" @click.self="finishConfirmation(false)">
+    <div v-if="confirmation" class="confirmation-mask" v-backdrop-dismiss="() => finishConfirmation(false)">
       <section ref="dialog" class="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="confirmation-title" aria-describedby="confirmation-message" tabindex="-1">
         <header><h2 id="confirmation-title">{{ confirmation.title }}</h2><button type="button" class="btn btn-icon btn-ghost" aria-label="关闭确认框" @click="finishConfirmation(false)"><UiIcon name="close" /></button></header>
         <div class="confirmation-body">
@@ -16,6 +16,7 @@
 </template>
 
 <script setup>
+import { vBackdropDismiss } from '../../../../plugins/ui-shared/backdrop-dismiss.js'
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import UiIcon from './UiIcon.vue'
 import { confirmation, finishConfirmation } from './useConfirmDialog'

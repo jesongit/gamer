@@ -46,3 +46,26 @@ describe('TemplateCropModal：模板短名冲突', () => {
     expect(ctx.backToCrop).toHaveBeenCalledTimes(1)
   })
 })
+
+it('框选拖出弹窗不取消或丢失名称；正常遮罩点击与取消按钮仍可关闭', async () => {
+  const ctx = context({
+    crop: { active: true, conflict: null, name: '尚未保存的模板' },
+    cropMouseDown: vi.fn(), cropMouseMove: vi.fn(), cropMouseUp: vi.fn(), cropMouseLeave: vi.fn(), cropWheel: vi.fn(),
+  })
+  const wrapper = mount(TemplateCropModal, { props: { context: ctx, onCropMounted: vi.fn() } })
+  const canvas = wrapper.get('canvas').element
+  const mask = wrapper.get('.modal-mask').element
+  const pointer = (target, type, x = 10) => target.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 1, isPrimary: true, button: 0, clientX: x, clientY: 10 }))
+  pointer(canvas, 'pointerdown')
+  pointer(mask, 'pointerup', 200)
+  mask.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 200, clientY: 10 }))
+  expect(ctx.cancelCrop).not.toHaveBeenCalled()
+  expect(wrapper.get('input.input').element.value).toBe('尚未保存的模板')
+  pointer(mask, 'pointerdown')
+  pointer(mask, 'pointerup')
+  mask.click()
+  expect(ctx.cancelCrop).toHaveBeenCalledTimes(1)
+  await wrapper.findAll('button').find(button => button.text() === '取消').trigger('click')
+  expect(ctx.cancelCrop).toHaveBeenCalledTimes(2)
+  wrapper.unmount()
+})

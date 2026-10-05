@@ -54,7 +54,7 @@
     </div>
 
     <!-- 新建/编辑弹窗（新建与编辑复用）：名称/设备/触发方式/执行器/执行目标/参数/启用 -->
-    <div v-if="showAdd" class="modal-mask" @click.self="showAdd = false">
+    <div v-if="showAdd" class="modal-mask" v-backdrop-dismiss="() => showAdd = false">
       <div class="modal">
         <div class="modal-head">
           <span class="title">{{ form.id ? '编辑任务' : '新建任务' }}</span>
@@ -175,6 +175,7 @@
 </template>
 
 <script setup>
+import { vBackdropDismiss } from '../../../plugins/ui-shared/backdrop-dismiss.js'
 const confirmDialog = useConfirmDialog()
 import { useConfirmDialog } from './ui/useConfirmDialog'
 import UiIcon from './ui/UiIcon.vue'

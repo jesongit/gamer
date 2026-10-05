@@ -4,7 +4,7 @@
      （本地时区格式化），提供「仍要查看日志」跳控制台对应设备；
      关闭不打断当前页面其他功能。 -->
 <template>
-  <div v-if="cur" class="modal-mask" @click.self="close">
+  <div v-if="cur" class="modal-mask" v-backdrop-dismiss="close">
     <div class="modal conflict-modal">
       <div class="modal-head">
         <span class="title">⚠️ 设备正被占用</span>
@@ -26,6 +26,7 @@
 </template>
 
 <script setup>
+import { vBackdropDismiss } from '../../../plugins/ui-shared/backdrop-dismiss.js'
 import { computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { store, devicesData, runConflicts, shiftRunConflict } from '../store'

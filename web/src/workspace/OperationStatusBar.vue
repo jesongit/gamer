@@ -5,10 +5,11 @@
     <OperationStatusZone side="plugin" :message="plugin" @perform="perform" />
     <span v-if="copyError" class="copy-error" role="alert">复制失败，请检查剪贴板权限</span>
     <span v-else-if="copied" class="copy-confirm" role="status">已复制</span>
-    <Teleport to="body"><div v-if="detail !== null" class="modal-mask" @click.self="detail = null" @keydown.esc.stop="detail = null"><section ref="detailPanel" class="modal status-detail" role="dialog" aria-modal="true" aria-label="操作详情" tabindex="-1"><div class="modal-head"><span class="title">操作详情</span><button class="btn btn-icon" aria-label="关闭操作详情" @click="detail = null">×</button></div><div class="modal-body"><pre>{{ detail }}</pre></div><div class="modal-foot"><button class="btn" @click="perform({ copy: detail })">复制</button><button class="btn" @click="detail = null">关闭</button></div></section></div></Teleport>
+    <Teleport to="body"><div v-if="detail !== null" class="modal-mask" v-backdrop-dismiss="() => detail = null" @keydown.esc.stop="detail = null"><section ref="detailPanel" class="modal status-detail" role="dialog" aria-modal="true" aria-label="操作详情" tabindex="-1"><div class="modal-head"><span class="title">操作详情</span><button class="btn btn-icon" aria-label="关闭操作详情" @click="detail = null">×</button></div><div class="modal-body"><pre>{{ detail }}</pre></div><div class="modal-foot"><button class="btn" @click="perform({ copy: detail })">复制</button><button class="btn" @click="detail = null">关闭</button></div></section></div></Teleport>
   </footer>
 </template>
 <script setup>
+import { vBackdropDismiss } from '../../../plugins/ui-shared/backdrop-dismiss.js'
 import { nextTick, onUnmounted, ref, watch } from 'vue'
 import OperationStatusZone from './OperationStatusZone.vue'
 defineProps({ core: Object, coreStatuses: { type: Array, default: () => [] }, plugin: Object })

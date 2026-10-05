@@ -1,5 +1,5 @@
 <template>
-  <div v-if="ctx.settingsOpen" class="modal-mask" @click.self="ctx.cancelSettings">
+  <div v-if="ctx.settingsOpen" class="modal-mask" v-backdrop-dismiss="ctx.cancelSettings">
     <div class="modal dev-modal">
       <div class="modal-head">
         <span class="title">{{ ctx.mode === 'add' ? '新增设备' : '设备设置' }}</span>
@@ -28,6 +28,7 @@
   </div>
 </template>
 <script setup>
+import { vBackdropDismiss } from '../../../../plugins/ui-shared/backdrop-dismiss.js'
 import { reactive } from 'vue'
 import ConsoleDeviceSummary from '../ConsoleDeviceSummary.vue'
 import DeviceVirtualFields from './DeviceVirtualFields.vue'

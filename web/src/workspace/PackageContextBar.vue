@@ -29,7 +29,7 @@
 
   <Teleport v-if="dialogs" to="body">
   <!-- 新建 / 复制弹窗（共用表单） -->
-  <div v-if="ctx.formModal.open" class="modal-mask" @click.self="ctx.closeForm">
+  <div v-if="ctx.formModal.open" class="modal-mask" v-backdrop-dismiss="ctx.closeForm">
     <div class="modal">
       <h3>{{ ctx.formModal.mode === 'create' ? '新建配置' : '复制配置' }}</h3>
       <label class="field">
@@ -58,7 +58,7 @@
   </div>
 
   <!-- 覆盖导入确认（plan §9：明示整体替换，避免半安装状态由服务端原子替换保证） -->
-  <div v-if="ctx.overwriteModal.open" class="modal-mask" @click.self="ctx.closeOverwrite">
+  <div v-if="ctx.overwriteModal.open" class="modal-mask" v-backdrop-dismiss="ctx.closeOverwrite">
     <div class="modal">
       <h3>配置已存在</h3>
       <p class="overwrite-warning">继续导入将<b>覆盖该配置当前数据</b>，包括用户直接修改或新增的内容。</p>
@@ -83,7 +83,7 @@
   </div>
 
   <!-- 删除确认 -->
-  <div v-if="ctx.deleteModal.open" class="modal-mask" @click.self="ctx.closeDelete">
+  <div v-if="ctx.deleteModal.open" class="modal-mask" v-backdrop-dismiss="ctx.closeDelete">
     <div class="modal">
       <h3>删除配置</h3>
       <p>将删除 <b class="mono">{{ ctx.deleteModal.target?.id }}</b> 的全部数据（含插件数据与 shared/），绑定任务将被挂起（不删除）。此操作不可恢复。</p>
@@ -98,7 +98,7 @@
   </div>
 
   <!-- 清单来自待下载的实际归档；取消只关闭预览，不触发下载。 -->
-  <div v-if="ctx.exportModal.open" class="modal-mask" @click.self="ctx.closeExport">
+  <div v-if="ctx.exportModal.open" class="modal-mask" v-backdrop-dismiss="ctx.closeExport">
     <div class="modal export-modal" role="dialog" aria-modal="true" aria-labelledby="package-export-title" :aria-busy="ctx.exportModal.loading">
       <h3 id="package-export-title">导出配置包</h3>
       <p class="export-subtitle">{{ ctx.exportModal.packageId }} · 仅包含已保存的内容</p>
@@ -168,6 +168,7 @@
 </template>
 
 <script setup>
+import { vBackdropDismiss } from '../../../plugins/ui-shared/backdrop-dismiss.js'
 /**
  * 右侧面板顶部的 Package Context 栏（plan §28）：当前 Package 下拉 +
  * 导入/导出/新建/复制/删除/详情。状态与动作收敛在 usePackageContext

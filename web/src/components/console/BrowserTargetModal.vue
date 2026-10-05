@@ -1,5 +1,5 @@
 <template>
-  <div class="modal-mask" @click.self="$emit('close')">
+  <div class="modal-mask" v-backdrop-dismiss="() => $emit('close')">
     <form class="browser-form" role="dialog" aria-modal="true" aria-label="浏览器目标" @submit.prevent="save">
       <h3>{{ target ? '浏览器目标设置' : '新增浏览器目标' }}</h3>
       <label>名称<input v-model="form.name" required maxlength="255" /></label>
@@ -14,6 +14,7 @@
   </div>
 </template>
 <script setup>
+import { vBackdropDismiss } from '../../../../plugins/ui-shared/backdrop-dismiss.js'
 import { reactive, ref } from 'vue'
 import { api } from '../../api'
 const props = defineProps({ target: { type: Object, default: null } })

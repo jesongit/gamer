@@ -1,5 +1,5 @@
 <template>
-  <div v-if="open" class="modal-mask" @click.self="emit('close')">
+  <div v-if="open" class="modal-mask" v-backdrop-dismiss="() => emit('close')">
     <div class="modal upd-confirm">
       <div class="modal-head">
         <span class="title">{{ isRollback ? '回滚确认' : '安装更新确认' }}</span>
@@ -69,6 +69,7 @@
 </template>
 
 <script setup>
+import { vBackdropDismiss } from '../../../plugins/ui-shared/backdrop-dismiss.js'
 /**
  * 安装/回滚确认弹窗（WEB-004）：
  * 确认项：目标版本、channel、包大小、data_schema/rollback_floor、维护窗口提示，
