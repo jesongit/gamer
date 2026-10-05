@@ -196,7 +196,14 @@ export async function downloadFixedVersion(
     if (response.status === 404) {
       throw new RegistryError('download_not_found', `插件 ${entry.id}@${entry.version} 的安装包在发布源不存在（404），该版本可能已下架`)
     }
-    throw new RegistryError('download_http_error', `插件下载返回 HTTP ${response.status}`)
+    let detail = ''
+    if (response.headers.get('content-type')?.includes('application/json')) {
+      try {
+        const body = await response.json()
+        detail = typeof body?.error === 'string' ? body.error : typeof body?.message === 'string' ? body.message : ''
+      } catch { /* 非 JSON 错误响应保留 HTTP 状态提示。 */ }
+    }
+    throw new RegistryError('download_http_error', `插件 ${entry.id}@${entry.version} 下载失败（HTTP ${response.status}）${detail ? `：${detail}` : ''}`)
   }
   const bytes = await archiveBytes(response)
   const digest = await sha256Hex(bytes)

@@ -297,9 +297,13 @@ fn parse_entries(
 
 fn merge_entries(bundled: Vec<Entry>, remote: Vec<Entry>) -> Vec<Entry> {
     let mut entries = BTreeMap::new();
-    // Keep bundled versions available offline; new immutable versions come from
-    // the plugin repository. Keep the release's pinned bytes for bundled versions.
+    // Keep existing bundled archives pinned for offline use. A source checkout
+    // or UI rebuild may retain registry.json without every ignored .gplugin;
+    // those entries must not shadow downloadable remote versions.
     for entry in remote.into_iter().chain(bundled) {
+        if matches!(&entry.origin, Origin::Bundled(path) if !path.is_file()) {
+            continue;
+        }
         let key = (
             entry.metadata["id"].as_str().unwrap().to_owned(),
             entry.metadata["version"].as_str().unwrap().to_owned(),
@@ -461,6 +465,78 @@ mod tests {
         let mut traversal = document("1.0.0");
         traversal["plugins"][0]["download_url"] = "/plugins/../../secret".into();
         assert!(parse_entries(&traversal, None, Path::new("unused"), true).is_err());
+    }
+
+    #[test]
+    fn missing_bundled_archives_do_not_shadow_remote_versions_or_appear_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = document("1.0.0");
+        fs::write(
+            dir.path().join("registry.json"),
+            serde_json::to_vec(&local).unwrap(),
+        )
+        .unwrap();
+        let market = PluginMarket::new(dir.path().into());
+        let offline = market.catalog_with(true, || Err("offline".into())).unwrap();
+        assert!(offline.entries.is_empty());
+
+        let mut release = release("gamer-example-v1.0.0", false, "2026-10-05");
+        let mut remote = remote_document("1.0.0", &mut release);
+        let published_hash = format!("{:x}", Sha256::digest(b"published plugin"));
+        remote["plugins"][0]["size"] = 16.into();
+        remote["plugins"][0]["sha256"] = published_hash.clone().into();
+        release["assets"][1]["size"] = 16.into();
+        release["assets"][1]["digest"] = format!("sha256:{published_hash}").into();
+        let online = market
+            .catalog_with(true, || {
+                parse_entries(&remote, Some(&release), dir.path(), true)
+            })
+            .unwrap();
+        assert_eq!(online.entries.len(), 1);
+        let entry = &online.entries[0];
+        assert!(
+            matches!(&entry.origin, Origin::Remote(url) if url.ends_with("/gamer-example-1.0.0.gplugin"))
+        );
+        assert_eq!(entry.metadata["sha256"], published_hash);
+        assert_eq!(entry.metadata["size"], 16);
+        let cached = market.catalog_with(true, || Err("offline".into())).unwrap();
+        assert_eq!(cached.source, "cache");
+        assert!(matches!(&cached.entries[0].origin, Origin::Remote(_)));
+    }
+
+    #[test]
+    fn existing_bundled_archives_keep_their_own_pinned_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("plugins")).unwrap();
+        let local = document("1.0.0");
+        fs::write(
+            dir.path().join("registry.json"),
+            serde_json::to_vec(&local).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("plugins/gamer-example-1.0.0.gplugin"),
+            b"verified plugin",
+        )
+        .unwrap();
+        let market = PluginMarket::new(dir.path().into());
+        let mut release = release("gamer-example-v1.0.0", false, "2026-10-05");
+        let remote = remote_document("1.0.0", &mut release);
+        market
+            .catalog_with(true, || {
+                parse_entries(&remote, Some(&release), dir.path(), true)
+            })
+            .unwrap();
+        let catalog = market.catalog(false).unwrap();
+        assert!(matches!(&catalog.entries[0].origin, Origin::Bundled(_)));
+        assert_eq!(
+            catalog.entries[0].metadata["sha256"],
+            local["plugins"][0]["sha256"]
+        );
+        assert_eq!(
+            market.archive("gamer-example", "1.0.0").unwrap(),
+            b"verified plugin"
+        );
     }
 
     #[test]
