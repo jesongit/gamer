@@ -450,7 +450,7 @@ pub(super) async fn api_delete_package(
     let packages = st.packages.clone();
     let deleted = run_blocking_api({
         let pkg = pkg.clone();
-        move || -> Result<bool, ApiError> { packages.delete_package(&pkg).map_err(internal) }
+        move || -> Result<bool, ApiError> { packages.delete_package(&pkg).map_err(store_error) }
     })
     .await;
     match deleted {
@@ -881,6 +881,14 @@ pub(super) async fn api_import_package(
             .map_err(archive_error)?;
         // 3) 媒体恢复（失败 → 函数内部回滚新建素材 + 调用方清 staging，
         //    导入整体拒绝）
+        // Serializes replacement with plugin transactions and activity acquisition.
+        let _package_barrier = store.snapshot_barrier();
+        if overwrite || !store.package_dir(&manifest.id).map_err(store_error)?.exists() {
+            if let Err(error) = store.prepare_replacement(&manifest.id, &staging) {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(ApiError::conflict(error.to_string()));
+            }
+        }
         let media = crate::media::service(&cfg);
         let (media_summary, created_media) = match import_package_media(&media, &staging, &manifest.id)
         {
@@ -1294,6 +1302,7 @@ fn store_error(e: anyhow::Error) -> ApiError {
         || message.contains("已存在")
         || message.contains("version_conflict")
         || message.contains("version_required")
+        || message.contains("package_busy")
     {
         ApiError::conflict(message)
     } else if message.contains("不存在") {

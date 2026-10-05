@@ -16,8 +16,8 @@
 //! ```
 //!
 //! 退出路径保障（RAII）：run 任务体内持两把 guard——
-//! - [`ActivityLease`]：prepare 成功后由执行器取得，drop 时释放具体活动资源；
-//!   panic 展开同样触发。
+//! - [`ActivityLease`]：prepare 成功后由执行器取得，正常路径等待异步 release
+//!   后 drop；panic 展开仍通过 Drop 释放具体活动资源。
 //! - [`FinishGuard`]：整个任务体作用域，drop 时从注册表摘除 + 写终态档案；
 //!   正常路径已显式置终态则按显式值归档，残留非终态（panic/忘记置位）判 failed，
 //!   取消请求在册判 cancelled。tokio spawn 任务 panic 时 future 被 drop，
@@ -218,6 +218,7 @@ const HISTORY_CAP: usize = 256;
 pub struct RunManager {
     journal: Option<crate::store::Db>,
     executor: Arc<dyn RunExecutor>,
+    executors: std::sync::RwLock<HashMap<String, Arc<dyn RunExecutor>>>,
     /// 设备级互斥：device_id → 活动 run_id
     active_by_device: Mutex<HashMap<String, String>>,
     /// run_id → 活动条目（终态后摘入 history）
@@ -236,6 +237,7 @@ impl RunManager {
     pub fn new(executor: Arc<dyn RunExecutor>) -> Self {
         Self {
             executor,
+            executors: std::sync::RwLock::new(HashMap::new()),
             journal: None,
             active_by_device: Mutex::new(HashMap::new()),
             runs: Mutex::new(HashMap::new()),
@@ -249,6 +251,23 @@ impl RunManager {
     pub fn with_journal(mut self, db: crate::store::Db) -> Self {
         self.journal = Some(db);
         self
+    }
+
+    /// Composition-root registration; payload semantics remain in the runner.
+    pub fn register_executor(&self, runner_id: &str, executor: Arc<dyn RunExecutor>) {
+        self.executors
+            .write()
+            .unwrap()
+            .insert(runner_id.to_owned(), executor);
+    }
+
+    fn executor_for(&self, runner_id: &str) -> Arc<dyn RunExecutor> {
+        self.executors
+            .read()
+            .unwrap()
+            .get(runner_id)
+            .cloned()
+            .unwrap_or_else(|| self.executor.clone())
     }
 
     fn persist(&self, record: &RunRecord) {
@@ -273,7 +292,7 @@ impl RunManager {
             .cloned()
     }
 
-    /// Wait for a run to reach a terminal state without polling the registry.
+    /// Wait for terminal state and release of the active run/activity lease.
     /// The notification is registered before each snapshot, so a completion
     /// racing with the snapshot cannot be missed.  Terminal records remain in
     /// the bounded history and are returned just like active records.
@@ -285,7 +304,12 @@ impl RunManager {
         loop {
             let notified = self.state_changed.notified();
             match self.get_run(run_id) {
-                Some(record) if record.state.is_terminal() => return Some(record),
+                Some(record)
+                    if record.state.is_terminal()
+                        && !self.runs.lock().unwrap().contains_key(run_id) =>
+                {
+                    return Some(record)
+                }
                 Some(_) => {}
                 None => return None,
             }
@@ -329,7 +353,7 @@ impl RunManager {
         if self.draining.load(Ordering::SeqCst) {
             return Err(StartError::ShuttingDown);
         }
-        // 锁序恒定：active_by_device 先于 runs（finalize 只做两次独立短锁，无嵌套）
+        // 提交与归档共用锁序：active_by_device → runs → history。
         let mut dev = self.active_by_device.lock().unwrap();
         if let Some(existing_rid) = dev.get(req.device_id()) {
             let cur = self
@@ -426,7 +450,8 @@ impl RunManager {
             drop(finish);
             return;
         }
-        let prepare = self.executor.prepare(&context, &req.request).await;
+        let executor = self.executor_for(&req.request.runner_id);
+        let prepare = executor.prepare(&context, &req.request).await;
         if let Err(e) = prepare {
             warn!(run_id = %run_id, err = %format!("{e:#}"), "run prepare (connect) failed");
             if self.is_cancelled(&run_id) {
@@ -442,7 +467,7 @@ impl RunManager {
         }
         // 活动租约：RAII 配对 release，
         // panic 展开时 Drop 必然归还
-        let _lease = match self.executor.acquire(&context) {
+        let mut lease = match executor.acquire(&context) {
             Ok(lease) => lease,
             Err(e) => {
                 finish.complete(
@@ -455,19 +480,21 @@ impl RunManager {
         self.mark_state(&run_id, RunState::Running, None);
 
         // starting→running 竞态取消：置位后再补一次检查
-        if self.is_cancelled(&run_id) {
-            finish.complete(&run_id, RunOutcome::Cancelled(vec![]));
-            return; // _lease → finish → _inflight 逆序 drop
-        }
-
-        let outcome = self.execute(req, context, run_id.clone()).await;
+        let outcome = if self.is_cancelled(&run_id) {
+            RunOutcome::Cancelled(vec![])
+        } else {
+            self.execute(executor, req, context, run_id.clone()).await
+        };
+        lease.release().await;
+        drop(lease);
         finish.complete(&run_id, outcome);
-        // finish / lease / inflight 依声明逆序自动释放
+        // Activity cleanup has completed before either the hook or terminal state.
     }
 
     /// 执行主体（独立函数便于阅读）：入口已过取消闸，出口把结果归类
     async fn execute(
         self: &Arc<Self>,
+        executor: Arc<dyn RunExecutor>,
         req: Arc<StartRequest>,
         context: RunContext,
         run_id: String,
@@ -482,8 +509,7 @@ impl RunManager {
             return RunOutcome::Failed("注册表条目丢失".into(), vec![]);
         };
         let was_cancelled = || self.cancel_requested(&run_id);
-        match self
-            .executor
+        match executor
             .execute(&context, &req.request, req.realtime_logs, stop.clone())
             .await
         {
@@ -564,24 +590,40 @@ impl RunManager {
         self.state_changed.notify_waiters();
     }
 
-    fn mark_terminal_checked(&self, run_id: &str, class: RunOutcomeClass, error: Option<String>) {
+    fn mark_terminal_checked(
+        &self,
+        run_id: &str,
+        class: RunOutcomeClass,
+        error: Option<String>,
+    ) -> bool {
         let mut runs = self.runs.lock().unwrap();
         let Some(entry) = runs.get_mut(run_id) else {
-            return;
+            return false;
         };
         // 显式终态不回退；这里只允许 running/stopping 收敛到终态
         if entry.record.state.is_terminal() {
-            return;
+            return entry.record.state == RunState::Cancelled;
         }
-        let state = match class {
-            RunOutcomeClass::Success => RunState::Success,
-            RunOutcomeClass::Failed => RunState::Failed,
-            RunOutcomeClass::Cancelled => RunState::Cancelled,
+        // cancel() uses this same lock. An accepted cancellation must win even
+        // if execution finished before asynchronous target cleanup did.
+        let state = if entry.cancel_requested {
+            RunState::Cancelled
+        } else {
+            match class {
+                RunOutcomeClass::Success => RunState::Success,
+                RunOutcomeClass::Failed => RunState::Failed,
+                RunOutcomeClass::Cancelled => RunState::Cancelled,
+            }
         };
         entry.record.state = state;
-        entry.record.error = error;
+        entry.record.error = if state == RunState::Cancelled {
+            None
+        } else {
+            error
+        };
         entry.record.finished_at = Some(Utc::now());
         self.state_changed.notify_waiters();
+        state == RunState::Cancelled
     }
 
     fn snapshot_or_placeholder(&self, run_id: &str) -> RunRecord {
@@ -605,6 +647,9 @@ impl RunManager {
     /// 兜底规则：cancelled 在册 → cancelled；其余残留（panic/ forgotten set）→ failed。
     fn finalize(&self, run_id: &str) -> Option<RunRecord> {
         let rec = {
+            // Use submit's lock order and archive atomically with slot removal.
+            // Readers must never see a gap between the active map and history.
+            let mut dev = self.active_by_device.lock().unwrap();
             let mut runs = self.runs.lock().unwrap();
             let entry = runs.get_mut(run_id)?;
             if !entry.record.state.is_terminal() {
@@ -623,20 +668,17 @@ impl RunManager {
                 }
                 entry.record.finished_at = Some(Utc::now());
             }
-            runs.remove(run_id).unwrap().record
-        };
-        // 摘除设备槽（仅当仍归属本 run：期间新 run 可能已占位？不可能——
-        // 本 run 尚未摘除前新 run 会撞 409；所以匹配即删，防御性再验一次）
-        {
-            let mut dev = self.active_by_device.lock().unwrap();
+            let rec = runs.remove(run_id).unwrap().record;
             if dev.get(&rec.device_id).map(|s| s.as_str()) == Some(run_id) {
                 dev.remove(&rec.device_id);
             }
-        }
-        let mut hist = self.history.lock().unwrap();
-        if hist.len() >= HISTORY_CAP {
-            hist.pop_front();
-        }
+            let mut hist = self.history.lock().unwrap();
+            if hist.len() >= HISTORY_CAP {
+                hist.pop_front();
+            }
+            hist.push_back(rec.clone());
+            rec
+        };
         info!(
             run_id = %rec.run_id,
             device = %rec.device_id,
@@ -647,10 +689,8 @@ impl RunManager {
             "run finished"
         );
         self.persist(&rec);
-        let finished = rec.clone();
-        hist.push_back(rec);
         self.state_changed.notify_waiters();
-        Some(finished)
+        Some(rec)
     }
 
     /// 停机 drain：先关闸（新提交一律 ShuttingDown），等待活动运行自然结束，
@@ -757,7 +797,7 @@ struct FinishGuard {
 }
 
 impl FinishGuard {
-    fn complete(&mut self, run_id: &str, outcome: RunOutcome) {
+    fn complete(&mut self, run_id: &str, mut outcome: RunOutcome) {
         let error = match &outcome {
             RunOutcome::Failed(msg, _) => Some(msg.clone()),
             RunOutcome::Success(_) | RunOutcome::Cancelled(_) => None,
@@ -767,7 +807,13 @@ impl FinishGuard {
             RunOutcome::Failed(_, _) => RunOutcomeClass::Failed,
             RunOutcome::Cancelled(_) => RunOutcomeClass::Cancelled,
         };
-        self.mgr.mark_terminal_checked(run_id, class, error);
+        if self.mgr.mark_terminal_checked(run_id, class, error) {
+            outcome = match outcome {
+                RunOutcome::Success(logs)
+                | RunOutcome::Failed(_, logs)
+                | RunOutcome::Cancelled(logs) => RunOutcome::Cancelled(logs),
+            };
+        }
         if let Some(hook) = self.on_finish.take() {
             hook(&self.mgr.snapshot_or_placeholder(run_id), &outcome);
         }
@@ -974,6 +1020,26 @@ mod tests {
 
     async fn settled(mgr: &Arc<RunManager>) {
         mgr.wait_settled(std::time::Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn runner_override_dispatches_prepare_acquire_and_execute_together() {
+        let fallback = Arc::new(FakeExecutor::default());
+        let selected = Arc::new(FakeExecutor::default());
+        let manager = Arc::new(RunManager::new(fallback.clone()));
+        manager.register_executor("test.runner", selected.clone());
+        manager
+            .submit(req("d", "package/interactive", RunSource::Manual), None)
+            .unwrap();
+        settled(&manager).await;
+        assert_eq!(
+            selected.stats(|s| (s.prepare_calls, s.occupies, s.executes, s.releases)),
+            (1, 1, 1, 1)
+        );
+        assert_eq!(
+            fallback.stats(|s| (s.prepare_calls, s.occupies, s.executes)),
+            (0, 0, 0)
+        );
     }
 
     // 九项必测之一：同设备两个不同脚本，第二个 409
@@ -1206,7 +1272,8 @@ mod tests {
 
     #[tokio::test]
     async fn wait_terminal_resolves_from_state_notification() {
-        let mgr = Arc::new(RunManager::new(Arc::new(FakeExecutor::default())));
+        let executor = Arc::new(FakeExecutor::default());
+        let mgr = Arc::new(RunManager::new(executor.clone()));
         let run = mgr
             .submit(req("d1", "p/s.yaml", RunSource::Scheduled), None)
             .unwrap();
@@ -1219,6 +1286,224 @@ mod tests {
         .expect("run record should remain queryable");
         assert_eq!(record.run_id, run.run_id);
         assert_eq!(record.state, RunState::Success);
+        assert!(mgr.active_for_device("d1").is_none());
+        assert_eq!(executor.stats(|s| (s.occupies, s.releases)), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn terminal_wait_and_finish_hook_follow_async_lease_cleanup_on_all_normal_exits() {
+        struct AsyncLease {
+            inner: Box<dyn ActivityLease>,
+            entered: Arc<tokio::sync::Notify>,
+            finish: Arc<tokio::sync::Notify>,
+            cleanup_done: Arc<AtomicBool>,
+        }
+        impl ActivityLease for AsyncLease {
+            fn release(&mut self) -> BoxFuture<'_, ()> {
+                Box::pin(async move {
+                    self.entered.notify_one();
+                    self.finish.notified().await;
+                    self.inner.release().await;
+                    self.cleanup_done.store(true, Ordering::SeqCst);
+                })
+            }
+        }
+        struct AsyncExecutor {
+            inner: FakeExecutor,
+            entered: Arc<tokio::sync::Notify>,
+            finish: Arc<tokio::sync::Notify>,
+            cleanup_done: Arc<AtomicBool>,
+            manager: PlMutex<std::sync::Weak<RunManager>>,
+            cancel_on_acquire: bool,
+        }
+        impl RunExecutor for AsyncExecutor {
+            fn prepare<'a>(
+                &'a self,
+                context: &'a RunContext,
+                request: &'a RunRequest,
+            ) -> BoxFuture<'a, anyhow::Result<()>> {
+                self.inner.prepare(context, request)
+            }
+            fn execute<'a>(
+                &'a self,
+                context: &'a RunContext,
+                request: &'a RunRequest,
+                realtime: bool,
+                stop: Arc<AtomicBool>,
+            ) -> BoxFuture<'a, anyhow::Result<Vec<(String, String)>>> {
+                self.inner.execute(context, request, realtime, stop)
+            }
+            fn acquire(&self, context: &RunContext) -> anyhow::Result<Box<dyn ActivityLease>> {
+                let inner = self.inner.acquire(context)?;
+                if self.cancel_on_acquire {
+                    self.manager
+                        .lock()
+                        .upgrade()
+                        .unwrap()
+                        .cancel(context.run_id.as_str());
+                }
+                Ok(Box::new(AsyncLease {
+                    inner,
+                    entered: self.entered.clone(),
+                    finish: self.finish.clone(),
+                    cleanup_done: self.cleanup_done.clone(),
+                }))
+            }
+        }
+        // Success, acquire/execute cancellation, and cancellation while the
+        // target is still releasing its held inputs all share the same barrier.
+        for (cancel_on_acquire, cancel_execution, cancel_cleanup) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let executor = Arc::new(AsyncExecutor {
+                inner: if cancel_execution {
+                    FakeExecutor::hanging()
+                } else {
+                    FakeExecutor::default()
+                },
+                entered: Arc::new(tokio::sync::Notify::new()),
+                finish: Arc::new(tokio::sync::Notify::new()),
+                cleanup_done: Arc::new(AtomicBool::new(false)),
+                manager: PlMutex::new(std::sync::Weak::new()),
+                cancel_on_acquire,
+            });
+            let manager = Arc::new(RunManager::new(executor.clone()));
+            *executor.manager.lock() = Arc::downgrade(&manager);
+            let calls = Arc::new(PlMutex::new(Vec::new()));
+            let (sink, done, state) = (
+                calls.clone(),
+                executor.cleanup_done.clone(),
+                executor.inner.state.clone(),
+            );
+            let hook: FinishHook = Arc::new(move |record, _| {
+                sink.lock().push((
+                    record.state,
+                    done.load(Ordering::SeqCst),
+                    state.lock().releases,
+                ));
+            });
+            let run = manager
+                .submit(req("d", "p/s.yaml", RunSource::Manual), Some(hook))
+                .unwrap();
+            if cancel_execution {
+                manager
+                    .wait_for_state(
+                        &run.run_id,
+                        |record| record.state == RunState::Running,
+                        std::time::Duration::from_secs(5),
+                    )
+                    .await;
+                assert_eq!(manager.cancel(&run.run_id), CancelOutcome::Accepted);
+            }
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                executor.entered.notified(),
+            )
+            .await
+            .expect("asynchronous lease release did not begin");
+            if cancel_cleanup {
+                assert_eq!(manager.cancel(&run.run_id), CancelOutcome::Accepted);
+            }
+            assert!(!executor.cleanup_done.load(Ordering::SeqCst));
+            assert_eq!(executor.inner.stats(|state| state.releases), 0);
+            assert!(calls.lock().is_empty(), "hook ran before cleanup");
+            assert_eq!(manager.active_for_device("d").unwrap().run_id, run.run_id);
+            assert!(!manager.get_run(&run.run_id).unwrap().state.is_terminal());
+            let (m, id) = (manager.clone(), run.run_id.clone());
+            let wait = tokio::spawn(async move { m.wait_terminal(&id).await });
+            tokio::task::yield_now().await;
+            assert!(!wait.is_finished(), "terminal wait bypassed cleanup");
+            executor.finish.notify_one();
+            let record = tokio::time::timeout(std::time::Duration::from_secs(5), wait)
+                .await
+                .expect("terminal wait did not finish after cleanup")
+                .unwrap()
+                .unwrap();
+            let expected = if cancel_on_acquire || cancel_execution || cancel_cleanup {
+                RunState::Cancelled
+            } else {
+                RunState::Success
+            };
+            assert_eq!(record.state, expected);
+            assert!(executor.cleanup_done.load(Ordering::SeqCst));
+            assert_eq!(executor.inner.stats(|state| state.releases), 1);
+            assert_eq!(*calls.lock(), vec![(expected, true, 1)]);
+            assert!(manager.active_for_device("d").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_commit_preserves_accepted_cancel_when_executor_outcome_is_stale() {
+        for stale_outcome in [
+            RunOutcome::Success(vec![("info".into(), "finished execution".into())]),
+            RunOutcome::Failed(
+                "old execution error".into(),
+                vec![("warn".into(), "execution diagnostic".into())],
+            ),
+        ] {
+            let manager = Arc::new(RunManager::new(Arc::new(FakeExecutor::default())));
+            let record = RunRecord {
+                run_id: "stale-outcome".into(),
+                device_id: "d".into(),
+                runner_id: "test.runner".into(),
+                entrypoint: "opaque-entrypoint".into(),
+                script_id: String::new(),
+                source: RunSource::Manual,
+                task_id: None,
+                scheduled_at: None,
+                state: RunState::Running,
+                started_at: Utc::now(),
+                finished_at: None,
+                error: None,
+            };
+            manager
+                .active_by_device
+                .lock()
+                .unwrap()
+                .insert(record.device_id.clone(), record.run_id.clone());
+            manager.runs.lock().unwrap().insert(
+                record.run_id.clone(),
+                ActiveRun {
+                    record: record.clone(),
+                    stop: Arc::new(AtomicBool::new(false)),
+                    cancel_requested: false,
+                },
+            );
+            let calls = Arc::new(PlMutex::new(Vec::new()));
+            let sink = calls.clone();
+            let hook: FinishHook = Arc::new(move |record, outcome| {
+                sink.lock().push((record.state, outcome.clone()));
+            });
+            let mut finish = FinishGuard {
+                mgr: manager.clone(),
+                run_id: record.run_id.clone(),
+                on_finish: Some(hook),
+            };
+            let expected_logs = stale_outcome.logs().to_vec();
+            // The executor already decided its outcome, but cancellation wins
+            // the registry lock before that stale decision can be committed.
+            assert_eq!(manager.cancel(&record.run_id), CancelOutcome::Accepted);
+            finish.complete(&record.run_id, stale_outcome);
+            assert_eq!(
+                manager.get_run(&record.run_id).unwrap().state,
+                RunState::Cancelled
+            );
+            assert!(manager.get_run(&record.run_id).unwrap().error.is_none());
+            {
+                let calls = calls.lock();
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].0, RunState::Cancelled);
+                assert!(matches!(&calls[0].1, RunOutcome::Cancelled(_)));
+                assert_eq!(calls[0].1.logs(), expected_logs.as_slice());
+            }
+            drop(finish);
+            let archived = manager.wait_terminal(&record.run_id).await.unwrap();
+            assert_eq!(archived.state, RunState::Cancelled);
+            assert!(manager.active_for_device("d").is_none());
+        }
     }
 
     #[tokio::test]

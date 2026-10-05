@@ -281,6 +281,9 @@ export const api = {
 
   // 设备
   listDevices: () => req('GET', '/api/devices'),
+  // 输入控制状态是目标级通用机制，Android 与浏览器使用同一入口。
+  getInputControl: async (id, options = {}) => readResult(await response('GET',
+    `/api/devices/${encodeURIComponent(requireId(id, 'device_id'))}/input-control`, undefined, options)),
   browserPages: (id) => req('GET', `/api/browser-targets/${encodeURIComponent(id)}/pages`),
   bindBrowser: (id, targetId) => req('POST', `/api/browser-targets/${encodeURIComponent(id)}/bind`, { target_id: targetId }),
   saveBrowser: (target) => req('POST', '/api/browser-targets', target),

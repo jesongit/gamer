@@ -23,6 +23,7 @@ use crate::webrtc::{remove_and_teardown_viewer, ViewerDisconnectReason};
 
 #[derive(Serialize)]
 struct DeviceView {
+    input_control: crate::core::control::ControlStatus,
     capabilities: crate::targets::TargetCapabilities,
     id: String,
     name: String,
@@ -113,6 +114,15 @@ pub(super) async fn api_list_devices(State(st): State<AppState>) -> Response {
     }
 }
 
+pub(super) async fn input_control(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::core::control::ControlStatus>, ApiError> {
+    crate::targets::check_available(&st.devices, &id)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    Ok(Json(st.devices.controls.status(&id)))
+}
+
 /// 渲染设备列表视图（带运行时状态/分辨率）。数据库查询走异步 worker RPC，
 /// 数据库失败必须向调用方返回 500，而不是伪装成空列表。
 async fn device_views(st: &AppState) -> Result<Vec<serde_json::Value>, ApiError> {
@@ -144,6 +154,7 @@ fn render_device_views(
             .map(|fc| fc.dims())
             .unwrap_or((0, 0));
         out.push(DeviceView {
+            input_control: devices.controls.status(&d.id),
             capabilities: crate::targets::TargetCapabilities::android(),
             id: d.id.clone(),
             name: d.name.clone(),
@@ -264,6 +275,22 @@ pub(super) async fn api_update_device(
         fps: req.fps,
         created_at: existing.created_at.clone(),
     };
+    // Target configuration is also a manual action while an AI owns the
+    // target. Its paused run keeps the session alive, so this admission can
+    // safely cover the metadata write without tearing down the viewer.
+    let has_control_owner = st.devices.controls.status(&id).owner.is_some();
+    if has_control_owner && session_affecting_change(&existing, &device, st.cfg.fps) {
+        return ApiError::conflict("control_owned: 请先停止 AI 会话再修改投屏目标配置")
+            .into_response();
+    }
+    let _control_admission = if has_control_owner && existing.pkg != device.pkg {
+        match st.devices.controls.admit_manual(&id).await {
+            Ok(permit) => Some(permit),
+            Err(e) => return ApiError::conflict(e.to_string()).into_response(),
+        }
+    } else {
+        None
+    };
     // 投屏相关参数（接入类型/地址/屏幕模式/虚拟屏参数/帧率）变更才需要重建会话：
     // 踢活跃 viewer + 拆会话，浏览器 onclose 自动重连恢复画面。仅改名称/应用包名
     // 等非投屏字段时保持现有连接不中断。脚本运行中仍受运行守卫保护不拆会话
@@ -296,6 +323,9 @@ pub(super) async fn api_delete_device(
     State(st): State<AppState>,
     Path(id): Path<String>,
 ) -> Response {
+    if st.devices.controls.status(&id).owner.is_some() {
+        return ApiError::conflict("control_owned: 请先停止 AI 会话再删除设备").into_response();
+    }
     remove_and_teardown_viewer(&st.viewers, &id, ViewerDisconnectReason::DeviceDisconnected).await;
     match st.devices.delete_device(&id).await {
         Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
@@ -476,6 +506,10 @@ pub(super) async fn api_install_apk(
     if let Err(err) = validate_apk_upload(q.filename.trim(), &body) {
         return err.into_response();
     }
+    let _control_admission = match st.devices.controls.admit_manual(&id).await {
+        Ok(permit) => permit,
+        Err(e) => return ApiError::conflict(e.to_string()).into_response(),
+    };
     let serial = device.addr.clone();
     if serial.trim().is_empty() {
         return err_response(StatusCode::BAD_REQUEST, "设备未接入 adb，无法安装");
@@ -606,6 +640,9 @@ pub(super) async fn api_disconnect_device(
     State(st): State<AppState>,
     Path(id): Path<String>,
 ) -> Response {
+    if st.devices.controls.status(&id).owner.is_some() {
+        return ApiError::conflict("control_owned: 请先停止 AI 会话再强制断开设备").into_response();
+    }
     remove_and_teardown_viewer(&st.viewers, &id, ViewerDisconnectReason::DeviceDisconnected).await;
     st.devices.disconnect_device(&id, true).await;
     Json(serde_json::json!({"ok": true})).into_response()
@@ -782,26 +819,38 @@ pub(super) async fn api_control(
     };
     // 录制输入观察（合同 §2.1）：REST 控制入口的来源标注为 manual；观察本体
     // 在 scrcpy 注入原语内（已被接受的输入进入设备发送路径后记录）。
-    let result = crate::recording::with_input_source("manual", async {
-        match ctl {
-            Ctl::Tap(x, y) => session.tap(x, y).await,
-            Ctl::Swipe(x1, y1, x2, y2, duration_ms) => {
-                session.swipe(x1, y1, x2, y2, duration_ms).await
-            }
-            Ctl::Text(text) => session.inject_text(text).await,
-            Ctl::Press(kc) => session.press_key(kc).await,
-            Ctl::Home => session.press_key(3).await,
-            Ctl::Back => session.press_key(4).await,
-            Ctl::Recents => session.press_key(187).await,
-            Ctl::StartApp(app) => session.start_app(app).await,
-            Ctl::StopApp(app) => session.stop_app(app).await,
-            Ctl::Rotate => session.rotate_device().await,
-            Ctl::Clipboard(text) => session.set_clipboard(text, false).await,
-        }
-    })
-    .await;
+    let result = st
+        .devices
+        .controls
+        .manual(
+            &id,
+            crate::recording::with_input_source("manual", async {
+                match ctl {
+                    Ctl::Tap(x, y) => session.tap(x, y).await,
+                    Ctl::Swipe(x1, y1, x2, y2, duration_ms) => {
+                        session.swipe(x1, y1, x2, y2, duration_ms).await
+                    }
+                    Ctl::Text(text) => session.inject_text(text).await,
+                    Ctl::Press(kc) => session.press_key(kc).await,
+                    Ctl::Home => session.press_key(3).await,
+                    Ctl::Back => session.press_key(4).await,
+                    Ctl::Recents => session.press_key(187).await,
+                    Ctl::StartApp(app) => session.start_app(app).await,
+                    Ctl::StopApp(app) => session.stop_app(app).await,
+                    Ctl::Rotate => session.rotate_device().await,
+                    Ctl::Clipboard(text) => session.set_clipboard(text, false).await,
+                }
+            }),
+        )
+        .await;
     match result {
         Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(e)
+            if e.to_string().starts_with("control_")
+                || e.to_string().starts_with("stale_generation") =>
+        {
+            ApiError::conflict(e.to_string()).into_response()
+        }
         Err(e) => ApiError::bad_gateway(e.to_string()).into_response(),
     }
 }

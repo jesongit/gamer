@@ -33,6 +33,7 @@ pub struct CdpSession {
     keys: Mutex<HashMap<String, String>>,
     pub viewer: Arc<Mutex<()>>,
     pub runs: std::sync::atomic::AtomicUsize,
+    pub(super) controls: Arc<crate::core::control::ControlRegistry>,
     buttons: Mutex<u32>,
     pointer: Mutex<(f64, f64)>,
     input_revision: std::sync::atomic::AtomicU64,
@@ -44,10 +45,25 @@ pub struct CdpSession {
     viewport: parking_lot::RwLock<(f64, f64)>,
 }
 impl CdpSession {
+    #[cfg(test)]
     pub async fn launch(
         target: &BrowserTarget,
         cfg: &crate::config::Config,
         executable: PathBuf,
+    ) -> anyhow::Result<Arc<Self>> {
+        Self::launch_with_controls(
+            target,
+            cfg,
+            executable,
+            Arc::new(crate::core::control::ControlRegistry::default()),
+        )
+        .await
+    }
+    pub async fn launch_with_controls(
+        target: &BrowserTarget,
+        cfg: &crate::config::Config,
+        executable: PathBuf,
+        controls: Arc<crate::core::control::ControlRegistry>,
     ) -> anyhow::Result<Arc<Self>> {
         target.validate()?;
         let profile = cfg
@@ -142,6 +158,7 @@ impl CdpSession {
             keys: Mutex::new(HashMap::new()),
             viewer: Arc::new(Mutex::new(())),
             runs: std::sync::atomic::AtomicUsize::new(0),
+            controls,
             buttons: Mutex::new(0),
             pointer: Mutex::new((0.0, 0.0)),
             input_revision: std::sync::atomic::AtomicU64::new(0),
@@ -233,6 +250,7 @@ impl CdpSession {
             input_revision: std::sync::atomic::AtomicU64::new(0),
             viewer: Arc::new(Mutex::new(())),
             runs: std::sync::atomic::AtomicUsize::new(0),
+            controls: self.controls.clone(),
             stream_gate: Mutex::new(()),
             preview_active: AtomicBool::new(false),
             recording_active: AtomicBool::new(false),
@@ -460,6 +478,7 @@ impl CdpSession {
         Ok((bytes, stamp))
     }
     pub async fn input(&self, value: &Value, expected: Option<&FrameStamp>) -> anyhow::Result<()> {
+        let _admission = self.controls.admit(&self.id).await?;
         let _gate = self.gate.lock().await;
         self.check_pointer_owner(value).await?;
         let result = self.input_locked(value, expected).await;
@@ -469,8 +488,25 @@ impl CdpSession {
         result
     }
     pub async fn manual_input(&self, value: &Value, expected: &FrameStamp) -> anyhow::Result<()> {
+        if !crate::core::control::ControlRegistry::manual_scoped(&self.id) {
+            return self
+                .controls
+                .manual(&self.id, self.manual_input_admitted(value, expected))
+                .await;
+        }
+        self.manual_input_admitted(value, expected).await
+    }
+    async fn manual_input_admitted(
+        &self,
+        value: &Value,
+        expected: &FrameStamp,
+    ) -> anyhow::Result<()> {
+        let _admission = self.controls.admit(&self.id).await?;
         let _gate = self.gate.lock().await;
-        ensure!(self.runs.load(Ordering::SeqCst) == 0, "目标正在执行任务");
+        ensure!(
+            self.runs.load(Ordering::SeqCst) == 0 || self.controls.status(&self.id).owner.is_some(),
+            "目标正在执行任务"
+        );
         self.check_pointer_owner(value).await?;
         let result = self.input_locked(value, Some(expected)).await;
         if result.is_err() {
@@ -658,9 +694,14 @@ impl CdpSession {
         y: u32,
         manual: Option<&FrameStamp>,
     ) -> anyhow::Result<()> {
+        let _admission = self.controls.admit(&self.id).await?;
         let _gate = self.gate.lock().await;
         if manual.is_some() {
-            ensure!(self.runs.load(Ordering::SeqCst) == 0, "目标正在执行任务");
+            ensure!(
+                self.runs.load(Ordering::SeqCst) == 0
+                    || self.controls.status(&self.id).owner.is_some(),
+                "目标正在执行任务"
+            );
         }
         let mut contact = self.held_contact.lock().await;
         let stamp = if action == "down" {
@@ -693,7 +734,9 @@ impl CdpSession {
     }
     pub async fn release_manual(&self) {
         let _gate = self.gate.lock().await;
-        if self.runs.load(Ordering::SeqCst) == 0 {
+        if self.runs.load(Ordering::SeqCst) == 0
+            || self.controls.status(&self.id).phase == crate::core::control::ControlPhase::Paused
+        {
             self.release_locked().await;
         }
     }

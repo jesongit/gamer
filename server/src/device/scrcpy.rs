@@ -24,6 +24,7 @@ use super::adb::Adb;
 pub const SCRCPY_VERSION: &str = "3.3.3";
 const DEVICE_NAME_LEN: usize = 64;
 const VIDEO_META_LEN: usize = 12;
+const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 
 // 视频包标志位
 const PACKET_FLAG_CONFIG: u64 = 1 << 63;
@@ -89,9 +90,9 @@ pub struct ScrcpySession {
     pub meta: Mutex<Option<VideoMeta>>,
     /// tokio Mutex：控制 socket 写入可能跨 await
     control: tokio::sync::Mutex<Option<TcpStream>>,
-    /// 设备分辨率（虚拟屏模式下 = 虚拟屏分辨率）
-    pub width: Mutex<u32>,
-    pub height: Mutex<u32>,
+    held_inputs: tokio::sync::Mutex<HeldInputs>,
+    input_epoch: String,
+    input_space: Mutex<InputSpace>,
     pub connected: Arc<std::sync::atomic::AtomicBool>,
     /// 最近一帧视频的到达时间（unix 微秒；0 = 尚无帧），
     /// 供视频静默看门狗检测断流并自动重连
@@ -99,6 +100,19 @@ pub struct ScrcpySession {
     /// 应用是否已启动（建会话时探测配置应用进程存活 + start_app 置位）：
     /// connect 响应据此告知前端抑制「未启动应用」提示
     pub app_started: std::sync::atomic::AtomicBool,
+    pub controls: parking_lot::RwLock<Arc<crate::core::control::ControlRegistry>>,
+}
+
+#[derive(Default)]
+struct HeldInputs {
+    touches: std::collections::HashMap<u64, (f32, f32)>,
+    keys: std::collections::HashSet<u32>,
+}
+
+struct InputSpace {
+    width: u32,
+    height: u32,
+    revision: u64,
 }
 
 /// Encode the scrcpy v3 touch control payload. Keeping the wire layout in a
@@ -142,7 +156,49 @@ impl ScrcpySession {
 
     /// 当前视频分辨率（虚拟屏模式下 = 虚拟屏分辨率）
     pub fn video_size(&self) -> (u32, u32) {
-        (*self.width.lock(), *self.height.lock())
+        let space = self.input_space.lock();
+        (space.width, space.height)
+    }
+
+    pub fn coordinate_space(
+        &self,
+    ) -> (
+        crate::capabilities::FrameSize,
+        crate::capabilities::FrameStamp,
+    ) {
+        let space = self.input_space.lock();
+        (
+            crate::capabilities::FrameSize::new(space.width, space.height),
+            crate::capabilities::FrameStamp {
+                target: self.device.id.clone(),
+                epoch: self.input_epoch.clone(),
+                revision: space.revision,
+            },
+        )
+    }
+
+    pub fn update_video_size(&self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let mut space = self.input_space.lock();
+        if (space.width, space.height) != (width, height) {
+            space.width = width;
+            space.height = height;
+            space.revision += 1;
+        }
+    }
+
+    pub fn validate_frame(&self, expected: &crate::capabilities::FrameStamp) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.connected.load(std::sync::atomic::Ordering::Acquire),
+            "stale_frame: 设备连接已结束"
+        );
+        anyhow::ensure!(
+            &self.coordinate_space().1 == expected,
+            "stale_frame: 设备连接或坐标空间已改变，请重新截图"
+        );
+        Ok(())
     }
 }
 
@@ -323,8 +379,16 @@ impl ScrcpySession {
             adb: adb.clone(),
             meta: Mutex::new(Some(meta)),
             control: tokio::sync::Mutex::new(Some(control)),
-            width: Mutex::new(width),
-            height: Mutex::new(height),
+            held_inputs: tokio::sync::Mutex::new(HeldInputs::default()),
+            controls: parking_lot::RwLock::new(Arc::new(
+                crate::core::control::ControlRegistry::default(),
+            )),
+            input_epoch: uuid::Uuid::new_v4().to_string(),
+            input_space: Mutex::new(InputSpace {
+                width,
+                height,
+                revision: 0,
+            }),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             last_frame_at: std::sync::atomic::AtomicU64::new(0),
             app_started: std::sync::atomic::AtomicBool::new(false),
@@ -469,12 +533,38 @@ impl ScrcpySession {
     // ---------- 控制消息注入 ----------
 
     async fn send_control(&self, msg: &[u8]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.connected.load(std::sync::atomic::Ordering::Acquire),
+            "设备连接已结束"
+        );
         let mut guard = self.control.lock().await;
-        if let Some(sock) = guard.as_mut() {
-            sock.write_all(msg).await?;
-            Ok(())
-        } else {
-            anyhow::bail!("control socket closed")
+        anyhow::ensure!(
+            self.connected.load(std::sync::atomic::Ordering::Acquire),
+            "设备连接已结束"
+        );
+        let result = match guard.as_mut() {
+            Some(sock) => tokio::time::timeout(CONTROL_WRITE_TIMEOUT, sock.write_all(msg)).await,
+            None => {
+                self.connected
+                    .store(false, std::sync::atomic::Ordering::Release);
+                anyhow::bail!("control socket closed")
+            }
+        };
+        match result {
+            Ok(Ok(())) => Ok(()),
+            failed => {
+                // A failed or partial write cannot be reused. Invalidate only
+                // this session and close its old socket before cleanup releases
+                // the owner; the watchdog can then reconnect a fresh session.
+                self.connected
+                    .store(false, std::sync::atomic::Ordering::Release);
+                guard.take();
+                match failed {
+                    Ok(Err(error)) => Err(error.into()),
+                    Err(_) => anyhow::bail!("control socket write timed out"),
+                    Ok(Ok(())) => unreachable!(),
+                }
+            }
         }
     }
 
@@ -487,11 +577,23 @@ impl ScrcpySession {
         y: f32,
         pressure: f32,
     ) -> anyhow::Result<()> {
-        let (w, h) = (*self.width.lock(), *self.height.lock());
+        let (w, h) = self.video_size();
         let x = (x.max(0.0).min(w as f32 - 1.0)) as u32;
         let y = (y.max(0.0).min(h as f32 - 1.0)) as u32;
         let buf = encode_touch_packet(action, pointer_id, x, y, w, h, pressure);
+        // Record DOWN before the cancellable socket write: a partial write can
+        // still reach the device and must be paired with UP by the barrier.
+        if action != ACTION_UP {
+            self.held_inputs
+                .lock()
+                .await
+                .touches
+                .insert(pointer_id, (x as f32, y as f32));
+        }
         self.send_control(&buf).await?;
+        if action == ACTION_UP {
+            self.held_inputs.lock().await.touches.remove(&pointer_id);
+        }
         // 统一输入观察（录制合同 §2.1）：所有来源（REST/投屏 DataChannel 直发、
         // keymap、runner、插件能力层）的触控都经此进入设备发送路径；已被接受
         // 的注入按 pointer 压缩为语义 tap/swipe 记录。无活动录制会话时直通。
@@ -541,10 +643,62 @@ impl ScrcpySession {
         buf[2..6].copy_from_slice(&keycode.to_be_bytes());
         buf[6..10].copy_from_slice(&repeat.to_be_bytes());
         buf[10..14].copy_from_slice(&meta.to_be_bytes());
+        if action == 0 {
+            self.held_inputs.lock().await.keys.insert(keycode);
+        }
         self.send_control(&buf).await?;
+        if action == 1 {
+            self.held_inputs.lock().await.keys.remove(&keycode);
+        }
         // 统一输入观察：key down/up 在观察侧按 keycode 配对为一次 key 事件
         crate::recording::observe_key(&self.device.id, action, keycode);
         Ok(())
+    }
+
+    /// Exclusive control barriers call this after all admitted actions drain.
+    pub async fn release_inputs(&self) -> anyhow::Result<()> {
+        if self.discard_disconnected_inputs().await {
+            return Ok(());
+        }
+        let (touches, keys) = {
+            let held = self.held_inputs.lock().await;
+            (
+                held.touches
+                    .iter()
+                    .map(|(id, point)| (*id, *point))
+                    .collect::<Vec<_>>(),
+                held.keys.iter().copied().collect::<Vec<_>>(),
+            )
+        };
+        let mut error = None;
+        for (id, (x, y)) in touches {
+            if let Err(e) = self.inject_touch(ACTION_UP, id, x, y, 0.0).await {
+                error.get_or_insert(e);
+            }
+        }
+        for key in keys {
+            if let Err(e) = self.inject_keycode(1, key, 0, 0).await {
+                error.get_or_insert(e);
+            }
+        }
+        // Video EOF or an UP write failure may have invalidated this session
+        // while releasing. Its closed socket cannot inject into a replacement.
+        if self.discard_disconnected_inputs().await {
+            return Ok(());
+        }
+        match error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    async fn discard_disconnected_inputs(&self) -> bool {
+        if self.connected.load(std::sync::atomic::Ordering::Acquire) {
+            return false;
+        }
+        self.control.lock().await.take();
+        *self.held_inputs.lock().await = HeldInputs::default();
+        true
     }
 
     /// 按键（按下+释放），如 HOME=3, BACK=4, APP_SWITCH=187
@@ -576,7 +730,7 @@ impl ScrcpySession {
         scroll_x: f32,
         scroll_y: f32,
     ) -> anyhow::Result<()> {
-        let (w, h) = (*self.width.lock(), *self.height.lock());
+        let (w, h) = self.video_size();
         let mut buf = [0u8; 21];
         buf[0] = 3; // TYPE_INJECT_SCROLL_EVENT
         buf[1..5].copy_from_slice(&(x as u32).to_be_bytes());
@@ -658,7 +812,8 @@ impl ScrcpySession {
         if let Some(pkg) = pkg_for_watch {
             if self.device.screen_mode == ScreenMode::Virtual && super::adb::is_safe_pkg(&pkg) {
                 let s = self.clone();
-                tokio::spawn(async move { s.watch_launch_freeze(&pkg).await });
+                let origin = self.controls.read().identity(&self.device.id);
+                tokio::spawn(async move { s.watch_launch_freeze(&pkg, &origin).await });
             }
         }
         self.app_started
@@ -757,7 +912,11 @@ impl ScrcpySession {
     /// （Activity Start 会强制 THAW，实测有效；不走 start_app 以免其 pidof
     /// 判定叠加 "+" 又把刚捅醒的进程 force-stop 掉）。两捅仍冻结 → 告警放弃，
     /// 用户手动重点击即走 "+" 强启兜底
-    async fn watch_launch_freeze(self: Arc<Self>, pkg: &str) {
+    async fn watch_launch_freeze(
+        self: Arc<Self>,
+        pkg: &str,
+        origin: &crate::core::control::ControlIdentity,
+    ) {
         let mut attempt = 0u32;
         loop {
             tokio::time::sleep(Duration::from_secs(if attempt == 0 { 6 } else { 8 })).await;
@@ -775,8 +934,25 @@ impl ScrcpySession {
             }
             warn!(device = %self.device.name, pkg = %pkg, attempt,
                 "app frozen in launch window (greeze), poking with plain start to thaw");
-            let _ = self.send_start_control(pkg).await;
+            if self.background_start_control(pkg, origin).await.is_err() {
+                return;
+            }
         }
+    }
+
+    /// Delayed recovery carries its original input owner but no operation gate.
+    /// Each actual launch must reacquire admission; pause or takeover cancels it.
+    async fn background_start_control(
+        &self,
+        pkg: &str,
+        origin: &crate::core::control::ControlIdentity,
+    ) -> anyhow::Result<()> {
+        let controls = self.controls.read().clone();
+        controls
+            .admit_identity(&self.device.id, origin)
+            .await?
+            .scope(self.send_start_control(pkg))
+            .await
     }
 
     /// viewer 注册触发的冻结自愈入口：应用被 Greeze 冻结（挂机冻结 → 画面完全
@@ -790,6 +966,7 @@ impl ScrcpySession {
         }
         let s = self.clone();
         let pkg = pkg.to_string();
+        let origin = self.controls.read().identity(&self.device.id);
         tokio::spawn(async move {
             let Some(pid) = s.app_pidof(&pkg).await else {
                 return;
@@ -799,8 +976,10 @@ impl ScrcpySession {
             }
             warn!(device = %s.device.name, pkg = %pkg,
                 "viewer connected but app frozen (greeze), poking with plain start to thaw");
-            let _ = s.send_start_control(&pkg).await;
-            s.watch_launch_freeze(&pkg).await;
+            if s.background_start_control(&pkg, &origin).await.is_err() {
+                return;
+            }
+            s.watch_launch_freeze(&pkg, &origin).await;
         });
     }
 }
@@ -844,6 +1023,28 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    fn input_test_session(device: Device, cfg: &crate::config::Config) -> Arc<ScrcpySession> {
+        Arc::new(ScrcpySession {
+            device,
+            adb: Adb::new(cfg),
+            meta: parking_lot::Mutex::new(None),
+            control: tokio::sync::Mutex::new(None),
+            held_inputs: tokio::sync::Mutex::new(HeldInputs::default()),
+            controls: parking_lot::RwLock::new(Arc::new(
+                crate::core::control::ControlRegistry::default(),
+            )),
+            input_epoch: uuid::Uuid::new_v4().to_string(),
+            input_space: Mutex::new(InputSpace {
+                width: 1920,
+                height: 1080,
+                revision: 0,
+            }),
+            connected: Arc::new(AtomicBool::new(true)),
+            last_frame_at: AtomicU64::new(0),
+            app_started: AtomicBool::new(false),
+        })
+    }
+
     fn online_test_manager(
         mode: ScreenMode,
     ) -> (
@@ -872,21 +1073,12 @@ mod tests {
             fps: Some(30),
             created_at: "test".into(),
         };
-        let session = Arc::new(ScrcpySession {
-            device: device.clone(),
-            adb: Adb::new(&cfg),
-            meta: parking_lot::Mutex::new(None),
-            control: tokio::sync::Mutex::new(None),
-            width: parking_lot::Mutex::new(1920),
-            height: parking_lot::Mutex::new(1080),
-            connected: Arc::new(AtomicBool::new(true)),
-            last_frame_at: AtomicU64::new(0),
-            app_started: AtomicBool::new(false),
-        });
+        let session = input_test_session(device.clone(), &cfg);
         let frames = tokio::sync::broadcast::channel(8).0;
         let audio_frames = tokio::sync::broadcast::channel(8).0;
         let db = Arc::new(Store::open(&cfg).expect("创建生命周期测试数据库"));
         let manager = Arc::new(crate::device::DeviceManager::new(db, cfg.clone()));
+        *session.controls.write() = manager.controls.clone();
         manager.devices.write().insert(
             device.id.clone(),
             crate::device::DeviceRuntime {
@@ -901,6 +1093,364 @@ mod tests {
             },
         );
         (manager, session, dir)
+    }
+
+    async fn attach_test_control(session: &ScrcpySession) -> TcpStream {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let writer = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (reader, _) = listener.accept().await.unwrap();
+        *session.control.lock().await = Some(writer);
+        reader
+    }
+
+    #[tokio::test]
+    async fn dead_control_write_releases_ai_owner_without_touching_replacement() {
+        let (manager, old, _dir) = online_test_manager(ScreenMode::Mirror);
+        let mut reader = attach_test_control(&old).await;
+        let id = old.device.id.clone();
+        let lease = manager.controls.claim(&id, "ai-session").await.unwrap();
+        manager
+            .controls
+            .execute(&lease, async {
+                old.inject_touch(ACTION_DOWN, 7, 30.0, 40.0, 1.0).await?;
+                old.inject_keycode(0, 4, 0, 0).await
+            })
+            .await
+            .unwrap();
+        let mut injected = [0u8; 46];
+        reader.read_exact(&mut injected).await.unwrap();
+        assert_eq!(injected[1], ACTION_DOWN);
+        assert_eq!(injected[33], 0);
+
+        let new = input_test_session(old.device.clone(), &manager.cfg);
+        *new.controls.write() = manager.controls.clone();
+        let mut new_reader = attach_test_control(&new).await;
+        // Closing this real TCP write half makes the next UP fail while video
+        // still reports connected; another session with the same ID stays live.
+        old.control
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .shutdown()
+            .await
+            .unwrap();
+        assert!(manager
+            .controls
+            .execute(&lease, old.inject_keycode(1, 4, 0, 0))
+            .await
+            .is_err());
+        assert!(!old.connected.load(Ordering::Acquire));
+        assert!(old.control.lock().await.is_none());
+        assert!(new.connected.load(Ordering::Acquire));
+        manager
+            .controls
+            .release(&lease, manager.release_control_inputs(&id))
+            .await
+            .unwrap();
+        assert!(manager.controls.status(&id).owner.is_none());
+        assert!(manager.controls.status(&id).manual_allowed);
+        assert!(old.held_inputs.lock().await.touches.is_empty());
+        assert!(old.held_inputs.lock().await.keys.is_empty());
+        assert_eq!(reader.read(&mut injected).await.unwrap(), 0);
+
+        manager.devices.write().get_mut(&id).unwrap().session = Some(new.clone());
+        manager
+            .controls
+            .manual(&id, new.inject_keycode(0, 3, 0, 0))
+            .await
+            .unwrap();
+        let mut key = [0u8; 14];
+        new_reader.read_exact(&mut key).await.unwrap();
+        assert_eq!(key[1], 0);
+        old.release_inputs().await.unwrap();
+        assert!(new.held_inputs.lock().await.keys.contains(&3));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), new_reader.read(&mut key))
+                .await
+                .is_err(),
+            "old cleanup must not send UP into the replacement"
+        );
+        manager
+            .controls
+            .manual(&id, new.inject_keycode(1, 3, 0, 0))
+            .await
+            .unwrap();
+        new_reader.read_exact(&mut key).await.unwrap();
+        assert_eq!(key[1], 1);
+    }
+
+    #[tokio::test]
+    async fn video_eof_pause_closes_old_control_before_allowing_manual() {
+        let (manager, session, _dir) = online_test_manager(ScreenMode::Mirror);
+        let mut reader = attach_test_control(&session).await;
+        let id = session.device.id.clone();
+        let lease = manager.controls.claim(&id, "ai-session").await.unwrap();
+        manager
+            .controls
+            .execute(
+                &lease,
+                session.inject_touch(ACTION_DOWN, 0, 30.0, 40.0, 1.0),
+            )
+            .await
+            .unwrap();
+        let mut touch = [0u8; 32];
+        reader.read_exact(&mut touch).await.unwrap();
+        assert_eq!(touch[1], ACTION_DOWN);
+        // This is the exact flag set by the video reader on EOF. The old
+        // control socket is still present and must be closed, not reused.
+        session.connected.store(false, Ordering::Release);
+        let paused = manager
+            .controls
+            .pause(&lease, manager.release_control_inputs(&id))
+            .await
+            .unwrap();
+        assert!(manager.controls.status(&id).manual_allowed);
+        assert!(session.control.lock().await.is_none());
+        assert!(session.held_inputs.lock().await.touches.is_empty());
+        assert_eq!(reader.read(&mut touch).await.unwrap(), 0);
+        manager
+            .controls
+            .release(&paused, manager.release_control_inputs(&id))
+            .await
+            .unwrap();
+        assert!(manager.controls.status(&id).owner.is_none());
+    }
+
+    #[tokio::test]
+    async fn watchdog_removes_control_dead_session_before_any_video_frame() {
+        let (manager, session, _dir) = online_test_manager(ScreenMode::Mirror);
+        let mut reader = attach_test_control(&session).await;
+        let id = session.device.id.clone();
+        let lease = manager.controls.claim(&id, "ai-session").await.unwrap();
+        manager
+            .controls
+            .execute(&lease, session.inject_keycode(0, 4, 0, 0))
+            .await
+            .unwrap();
+        let mut key = [0u8; 14];
+        reader.read_exact(&mut key).await.unwrap();
+        assert_eq!(key[1], 0);
+        session.control.lock().await.take();
+        assert!(manager
+            .controls
+            .execute(&lease, session.inject_keycode(1, 4, 0, 0))
+            .await
+            .is_err());
+        assert!(!session.connected.load(Ordering::Acquire));
+        assert_eq!(session.video_idle_ms(), 0);
+        manager
+            .controls
+            .release(&lease, manager.release_control_inputs(&id))
+            .await
+            .unwrap();
+        assert_eq!(reader.read(&mut key).await.unwrap(), 0);
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+        // Mirror, no Run/viewer and an explicitly invalid adb_path: this
+        // exercises real watchdog teardown without starting any ADB process.
+        crate::api::system::spawn_watchdog(
+            manager.clone(),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            metrics.clone(),
+        );
+        tokio::time::timeout(Duration::from_secs(7), async {
+            while manager.session(&id).is_some() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(metrics.snapshot().scrcpy_reconnect_watchdog_dead_total, 1);
+        assert_eq!(
+            manager.snapshot(&id).unwrap().1,
+            crate::device::DeviceStatus::Offline
+        );
+    }
+
+    #[tokio::test]
+    async fn android_frame_epoch_rejects_same_size_replacement_without_injecting_into_new_session()
+    {
+        use crate::capabilities::{
+            adapters::{DeviceAdapter, FrameAdapter, FrameStore, InputAdapter, TouchAdapter},
+            DeviceHandle, DeviceId, FrameService, InputService, KeyAction, TextInput, TouchPoint,
+            TouchService,
+        };
+        use tokio::io::AsyncReadExt;
+        let (manager, old, _dir) = online_test_manager(ScreenMode::Mirror);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let writer = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut old_reader, _) = listener.accept().await.unwrap();
+        *old.control.lock().await = Some(writer);
+        let device = Arc::new(DeviceAdapter::new(manager.clone()));
+        let touch = Arc::new(TouchAdapter::new(device.clone()));
+        let input = InputAdapter::new(device, touch.clone());
+        let frames = FrameAdapter::new(manager.clone(), Arc::new(FrameStore::new()));
+        let handle = DeviceHandle::new(DeviceId::new(&old.device.id));
+        let (size, stamp) = frames.coordinate_space(&handle).await.unwrap();
+        let stamp = stamp.unwrap();
+        let bound = handle.clone().with_expected_frame(stamp.clone());
+        let contact = touch
+            .begin(&bound, TouchPoint::new(10, 20, 1.0))
+            .await
+            .unwrap();
+        let mut packet = [0u8; 32];
+        old_reader.read_exact(&mut packet).await.unwrap();
+        assert_eq!(packet[1], ACTION_DOWN);
+        let new = input_test_session(old.device.clone(), &manager.cfg);
+        *new.controls.write() = manager.controls.clone();
+        let writer = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut new_reader, _) = listener.accept().await.unwrap();
+        *new.control.lock().await = Some(writer);
+        manager
+            .devices
+            .write()
+            .get_mut(&old.device.id)
+            .unwrap()
+            .session = Some(new.clone());
+        let (new_size, new_stamp) = frames.coordinate_space(&handle).await.unwrap();
+        assert_eq!(size, new_size);
+        assert_ne!(Some(stamp.clone()), new_stamp);
+        assert!(input
+            .tap_from_frame(&handle, TouchPoint::new(20, 30, 1.0), Some(&stamp))
+            .await
+            .is_err());
+        assert!(input
+            .key_named(&bound, "BACK", KeyAction::Press)
+            .await
+            .is_err());
+        assert!(input.text(&bound, TextInput::new("stale")).await.is_err());
+        assert!(touch
+            .move_touch(&contact, TouchPoint::new(30, 40, 1.0))
+            .await
+            .is_err());
+        touch.end(&contact).await.unwrap();
+        old_reader.read_exact(&mut packet).await.unwrap();
+        assert_eq!(
+            packet[1], ACTION_UP,
+            "old touch cleanup only reaches its original socket"
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                new_reader.read_exact(&mut packet)
+            )
+            .await
+            .is_err(),
+            "no stale input or cleanup may reach new session"
+        );
+        input
+            .tap_from_frame(&handle, TouchPoint::new(20, 30, 1.0), new_stamp.as_ref())
+            .await
+            .unwrap();
+        let mut tap = [0u8; 64];
+        new_reader.read_exact(&mut tap).await.unwrap();
+        assert_eq!(tap[1], ACTION_DOWN);
+        assert_eq!(tap[33], ACTION_UP);
+        let before = new.coordinate_space().1;
+        new.update_video_size(1080, 1920);
+        new.update_video_size(1920, 1080);
+        assert_ne!(
+            before,
+            new.coordinate_space().1,
+            "size returning to old dimensions cannot resurrect an old coordinate revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn ai_pause_barrier_finishes_injected_swipe_then_allows_manual_and_rejects_stale_cleanup()
+    {
+        use tokio::io::AsyncReadExt;
+        let (manager, session, _dir) = online_test_manager(ScreenMode::Mirror);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let writer = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut reader, _) = listener.accept().await.unwrap();
+        *session.control.lock().await = Some(writer);
+        let controls = manager.controls.clone();
+        let id = session.device.id.clone();
+        let old_viewer = controls.manual_lease(&id);
+        let delayed_manual_launch = controls
+            .manual(&id, async { Ok(controls.identity(&id)) })
+            .await
+            .unwrap();
+        let lease = controls.claim(&id, "ai-session").await.unwrap();
+        assert!(session
+            .background_start_control("test.app", &delayed_manual_launch)
+            .await
+            .is_err());
+        let delayed_ai_launch = controls
+            .execute(&lease, async { Ok(controls.identity(&id)) })
+            .await
+            .unwrap();
+        let (c, l, s) = (controls.clone(), lease.clone(), session.clone());
+        let action =
+            tokio::spawn(async move { c.execute(&l, s.swipe(10.0, 20.0, 80.0, 90.0, 100)).await });
+        let mut down = [0u8; 32];
+        reader.read_exact(&mut down).await.unwrap();
+        assert_eq!(down[1], ACTION_DOWN);
+        let (c, l, m, t) = (controls.clone(), lease.clone(), manager.clone(), id.clone());
+        let pause = tokio::spawn(async move { c.pause(&l, m.release_control_inputs(&t)).await });
+        tokio::task::yield_now().await;
+        assert!(controls.manual(&id, session.press_key(3)).await.is_err());
+        let mut remaining = vec![0u8; 21 * 32];
+        reader.read_exact(&mut remaining).await.unwrap();
+        assert_eq!(remaining[20 * 32 + 1], ACTION_UP);
+        action.await.unwrap().unwrap();
+        let paused = pause.await.unwrap().unwrap();
+        assert!(session
+            .background_start_control("test.app", &delayed_ai_launch)
+            .await
+            .is_err());
+        controls
+            .manual(&id, session.inject_keycode(0, 3, 0, 0))
+            .await
+            .unwrap();
+        let mut key = [0u8; 14];
+        reader.read_exact(&mut key).await.unwrap();
+        assert_eq!(key[1], 0);
+        let current = controls
+            .resume(&paused, manager.release_control_inputs(&id))
+            .await
+            .unwrap();
+        reader.read_exact(&mut key).await.unwrap();
+        assert_eq!(key[1], 1, "resume releases the manual key before AI enters");
+        controls
+            .execute(&current, session.inject_keycode(0, 4, 0, 0))
+            .await
+            .unwrap();
+        reader.read_exact(&mut key).await.unwrap();
+        assert_eq!(key[1], 0);
+        controls
+            .cleanup_manual(&old_viewer, session.release_inputs())
+            .await
+            .unwrap();
+        controls
+            .release(&lease, session.release_inputs())
+            .await
+            .unwrap();
+        assert!(controls
+            .execute(&lease, session.tap(30.0, 40.0))
+            .await
+            .is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), reader.read_exact(&mut key))
+                .await
+                .is_err(),
+            "old viewer and generation must not inject UP or another action"
+        );
+        controls
+            .release(&current, manager.release_control_inputs(&id))
+            .await
+            .unwrap();
+        reader.read_exact(&mut key).await.unwrap();
+        assert_eq!(key[1], 1);
     }
 
     fn mark_old_idle(manager: &Arc<crate::device::DeviceManager>, device_id: &str) {

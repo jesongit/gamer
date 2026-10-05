@@ -29,6 +29,8 @@ export function useConsoleDeviceManager({
   cleanup,
   /** 控制消息发送（Console 的 DataChannel 链路，函数声明提升后传入） */
   sendControl,
+  /** 服务端权威控制状态的 UI 镜像；缺省保持已有调用方契约。 */
+  guardManualInput = () => true,
 }) {
   const confirmDialog = useConfirmDialog()
   const beginReport = operationReporter(feedback, '', toast)
@@ -410,6 +412,7 @@ export function useConsoleDeviceManager({
     const toast = beginReport()
     const pkg = (e?.target?.value || '').trim()
     const d = current.value
+    if (!guardManualInput()) { if (e?.target) e.target.value = (d?.pkg || '').trim(); return }
     if (!d || !pkg || pkg === (d.pkg || '').trim() || appSelectSaving.value) return
     appSelectSaving.value = true
     try {
@@ -439,6 +442,7 @@ export function useConsoleDeviceManager({
 
   function key(k) {
     if (!connected.value) return
+    if (!guardManualInput()) return
     const codes = { HOME: 3, BACK: 4, APP_SWITCH: 187, VOL_UP: 24, VOL_DOWN: 25 }
     sendControl({ type: 'press', keycode: codes[k] || 0 })
   }
@@ -472,7 +476,7 @@ export function useConsoleDeviceManager({
     }).catch(e => toast('截图失败：' + e.message, 'error'))
   }
 
-  function rotate() { if (connected.value) sendControl({ type: 'rotate' }) }
+  function rotate() { if (connected.value && guardManualInput()) sendControl({ type: 'rotate' }) }
 
   function splitTextForScrcpy(text, maxBytes = 300) {
     const encoder = new TextEncoder()
@@ -496,6 +500,7 @@ export function useConsoleDeviceManager({
   async function clipboard() {
     const toast = beginReport()
     if (!connected.value) return toast('请先连接设备', 'error')
+    if (!guardManualInput()) return
     if (!navigator.clipboard?.readText) {
       return toast('当前浏览器不允许读取系统剪贴板，请使用 HTTPS 或 localhost', 'warn')
     }
@@ -506,24 +511,27 @@ export function useConsoleDeviceManager({
       return toast('读取系统剪贴板失败，请允许浏览器访问剪贴板', 'error')
     }
     if (!text) return toast('系统剪贴板为空', 'warn')
+    // 读取剪贴板期间控制权可能变化；发送前再次判断，不误报粘贴成功。
+    if (!guardManualInput()) return
 
     // scrcpy 文本控制消息单条上限为 300 字节；按 UTF-8 字符切块，避免中文
     // 或 emoji 被截断。DataChannel 本身有序，多个 text 消息会按原顺序提交。
     const chunks = splitTextForScrcpy(text)
-    for (const chunk of chunks) sendControl({ type: 'text', text: chunk })
+    for (const chunk of chunks) if (sendControl({ type: 'text', text: chunk }) === false) return
     toast(`已粘贴 ${text.length} 个字符`, 'success')
   }
 
   function launchGame() {
     const toast = beginReport()
     if (!connected.value) return toast('请先连接设备', 'error')
+    if (!guardManualInput()) return
     // Android 运行目标 = 设备配置的应用包名（plan §27：启动应用属设备/投屏区域，
     // 与 Package 数据上下文无关）
     const androidPkg = (current.value?.pkg || '').trim()
     if (!androidPkg) return toast('未配置应用，请先在工具条「应用」下拉选择', 'warn')
     // 工具栏「启动」定义为重启：+ 前缀让 scrcpy 先 force-stop 再冷启动，
     // 避免应用已在运行时只切回前台而不重置状态。
-    sendControl({ type: 'start_app', app: `+${androidPkg}` })
+    if (sendControl({ type: 'start_app', app: `+${androidPkg}` }) === false) return
     if (store.deviceId) appStartedDevices.add(store.deviceId)
     appHintDismissed.value = true
     toast(`正在重启 ${androidPkg}…`, 'info')
@@ -533,9 +541,10 @@ export function useConsoleDeviceManager({
   function stopGame() {
     const toast = beginReport()
     if (!connected.value) return toast('请先连接设备', 'error')
+    if (!guardManualInput()) return
     const androidPkg = (current.value?.pkg || '').trim()
     if (!androidPkg) return toast('未配置应用，请先在工具条「应用」下拉选择', 'warn')
-    sendControl({ type: 'stop_app', app: androidPkg })
+    if (sendControl({ type: 'stop_app', app: androidPkg }) === false) return
     toast(`正在停止 ${androidPkg}…`, 'info')
   }
 

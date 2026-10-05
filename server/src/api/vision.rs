@@ -374,6 +374,7 @@ mod tests {
     fn offline_frame_extraction_needs_no_device_manager() {
         let src = tempfile::tempdir().unwrap();
         let clip = src.path().join("clip.mp4");
+        // 夹具只验证 PTS 与 PNG 提帧，用内建 MPEG-4 编码兼容 LGPL 发行依赖。
         let gen = std::process::Command::new("ffmpeg")
             .args([
                 "-y",

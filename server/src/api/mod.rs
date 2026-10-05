@@ -20,6 +20,7 @@ mod browser;
 mod common;
 mod devices;
 mod error;
+mod extension_mcp;
 mod extensions;
 mod extensions_management;
 mod extensions_market;
@@ -192,6 +193,10 @@ pub(crate) fn build_router_with_extensions(
     //      高风险接口标注（专项测试见文件尾 tests）：shutdown、设备控制
     //      （devices::api_control）、运行分发、资源删除。
     let protected_json: Router<()> = Router::new()
+        .route(
+            "/api/devices/:id/input-control",
+            get(devices::input_control),
+        )
         .route(
             "/api/browser-targets",
             get(browser::list).post(browser::save),
@@ -523,6 +528,13 @@ pub(crate) fn build_router_with_extensions(
         ))
         .layer(DefaultBodyLimit::max(BODY_LIMIT_ZIP_IMPORT));
 
+    // MCP uses a plugin-scoped Bearer credential and a real loopback peer;
+    // administrator cookies and the host's local_only setting do not apply.
+    let local_mcp: Router<()> = Router::new()
+        .route("/api/extensions/:id/mcp", post(extension_mcp::post_message))
+        .with_state(state.clone())
+        .layer(DefaultBodyLimit::max(BODY_LIMIT_JSON));
+
     // 最外层注入来源 IP 键（登录限流用）；CORS 层已移除——vite dev proxy 同源转发不受影响
     Router::new()
         .merge(public)
@@ -533,6 +545,7 @@ pub(crate) fn build_router_with_extensions(
         .merge(protected_recording)
         .merge(protected_apk)
         .merge(protected_extensions)
+        .merge(local_mcp)
         .layer(axmw::from_fn(auth::inject_ip_key))
         .layer(axmw::from_fn(crate::update::barrier::middleware))
 }

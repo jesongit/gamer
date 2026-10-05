@@ -22,9 +22,14 @@ impl InputAdapter {
     }
 
     async fn tap_touch(&self, device: &DeviceHandle, point: TouchPoint) -> CapabilityResult<()> {
-        let touch = self.touch.begin(device, point).await?;
-        tokio::time::sleep(Duration::from_millis(60)).await;
-        self.touch.end(&touch).await
+        let permit = self.device.admit(device).await?;
+        permit
+            .scope(async {
+                let touch = self.touch.begin(device, point).await?;
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                self.touch.end(&touch).await
+            })
+            .await
     }
 }
 
@@ -46,12 +51,11 @@ impl InputService for InputAdapter {
                 )
                 .await;
         }
-        if stamp.is_some() {
-            return Err(CapabilityError::InvalidRequest(
-                "画面目标与输入目标不一致".into(),
-            ));
-        }
-        self.tap_touch(device, point).await
+        let bound = match stamp {
+            Some(stamp) => device.clone().with_expected_frame(stamp.clone()),
+            None => device.clone(),
+        };
+        self.tap_touch(&bound, point).await
     }
     async fn key_named(
         &self,
@@ -95,6 +99,30 @@ impl InputService for InputAdapter {
         gesture: SwipeGesture,
         expected: Option<&super::super::FrameStamp>,
     ) -> CapabilityResult<()> {
+        let permit = self.device.admit(device).await?;
+        permit
+            .scope(self.swipe_admitted(device, gesture, expected))
+            .await
+    }
+
+    async fn key(&self, device: &DeviceHandle, input: KeyInput) -> CapabilityResult<()> {
+        let _permit = self.device.admit(device).await?;
+        self.key_admitted(device, input).await
+    }
+
+    async fn text(&self, device: &DeviceHandle, input: TextInput) -> CapabilityResult<()> {
+        let permit = self.device.admit(device).await?;
+        permit.scope(self.text_admitted(device, input)).await
+    }
+}
+
+impl InputAdapter {
+    async fn swipe_admitted(
+        &self,
+        device: &DeviceHandle,
+        gesture: SwipeGesture,
+        expected: Option<&super::super::FrameStamp>,
+    ) -> CapabilityResult<()> {
         if crate::targets::is_browser(device.id().as_str()) {
             let session = self
                 .device
@@ -121,12 +149,11 @@ impl InputService for InputAdapter {
             return result.map_err(|e| CapabilityError::Failed(e.to_string()));
         }
 
-        if expected.is_some() {
-            return Err(CapabilityError::InvalidRequest(
-                "画面目标与输入目标不一致".into(),
-            ));
-        }
-        let touch = self.touch.begin(device, gesture.start()).await?;
+        let bound = match expected {
+            Some(stamp) => device.clone().with_expected_frame(stamp.clone()),
+            None => device.clone(),
+        };
+        let touch = self.touch.begin(&bound, gesture.start()).await?;
         let result = async {
             for i in 1..=20u64 {
                 let t = i as f32 / 20.0;
@@ -147,7 +174,7 @@ impl InputService for InputAdapter {
         result.and(end)
     }
 
-    async fn key(&self, device: &DeviceHandle, input: KeyInput) -> CapabilityResult<()> {
+    async fn key_admitted(&self, device: &DeviceHandle, input: KeyInput) -> CapabilityResult<()> {
         if crate::targets::is_browser(device.id().as_str()) {
             return Err(CapabilityError::Unavailable(
                 "target.android_key: 当前目标不支持 Android 数字键码，请使用命名按键",
@@ -168,7 +195,7 @@ impl InputService for InputAdapter {
         result.map_err(|error| CapabilityError::Failed(error.to_string()))
     }
 
-    async fn text(&self, device: &DeviceHandle, input: TextInput) -> CapabilityResult<()> {
+    async fn text_admitted(&self, device: &DeviceHandle, input: TextInput) -> CapabilityResult<()> {
         if crate::targets::is_browser(device.id().as_str()) {
             return self
                 .device

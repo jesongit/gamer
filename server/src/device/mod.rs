@@ -246,6 +246,7 @@ pub struct DeviceManager {
     pub cfg: Config,
     pub adb: Adb,
     pub browsers: Arc<crate::browser::BrowserManager>,
+    pub controls: Arc<crate::core::control::ControlRegistry>,
     pub devices: RwLock<HashMap<String, DeviceRuntime>>,
     /// 普通连接共享读锁；显式重置 ADB 独占写锁，避免重置期间创建新会话。
     pub(crate) connection_gate: tokio::sync::RwLock<()>,
@@ -259,17 +260,36 @@ pub struct DeviceManager {
 impl DeviceManager {
     pub fn new(db: Db, cfg: Config) -> Self {
         let adb = Adb::new(&cfg);
-        let browsers = Arc::new(crate::browser::BrowserManager::new(db.clone(), cfg.clone()));
+        let controls = Arc::new(crate::core::control::ControlRegistry::default());
+        let browsers = Arc::new(crate::browser::BrowserManager::with_controls(
+            db.clone(),
+            cfg.clone(),
+            controls.clone(),
+        ));
         Self {
             db,
             cfg,
             adb,
             browsers,
+            controls,
             activity: Arc::new(DeviceActivity::default()),
             idle: std::sync::Mutex::new(HashMap::new()),
             devices: RwLock::new(HashMap::new()),
             connection_gate: tokio::sync::RwLock::new(()),
         }
+    }
+
+    /// Called only under a control transition's exclusive operation barrier.
+    /// No new owner can enter until the cleanup completes.
+    pub async fn release_control_inputs(&self, id: &str) -> anyhow::Result<()> {
+        if crate::targets::is_browser(id) {
+            if let Ok(session) = self.browsers.session(id) {
+                session.release_inputs().await;
+            }
+        } else if let Some(session) = self.session(id) {
+            session.release_inputs().await?;
+        }
+        Ok(())
     }
 
     pub async fn start(self: &Arc<Self>) -> anyhow::Result<()> {
@@ -475,6 +495,7 @@ impl DeviceManager {
 
         // 后台消费视频帧：广播 + 帧缓存
         let session = handle.session.clone();
+        *session.controls.write() = self.controls.clone();
         // 探测配置应用进程是否存活（此前启动过、跨空闲仍在跑）：pidof 单发约百毫秒；
         // 置位后 connect 响应告知前端抑制「未启动应用」提示
         if session.probe_app_running().await {
@@ -497,6 +518,8 @@ impl DeviceManager {
                 crate::metrics::global().record_video_input_frame();
                 if let Some(fc) = &cache {
                     fc.feed(&frame);
+                    let (width, height) = fc.dims();
+                    s2.update_video_size(width, height);
                 }
                 // 诊断：广播 send 结果（接收者数 / 错误），降频避免每帧刷日志。
                 // 注意：无任何 viewer 时 tokio broadcast 返回 Err(SendError)（含整帧数据），
@@ -756,7 +779,8 @@ impl DeviceManager {
     /// 有运行租约时跳过（runner 自管应用生命周期）；未配置应用包名跳过；其余交
     /// session 探测冻结后 plain start 捅醒（Activity Start 强制 THAW，原地恢复）
     pub fn poke_thaw_if_frozen(&self, id: &str) {
-        if self.activity.has_kind(id, ActivityKind::Run) {
+        if self.activity.has_kind(id, ActivityKind::Run) || self.controls.status(id).owner.is_some()
+        {
             return;
         }
         let map = self.devices.read();

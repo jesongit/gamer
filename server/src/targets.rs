@@ -174,7 +174,7 @@ pub fn acquire(devices: &DeviceManager, id: &str) -> anyhow::Result<Box<dyn Acti
         let s = devices.browsers.session(id)?;
         anyhow::ensure!(s.is_alive(), "目标已断开");
         s.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        return Ok(Box::new(crate::browser::BrowserRunLease(s)));
+        return Ok(Box::new(crate::browser::BrowserRunLease::new(s)));
     }
     Ok(Box::new(devices.acquire_activity(id, ActivityKind::Run)))
 }

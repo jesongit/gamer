@@ -271,29 +271,55 @@ impl ViewerSession {
         let worker_extensions = extensions;
         let worker_audio_on = audio_on.clone();
         let worker_touch_state = touch_state.clone();
+        let controls = session.controls.read().clone();
+        let worker_controls = controls.clone();
         tokio::spawn(async move {
             let mut accepting = true;
+            let mut cleanup_lease = worker_controls.manual_lease(&s_worker.device.id);
             while let Some(command) = control_rx.recv().await {
                 match command {
-                    ControlCommand::Data(data) if accepting => {
-                        if let Err(e) = handle_control_msg(
+                    ControlCommand::Data(data, ticket) if accepting => {
+                        let observation_only = serde_json::from_slice::<serde_json::Value>(&data)
+                            .ok()
+                            .is_some_and(|v| {
+                                matches!(v["type"].as_str(), Some("audio" | "reset_video"))
+                            });
+                        if !observation_only && cleanup_lease != ticket {
+                            // The control barrier already released these physical
+                            // contacts. Discard the viewer's old local bookkeeping.
+                            worker_touch_state.take_all();
+                        }
+                        let operation = handle_control_msg(
                             &s_worker,
                             &worker_audio_on,
                             &worker_touch_state,
                             &worker_extensions,
                             &data,
-                        )
-                        .await
-                        {
+                        );
+                        let result = if observation_only {
+                            operation.await
+                        } else {
+                            worker_controls.manual_with(&ticket, operation).await
+                        };
+                        if result.is_ok() && !observation_only {
+                            cleanup_lease = ticket;
+                        }
+                        if let Err(e) = result {
                             debug!("control msg error: {}", e);
                         }
                     }
-                    ControlCommand::Data(_) => {
+                    ControlCommand::Data(_, _) => {
                         debug!("dropping control msg after touch cleanup");
                     }
                     ControlCommand::ReleaseTouches { done } => {
                         accepting = false;
-                        if let Err(e) = release_all_touches(&s_worker, &worker_touch_state).await {
+                        if let Err(e) = worker_controls
+                            .cleanup_manual(
+                                &cleanup_lease,
+                                release_all_touches(&s_worker, &worker_touch_state),
+                            )
+                            .await
+                        {
                             debug!("touch cleanup error: {}", e);
                         }
                         if let Some(done) = done {
@@ -302,7 +328,12 @@ impl ViewerSession {
                     }
                 }
             }
-            let _ = release_all_touches(&s_worker, &worker_touch_state).await;
+            let _ = worker_controls
+                .cleanup_manual(
+                    &cleanup_lease,
+                    release_all_touches(&s_worker, &worker_touch_state),
+                )
+                .await;
         });
 
         let session_dc = session.clone();
@@ -318,13 +349,15 @@ impl ViewerSession {
                 *dc_holder.lock() = Some(dc.clone());
                 let s = session_dc.clone();
                 let message_tx = control_tx_for_dc.clone();
+                let message_controls = controls.clone();
                 dc.on_message(Box::new(move |msg| {
                     let data = msg.data.to_vec();
                     let s2 = s.clone();
                     // 只记录长度，不打印内容：拖动时每秒几十上百条消息，
                     // 逐条格式化打印会让服务端日志成为性能瓶颈（全局日志锁串行化）
                     debug!("control msg: {} bytes", data.len());
-                    if message_tx.send(ControlCommand::Data(data)).is_err() {
+                    let ticket = message_controls.manual_lease(&s2.device.id);
+                    if message_tx.send(ControlCommand::Data(data, ticket)).is_err() {
                         debug!("control queue closed, dropping msg for {}", s2.device.name);
                     }
                     Box::pin(async {})
