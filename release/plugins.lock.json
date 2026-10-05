@@ -1,17 +1,17 @@
 {
   "schema_version": 1,
-  "tag": "gamer-yaml-v0.1.3",
-  "plugin_commit": "3af25baf38fa4ec23dc81660c5d663eb6a3845f2",
+  "tag": "gamer-ai-v0.3.10",
+  "plugin_commit": "06da0cb7eeb86f7a7f10103ad7b253a8f197fc36",
   "registry": {
     "name": "registry.json",
-    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-yaml-v0.1.3/registry.json",
-    "size": 7519,
-    "sha256": "6cdd0deb39a53ba1f211c83102d56b95efea81d5cb4201c8969ad4526e5d7ea4"
+    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-ai-v0.3.10/registry.json",
+    "size": 8973,
+    "sha256": "04482157a6753e3ee0661ee3550400be1401948a47c7357c07884152c7954b04"
   },
   "bundle": {
-    "name": "gamer-official-plugins-0.1.3-windows-x64.zip",
-    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-yaml-v0.1.3/gamer-official-plugins-0.1.3-windows-x64.zip",
-    "size": 687486,
-    "sha256": "e30e99a7f0210629920f0f7c88748be190d07091b282c73fd2d67938eddc0e58"
+    "name": "gamer-official-plugins-0.3.10-windows-x64.zip",
+    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-ai-v0.3.10/gamer-official-plugins-0.3.10-windows-x64.zip",
+    "size": 797900,
+    "sha256": "9fbe43a03d99cf1159b32525aaef27b07494cf30edcb52b0faa714b30d224956"
   }
 }
