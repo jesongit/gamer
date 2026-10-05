@@ -55,6 +55,24 @@ try {
     foreach ($p in $plugins) {
         $name = "$($p.id)-$($p.version).gplugin"
         [IO.Compression.ZipFileExtensions]::ExtractToFile($zip.GetEntry($name), (Join-Path $public "plugins/$name"), $true)
+        # Console 的共享组件在插件未安装/停用时仍需这些发行自带的 UI。
+        # 从已校验归档提取同一份字节，普通 Web build 只负责复制静态快照。
+        if ($p.id -in $requiredIds) {
+            $uiRoot = [IO.Path]::GetFullPath((Join-Path $public "plugin-ui/$($p.id)"))
+            $archive = [IO.Compression.ZipFile]::OpenRead((Join-Path $public "plugins/$name"))
+            try {
+                if (-not $archive.GetEntry('ui/plugin.js') -or -not $archive.GetEntry('ui/style.css')) { throw "插件缺少共享 UI 入口或样式: $name" }
+                foreach ($entry in $archive.Entries) {
+                    if (-not $entry.FullName.StartsWith('ui/', [StringComparison]::Ordinal) -or $entry.FullName.EndsWith('/')) { continue }
+                    $relative = $entry.FullName.Substring(3)
+                    if ($relative -match '\\|(^|/)\.\.?(/|$)') { throw "非法插件 UI 路径: $($entry.FullName)" }
+                    $target = [IO.Path]::GetFullPath((Join-Path $uiRoot $relative))
+                    if (-not $target.StartsWith($uiRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw '插件 UI 路径越界' }
+                    New-Item -ItemType Directory -Force -Path ([IO.Path]::GetDirectoryName($target)) | Out-Null
+                    [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
+                }
+            } finally { $archive.Dispose() }
+        }
         # 市场使用发布字节的同源副本，离线可用且无需浏览器跨域 GitHub。
         $p.download_url = "/plugins/$name"
     }
