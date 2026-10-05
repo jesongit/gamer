@@ -1,20 +1,20 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-10-04T03:43:55Z",
+  "generated_at": "2026-10-05T07:25:50Z",
   "host_api": "1.0.0",
   "provenance": {
-    "plugin_commit": "d6ba6931bcf4ab2d4ddaa38c765d47c5a2c5dfab",
+    "plugin_commit": "0c32332bdd53aea8840984df31512d9ab803e608",
     "sdk_host_commit": "acdfbe0bd75b72eff52b4cd48de22df7277ef8b3"
   },
   "plugins": [
     {
       "id": "gamer-ai",
-      "version": "0.3.8",
+      "version": "0.3.9",
       "name": "AI 助手",
       "description": "Agent 对话、配置包攻略记忆与混合检索，可选联网服务和本机 MCP 游玩接入",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-ai-0.3.8.gplugin",
-      "sha256": "4fe697d49ea353418f5c0171b1331a10b155ec72bce4094a3084be0ad61194f1",
+      "download_url": "/plugins/gamer-ai-0.3.9.gplugin",
+      "sha256": "fac420e126d1dfd591b4cc7db6c9677f940f4868efe1e3187264e8a26ed6db7d",
       "size": 109838,
       "permissions": [
         "ui.host",
@@ -55,7 +55,7 @@
       },
       "execution": {
         "kind": "builtin",
-        "host_version": ">=0.2.13"
+        "host_version": ">=0.2.14"
       }
     },
     {
@@ -65,7 +65,7 @@
       "description": "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键",
       "publisher": "gamer.dev",
       "download_url": "/plugins/gamer-keymap-0.1.3.gplugin",
-      "sha256": "f62ac46f8953d13ac455c40785ff42cb61d3131e60aa8336b8d88196e3c086ea",
+      "sha256": "db727a33589d7eff7436aa32facb374e708ce1ed1e9f39613aafbbfac210e998",
       "size": 131898,
       "permissions": [
         "ui.host",
@@ -106,7 +106,7 @@
       "description": "向直播姬提供设备音视频素材，接收 B 站直播互动；支持手动 RTMP 输出",
       "publisher": "gamer.dev",
       "download_url": "/plugins/gamer-live-0.2.5.gplugin",
-      "sha256": "ea9f03d91026b2152c9d096e0baae63dac7c5db5ce96136481a48e43febbcf6f",
+      "sha256": "6c393d46e83260deec57f2fcb9008f700a5795e173ea5df642f1814a8ba38efe",
       "size": 22325,
       "permissions": [
         "ui.host",
@@ -148,7 +148,7 @@
       "description": "使用本机 GitHub CLI 将配置包发布到自己的公开仓库",
       "publisher": "gamer.dev",
       "download_url": "/plugins/gamer-package-publisher-0.1.0.gplugin",
-      "sha256": "de16d36c1b99c1253992b6d4412b70ce19a9f9dec0d878dc75020c850eb613a9",
+      "sha256": "e40e1ddd8bf95fe43868e383a84335f778e8ebdf68f97bfc67448124c2a5c73b",
       "size": 5120,
       "permissions": [
         "ui.host",
@@ -183,7 +183,7 @@
       "description": "视频工作台：媒体素材库、设备录制与操作草稿生成",
       "publisher": "gamer.dev",
       "download_url": "/plugins/gamer-video-0.1.1.gplugin",
-      "sha256": "ac63e6251be2ac87ba8d797f3b433e83b381f18d6d90e7e13fa8243b887dea5d",
+      "sha256": "5e145cdf330e32fdc10dba808cc0733d06b31742e168c04a7d047eb23a8cb8b2",
       "size": 63386,
       "permissions": [
         "ui.host",
@@ -223,8 +223,8 @@
       "description": "自动化：YAML V1 脚本、函数库与模板的制作与运行",
       "publisher": "gamer.dev",
       "download_url": "/plugins/gamer-yaml-0.1.1.gplugin",
-      "sha256": "59eb9071a7bf2022e042e433ecb174d196d0c93635ee76feebb2e0893ef2cedc",
-      "size": 451819,
+      "sha256": "0cb128abbe9d1115946774e090e4d0bf27f1e93e4bf47e3874cf28eb9213ecf1",
+      "size": 451775,
       "permissions": [
         "ui.host",
         "device.read",

@@ -504,6 +504,10 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - Windows 并行 Rust 链接可能因页面文件不足报 os error 1455 或无法 mmap 元数据，未必是缓存损坏；等待其他编译结束后用 -j 1 和所需 --lib/--bin 目标重试，避免直接清空缓存或修改系统设置。
 - 视频快捷键只接收播放器根元素焦点时，鼠标点击进度条或播放按钮会把焦点留在原生控件而失效；鼠标操作播放控件后恢复播放器焦点，下拉框和键盘激活仍保留原生焦点，并用组件实际焦点与冒泡按键事件回归。
 - 新工作树只安装 web 依赖时，舞台测试跨目录加载插件源码可能报缺少 pinyin-pro；先执行 `node tools/build-plugin-ui.mjs --install-only` 安装固定插件快照的 UI 依赖，不修改解析别名或跟随插件仓最新提交。
+- Scoop 的 `rust-gnu` 独立安装不带 rustup、WASM 标准库或完整 C 编译器：首次构建需补齐 GCC 并加入当前进程 PATH，WASM 标准库须与 rustc 版本一致；Cargo 镜像缺少锁定版本时用独立 CARGO_HOME 连接官方源，不修改 Cargo.lock。
+- Windows Cargo 执行本地构建的 `build-script-build.exe` 报 os error 4551 时，检查 CodeIntegrity/Operational 事件 3077/3118；本机可能启用了 Smart App Control，需由用户或管理员按安全策略处理阻止后再继续构建，不应当作源码错误或清缓存重试。
+- 临时设置 CARGO_HOME 只对当前进程及其子进程生效，之后直接执行 `gamer.ps1 rebuild` 仍会读取用户级 Cargo 镜像；若镜像缺少 `memfd 0.6.6` 等锁定版本，备份并移除用户 `.cargo/config.toml` 中过期的 source replacement，使用 `cargo fetch --locked` 验证官方源解析，不降级依赖。
+- Scoop 安装 GCC 后旧终端或已打开的 IDE 仍可能报 `dlltool.exe: program not found`：它们继承了安装前的 PATH，重启终端宿主应用，或在当前 PowerShell 将已安装 GCC 的 `bin` 目录加入 `$env:PATH` 后再构建。
 
 - YAML WASM 每次宿主函数调用会创建临时 Tokio runtime，通知后台任务若在其中 spawn 会随调用结束被取消；通知服务必须捕获长期服务 runtime，并通过“调用已返回后仍完成发送”的测试验证。
 - Rust 测试报 E0786 invalid metadata / Unsupported archive identifier 或 rlib 缺失时，已有目标缓存可能损坏；仅 cargo clean 对报错的具体依赖清理后重建，保留其他产物。

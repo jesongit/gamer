@@ -1132,7 +1132,7 @@ dependencies = [
 
 [[package]]
 name = "gamer-server"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1186,7 +1186,7 @@ dependencies = [
 
 [[package]]
 name = "gamer-updater"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "semver",
  "serde",
