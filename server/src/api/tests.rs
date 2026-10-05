@@ -482,6 +482,9 @@ mod sec_tests {
     mod packages_tests {
         include!("tests/packages.rs");
     }
+    mod media_tests {
+        include!("tests/media.rs");
+    }
     mod vision_preview_tests {
         include!("tests/vision_preview.rs");
     }

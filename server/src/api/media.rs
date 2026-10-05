@@ -34,7 +34,7 @@ use crate::media::{
 /// 媒体路由组（挂进受保护组；导入大字节限额由组层统一设定）。
 /// 合同端点：
 /// - `POST /api/media/import?name=<filename>`（raw bytes → 201 metadata）
-/// - `GET  /api/media`（列表）/ `GET|DELETE /api/media/:id`
+/// - `GET  /api/media`（列表）/ `GET|PATCH|DELETE /api/media/:id`
 /// - `GET  /api/media/:id/file`（Range 播放流）
 /// - `GET  /api/media/:id/frame?pts_us=|index=&max_width=`（PNG 确定帧 +
 ///   `X-Frame-Index`/`X-Frame-Pts-Us` 帧身份响应头）
@@ -48,7 +48,9 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/media", get(api_media_list))
         .route(
             "/api/media/:id",
-            get(api_media_get).delete(api_media_delete),
+            get(api_media_get)
+                .patch(api_media_rename)
+                .delete(api_media_delete),
         )
         .route("/api/media/:id/file", get(api_media_file))
         .route("/api/media/:id/frame", get(api_media_frame))
@@ -127,6 +129,26 @@ async fn api_media_delete(State(st): State<AppState>, Path(id): Path<String>) ->
     let svc = media_service(&st.cfg);
     match run_blocking_api(move || svc.delete(&MediaId(id)).map_err(map_media_err)).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenameMediaBody {
+    name: String,
+}
+
+async fn api_media_rename(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<RenameMediaBody>,
+) -> Response {
+    let svc = media_service(&st.cfg);
+    match run_blocking_api(move || svc.rename(&MediaId(id), &body.name).map_err(map_media_err))
+        .await
+    {
+        Ok(meta) => Json(meta).into_response(),
         Err(err) => err.into_response(),
     }
 }

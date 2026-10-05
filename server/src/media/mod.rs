@@ -448,6 +448,23 @@ impl MediaService {
         read_metadata(&self.media_dir(id))
     }
 
+    /// 修改显示名称；沿用元数据锁和原子写入，保留素材身份、字节与业务引用。
+    pub fn rename(&self, id: &MediaId, name: &str) -> anyhow::Result<MediaMetadata> {
+        Self::validate_id(id)?;
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 255 || name.chars().any(char::is_control) {
+            return Err(MediaError::invalid(
+                "视频名称须为 1–255 个字符，不能包含控制字符",
+            ));
+        }
+        let _io = self.io_lock.lock();
+        let dir = self.media_dir(id);
+        let mut meta = read_metadata(&dir)?;
+        meta.name = name.to_owned();
+        write_metadata(&dir, &meta)?;
+        Ok(meta)
+    }
+
     /// 删除素材目录；仍被引用（refs 非空）→ 明确错误（409 语义）。
     pub fn delete(&self, id: &MediaId) -> anyhow::Result<()> {
         Self::validate_id(id)?;
@@ -1627,6 +1644,69 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("original.mp4"), b"x").unwrap();
         write_metadata(&dir, &meta_fixture(id, created_at, refs)).unwrap();
+    }
+
+    #[test]
+    fn rename_persists_name_without_changing_identity_bytes_or_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed_media_dir(
+            root,
+            "aaa1",
+            "2026-09-07T01:00:00Z",
+            vec![project_ref("pkg")],
+        );
+        let svc = test_service(root);
+        let id = MediaId("aaa1".into());
+        let mut expected = svc.get(&id).unwrap();
+        expected.name = "战斗录像.mp4".into();
+        assert_eq!(svc.rename(&id, "  战斗录像.mp4  ").unwrap(), expected);
+        assert_eq!(test_service(root).get(&id).unwrap(), expected);
+        assert_eq!(fs::read(svc.file_path(&id).unwrap()).unwrap(), b"x");
+        assert_eq!(svc.list().unwrap(), vec![expected]);
+        assert_eq!(
+            svc.delete(&id)
+                .unwrap_err()
+                .downcast_ref::<MediaError>()
+                .unwrap()
+                .kind(),
+            MediaErrorKind::Referenced
+        );
+    }
+
+    #[test]
+    fn rename_rejects_invalid_names_and_missing_media_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed_media_dir(root, "aaa1", "2026-09-07T01:00:00Z", vec![]);
+        let svc = test_service(root);
+        let id = MediaId("aaa1".into());
+        let before = svc.get(&id).unwrap();
+        for name in [
+            "".to_owned(),
+            "   ".to_owned(),
+            "bad\nname".to_owned(),
+            "字".repeat(256),
+        ] {
+            assert_eq!(
+                svc.rename(&id, &name)
+                    .unwrap_err()
+                    .downcast_ref::<MediaError>()
+                    .unwrap()
+                    .kind(),
+                MediaErrorKind::Invalid
+            );
+            assert_eq!(svc.get(&id).unwrap(), before);
+        }
+        assert_eq!(
+            svc.rename(&MediaId("ghost".into()), "录像")
+                .unwrap_err()
+                .downcast_ref::<MediaError>()
+                .unwrap()
+                .kind(),
+            MediaErrorKind::NotFound
+        );
+        assert!(!root.join("ghost").exists());
     }
 
     #[test]
