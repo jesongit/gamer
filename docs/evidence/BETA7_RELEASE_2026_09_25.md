@@ -30,6 +30,32 @@
 
 真实 WASM 回归覆盖 1920×1080 匹配结果中心点击（350,871）、相对坐标、横竖尺寸变化与缺少尺寸时拒绝输入。新增真机复测命令被自动审批拒绝，仅返回 blocked by policy；本次没有完成真机点击复测，不能记为通过。未进行干净 Windows 虚拟机人工界面验收或用户游戏脚本验收。
 
+## 发布后补充真机验收续测（2026-09-25）
+
+**结果：执行前仍被策略拒绝，真机验收未完成。** 下述脚本审阅与静态检查不是设备测试通过证据。
+
+- 实际核对主仓 `main` 为 `4bab21a0c9fded43b541b6c84609866b288ecfa4`，开始时工作区干净；`plugins` 实际 HEAD 与主仓 gitlink 均为 `12e243b38a97e56b92a416f8bc29b037ea5e8adb`，未更新 submodule。
+- 已读取 AGENTS.md、本文、`tools/prepare-test-adb.ps1`、原测试脚本及此前拒绝摘要。隔离目录仍为 `backups/beta-release/beta7-ci-install`；只读检查其数据库任务数为 0，目标设备记录存在，但数据库记录不代表设备当前在线。
+- 原脚本的匹配框断言有误：`server/src/run_journal.rs` 不持久化 `hit/miss`，不能从运行历史要求一个 `hit`。已改读 `detail / branch / data.result` 的完整对象（`x/y/width/height/center`），校验分支、模板、分数及中心；点击前检查截图为 1920×1080，并等待审阅截图后给出标题裁剪区域。
+- 已补充短录制输入断言：运行事件 `tap` 为能力调用后的请求坐标；录制 InputObserver 在 scrcpy 控制数据写入成功后记录最终注入坐标，核对唯一 accepted tap、来源、画面尺寸及预期中心。该证据仍不等于 Android 层肉眼看见触点。
+- 保存拒绝检查保持 HTTP 400 + `yaml.args.ref_type`，增加 GET 404 确认无错误资源落盘。测试资源使用唯一名称。脚本在连接前登记清理状态，以 `finally` 取消未结束运行、停止自建录制、断开虚拟屏、还原隔离设备记录，并比较设备临时状态与显示列表。脚本 `python -m py_compile` 通过；上述运行逻辑均尚未实际执行验证。
+- 启动尝试使用 `exec_command`，在首次 ADB 调用前设置 `GAMER_LOCAL_ONLY=1`、`ADB_MDNS=0`，调用既有 ADB 准备脚本，测试启动器使用 `Start-Process -WindowStyle Hidden`，包含退出清理。工具在创建 PowerShell 进程前返回 `exec_command failed: CreateProcess … rejected: blocked by policy`，无具体规则或理由；工具返回中的命令本身已截断。原始返回及未完成范围保存于 `backups/beta-release/codex-execution-denial.md`。
+- 拒绝后仅做只读复查：无 Gamer/ADB/scrcpy/Python 进程，无 8443/18443/5037 监听，隔离目录无 `qa-*` 输出。本次未启动服务、未调用 ADB、未创建虚拟屏，无本次创建的服务或虚拟屏需要清理；设备实时连接状态未核实。未更换执行渠道、包装或拆分重试，未重复请求授权。
+- 未修改产品源码、已发布标签或资产，未操作游戏或个人设置，未改动 `release/dist/Gamer-0.2.0-windows-x64-full`。
+
+| 本次真机观测项 | 实际结果 |
+| --- | --- |
+| 实际匹配框 | 无，测试未执行 |
+| 预期中心 | 无实际框可计算；计划公式为 `(x + width // 2, y + height // 2)` |
+| 实际点击坐标 | 无，未发送点击 |
+| 完整对象传入 tap 的自动化断言 | 本次未执行；上节既有 WASM 回归结果保持原范围 |
+| 保存时拒绝引用类型不匹配 | 本次隔离服务复验未执行 |
+| 标题区域及触点肉眼观察 | 未进行，未生成设备截图 |
+
+后续需执行平台先排查该启动操作为何被拒绝；本次没有可报告的真机匹配框或点击坐标，不能以既有回归中的 `(350,871)` 替代。
+
+本机执行平台排查已记录于 [CODEX_EXECUTION_POLICY_2026_09_25.md](CODEX_EXECUTION_POLICY_2026_09_25.md)：有效权限与原始拒绝时间已确认，证据支持定位到命令执行策略检查，但具体规则和根因未暴露，尚未修复。此前“自动审批拒绝”是笼统描述，没有证据认定由 Guardian/Auto-review 作出决策；本轮未重试真机操作。
+
 ## 公开状态
 
 - [Gamer 0.2.0-beta.7](https://github.com/jesongit/gamer/releases/tag/v0.2.0-beta.7) 与 [自动化插件 0.1.0-beta.2](https://github.com/jesongit/gamer-plugins/releases/tag/gamer-yaml-v0.1.0-beta.2) 均为公开预发布。
