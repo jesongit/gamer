@@ -18,7 +18,10 @@ import { currentPackageId, packageStore, selectPackage } from './package-store'
 import { cellShort, parseStepPath } from '../../plugins/gamer-yaml/ui/src/script-editor/components/kinds'
 
 let wrapper
-beforeEach(() => { vi.spyOn(api, 'listRunHistory').mockResolvedValue([]) })
+beforeEach(() => {
+  vi.spyOn(api, 'listRunHistory').mockResolvedValue([])
+  vi.spyOn(api, 'listTemplates').mockResolvedValue([])
+})
 
 it('步骤摘要显示完整复合值，错误路径支持中文函数与宿主 functions 前缀', () => {
   expect(cellShort({ lit: { value: true } })).toBe('{"value":true}')

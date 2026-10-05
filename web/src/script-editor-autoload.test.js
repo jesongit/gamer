@@ -3,7 +3,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { defineComponent, h, KeepAlive, ref } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 import { api } from './api'
-import { scriptsData, store, runRegistry } from './store'
+import { scriptsData, templatesData, store, runRegistry } from './store'
 import { useConsoleScriptRunner } from '../../plugins/gamer-yaml/ui/src/components/console/useConsoleScriptRunner'
 import ScriptRunner from '../../plugins/gamer-yaml/ui/src/components/console/ScriptRunner.vue'
 import AutomationWorkbench from '../../plugins/gamer-yaml/ui/src/components/console/AutomationWorkbench.vue'
@@ -15,12 +15,13 @@ vi.mock('./components/ui/useConfirmDialog', () => ({ useConfirmDialog: () => con
 let wrapper
 const script = { id: 'auto/main.yaml', package: 'auto', name: 'main.yaml', version: 's1', content: 'run:\n  - log: script\n' }
 const library = { id: 'auto/_function.yaml', pkg: 'auto', file: '_function.yaml', version: 'f1', functions: ['first', 'chosen'], content: 'functions:\n  first:\n    run: []\n  chosen:\n    run: []\n' }
-afterEach(() => { wrapper?.unmount(); wrapper = null; vi.restoreAllMocks(); confirm.mockReset().mockResolvedValue(false); scriptsData.value = []; store.running = false; store.runId = null; store.deviceId = ''; runRegistry.byId = {}; runRegistry.activeByDevice = {}; runRegistry.last = null })
+afterEach(() => { wrapper?.unmount(); wrapper = null; vi.restoreAllMocks(); confirm.mockReset().mockResolvedValue(false); scriptsData.value = []; templatesData.value = []; store.running = false; store.runId = null; store.deviceId = ''; runRegistry.byId = {}; runRegistry.activeByDevice = {}; runRegistry.last = null })
 async function setup({ preset = '', delayList = false, workbench = false } = {}) {
   const getScript = vi.spyOn(api, 'getScript').mockResolvedValue(script)
   const getFunction = vi.spyOn(api, 'getFunction').mockResolvedValue(library)
   vi.spyOn(api, 'listScripts').mockImplementation(() => delayList ? new Promise(() => {}) : Promise.resolve([script]))
   vi.spyOn(api, 'listFunctions').mockResolvedValue([library])
+  vi.spyOn(api, 'listTemplates').mockResolvedValue([])
   vi.spyOn(api, 'getRunnerFunctions').mockResolvedValue({ functions: [] })
   vi.spyOn(api, 'listRunHistory').mockResolvedValue([])
   vi.spyOn(api, 'getRunEvents').mockResolvedValue({ events: [], has_more: false })
@@ -37,6 +38,50 @@ async function setup({ preset = '', delayList = false, workbench = false } = {})
   await runner.fnLib.refresh('auto'); await flushPromises()
   return { panel, runner, getScript, getFunction }
 }
+
+it('另一页面重命名后，保存先刷新候选并同步整个函数库，保留当前函数和未保存步骤', async () => {
+  const { runner, panel, getFunction } = await setup()
+  panel.value = 'function'; await flushPromises()
+  const oldSource = 'functions:\n  first:\n    run:\n      - find: 确认-差分宇宙.png\n  chosen:\n    run: []\n'
+  const newSource = oldSource.replace('find: 确认-', 'find: 确定-')
+  getFunction.mockResolvedValue({ ...library, content: oldSource })
+  await wrapper.get('select[aria-label="选择函数"]').setValue(`${library.id}#chosen`); await flushPromises()
+  const shell = runner.scriptShell, model = shell.model, stack = shell.stack
+  stack.apply({ type: 'insert_step', path: ['functions', 'chosen', 'run'], index: 0,
+    step: { uuid: 'local-log', kind: 'call', fn: 'log', args: { kind: 'value', cell: { lit: '未保存步骤' } }, as: null } })
+  getFunction.mockResolvedValue({ ...library, content: newSource, version: 'renamed' })
+  api.listTemplates.mockResolvedValue([{ pkg: 'auto', name: '确定-差分宇宙.png' }])
+  const update = vi.spyOn(api, 'updateFunction').mockResolvedValue({ ...library, version: 'saved' })
+  const result = await runner.functionsPanel.saveEditScript(); await flushPromises()
+  expect(result?.diagnostics || []).toEqual([])
+  expect(result).toMatchObject({ ok: true })
+  expect(result._savedSnapshot).toContain('find: 确定-差分宇宙.png')
+  expect(update).toHaveBeenCalledWith(library.id, expect.objectContaining({ expected_version: 'renamed' }))
+  expect(update.mock.calls[0][1].content).toContain('find: 确定-差分宇宙.png')
+  expect(update.mock.calls[0][1].content).toContain('未保存步骤')
+  expect(shell.model).toBe(model)
+  expect(shell.stack).toBe(stack)
+  expect(wrapper.get('input[aria-label="函数名称"]').element.value).toBe('chosen')
+  expect(shell.undo()).toBe(true)
+})
+
+it('函数保存刷新脚本列表时，缓存脚本页的选择器不能清掉当前函数画布和撤销栈', async () => {
+  const { runner } = await setup({ workbench: true })
+  await wrapper.findAll('.tab-btn').find(b => b.text() === '函数').trigger('click'); await flushPromises()
+  await wrapper.get('select[aria-label="选择函数"]').setValue(`${library.id}#chosen`); await flushPromises()
+  const shell = runner.scriptShell, model = shell.model, stack = shell.stack
+  stack.apply({ type: 'insert_step', path: ['functions', 'chosen', 'run'], index: 0,
+    step: { uuid: 'retained-log', kind: 'call', fn: 'log', args: { kind: 'value', cell: { lit: '保存后仍保留' } }, as: null } })
+  api.listScripts.mockResolvedValue([])
+  vi.spyOn(api, 'updateFunction').mockResolvedValue({ ...library, version: 'saved' })
+  await wrapper.findAll('.resource-action').find(button => button.text() === '保存').trigger('click'); await flushPromises()
+  expect(shell.model).toBe(model)
+  expect(shell.stack).toBe(stack)
+  expect(wrapper.find('.se-canvas').exists()).toBe(true)
+  expect(wrapper.text()).not.toContain('正在加载编辑器')
+  expect(wrapper.get('input[aria-label="函数名称"]').element.value).toBe('chosen')
+  expect(shell.undo()).toBe(true)
+})
 
 it('自动化子页签切换保留选择，取消切换保留当前页签和未保存内容', async () => {
   const { runner } = await setup({ workbench: true })
@@ -329,7 +374,8 @@ it.each([false, true])('keeps the selected function and undo history after save 
   expect(shell.stack).toBe(stack)
   expect(shell.dirty).toBe(false)
   expect(shell.version).toBe('f2')
-  expect(getFunction).toHaveBeenCalledTimes(loads)
+  // 保存前核对磁盘快照（冲突覆盖会再核对一次），不重载当前模型。
+  expect(getFunction).toHaveBeenCalledTimes(loads + (conflict ? 2 : 1))
   expect(shell.undo()).toBe(true)
   expect(shell.dirty).toBe(true)
 })

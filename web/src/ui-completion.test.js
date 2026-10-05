@@ -85,6 +85,7 @@ it('调用退栈保留最内层失败，旧运行事件不会混进新运行', (
 it('拆分库的函数打开共享画布，保存使用所属文件和读取版本', async () => {
   const file = { id: 'qa/_function_extra.yaml', pkg: 'qa', file: '_function_extra.yaml', version: 'file-v1', functions: ['other', 'helper'], content: 'functions:\n  other:\n    run: []\n  helper:\n    run: []\n' }
   vi.spyOn(api, 'listFunctions').mockResolvedValue([file])
+  vi.spyOn(api, 'listTemplates').mockResolvedValue([])
   vi.spyOn(api, 'getFunction').mockResolvedValue(file)
   vi.spyOn(api, 'listScripts').mockResolvedValue([])
   vi.spyOn(api, 'getRunnerFunctions').mockResolvedValue({ functions: [] })

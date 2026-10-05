@@ -20,6 +20,7 @@ async function setup() {
   vi.spyOn(api, 'listScripts').mockImplementation(async () => [{ ...script }])
   vi.spyOn(api, 'getScript').mockImplementation(async () => ({ ...script }))
   vi.spyOn(api, 'listFunctions').mockImplementation(async () => [{ ...file }])
+  vi.spyOn(api, 'listTemplates').mockResolvedValue([])
   const getFunction = vi.spyOn(api, 'getFunction').mockImplementation(async () => { order.push('load-function'); return { ...file } })
   vi.spyOn(api, 'getRunnerFunctions').mockResolvedValue({ functions: catalog })
   const saveScript = vi.spyOn(api, 'updateScript').mockImplementation(async (id, data) => { order.push('save-script'); Object.assign(script, data, { version: 's2' }); return { ...script } })

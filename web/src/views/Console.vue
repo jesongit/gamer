@@ -522,6 +522,7 @@ const {
   clearCallParamsCache: () => clearCallParamsCache(),
   refreshScripts: () => refreshScripts(),
   refreshFnLib: pkg => fnLib.refresh(pkg),
+  onTemplateRenamed: rename => onTemplateRenamed(rename),
 })
 
 // ---------- bridge overlay（sandbox UI 申请的画面叠加框） ----------
@@ -536,7 +537,7 @@ const {
   fnLib, resourcePreview, closeResourcePreview,
   runArgsFlow, onRunArgsSubmit,
   startLogPolling, stopLogPolling,
-  clearCallParamsCache, editorMatchThreshold,
+  clearCallParamsCache, editorMatchThreshold, onTemplateRenamed,
   startRunStatusPoll, restoreRunState, onBeforeUnload,
   refreshScripts,
   scriptPanel, functionsPanel, beforePackageChange,

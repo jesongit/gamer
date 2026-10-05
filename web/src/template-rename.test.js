@@ -13,7 +13,7 @@ const oldName = '旧模板#253_114_332_211.png'
 const newName = '旷宇纷争#253_114_332_211.png'
 const target = { pkg: 'game', name: oldName }
 
-function setup() {
+function setup(onTemplateRenamed = vi.fn()) {
   const packageId = ref('game')
   const toast = vi.fn()
   const refreshScripts = vi.fn()
@@ -24,17 +24,17 @@ function setup() {
     panel = useConsoleTemplates({
       packageId, templatesData: ref([]), toast, store: { deviceId: null },
       connected: ref(false), videoElement: ref(null), videoWrap: ref(null), current: ref(null),
-      refreshScripts, refreshFnLib, clearCallParamsCache,
+      refreshScripts, refreshFnLib, clearCallParamsCache, onTemplateRenamed,
     })
     return () => h(TemplateCapture, { context: panel.templateCaptureContext })
   } }), { attachTo: document.body })
-  return { panel, packageId, toast, refreshScripts, refreshFnLib, clearCallParamsCache }
+  return { panel, packageId, toast, refreshScripts, refreshFnLib, clearCallParamsCache, onTemplateRenamed }
 }
 
 it('Enter 重命名后立即更新模板行、缩略图和候选短名，无需重新进入页面', async () => {
   vi.spyOn(api, 'listTemplates').mockResolvedValueOnce([target]).mockResolvedValue([{ ...target, name: newName }])
   const rename = vi.spyOn(api, 'renameTemplate').mockResolvedValue({ path: `templates/${newName}` })
-  const { panel, toast, refreshScripts, refreshFnLib, clearCallParamsCache } = setup()
+  const { panel, toast, refreshScripts, refreshFnLib, clearCallParamsCache, onTemplateRenamed } = setup()
   await flushPromises()
   await wrapper.get('button[aria-haspopup="menu"]').trigger('click')
   await flushPromises()
@@ -51,6 +51,7 @@ it('Enter 重命名后立即更新模板行、缩略图和候选短名，无需�
   expect(wrapper.get('.tpl-thumb img').attributes('src')).toContain(encodeURIComponent(newName))
   expect(panel.templateNames.value).toEqual(['旷宇纷争.png'])
   expect(refreshScripts).toHaveBeenCalledOnce()
+  expect(onTemplateRenamed).toHaveBeenCalledWith({ pkg: 'game', oldName, newName })
   expect(refreshFnLib).toHaveBeenCalledWith('game')
   expect(clearCallParamsCache).toHaveBeenCalledOnce()
   expect(toast).toHaveBeenLastCalledWith(`模板已重命名为 ${newName}`, 'success')
@@ -73,7 +74,7 @@ it('重命名请求期间切换配置包，迟到响应不刷新新包的引用�
   const list = vi.spyOn(api, 'listTemplates').mockImplementation(pkg => Promise.resolve(
     pkg === 'game' ? [target] : [{ pkg, name: '新包模板.png' }]))
   const rename = vi.spyOn(api, 'renameTemplate').mockImplementation(() => new Promise(resolve => { completeRename = resolve }))
-  const { panel, packageId, refreshScripts, refreshFnLib, clearCallParamsCache } = setup()
+  const { panel, packageId, refreshScripts, refreshFnLib, clearCallParamsCache, onTemplateRenamed } = setup()
   await flushPromises()
   panel.startRename(target)
   panel.renameVal.value = newName
@@ -89,4 +90,17 @@ it('重命名请求期间切换配置包，迟到响应不刷新新包的引用�
   expect(refreshScripts).not.toHaveBeenCalled()
   expect(refreshFnLib).not.toHaveBeenCalled()
   expect(clearCallParamsCache).not.toHaveBeenCalled()
+  expect(onTemplateRenamed).not.toHaveBeenCalled()
+})
+
+it('模板已移动但编辑器版本刷新失败，保留编辑器并准确报告部分成功', async () => {
+  vi.spyOn(api, 'listTemplates').mockResolvedValueOnce([target]).mockResolvedValue([{ ...target, name: newName }])
+  vi.spyOn(api, 'renameTemplate').mockResolvedValue({})
+  const { panel, toast } = setup(vi.fn().mockRejectedValue(new Error('offline')))
+  await flushPromises()
+  panel.startRename(target)
+  panel.renameVal.value = newName
+  await panel.confirmRename(target)
+  expect(wrapper.get('.tpl-row').text()).toContain('旷宇纷争.png')
+  expect(toast).toHaveBeenLastCalledWith(expect.stringContaining('编辑器引用刷新失败'), 'warn')
 })
