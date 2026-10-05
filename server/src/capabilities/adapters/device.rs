@@ -26,24 +26,58 @@ impl DeviceAdapter {
             .browsers
             .session(device.id().as_str())
             .map_err(|e| CapabilityError::Failed(e.to_string()))?;
-        let result = if let Some(frame) = device.manual_frame() {
-            session.manual_input(value, frame).await
-        } else {
-            session.input(value, stamp).await
-        };
+        let permit = self.admit(device).await?;
+        if let Some(expected) = device.expected_frame() {
+            session
+                .validate(expected)
+                .map_err(|e| CapabilityError::Failed(e.to_string()))?;
+        }
+        let result = permit
+            .scope(async {
+                if let Some(frame) = device.manual_frame() {
+                    session.manual_input(value, frame).await
+                } else {
+                    session
+                        .input(value, stamp.or(device.expected_frame()))
+                        .await
+                }
+            })
+            .await;
         result.map_err(|e| CapabilityError::Failed(e.to_string()))
     }
     pub(crate) fn new(devices: Arc<DeviceManager>) -> Self {
         Self { devices }
     }
 
+    pub(crate) async fn admit(
+        &self,
+        device: &DeviceHandle,
+    ) -> CapabilityResult<crate::core::control::ControlPermit> {
+        let admission = if device.manual_frame().is_some() {
+            self.devices
+                .controls
+                .admit_manual(device.id().as_str())
+                .await
+        } else {
+            self.devices.controls.admit(device.id().as_str()).await
+        };
+        admission.map_err(|e| CapabilityError::Failed(e.to_string()))
+    }
+
     pub(crate) fn session(
         &self,
         device: &DeviceHandle,
     ) -> CapabilityResult<Arc<crate::device::scrcpy::ScrcpySession>> {
-        self.devices
+        let session = self
+            .devices
             .session(device.id().as_str())
-            .ok_or(CapabilityError::Unavailable("device session"))
+            .ok_or(CapabilityError::Unavailable("device session"))?;
+        if let Some(expected) = device.expected_frame() {
+            session
+                .validate_frame(expected)
+                .map_err(|e| CapabilityError::Failed(e.to_string()))?;
+        }
+        Ok(session)
     }
 
     fn check_app_name(app: &AppId) -> CapabilityResult<()> {
@@ -75,6 +109,7 @@ impl DeviceService for DeviceAdapter {
 
     async fn start_app(&self, device: &DeviceHandle, app: &AppId) -> CapabilityResult<()> {
         Self::check_app_name(app)?;
+        let _permit = self.admit(device).await?;
         self.session(device)?
             .start_app(app.as_str())
             .await
@@ -83,17 +118,24 @@ impl DeviceService for DeviceAdapter {
 
     async fn stop_app(&self, device: &DeviceHandle, app: &AppId) -> CapabilityResult<()> {
         Self::check_app_name(app)?;
+        let _permit = self.admit(device).await?;
+        if device.expected_frame().is_some() {
+            self.session(device)?;
+        }
         let package = app.as_str();
         if package.starts_with('+') || package.starts_with('?') {
             return Err(CapabilityError::InvalidRequest(
                 "stop_app expects a package name without a launch prefix".into(),
             ));
         }
-        let (_, _, serial) = self
+        let (target, _, _) = self
             .devices
             .snapshot(device.id().as_str())
             .ok_or_else(|| CapabilityError::NotFound(format!("device {}", device.id().as_str())))?;
-        let serial = serial.ok_or(CapabilityError::Unavailable("adb serial"))?;
+        let serial = target.addr;
+        if serial.trim().is_empty() {
+            return Err(CapabilityError::Unavailable("adb serial"));
+        }
         self.devices
             .adb
             .shell(

@@ -4,6 +4,7 @@
       <input v-model="query" class="input plugin-search" type="search" aria-label="搜索插件" placeholder="搜索插件名称、ID 或描述" />
       <span class="muted plugin-count">{{ filteredPlugins.length }} 个插件</span>
       <button class="btn btn-sm" :disabled="busy || loading" @click="refresh(true)">刷新</button>
+      <button class="btn btn-sm" :disabled="busy || loading || !installedKnown" @click="updateAll">更新全部</button>
       <button class="btn btn-sm" :disabled="busy" @click="fileInput?.click()">本地导入</button>
       <button class="btn btn-sm" :aria-expanded="urlOpen" @click="urlOpen = !urlOpen">URL 导入</button>
       <input ref="fileInput" type="file" accept=".gplugin,.zip,application/zip" hidden @change="onLocalFile" />
@@ -16,7 +17,7 @@
           <div v-if="error" class="plugin-alert error" role="alert">{{ error }}</div>
           <div v-if="registry.market_status?.warning" class="plugin-alert info" role="status">{{ registry.market_status.warning }}</div>
           <div v-if="operationResult" class="plugin-result" role="status" aria-live="polite">
-            <div class="plugin-result-operation">{{ operationResult.operation.text }}</div>
+            <div class="plugin-result-operation" :class="{ 'result-warning': operationResult.operation.tone === 'warning' }">{{ operationResult.operation.text }}</div>
             <div v-if="operationResult.detail" class="plugin-result-detail" :class="`result-${typeof operationResult.detail === 'object' ? operationResult.detail.tone : 'info'}`">
               {{ typeof operationResult.detail === 'object' ? operationResult.detail.text : operationResult.detail }}
             </div>
@@ -26,7 +27,7 @@
           </div>
           <div v-else-if="notice" class="plugin-alert info" role="status">{{ notice }}</div>
           <div v-if="busy" class="plugin-operation-loading" role="status" aria-live="polite">
-            正在{{ operationLabel(activeOperation) }}，请稍候…
+            {{ batchProgress || `正在${operationLabel(activeOperation)}，请稍候…` }}
           </div>
           <div v-if="loading" class="plugin-center-loading">正在读取插件信息…</div>
 
@@ -129,6 +130,7 @@ const installedKnown = ref(false)
 const loading = ref(false)
 const busy = ref(false)
 const activeOperation = ref('')
+const batchProgress = ref('')
 const error = ref('')
 const notice = ref('')
 const operationResult = ref(null)
@@ -164,11 +166,13 @@ function beginOperation(key) {
 function endOperation(key) {
   if (activeOperation.value === key) {
     activeOperation.value = ''
+    batchProgress.value = ''
     busy.value = false
   }
 }
 
 function operationLabel(key) {
+  if (key === 'update-all') return '更新全部插件'
   if (String(key).startsWith('market:')) return '更新插件'
   if (String(key).startsWith('uninstall:')) return '卸载插件'
   if (String(key).startsWith('enable:')) return '启用插件'
@@ -267,8 +271,7 @@ function formatPermissionDiff(diff) {
   return lines.length ? lines.join('\n') : '权限无变化。'
 }
 
-async function inspectAndConfirm(file, source, current, providedInspection = null) {
-  const inspection = providedInspection || await props.apiClient.inspectExtension(file)
+function inspectionConfirmation(inspection, source, current) {
   const entry = source.registryEntry
   if (entry && (inspection.id !== entry.id || inspection.version !== entry.version)) {
     throw new Error(`固定版本校验失败：期望 ${entry.id}@${entry.version}，归档是 ${inspection.id}@${inspection.version}`)
@@ -285,7 +288,7 @@ async function inspectAndConfirm(file, source, current, providedInspection = nul
   // 文案唯一实现在 plugin-service.executionChangeDetail（可单测）。
   const executionChangeLine = executionChangeDetail(inspection.execution_change)
   const title = current ? '确认更新插件' : '确认安装插件'
-  const accepted = await confirmDialog(inspection.name || inspection.id, {
+  return {
     title, confirmText: current ? '确认更新' : '确认安装',
     fields: [
       { label: '插件 ID', value: inspection.id },
@@ -299,32 +302,42 @@ async function inspectAndConfirm(file, source, current, providedInspection = nul
       ...(requestedPermissions.includes('ui.host') ? [{ title: '宿主界面权限', text: '此插件的界面与 Gamer 页面在同一环境运行，可访问当前会话和工作区。仅安装你信任的插件；更新界面后需刷新页面生效。', tone: 'warn' }] : []),
       ...(requestedPermissions.includes('media.stream') ? [{ title: '音视频输出权限', text: '此插件可读取设备画面和游戏声音，并提供本机素材地址或发送到你指定的 RTMP 地址。', tone: 'warn' }] : []),
       ...(requestedPermissions.includes('live.connect') ? [{ title: '直播互动权限', text: '此插件使用你填写的账号凭据连接直播平台，接收已授权的直播间消息。', tone: 'warn' }] : []),
+      ...(requestedPermissions.includes('ai.connect') ? [{ title: 'AI 模型连接权限', text: '此插件使用保存的密钥连接你设置的模型 API，并提交目标描述、截图与必要的操作记录。AI 操作在你开始的会话中执行，人工操作需要先暂停 AI。', tone: 'warn' }] : []),
       ...(requestedPermissions.includes('package.publish') ? [{ title: '配置发布权限', text: '此插件可导出你选择的配置，并使用运行 Gamer 的电脑上的 gh 登录向 GitHub 仓库上传和公开 Release。请核对发布账号和目标仓库。', tone: 'warn' }] : []),
       ...(current ? [{ title: '权限变化', text: formatPermissionDiff(summary.diff), tone: summary.diff.added.length ? 'warn' : '' }] : []),
       ...(executionChangeLine ? [{ title: '执行方式变化', text: executionChangeLine, tone: 'warn' }] : []),
     ],
     warning: policy.requiresWarning || summary.diff.added.length ? '请确认来源与权限后继续。' : '',
-  })
-  if (!accepted) return null
-  return { inspection, summary }
+  }
 }
 
-async function installArchive(file, source, current) {
+async function inspectAndConfirm(file, source, current, providedInspection = null) {
+  const inspection = providedInspection || await props.apiClient.inspectExtension(file)
+  const accepted = await confirmDialog(inspection.name || inspection.id, inspectionConfirmation(inspection, source, current))
+  if (!accepted) return null
+  return inspection
+}
+
+async function installConfirmedArchive(file, source, existing, inspection) {
   // official 来源只用于服务端来源记录（审计/更新判断），不再触发签名/proof 门禁。
   const uploadOptions = source.kind === 'official' ? { source: 'official' } : {}
-  const inspection = await props.apiClient.inspectExtension(file, uploadOptions)
-  const existing = current || installedPlugin(inspection.id)
-  const result = await inspectAndConfirm(file, source, existing, inspection)
-  if (!result) return false
   const confirmedOptions = { ...uploadOptions, permissionConfirmed: true }
   const operation = existing
     ? props.apiClient.updateExtension(existing.id, file, confirmedOptions)
     : props.apiClient.installExtension(file, confirmedOptions)
   let snapshot = await operation
-  sourceMetadata.value = rememberPluginSource(sourceMetadata.value, result.inspection.id, result.inspection.version, source)
+  sourceMetadata.value = rememberPluginSource(sourceMetadata.value, inspection.id, inspection.version, source)
   if (!existing || existing.state !== 'disabled') {
-    if (snapshot?.state === 'installed') snapshot = await props.apiClient.enableExtension(snapshot.id || result.inspection.id)
+    if (snapshot?.state === 'installed') snapshot = await props.apiClient.enableExtension(snapshot.id || inspection.id)
   }
+  return snapshot
+}
+
+async function installArchive(file, source, current) {
+  const inspection = await props.apiClient.inspectExtension(file, source.kind === 'official' ? { source: 'official' } : {})
+  const existing = current || installedPlugin(inspection.id)
+  if (!await inspectAndConfirm(file, source, existing, inspection)) return false
+  const snapshot = await installConfirmedArchive(file, source, existing, inspection)
   emit('changed')
   const refreshResult = await refresh()
   showMutationResult(
@@ -332,6 +345,72 @@ async function installArchive(file, source, current) {
     refreshResult,
   )
   return true
+}
+
+async function updateAll() {
+  const operationKey = 'update-all'
+  if (loading.value || !installedKnown.value || !beginOperation(operationKey)) return
+  clearMessages()
+  try {
+    batchProgress.value = '正在检查插件更新…'
+    const checked = await refresh(true)
+    if (!checked.ok) return
+    // 按完整列表选择候选，搜索条件不影响“全部”；只更新已安装且版本较低的插件。
+    const candidates = plugins.value.filter(item => item.installed && item.relation?.kind === 'update')
+    if (!candidates.length) { notice.value = '已安装插件均无可用更新。'; return }
+    const prepared = []
+    const results = []
+    for (const [index, item] of candidates.entries()) {
+      batchProgress.value = `正在准备更新（${index + 1}/${candidates.length}）：${item.info.name || item.id}`
+      try {
+        if (!canInstallMarket(item.entry)) throw new Error('该市场条目缺少固定版本 SHA-256，无法校验完整性，已阻止下载。')
+        const { file } = await downloadFixedVersion(item.entry)
+        const source = { kind: 'official', label: '官方市场', publisher: item.entry.publisher, execution: item.entry.execution, registryEntry: item.entry }
+        const inspection = await props.apiClient.inspectExtension(file, { source: 'official' })
+        const confirmation = inspectionConfirmation(inspection, source, item.installed)
+        prepared.push({ file, source, inspection, confirmation, current: item.installed })
+      } catch (errorValue) {
+        results.push({ ok: false, text: `${item.info.name || item.id}：${installErrorText(errorValue)}` })
+      }
+    }
+    if (prepared.length) {
+      batchProgress.value = '等待确认更新…'
+      const accepted = await confirmDialog(`更新以下 ${prepared.length} 个插件？`, {
+        title: '确认更新全部', confirmText: '确认更新全部',
+        sections: [
+          ...prepared.map(({ inspection, confirmation }) => ({
+            title: inspection.name || inspection.id,
+            text: [
+              ...confirmation.fields.map(field => `${field.label}：${field.value}`),
+              ...confirmation.sections.map(section => `${section.title}：${section.text}`),
+            ].join('\n'),
+            tone: confirmation.sections.some(section => section.tone === 'warn') ? 'warn' : '',
+          })),
+          ...(results.length ? [{ title: '无法更新的插件', text: results.map(item => item.text).join('\n'), tone: 'warn' }] : []),
+        ],
+        warning: '请确认来源与权限后继续。单个插件失败时会继续更新其余插件。',
+      })
+      if (!accepted) { notice.value = '已取消全部更新。'; return }
+      for (const [index, item] of prepared.entries()) {
+        batchProgress.value = `正在更新（${index + 1}/${prepared.length}）：${item.inspection.name || item.inspection.id}`
+        try {
+          const snapshot = await installConfirmedArchive(item.file, item.source, item.current, item.inspection)
+          const description = describeExtensionMutation('update', snapshot, { plugin: item.current })
+          results.push({ ok: true, warning: description.detail.tone !== 'success', text: `${description.operation.text}\n${description.detail.text}` })
+        } catch (errorValue) {
+          results.push({ ok: false, text: `${item.inspection.name || item.inspection.id}：${installErrorText(errorValue)}` })
+        }
+      }
+      emit('changed')
+    }
+    const refreshResult = prepared.length ? await refresh() : checked
+    const succeeded = results.filter(item => item.ok).length
+    const failed = results.length - succeeded
+    showMutationResult({
+      operation: { tone: failed ? 'warning' : 'success', text: `全部更新完成：成功 ${succeeded} 个，失败 ${failed} 个。` },
+      detail: { tone: failed || results.some(item => item.warning) ? 'warning' : 'info', text: results.map(item => item.text).join('\n') },
+    }, refreshResult)
+  } catch (errorValue) { error.value = installErrorText(errorValue) } finally { endOperation(operationKey) }
 }
 
 async function installMarket(entry, current = installedPlugin(entry.id)) {

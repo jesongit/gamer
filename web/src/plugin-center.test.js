@@ -171,6 +171,21 @@ describe('Phase 1 plugin center contracts（免签名市场）', () => {
     })).rejects.toMatchObject({ code: 'missing_hash' })
   })
 
+  it.each([
+    [{ error: '官方插件源连接超时，请稍后重试' }, '官方插件源连接超时，请稍后重试'],
+    [{ message: '插件文件与发布清单不一致' }, '插件文件与发布清单不一致'],
+  ])('shows the actual proxy failure for HTTP 502: %j', async (body, detail) => {
+    fetch.mockResolvedValueOnce(jsonResponse(502, body))
+    const failure = downloadFixedVersion({ id: 'gamer-yaml', version: '0.1.3', download_url: '/api/extensions/market/gamer-yaml/0.1.3/archive' })
+    await expect(failure).rejects.toMatchObject({ code: 'download_http_error', message: `插件 gamer-yaml@0.1.3 下载失败（HTTP 502）：${detail}` })
+  })
+
+  it('keeps the HTTP status when the proxy error body is malformed', async () => {
+    fetch.mockResolvedValueOnce({ ...jsonResponse(502, null), json: async () => { throw new Error('invalid JSON') } })
+    await expect(downloadFixedVersion({ id: 'gamer-yaml', version: '0.1.3', download_url: '/demo.gplugin' }))
+      .rejects.toMatchObject({ code: 'download_http_error', message: '插件 gamer-yaml@0.1.3 下载失败（HTTP 502）' })
+  })
+
   it('allows every source without signature gating: official unsigned installs, local/url warn only', () => {
     // official 无签名信息 = 正常态（v2 registry/inspect 不再有签名字段）
     expect(installPolicy({ kind: 'official' })).toMatchObject({ allowed: true, requiresWarning: false })

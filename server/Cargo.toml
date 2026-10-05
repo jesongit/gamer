@@ -1,6 +1,6 @@
 [package]
 name = "gamer-server"
-version = "0.2.7"
+version = "0.2.15"
 edition = "2021"
 description = "Gamer 游戏自动化助手服务端：scrcpy 设备控制 + WebRTC 推流 + 模板匹配 + YAML 自动化 + 定时任务"
 
@@ -42,6 +42,9 @@ cron = "0.12"
 
 # 数据库
 rusqlite = { version = "0.31", features = ["bundled"] }
+# Plugin-owned, rebuildable Chinese guide retrieval cache (no external service).
+sqlite-vec = "=0.1.6"
+jieba-rs = "=0.8.1"
 
 # 工具
 anyhow = "1"

@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+use futures_util::future::BoxFuture;
+
 /// The small set of consumer categories currently known by the runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActivityKind {
@@ -156,15 +158,26 @@ impl DeviceLease {
 
 impl Drop for DeviceLease {
     fn drop(&mut self) {
-        self.release();
+        DeviceLease::release(self);
     }
 }
 
 /// Generic lease returned by runner implementations.  RunManager owns it but
 /// does not know which device subsystem created it.
-pub trait ActivityLease: Send + Sync + 'static {}
+pub trait ActivityLease: Send + Sync + 'static {
+    /// Complete asynchronous cleanup before publishing a run's terminal state.
+    /// Drop remains the fallback when execution panics or its task is aborted.
+    fn release(&mut self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+}
 
-impl ActivityLease for DeviceLease {}
+impl ActivityLease for DeviceLease {
+    fn release(&mut self) -> BoxFuture<'_, ()> {
+        DeviceLease::release(self);
+        Box::pin(async {})
+    }
+}
 
 /// A no-op lease for tests and adapters that do not own a device resource.
 #[allow(dead_code)]

@@ -50,15 +50,21 @@ pub struct BrowserManager {
     sessions: parking_lot::RwLock<HashMap<String, Arc<CdpSession>>>,
     gate: Mutex<()>,
     pub events: tokio::sync::broadcast::Sender<crate::core::RuntimeEvent>,
+    pub controls: Arc<crate::core::control::ControlRegistry>,
 }
 impl BrowserManager {
-    pub fn new(db: Db, cfg: Config) -> Self {
+    pub fn with_controls(
+        db: Db,
+        cfg: Config,
+        controls: Arc<crate::core::control::ControlRegistry>,
+    ) -> Self {
         Self {
             db,
             cfg,
             sessions: Default::default(),
             gate: Mutex::new(()),
             events: tokio::sync::broadcast::channel(256).0,
+            controls,
         }
     }
     pub fn get(&self, id: &str) -> anyhow::Result<BrowserTarget> {
@@ -90,8 +96,13 @@ impl BrowserManager {
         }
         self.close_inner(id).await;
         let target = self.get(id)?;
-        let session =
-            CdpSession::launch(&target, &self.cfg, browser_executable(&self.cfg)?).await?;
+        let session = CdpSession::launch_with_controls(
+            &target,
+            &self.cfg,
+            browser_executable(&self.cfg)?,
+            self.controls.clone(),
+        )
+        .await?;
         self.sessions
             .write()
             .insert(id.to_string(), session.clone());
@@ -205,19 +216,76 @@ fn browser_executable(cfg: &Config) -> anyhow::Result<PathBuf> {
     anyhow::bail!("未找到浏览器，请配置 browser_path")
 }
 
-pub struct BrowserRunLease(pub Arc<CdpSession>);
-impl crate::core::ActivityLease for BrowserRunLease {}
+pub struct BrowserRunLease {
+    session: Arc<CdpSession>,
+    manual_ticket: crate::core::control::ManualLease,
+    released: bool,
+}
+impl BrowserRunLease {
+    pub(crate) fn new(session: Arc<CdpSession>) -> Self {
+        let manual_ticket = session.controls.manual_lease(&session.id);
+        Self {
+            session,
+            manual_ticket,
+            released: false,
+        }
+    }
+
+    async fn cleanup(
+        session: &CdpSession,
+        ticket: &crate::core::control::ManualLease,
+        timeout: Option<Duration>,
+    ) {
+        if session.controls.manual_lease(&session.id) != *ticket {
+            return;
+        }
+        let _ = session
+            .controls
+            .cleanup_manual(ticket, async {
+                if let Some(timeout) = timeout {
+                    if tokio::time::timeout(timeout, session.release_inputs())
+                        .await
+                        .is_err()
+                    {
+                        // The original ticket has passed admission and still
+                        // holds the Core gate, so invalidation cannot hit a
+                        // newer owner's session after partially draining inputs.
+                        session.invalidate();
+                    }
+                } else {
+                    session.release_inputs().await;
+                }
+                Ok(())
+            })
+            .await;
+    }
+}
+impl crate::core::ActivityLease for BrowserRunLease {
+    fn release(&mut self) -> futures_util::future::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            if self.released {
+                return;
+            }
+            Self::cleanup(&self.session, &self.manual_ticket, None).await;
+            self.session
+                .runs
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            self.released = true;
+        })
+    }
+}
 impl Drop for BrowserRunLease {
     fn drop(&mut self) {
-        let session = self.0.clone();
+        if self.released {
+            return;
+        }
+        let session = self.session.clone();
+        let ticket = self.manual_ticket.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                if tokio::time::timeout(Duration::from_secs(3), session.release_inputs())
-                    .await
-                    .is_err()
-                {
-                    session.invalidate();
-                }
+                // An abandoned old lease must not invalidate a new owner's
+                // session merely because that owner's gate remains busy.
+                Self::cleanup(&session, &ticket, Some(Duration::from_secs(3))).await;
                 session
                     .runs
                     .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);

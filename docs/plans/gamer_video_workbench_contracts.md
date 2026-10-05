@@ -31,6 +31,7 @@
 | `POST /api/media/import?name=<urlencoded 文件名>` | raw 字节 body（组限额 1GiB） | 201 `MediaMetadata` JSON |
 | `GET /api/media` | - | `{"media":[MediaMetadata]}`（创建时间倒序） |
 | `GET /api/media/:id` | - | `MediaMetadata`；不存在 404 `{"error":"media_not_found"}` |
+| `PATCH /api/media/:id` | `{"name":"视频显示名称"}`（去首尾空白，1–255 字符，无控制字符） | 200 `MediaMetadata`；仅改名称，素材 ID、原文件与引用保持；非法名称 400，不存在 404 |
 | `DELETE /api/media/:id` | - | 204；被引用 409 `{"error":"media_referenced"}` |
 | `GET /api/media/:id/file` | 可选 `Range` 头 | 原文件流（206/200，`Accept-Ranges: bytes`）；仅供 `<video>` 播放 |
 | `GET /api/media/:id/frame?pts_us=|index=&max_width=` | - | PNG 字节（同一请求逐字节可重复）；400 非法参数 |

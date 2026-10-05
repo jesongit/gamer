@@ -29,6 +29,8 @@ pub(crate) enum Permission {
     MediaStream,
     LiveConnect,
     NotifySend,
+    /// A managed model connection; does not grant arbitrary network access.
+    AiConnect,
     MediaRead,
     MediaImport,
     MediaRecord,
@@ -60,6 +62,7 @@ impl Permission {
             "media.stream" => Ok(Self::MediaStream),
             "live.connect" => Ok(Self::LiveConnect),
             "notify.send" => Ok(Self::NotifySend),
+            "ai.connect" => Ok(Self::AiConnect),
             "media.read" => Ok(Self::MediaRead),
             "media.import" => Ok(Self::MediaImport),
             "media.record" => Ok(Self::MediaRecord),
@@ -104,6 +107,7 @@ impl Permission {
             Self::MediaStream => "media.stream",
             Self::LiveConnect => "live.connect",
             Self::NotifySend => "notify.send",
+            Self::AiConnect => "ai.connect",
             Self::MediaRead => "media.read",
             Self::MediaImport => "media.import",
             Self::MediaRecord => "media.record",
@@ -123,7 +127,9 @@ impl Permission {
             Self::Touch => HostApiDomain::Touch,
             Self::ResourceRead | Self::PackagePublish => HostApiDomain::Resource,
             Self::RunSubmit | Self::RunControl => HostApiDomain::Run,
-            Self::RuntimeSleep | Self::LiveConnect | Self::NotifySend => HostApiDomain::Runtime,
+            Self::RuntimeSleep | Self::LiveConnect | Self::NotifySend | Self::AiConnect => {
+                HostApiDomain::Runtime
+            }
             Self::LogWrite => HostApiDomain::Log,
             Self::MediaStream
             | Self::MediaRead
@@ -133,6 +139,30 @@ impl Permission {
             | Self::MediaEventsRead => HostApiDomain::Media,
             Self::UiHost => HostApiDomain::Ui,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_ai_connection_is_explicit_and_does_not_open_network_permissions() {
+        let permission = Permission::parse("ai.connect").unwrap();
+        assert_eq!(permission, Permission::AiConnect);
+        assert_eq!(permission.as_str(), "ai.connect");
+        assert_eq!(permission.domain(), HostApiDomain::Runtime);
+        let set = PermissionSet::parse(["device.read", "ai.connect"]).unwrap();
+        assert!(set.allows(Permission::AiConnect));
+        assert!(!set.allows(Permission::InputTap));
+        assert!(matches!(
+            Permission::parse("ai.anything"),
+            Err(PermissionError::Unknown(_))
+        ));
+        assert!(matches!(
+            Permission::parse("network.connect"),
+            Err(PermissionError::Forbidden(_))
+        ));
     }
 }
 

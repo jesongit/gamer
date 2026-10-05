@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod control;
 pub mod events;
 pub(crate) mod fs;
 pub mod models;

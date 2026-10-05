@@ -35,6 +35,7 @@ impl DeviceId {
 pub struct DeviceHandle {
     id: DeviceId,
     manual_frame: Option<super::FrameStamp>,
+    expected_frame: Option<super::FrameStamp>,
 }
 
 impl DeviceHandle {
@@ -42,6 +43,7 @@ impl DeviceHandle {
         Self {
             id,
             manual_frame: None,
+            expected_frame: None,
         }
     }
 
@@ -51,6 +53,16 @@ impl DeviceHandle {
     }
     pub fn manual_frame(&self) -> Option<&super::FrameStamp> {
         self.manual_frame.as_ref()
+    }
+
+    /// Bind an automated input to the session and coordinate space observed
+    /// by FrameService. This does not change its trusted control source.
+    pub fn with_expected_frame(mut self, frame: super::FrameStamp) -> Self {
+        self.expected_frame = Some(frame);
+        self
+    }
+    pub fn expected_frame(&self) -> Option<&super::FrameStamp> {
+        self.expected_frame.as_ref()
     }
 
     pub fn id(&self) -> &DeviceId {

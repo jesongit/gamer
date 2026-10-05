@@ -14,6 +14,8 @@
     reason = "The extension facade is consumed incrementally by later adapters"
 )]
 
+#[path = "../../../plugins/gamer-ai/host/mod.rs"]
+pub(crate) mod ai;
 mod archive;
 mod builtin;
 mod error;
@@ -75,8 +77,8 @@ pub(crate) use model::{
 };
 pub(crate) use permissions::{Permission, PermissionSet};
 pub(crate) use service::{
-    DependencyStatus, ExtensionInspection, ExtensionInstallContext, ExtensionService,
-    ExtensionSnapshot, PermissionDiff, PluginCallContext, TimerRunnerRegistrar,
+    CompositeTimerRunnerRegistrar, DependencyStatus, ExtensionInspection, ExtensionInstallContext,
+    ExtensionService, ExtensionSnapshot, PermissionDiff, PluginCallContext, TimerRunnerRegistrar,
 };
 pub(crate) use store::{ExtensionStore, InstalledExtension};
 pub(crate) use ui::{RegisteredUiContribution, UiContributionRegistry};
@@ -107,7 +109,8 @@ pub(crate) fn native_call_action(
 /// Side-effect-free native action lookup used by the lifecycle gate before
 /// invoking `native_call_action`.
 pub(crate) fn is_public_native_action(id: &ExtensionId, action: &str) -> bool {
-    notify::accepts(id.as_str(), action)
+    ai::accepts(id.as_str(), action)
+        || notify::accepts(id.as_str(), action)
         || live::accepts(id.as_str(), action)
         || package_publisher::accepts(id.as_str(), action)
         || gamer_yaml::is_public_native_action(id.as_str(), action)
@@ -131,7 +134,8 @@ pub(crate) fn native_action_required_permissions(
     id: &ExtensionId,
     action: &str,
 ) -> Option<&'static [Permission]> {
-    notify::permissions(id.as_str(), action)
+    ai::permissions(id.as_str(), action)
+        .or_else(|| notify::permissions(id.as_str(), action))
         .or_else(|| live::permissions(id.as_str(), action))
         .or_else(|| package_publisher::permissions(id.as_str(), action))
         .or_else(|| gamer_yaml::native_action_required_permissions(id.as_str(), action))
@@ -152,6 +156,9 @@ pub(crate) fn native_action_caller_permissions(
 /// 集合由 `service.rs::declarative_actions` 从 manifest 读出，两条目录在
 /// `service.capability_actions` 合并。
 pub(crate) fn native_public_actions(id: &ExtensionId) -> Vec<serde_json::Value> {
+    if id.as_str() == ai::ID {
+        return ai::ACTIONS.iter().map(|action| serde_json::json!({"action":action,"version":1,"surface":"native","permissions":ai::permissions(id.as_str(),action).unwrap_or_default().iter().map(|permission|permission.as_str()).collect::<Vec<_>>()})).collect();
+    }
     if id.as_str() == notify::ID {
         return notify::ACTIONS.iter().map(|action| serde_json::json!({"action":action,"version":1,"surface":"native","permissions":["notify.send"]})).collect();
     }

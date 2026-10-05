@@ -110,8 +110,9 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
 - `entry`：仅 `kind="wasm"` 使用；`.wasm` 后缀、不得指向 `manifest.toml`；zip
   内必须存在且 ≥4 字节、`\0asm` magic。builtin（`[execution] kind="builtin"` + `builtin_id`）必须
   **没有** `entry`，且包内不得携带 `plugin.wasm`（防伪装执行类型）。
-- 当前服务端静态注册的 builtin id 为 `gamer-video`；下载的 `.gplugin` 不能新增
-  builtin 实现。它是无 guest 的宿主扩展，Media/Recording 机制由 Core 提供。
+- 当前服务端静态注册的 builtin id 为 `gamer-video`、`gamer-package-publisher`、
+  `gamer-live`、`gamer-notify`、`gamer-ai`；下载的 `.gplugin` 不能新增 builtin
+  实现。它们不携带 guest；新增 `host/` 实现需要宿主更新。
 - `[host_api]` 九域：`device/vision/input/touch/resource/run/runtime/log/media`，
   值为 SemVer range；宿主当前全域 1.0.0；不满足在安装期返回
   `unsupported_host_api`（required/supported 结构化字段）。
@@ -147,7 +148,7 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
   `content_package` 完全一致。当前没有明确 caller 契约的 declarative 动作不
   自动开放。不为此增加分布式 RPC、服务发现或消息总线。
 
-## 3. 权限闭集（24 项，默认拒绝）
+## 3. 权限闭集（25 项，默认拒绝）
 
 来源：`server/src/extensions/permissions.rs`（封闭枚举 + 显式禁区）。
 权限 → Host API 域映射与状态标注见
@@ -167,6 +168,10 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
 - `notify.send`：通知助手的全局通道与发送原生动作门禁（runtime 域），不开放任意网络访问；gamer-yaml 的 `notify` 以可选依赖消费发送动作，缺失时降级。任务可选策略存于通用 `extensions` 对象，以插件 ID 为键；Core 原样持久化，不将它作为 Runner 依赖。见[通知助手](../guides/notifications.md)。
 - `media.stream`：设备音视频的本机素材和 RTMP 输出（media 域）；`live.connect`：直播平台连接与互动事件读取（runtime 域）。均为 builtin 原生动作门禁，不开放任意网络或进程调用，见[直播助手](../guides/live-plugin.md)。
 - `package.publish`：配置包发布插件的原生发布动作，允许导出用户选择的配置并使用宿主 gh 登录管理公开 GitHub 仓库 Release；要求 `resource ^1.1`。它不开放 shell 或任意 gh 参数，也不是公开 WIT 的命令执行接口。参见[配置发布指南](../guides/package-publishing.md)。
+- `ai.connect`：受管模型连接、配置与连接能力测试的原生动作门禁，映射到
+  `runtime` 域。`gamer-ai` 通过宿主 HTTP 客户端使用已保存的模型连接；此权限
+  不提供任意网络接口，不增加公开 WIT 函数。外部 MCP 不需要模型密钥，各工具
+  仍检查其对应的设备、输入或应用权限。
 
 授权链：manifest 声明 → 安装时权限增量需用户确认（`x-gamer-permission-confirm`）
 → 运行时宿主在每次 capability 调用前检查（未声明 → `HostError{kind:denied}`）。
@@ -181,12 +186,50 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
 | `POST /api/extensions/:id/update` | 装新版本并激活（Running 拒绝）；版本回退 = 卸载后重装旧归档（历史版本仅展示） |
 | `POST /api/extensions/:id/enable|disable` | 用户生命周期（V1 收敛：enable = 启用意图 + 直接启动，幂等；可带 `{app_context}`，keymap 另支持 `profile`；disable 运行中自动 stop；`/start` `/stop` `/activate` 细粒度端点已删除，内部保留原语） |
 | `POST /api/extensions/:id/call` | `{action, values}` → 公开动作集合门禁（declarative 按钮白名单 ∪ 原生动作清单）→ WASM 常驻实例 `call` / builtin 宿主实现；返回 JSON |
+| `POST /api/extensions/:id/mcp` | 本机 builtin MCP 协议入口，独立 Bearer 认证、插件必须 Running；JSON-RPC 响应使用 JSON，通知成功返回 202 空 body；见下节 |
 | `GET /api/extensions/:id/capabilities` | 能力发现：`{id, state, running, actions}` 公开动作清单（跨插件调用前查询，简化计划 Phase 4） |
 | `DELETE /api/extensions/:id/:version` | 卸载（active 版本 Running 时拒绝；被运行中插件必需依赖引用时拒绝；非 active 旧版本可直接删除；最后一版才清状态；不删 Package 数据） |
 | `GET /api/extensions` | 列表 + `runtime_available` + UI 贡献注册表 + 各插件 `targets.android`（空声明归一 `["*"]`）+ 依赖实时状态 `dependencies[{id,version_req,required,installed,version,state,satisfied,note}]` |
 | `GET /api/extensions/management` | 管理视图（执行形态/权限/宿主 API/依赖任务） |
 | `GET /api/extensions/ui` 、`GET /api/extensions/:id/ui/*path` | UI 贡献注册表 / iframe 资产 |
 | `GET|POST /api/packages/:pkg/plugins/:plugin/resources[/*path]`、`PUT|DELETE …/*path`、`POST …/rename` | Package 插件资源（文本 JSON 乐观并发 / 模板 PNG 字节）；第三方插件数据读写通道 |
+
+## 4.1 本机 MCP 协议入口
+
+传输采用 [MCP Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+的无状态 JSON 响应模式。当前 `gamer-ai` 提供该能力，地址为
+`http://127.0.0.1:8443/api/extensions/gamer-ai/mcp`；其他 builtin 必须显式实现
+协议服务，声明权限或仅安装 UI 不会自动开放 MCP。
+
+- POST 的真实连接来源必须是回环地址；`Host` 也必须是回环地址或 `localhost`。
+  不接受代理转发头。`Origin` 若存在，必须是本机来源且与 `Host` 一致。
+- 每次请求携带 `Authorization: Bearer <插件连接令牌>`；管理员 Cookie、
+  `X-Admin-Token` 与宿主 `local_only` 均不代替这个门禁。无效或已撤销的令牌
+  返回 401；非法来源返回 403。
+- POST 使用 `Content-Type: application/json` 和
+  `Accept: application/json, text/event-stream`，每次 body 为单个 JSON-RPC 2.0
+  消息，上限 256 KiB。接受的请求返回 `application/json`；通知返回 202 空 body。
+  首版不提供 SSE，GET 返回 405。
+- 支持 `initialize`、`notifications/initialized`、`ping`、`tools/list`、
+  `tools/call`。初始化协商版本 `2025-11-25`、`2025-06-18` 或 `2025-03-26`；
+  后续请求应携带协商所得 `MCP-Protocol-Version`，不支持的版本返回 400。
+  不颁发 `Mcp-Session-Id`，它也不充当设备运行身份。
+- 工具 schema、授权目标和执行归插件所有。图片在工具结果的 `content` 中使用
+  标准 `{type:"image", mimeType, data}` block，`data` 为图片字节的 Base64；不能
+  用本机文件路径代替图片。
+
+AI 的目标控制会话与 HTTP 连接分别管理。用户在 AI 面板授权令牌的目标与
+观察或控制范围；只读观察无需开始控制会话，输入须由用户先开始 MCP 会话。
+输入要求当前 `session_id`、`generation`、最近截图的 `frame_id`，以及用于重试
+去重的 `operation_id`（同一操作重试保留该 ID）。AI 控制中人工输入被服务端拒绝，暂停完成后才开放；
+外部工具不能自行恢复。令牌撤销、控制租约到期或插件停用会阻止后续动作并收尾。
+具体工具、配置和运行限制见 [AI 插件说明](../../plugins/gamer-ai/README.md)。
+
+2026-10-02 已用 `glm-5.3-flash` 分别实测 Responses
+（`https://open.bigmodel.cn/api/v1`）和 Chat Completions
+（`https://open.bigmodel.cn/api/paas/v4`）：模型响应、随机合成 PNG 输入、基于图片
+的函数调用、工具结果回传新图片后的识别均通过。测试不连接设备，不代表游戏
+任务成功率；协议切换由用户显式选择。
 
 ## 5. 版本与兼容语义
 

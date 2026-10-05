@@ -107,7 +107,18 @@ impl FrameService for FrameAdapter {
                 .map(|(size, stamp)| (size, Some(stamp)))
                 .map_err(|e| CapabilityError::Failed(e.to_string()));
         }
-        Ok((self.device_size(device).await?, None))
+        let session = self
+            .devices
+            .session(device.id().as_str())
+            .ok_or_else(|| CapabilityError::NotFound("device session".into()))?;
+        let (size, stamp) = session.coordinate_space();
+        session
+            .validate_frame(&stamp)
+            .map_err(|e| CapabilityError::Failed(e.to_string()))?;
+        if size.width == 0 || size.height == 0 {
+            return Err(CapabilityError::Failed("设备画面尺寸尚未就绪".into()));
+        }
+        Ok((size, Some(stamp)))
     }
     async fn stamp(
         &self,
@@ -173,12 +184,22 @@ impl FrameService for FrameAdapter {
             .map_err(|e| CapabilityError::Failed(e.to_string()))?;
             return self.store.insert_stamped(frame, Some(stamp));
         }
+        let (size, expected) = self.coordinate_space(device).await?;
         let frame = self
             .devices
             .screenshot_frame(device.id().as_str())
             .await
             .map_err(|error| CapabilityError::Failed(error.to_string()))?;
-        self.store.insert(frame)
+        let (current_size, current_stamp) = self.coordinate_space(device).await?;
+        if current_size != size
+            || current_stamp != expected
+            || frame.dimensions() != (size.width, size.height)
+        {
+            return Err(CapabilityError::Failed(
+                "stale_frame: 截图期间设备连接或画面尺寸已改变，请重新截图".into(),
+            ));
+        }
+        self.store.insert_stamped(frame, expected)
     }
 
     async fn size(&self, frame: FrameHandle) -> CapabilityResult<FrameSize> {

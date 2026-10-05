@@ -25,6 +25,111 @@ fn target(url: &str, profile: &str) -> BrowserTarget {
     }
 }
 
+#[tokio::test]
+#[ignore = "requires installed browser; local AI control barrier integration"]
+async fn ai_pause_keeps_browser_run_slot_and_opens_manual_only_after_cleanup() {
+    use axum::{response::Html, routing::get, Router};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let app=Router::new().route("/",get(||async {Html("<!doctype html><style>body{margin:0}</style><script>window.down=0;window.up=0;addEventListener('pointerdown',()=>down++);addEventListener('keyup',()=>up++);</script>")}));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        data_dir: dir.path().into(),
+        ..Default::default()
+    };
+    let controls = Arc::new(crate::core::control::ControlRegistry::default());
+    let target = target(&url, "ai-control");
+    let session = CdpSession::launch_with_controls(
+        &target,
+        &cfg,
+        browser_executable(&cfg).unwrap(),
+        controls.clone(),
+    )
+    .await
+    .unwrap();
+    let (_, stamp) = capture(&session).await;
+    let viewer = controls.manual_lease(&target.id);
+    let lease = controls.claim(&target.id, "ai").await.unwrap();
+    session.runs.store(1, std::sync::atomic::Ordering::SeqCst);
+    assert!(session
+        .manual_input(&json!({"type":"tap","x":10,"y":20}), &stamp)
+        .await
+        .is_err());
+    controls
+        .execute(
+            &lease,
+            session.input(&json!({"type":"tap","x":10,"y":20}), Some(&stamp)),
+        )
+        .await
+        .unwrap();
+    let paused = controls
+        .pause(&lease, async {
+            session.release_inputs().await;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    session
+        .manual_input(&json!({"type":"tap","x":20,"y":30}), &stamp)
+        .await
+        .unwrap();
+    session
+        .manual_input(&json!({"type":"key","key":"a","action":"down"}), &stamp)
+        .await
+        .unwrap();
+    assert_eq!(
+        session.runs.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "paused AI retains the original run slot"
+    );
+    let resumed = controls
+        .resume(&paused, async {
+            session.release_inputs().await;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        session.evaluate_for_test("up").await,
+        json!(1),
+        "resume releases the manually held key"
+    );
+    controls
+        .execute(
+            &resumed,
+            session.input(
+                &json!({"type":"key","key":"b","action":"down"}),
+                Some(&stamp),
+            ),
+        )
+        .await
+        .unwrap();
+    controls
+        .cleanup_manual(&viewer, async {
+            session.release_manual().await;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        session.evaluate_for_test("up").await,
+        json!(1),
+        "old viewer cleanup cannot release AI key"
+    );
+    assert_eq!(session.evaluate_for_test("down").await, json!(2));
+    controls
+        .release(&resumed, async {
+            session.release_inputs().await;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    session.runs.store(0, std::sync::atomic::Ordering::SeqCst);
+    session.close().await;
+    server.abort();
+}
+
 // Explicit opt-in: requires an installed Chrome/Edge, uses only a local test page
 // and temporary profile directories. No real cloud account or game is opened.
 #[tokio::test]

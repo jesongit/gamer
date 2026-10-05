@@ -1105,7 +1105,7 @@ fn verify_rtp_rebuild(frame: &VideoFrame, payloads: &[Bytes]) {
 /// { "type": "tap"|"swipe"|"key"|"touch"|"press"|"text"|"scroll"|"clipboard"|"start_app"|"stop_app"|"rotate"|"back", ... }
 /// viewer 级消息：{"type":"reset_video"}（请求 IDR）、{"type":"audio","on":bool}（音频转发开关）
 pub(crate) enum ControlCommand {
-    Data(Vec<u8>),
+    Data(Vec<u8>, crate::core::control::ManualLease),
     ReleaseTouches {
         done: Option<tokio::sync::oneshot::Sender<()>>,
     },

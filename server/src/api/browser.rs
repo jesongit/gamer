@@ -26,10 +26,11 @@ pub(super) async fn list(State(st): State<AppState>) -> Result<Json<Vec<Value>>,
                     .browsers
                     .session(&t.id)
                     .is_ok_and(|s| s.is_alive());
-                let mut value = serde_json::to_value(t).unwrap();
+                let mut value = serde_json::to_value(&t).unwrap();
                 value["kind"] = json!("browser");
                 value["capabilities"] = json!(crate::targets::TargetCapabilities::browser());
                 value["status"] = json!(if live { "online" } else { "offline" });
+                value["input_control"] = json!(st.devices.controls.status(&t.id));
                 value
             })
             .collect(),
@@ -180,6 +181,7 @@ async fn serve(mut socket: WebSocket, s: Arc<CdpSession>, st: AppState) {
     let mut serial = 0_u64;
     let mut awaiting_display: Option<(u64, tokio::time::Instant)> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(33));
+    let mut cleanup_lease = st.devices.controls.manual_lease(&s.id);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         let reply = tokio::select! {
@@ -193,13 +195,18 @@ async fn serve(mut socket: WebSocket, s: Arc<CdpSession>, st: AppState) {
                         if awaiting_display.is_some_and(|(id,_)|value["id"].as_u64()==Some(id)) {awaiting_display=None;}
                         return Ok::<_,anyhow::Error>(());
                     }
-                    if value["type"]=="release" {anyhow::ensure!(st.runs.active_for_device(&s.id).is_none() && s.runs.load(std::sync::atomic::Ordering::SeqCst)==0,"任务执行期间禁止手动操作");s.release_manual().await;return Ok::<_,anyhow::Error>(())}
-                    anyhow::ensure!(st.runs.active_for_device(&s.id).is_none(),"任务执行期间禁止手动操作");
+                    let ticket = st.devices.controls.manual_lease(&s.id);
+                    let result = st.devices.controls.manual_with(&ticket,async {
+                    anyhow::ensure!(st.runs.active_for_device(&s.id).is_none() || st.devices.controls.status(&s.id).owner.is_some(),"任务执行期间禁止手动操作");
+                    if value["type"]=="release" {s.release_manual().await;return Ok::<_,anyhow::Error>(())}
                     let stamp:FrameStamp=serde_json::from_value(value["stamp"].clone())?;
                     if value["type"]=="input_event" {
                         return mapped_input(&st, &s, &value, &stamp).await;
                     }
                     s.manual_input(&value,&stamp).await
+                    }).await;
+                    if result.is_ok() {cleanup_lease=ticket;}
+                    result
                 }.await;
                 match result {Ok(())=>continue,Err(e)=>{
                     // A static page may not produce another screencast event.
@@ -262,9 +269,14 @@ async fn serve(mut socket: WebSocket, s: Arc<CdpSession>, st: AppState) {
     }
     s.stop_preview().await;
     // Do not release keys owned by an automation that started after this viewer.
-    if st.runs.active_for_device(&s.id).is_none() {
-        s.release_manual().await;
-    }
+    let _ = st
+        .devices
+        .controls
+        .cleanup_manual(&cleanup_lease, async {
+            s.release_manual().await;
+            Ok(())
+        })
+        .await;
 }
 
 async fn mapped_input(
@@ -277,7 +289,8 @@ async fn mapped_input(
     use crate::extensions::{InputEvent, ScreenSize};
     session.validate(stamp)?;
     anyhow::ensure!(
-        session.runs.load(std::sync::atomic::Ordering::SeqCst) == 0,
+        session.runs.load(std::sync::atomic::Ordering::SeqCst) == 0
+            || st.devices.controls.status(&session.id).owner.is_some(),
         "目标正在执行任务"
     );
     let event: InputEvent = serde_json::from_value(value["event"].clone())?;

@@ -8,7 +8,26 @@ import { readFileSync } from 'node:fs'
 const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
 
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [
+    {
+      name: 'gamer-prebuilt-plugin-ui',
+      configureServer(server) {
+        // These are independently built ES modules. Vite adds ?import to dynamic
+        // imports, which its public middleware otherwise rejects as source code.
+        server.middlewares.use((req, _res, next) => {
+          if (req.url?.startsWith('/plugin-ui/')) {
+            const url = new URL(req.url, 'http://localhost')
+            if (/\.m?js$/.test(url.pathname) && url.searchParams.has('import')) {
+              url.searchParams.delete('import')
+              req.url = url.pathname + url.search
+            }
+          }
+          next()
+        })
+      },
+    },
+    vue(),
+  ],
   resolve: { dedupe: ["vue", "vue-router"] },
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version)

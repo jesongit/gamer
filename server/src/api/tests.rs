@@ -69,6 +69,7 @@ mod sec_tests {
 
     struct TestApp {
         app: Router,
+        packages: Arc<PackageStore>,
         /// 设备管理器句柄：测试用 `seed_device` 直注设备行（POST /api/devices
         /// 的 id 由服务端生成，测试需要固定 device_id 时走这里）。
         devices: Arc<DeviceManager>,
@@ -252,12 +253,17 @@ mod sec_tests {
             scheduler,
             cfg,
             viewers,
-            scripts,
+            scripts.clone(),
             shutdown,
             auth.clone(),
             update,
         );
-        TestApp { app, devices, dir }
+        TestApp {
+            app,
+            packages: scripts,
+            devices,
+            dir,
+        }
     }
 
     fn req(
@@ -481,6 +487,9 @@ mod sec_tests {
     }
     mod packages_tests {
         include!("tests/packages.rs");
+    }
+    mod media_tests {
+        include!("tests/media.rs");
     }
     mod vision_preview_tests {
         include!("tests/vision_preview.rs");
