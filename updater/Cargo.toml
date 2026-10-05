@@ -1,6 +1,6 @@
 [package]
 name = "gamer-updater"
-version = "0.2.15"
+version = "0.2.16"
 edition = "2021"
 description = "Gamer 内置更新引擎（校验、快照、重启与回退）"
 publish = false

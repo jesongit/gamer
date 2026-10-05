@@ -209,6 +209,7 @@ jobs:
           node tools/check-plugin-sdk.mjs
           if ($LASTEXITCODE -ne 0) { throw "Plugin SDK mismatch" }
           ./release/packaging/fetch-plugins.ps1
+          ./release/packaging/test-plugin-ui-snapshot.ps1
 
       # package-app 自带构建信息注入（GAMER_GIT_COMMIT/BUILD_TIME/CHANNEL/BUILD_TARGET，
       # 取自 git HEAD + rustc host triple），并复核 zip 布局与逐文件 sha256
@@ -217,6 +218,10 @@ jobs:
         env:
           CHANNEL: ${{ steps.ver.outputs.channel }}
         run: ./release/packaging/package-app.ps1 -Channel $env:CHANNEL
+
+      - name: Verify shared plugin UI in the packaged shell
+        shell: pwsh
+        run: ./release/packaging/test-plugin-ui-snapshot.ps1 -SnapshotRoot server/web-dist
 
       - name: Package components (adb + ffmpeg zips)
         shell: pwsh
