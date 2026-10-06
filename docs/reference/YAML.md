@@ -1,371 +1,250 @@
-# YAML 脚本语法（V1 唯一正式方案）
+# YAML 自动化语法 v2
 
-2026-09-19 编辑/诊断补齐：所有 `_function*.yaml` 使用同一画布编辑并按所属文件的 `expected_version` 保存。保存函数库时拒绝原生/包内同名函数；删除或改名仍被引用的函数返回 `yaml.functions.referenced`（列出调用资源），其他文件无法解析且无法确认引用时返回 `yaml.functions.references_unknown`。这不是跨文件自动重构；修复引用后再提交。删除最后一个函数可保存 `functions: {}`。
+当前正式语法必须声明 `version: 2`。旧无版本脚本不静默兼容；请明确改写目标、观察、动作与完成条件。脚本和函数库都使用版本 2，生产执行与离线素材验证共用同一个解析器和解释器。
 
-gamer-yaml 3.1.2 的运行事件可携带 `trace`：`run_id`、`frame_id`、`parent_frame_id`、`source{package_id,plugin_id,path,version,function?}`。定义来源来自执行冻结资源；递归调用有独立帧 ID，`path` 为该调用中的步骤路径。Core 仅转发可选数据，YAML 插件解释语义。不含完整历史源码，当前文件版本已变时 UI 显示身份/差异而不错误高亮。此字段属于运行事件，不是 YAML 新关键字。
+权威实现：`plugins/gamer-yaml/host/syntax.rs`、`host/syntax/`、`plugins/gamer-yaml/interpreter/`。原生函数参数以 `GET /api/runners/gamer-yaml/functions` 和 `host/native_funcs.rs` 注册表为准，不从模型名称或前端表单猜测。
 
-从界面建脚本、找图点击、参数到函数复用和定时运行，见 [YAML 自动化教程](../guides/yaml-tutorial.md)（2026-09-14 核对）。
-
-Gamer 自动化脚本只支持 **YAML V1**（Gamer V1 简化计划 Phase 1；无 `version`
-字段——出现 `version:` 直接报 `yaml.version.removed` 拒绝诊断，旧 v3/v2 脚本
-**无兼容分支、无 fallback、无迁移工具**）。
-
-核心原则：**YAML 只描述流程，所有实际操作都是函数调用**。解释器只认识
-函数调用 / `if` / `repeat` / `return` / `match_templates` / `break` 六类步骤；`tap`、`find`、`sleep` 等
-都不是语法关键字，而是函数。
-
-- 权威实现：`plugins/gamer-yaml/interpreter/`（唯一解释器，WASM guest 与宿主测试
-  同源）+ `plugins/gamer-yaml/host/syntax.rs`（解析/校验/降线）+
-  `native_funcs.rs`（原生函数注册表）；前端可视化编辑器（`plugins/gamer-yaml/ui/src/script-editor/`）
-  与 Runtime 共用同一 V1 surface DSL；
-- 旧 v3 语法文档（docs/yaml-v3/）已删除，历史实现见 git 历史。
-
-## 1. 目录与函数来源
-
-脚本、函数库、模板按 **Package**（数据一级作用域）存放：
-
-```
-data/packages/<package-id>/
-├── package.toml                      # manifest（id/name/version/author/targets/plugins 依赖）
-├── shared/                           # 跨插件保留区（gamer-yaml 不写）
-└── plugins/
-    ├── gamer-yaml/
-    │   ├── automations/              # 自动化脚本 + 函数库（按文件名前缀识别，见 §4）
-    │   │   ├── daily.yaml            # 自动化（普通 .yaml）
-    │   │   └── _function.yaml        # Package 默认函数库（functions: 包装）
-    │   └── templates/                # 模板图片（8-bit 灰度 PNG）
-    └── <其他插件>/                    # dormant 数据原样保留，Core 不解释
-```
-
-**文件识别规则**（简化计划：识别只用于资源发现，不加 `kind` 字段；目录与
-文件名不产生函数命名空间）：
-
-```text
-automations/ 内文件名以 _function 开头且以 .yaml 结尾 → 函数库（functions: 包装）
-automations/ 内其他 .yaml                            → 自动化脚本
-```
-
-旧 `functions/` 专属目录已删除（保存钩子报 `yaml.functions.dir.removed`，
-无兼容层、无自动迁移）。
-
-**函数只有两种来源**：
-
-1. **插件函数**：`gamer-yaml` 原生注册表（`native_funcs.rs`，Schema 唯一声明点），
-   随插件安装/启用变化；受插件权限约束；其中 `tap / swipe / key / input_text /
-   launch / stop_app / sleep / log / find` 是 Core 能力的基础包装，
-   `wait_find / tap_template / wait_disappear` 是插件便利函数（复用 find/sleep
-   组合，不复制视觉算法），`eq..le` 是纯数据函数；
-2. **当前 Package 函数**：`automations/_function*.yaml`（用户可编辑，默认只有
-   `_function.yaml` 一个文件；手动拆分的 `_function_battle.yaml` 等同样参与
-   加载），解释器本地执行。
-
-运行前组合为唯一函数名注册表：同名冲突（原生 vs Package、跨文件重复）一律
-拒绝，文件顺序不决定胜者；不跨 Package 查找；运行开始时冻结全部函数定义。
-**统一命名空间：调用名 = 函数名**，移动/重命名函数库文件不改变调用名。
-函数目标寻址 = `<package-id>#<函数名>`（函数测试运行、参数 schema 查询）。
-通过 `POST /api/runs` 运行时，`content_package` 只填写配置包 ID（例如 `com.mihoyo.hkrpg`），不能包含 `#函数名` 或 Android 应用名；前端显式传递此字段，服务端缺省按入口第一个 `/` 或 `#` 之前的配置包 ID 解析。
-首版原生函数清单：
-
-```text
-原子：tap / swipe / key / input_text / launch / stop_app / sleep / log / find
-便利：wait_find / tap_template / wait_disappear
-比较：eq / ne / gt / ge / lt / le
-通知：notify（可选 gamer-notify 发送能力）
-```
-
-`GET /api/runners/gamer-yaml/functions` 返回原生函数目录（Schema 唯一前端来源）。
-
-`notify` 是普通函数，参数 `content`（必填字符串）、`title`（可选字符串）、`channel`（可选全局通道 ID，空值使用默认通道），返回 `{accepted,id?,status,reason}`。提交后继续执行，实际结果查看通知助手发送记录；插件缺失、停用、版本不兼容或通道不可用时返回未发送原因，不中断流程。函数目录始终包含它，编辑器可以添加、编辑和保存。gamer-yaml 声明可选依赖并通过 `notify.send` 权限调用，通知通道不属于 Package。
+## 最小完整自动化
 
 ```yaml
+version: 2
+name: 领取每日奖励
+targets:
+  claim:
+    template: claim.png
+    threshold: 0.8
+  confirm:
+    template: confirm.png
+  done:
+    template: claimed.png
 run:
-  - notify:
-      title: 备份完成
-      content: 数据库备份已完成
-      channel: wechat
-    as: delivery
-  - log: 后续步骤继续
+  - id: claim_reward
+    wait: claim
+    timeout: 10s
+    as: button
+    then:
+      - tap: $button
+  - optional:
+      find: confirm
+      timeout: 0ms
+      as: popup
+      then:
+        - tap: $popup
+  - finish: done
+    timeout: 10s
 ```
 
-任务结果通知另在任务编辑页按结果配置，不要求脚本含 `notify`。详见[通知助手](../guides/notifications.md)。
-前端「函数」页面按函数展示，默认在 `_function.yaml` 新建；额外拆分的
-`_function*.yaml` 同样可在画布中编辑，并按实际定义文件保存。
+`wait` 只观察，不隐式点击。匹配对象与实际截图来源绑定，后续 `tap` 复用这次观察。`finish` 必须观察到已声明的完成画面；执行到文件末尾或点击结束均不等于游戏目标完成。
 
-浏览器目标沿用这些函数和任务入口，不新增 YAML 关键字。`key` 支持浏览器逻辑键名（如 `W`、`Enter`、`Escape`、`ArrowLeft`、`Control`、`Shift`、`F1`）及 `press/down/up`；Android 数字键码仍只用于 Android。编辑器的按键字段支持主题下拉和「录入按键」：点击按钮后按一次键即可填入物理键名（如 `KeyW`、`Digit1`、`Space`、`ArrowLeft`），也可继续手工输入命名键或 Android 数字键码。`input_text` 插入文本，`tap/swipe` 使用现有归一化坐标。`launch/stop_app` 为 Android 应用操作，浏览器不支持；浏览器初始网址由目标配置提供，登录、排队、进入游戏由脚本处理。
+## 资源与作用域
 
-浏览器 `find/wait_find/find_any` 的命中对象及其 `center` 带内部 `_frame` 来源标记；直接 `tap: $result` 或 `tap: $result.center` 会拒绝导航、改绑或坐标映射变化前的旧结果。不要修改该标记；主动拆为裸 `x/y` 数值会失去来源校验。定时任务选择浏览器目标时不填写 `android_package`，配置包仍独立选择。配置与使用见 [CDP 浏览器目标](../guides/browser-targets.md)。
+```text
+data/packages/<package-id>/plugins/gamer-yaml/
+  automations/daily.yaml
+  automations/_function.yaml
+  automations/_function_extra.yaml
+  templates/claim.png
+  samples/<sample-id>.gamersample
+```
 
-## 2. 脚本格式
+- 普通 `.yaml` 文件为自动化；文件名以 `_function` 开头且以 `.yaml` 结尾的文件是函数库
+- 所有函数库的函数共用配置包内的命名空间；文件和目录名不进入函数名，同名冲突拒绝执行
+- 自动化入口为 `<package-id>/<name>.yaml`，函数测试入口为 `<package-id>#<function>`
+- `content_package` 是配置包 ID，与 Android 应用包名和设备 ID 分开
+- 运行开始冻结脚本、函数和模板的有效资源快照；并发编辑不会将新模板混入旧运行
+
+## 顶层字段和目标
+
+`version`、`name`、`params`、`vars`、`targets` 与 `run` 描述脚本。未知字段产生结构化诊断，原文编辑器保留原始内容供修正，不用旧模型重新序列化覆盖。
 
 ```yaml
-name: 每日签到            # 可选
-
-params:                   # 可选：运行参数 Schema（类型/必填/默认值/说明）
-  retry:
+version: 2
+params:
+  tries:
     type: integer
     default: 3
-    desc: 重试次数
-  secret:
-    type: string
-    required: true
-
-vars:                     # 可选：字面量表（不做引用解析）
-  timeout: 15s
-
-run:                      # 必有（可为空列表）：执行入口
-  - launch: com.example.game
-  - wait_find:
-      template: home.png
-      click: false
-      timeout: $timeout
-    as: home
-  - if: $home
+vars:
+  message: 正在领取
+targets:
+  claim:
+    template: claim.png
+    threshold: 0.85
+    region: [0.1, 0.2, 0.8, 0.5]
+  done:
+    template: done.png
+run:
+  - log: $message
+  - wait: claim
+    timeout: 8s
     then:
-      - claim_daily: {}
+      - tap: claim
+  - finish: done
+```
+
+目标引用可以是 `targets` 的名称，也可以是内联 `{template: claim.png, threshold: 0.8}`。搜索区域与匹配参数沿用原生视觉能力的坐标约定；保存时以服务端校验为准。默认目标别名为目标名，例如 `wait: claim` 提供 `$claim`；`tap: claim` 是使用该目标已观察结果的简写，不会重新找图。
+
+参数类型保留 `any / boolean / integer / number / string / list / object / duration / point / template / key`。手动运行直接采用默认值，仅缺少必填参数时显示参数表单；任务表单可显式覆盖。
+
+## 视觉流程步骤
+
+### 必需观察 `wait`
+
+```yaml
+- id: wait_login
+  wait: login
+  timeout: 10s
+  as: button
+  then:
+    - tap: $button
+```
+
+默认超时 10s。命中后执行 `then`，没有 `then` 时只取得观察结果。超时明确失败。模板缺失、参数错误和目标断开属于错误，不能伪装成未命中。`id` 给步骤稳定的业务身份，错误同时保留源路径。
+
+### 可选观察 `optional`
+
+```yaml
+- optional:
+    find: confirm
+    timeout: 0ms
+    as: popup
+    then:
+      - tap: $popup
+```
+
+默认超时 0ms，即立即观察一次；显式正超时才轮询等待。只在未命中时跳过，不能吞掉语法错误、模板缺失、设备错误或权限错误。
+
+也支持简写：
+
+```yaml
+- optional: confirm
+  then:
+    - tap: confirm
+```
+
+### 完成 `finish` 与失败 `fail`
+
+```yaml
+- finish: done
+  timeout: 10s
+```
+
+`finish` 观察到完成目标才标记脚本目标达成。没有到达 `finish` 的脚本不应作为成功自动化保存。函数中的普通 `return` 仍可返回值，不替代顶层自动化的完成证明。
+
+```yaml
+- fail: 未满足领取前置条件
+```
+
+`fail` 明确停止并给出业务原因。
+
+### 图像证据 `trace`
+
+```yaml
+- trace: false
+- trace: true
+```
+
+开启与关闭均有边界记录。关闭期间不持续采图；运行报错时保留最后实际观察帧，并尽力取得新的错误截图。两者时间和类型分开，不把新截图冒充执行时已见画面。
+
+## 普通函数、表达式与控制流
+
+普通函数调用、`if`、有界 `repeat`、`break`、`return`、参数和变量继续使用现有语义。以下为可嵌入 `run` 的片段，不是缺少版本与完成条件的完整脚本：
+
+```yaml
+- find: claim.png
+  as: hit
+- if: $hit
+  then:
+    - tap: $hit
+  else:
+    - log: 未观察到领取按钮
+- repeat: 3
+  do:
+    - log: 检查状态
+    - break: {}
+- swipe:
+    from: [0.5, 0.8]
+    to: [0.5, 0.2]
+    duration: 500ms
+- key: HOME
+- sleep: 200ms
+```
+
+- 一个普通步骤包含一个调用或控制流动作，`as` 接收调用返回值
+- `find` 是单次匹配，不点击；新流程推荐用 `wait` 表达必需等待，用 `optional` 表达可选画面
+- 底层 `wait_find` 等便利函数仍由原生注册表定义；不要假定它们与 `wait` 的点击和超时语义相同
+- `if` 仅将 `false` 和 `null` 视为假；比较调用 `eq / ne / gt / ge / lt / le`
+- `repeat` 为非负整数或引用；`break` 退出当前函数内最近循环，不跨函数边界
+- 表达式只有字面量与 `$name.field` 引用；`$$` 转义字面量 `$`，无 eval、算术插值或动态索引
+- 数组和对象中的步骤实参递归解析引用，变量初值和参数默认值是字面量
+- `launch / stop_app` 是真实设备副作用；离线回放不会执行它们，也不会发送通知或网络请求
+- 等待、循环、调用深度受取消与执行预算约束，不存在无界“自动修好”保证
+
+同帧模板分支保留 `match_templates`，按 case 顺序仅执行第一个命中分支，不自动点击：
+
+```yaml
+- match_templates:
+    cases:
+      - template: announcement.png
+        as: hit
+        do:
+          - tap: $hit
+      - template: login.png
+        do:
+          - log: 登录页
     else:
-      - log: 未进入主页
-  - return: true
+      - log: 未识别画面
 ```
 
-参数类型：`any / boolean / integer / number / string / list / object /
-duration / point / template / key`（别名 bool/int/float/text 解析期归一）。
-默认值按类型校验（`yaml.param.default.invalid`）。
+`times` 默认 1；显式多轮时使用有界 `times` 和 `interval`。模板分支内的别名只在该分支有效。可选字段和取值范围以权威函数目录与服务端诊断为准。
 
-工作台手动运行自动化或函数时直接采用声明的默认值，不弹出覆盖选项；只有缺少必填参数时才提示补填。任务表单仍可显式配置自己的参数值。
-
-## 3. 步骤与表达式
-
-**一个步骤 = 恰好一个动作键**（函数名或 `if/repeat/return/match_templates/break`）+ 可选 `as`；
-`then/else/do` 是 if/repeat 的结构键。
+## 函数库
 
 ```yaml
-run:
-  - tap: [0.5, 0.8]              # 位置值简写（标量/数组 → 第一个参数）
-  - find: login_button.png       # 同上
-    as: button                   # as = 返回值赋给变量
-  - tap: $button.center          # $name.field 引用（仅点号字段，无索引）
-  - swipe:
-      from: [0.5, 0.8]
-      to: [0.5, 0.2]
-      duration: 500ms
-  - key: HOME
-  - input_text: 你好
-  - sleep: 1s                    # duration：带单位串或毫秒数；0 合法
-  - log: 未进入主页               # 非字符串值自动转 JSON 文本
-  - log:
-      message: 带级别
-      level: warn
-  - launch: com.example.game     # 缺省包名 = 设备配置的应用（冷启动）
-  - stop_app: {}
-  - repeat: $retry               # 固定次数（非负整数或整数引用）
-    do:
-      - tap: [0.5, 0.5]
-  - return: $button              # 返回值（脚本顶层返回即运行结果）
-```
-
-- 所有函数支持可选字符串参数 `name`（也可用变量引用），写在函数参数映射中，
-  如 `tap: {name: 点击登录, position: [0.5, 0.8]}`。可视化卡片直接展示该值，
-  不再拼接函数名或参数。未填写时，原生函数默认使用中文名（如「点击」「等待」），
-  配置包函数默认使用 `description`，未写说明则使用函数名；显式声明的 `name` 参数默认值优先。
-  `name` 不改变调用目标，位置值简写仍对应原来的第一个参数。
-- 无参或全部参数可省略的函数允许 `{}` 或 null（如 `launch: {}` / `launch:`）；
-  `sleep` 的 duration 必填，不能用 `sleep:` 省略；
-- `if` 条件：只有 `false`/`null` 为假，其余值均为真（包括 `0`、空字符串、空数组、空对象；
-  比较用 `eq/gt` 等函数）；
-- 函数调用独立局部作用域：参数显式传入，`as` 接收返回值；
-- `find`/`wait_find` 未命中返回 `null`（不是错误）。`find` 是**单次模板匹配**
-  （无 timeout/interval 参数）；等待轮询用 `wait_find`（timeout 缺省 10s，
-  interval 缺省 250ms，轮询直到命中或超时）。`click` 为 boolean，缺省 `true`：
-  命中后按全局点击前后延迟点击模板中心，再返回匹配对象；`click: false` 仅等待，
-    不点击目标；未配置障碍时不需要 `input.tap` 权限。超时返回 `null`。
-  已有脚本若在 `wait_find` 后单独 `tap`，应加 `click: false` 避免重复点击。
-  `obstacles` 缺省 `[]`，接受模板名列表或列表变量引用：每轮共用一帧，先按顺序匹配
-  障碍，命中第一个即点击中心并等待后进入下一轮，不再处理旧帧上的其他模板；
-  没有障碍命中才匹配目标。障碍点击与等待计入总 `timeout`，不重置计时；
-  `click: false` 只关闭目标点击，不关闭障碍处理。障碍共用 `threshold`，搜索区域取
-  各自模板文件名后缀，不继承目标 `region`。模板列表中的字面量引用随模板重命名更新。
-  `tap_template` 的 timeout 缺省 10s
-  （显式传 0ms 只尝试一次）、interval 缺省 100ms，找到后按全局点击前后延迟点击命中中心；
-  `wait_disappear` 的 timeout 缺省 10s、interval 缺省 250ms，轮询直到模板消失
-  （消失返回 true，超时返回 false）。轮询间隔最低 50ms。
-
-**表达式只有两种**：字面量、`$name.field` 引用。字符串以 `$` 开头是引用；
-字面量 `$` 用 `$$` 转义。无算术、无插值、无 eval、无动态索引。
-步骤表达式中的数组和对象会递归解析引用，如 `tap: {position: [$x, $y]}`；
-`vars` 与参数默认值仍是字面量，不做引用解析。
-
-诊断码命名空间 `yaml.*`（解析/结构）与 `param.args.*`（绑定）；旧 v3 源在
-解析层直接报 `yaml.version.removed`，其余旧形态报 `yaml.top.unknown`——
-**不接受旧语法**。
-
-### 模板分支 `match_templates`
-
-插件内置复合步骤，字段为 `cases`（1..64 项）、可选 `threshold`（默认 0.8）、`times`（默认 1）、`interval`（默认 250ms）与可选 `else`。
-`times` 为正整数或引用，表示最多匹配轮数；`interval` 为非负毫秒数、带单位时间或引用。
-每个 case 为 `template`（非空模板名或引用）、可选 `as`（局部匹配结果变量）、必填 `do` 步骤列表。
-模板使用普通模板引用语义，重命名会同步更新。`as` 只在本分支有效，离开分支后恢复原变量；
-分支内其他普通函数调用的 `as` 保持原有语义。顶层步骤不接受 `as`。
-
-每轮通过原生函数 `find_any` 共用一帧并按顺序停止在首个命中，不自动点击。
-`times: 1` 保持单次匹配，分支内的 `break` 仍退出外层 `repeat`。
-`times > 1` 时执行命中分支或全部未命中的 `else`，本轮动作完成后等待 `interval`，再重新取画面匹配；命中也消耗一轮，不会自动结束循环。
-首轮立即匹配，末轮或提前退出后不再等待；分支内 `break` 结束当前多轮匹配，嵌套 `repeat` 的 `break` 只退出该内层循环。
-`else` 在每轮全部未命中时执行，不是轮数耗尽的回调；耗尽轮数后继续后续步骤。错误不当作未命中，
-动作错误终止运行，`return` 退出当前脚本/函数。每个分支仍受取消及步数/调用深度预算约束。
-运行路径为 `run[0].cases[0].do[0]`、`run[0].else[0]`，与可视化卡片错误定位一致。
-
-```yaml
-run:
-  - match_templates:
-      cases:
-        - template: 关闭公告.png
-          as: hit
-          do:
-            - tap: $hit
-        - template: 登录按钮.png
-          do:
-            - log: 已进入登录页
-      else:
-        - log: 未识别到页面
-```
-
-`find_any` 可独立调用，参数 `templates`（模板列表或引用，1..64 项）、`threshold`（默认 0.8）
-和通用 `name`；返回匹配对象附 `index`（零基索引）和输入的 `template`，未命中为 `null`。
-无点击权限要求；模板各用自己的文件名区域。
-
-多轮匹配示例（需要自动化 0.1.6 与 Gamer 0.2.17 或更高版本）：
-
-```yaml
-run:
-  - match_templates:
-      times: 999
-      interval: 250ms
-      cases:
-        - template: 位面锚点.png
-          do:
-            - break: {}
-        - template: 选择祝福.png
-          do:
-            - 选择祝福或方程: {}
-      else:
-        - log: 等待界面变化
-```
-
-已有 `repeat → match_templates` 可把轮数移入 `times`；循环内其他每轮动作须保留外层循环，或按实际逻辑移入 `cases[].do` / `else`，不能直接删除。
-
-`tap` 接受相对坐标，也可直接接收匹配结果：`tap: $hit` 或
-`tap: {position: $hit}` 自动点击 `center`，不重新匹配。显式 `$hit.center`
-仍有效；匹配结果内的 `x/y` 是像素边框位置，不作为点击坐标。未命中的 `null`
-或非法中心坐标会报错且不点击，因此 `find` / `wait_find` 的结果应先用 `if` 判断。
-`tap_template` 仍接收模板名称并重新匹配，引用模板名使用 `$hit.template`。
-
-保存时校验能确定的引用类型：参数声明、字面量变量、原生函数匹配结果及模板分支局部结果。
-例如把 `$hit` 传给 `tap_template.template` 会报告 `yaml.args.ref_type` 并定位参数；
-可视化编辑与服务端保存接口均检查。未知自定义返回值、分支或循环改写后不能确定的值，
-继续由运行时校验。直接点击匹配结果及保存期引用类型校验需要包含这些改动的本体，
-从 Gamer 0.2.0-beta.7 与自动化插件 0.1.0-beta.2 起支持；beta.6 尚不支持，仅更新插件 UI 不会更新宿主能力。
-
-## 4. 函数库文件（当前 Package 函数）
-
-存储位置 = `automations/` 内文件名以 `_function` 开头的 `.yaml` 文件（默认库
-`_function.yaml`；手动拆分可加 `_function_battle.yaml` 等，第一版只识别小写
-`_function` 前缀 + `.yaml` 后缀，不接受 `.yml`）。文件内容继续使用
-`functions:` 包装，**不新增 `kind` 字段**：
-
-```yaml
-functions:                        # 顶层必须有 functions: 包装
-  claim_daily:
-    description: 领取每日奖励      # 可选说明
+version: 2
+functions:
+  announce:
     params:
-      timeout:
-        type: duration
-        default: 3s
-    vars:                         # 可选：函数内字面量
-      tag: local
-    returns:                      # 可选：仅文档/提示，不做运行时校验
-      type: boolean
-    run:                          # 必有
-      - tap_template:
-          template: daily_button.png
-          timeout: $timeout
+      message:
+        type: string
+    run:
+      - log: $message
       - return: true
 ```
 
-脚本直接调用（两种来源语法一致）：
+调用：`announce: {message: 领取完成}`。函数有独立局部作用域，参数显式传递，返回值通过 `as` 接收。重复函数名拒绝保存和运行；删除或改名仍有引用的函数会给出相关文件诊断。
 
-```yaml
-run:
-  - claim_daily:
-      timeout: 10s
-    as: success
-```
+函数页编辑完整原文库，保留注释、顺序与所有定义；右侧函数选择器仅决定测试运行入口，不会过滤后再覆盖其他函数。保存使用 `expected_version` 防止覆盖别人刚保存的资源。
 
-- 函数名允许中文汉字（CJK 基本区与扩展 A）、小写英文字母、数字、下划线，不能以数字开头，例如 `每日任务跳转`、`领取_daily2`；空格、点号、斜杠等分隔符不可用，保留字 `if/repeat/return/match_templates/break` 不可用；参数名、变量名仍使用 `[a-z_][a-z0-9_]*`；
-- **统一命名空间**：文件名与目录只是存储组织，不进入调用名（`_function_battle.yaml`
-  里的 `attack` 调用仍写 `attack`）；同一文件内函数名唯一，跨文件/与原生函数
-  同名直接报冲突（`yaml.fn.conflict`），文件顺序不决定胜者；
-- 一个函数库文件可定义多个函数；函数库文件不进入自动化运行列表与定时任务
-  选择器（函数测试运行 = `POST /api/runs`，entrypoint `<pkg>#<函数名>`）；
-- 脚本文件不再内嵌局部函数库；可复用函数一律存 `_function*.yaml`。
+## 多素材生成、验证与保存
 
-## 5. 错误处理与预算
+自动化工作台的“AI 生成与验证”支持：
 
-无 try/catch/throw/on_error。业务未命中（find 未找到）返回 `null`；参数错误、
-资源不存在、设备断开、权限不足属于执行错误，终止当前 Run 并给结构化错误。
+1. 选择视频素材，或导入可携带的 `.gamersample` 归档，填写目标和脚本位置
+2. 通过 AI 生成候选，或选“手写源码离线验证”自行建立候选
+3. 在实际素材图上通过同一执行语义校验观察、动作顺序与完成画面
+4. 有界自动修正并重新验证所有原始样本；不允许删除失败样本或放宽目标换取通过
+5. 查看 YAML、候选模板来源与每份素材报告，再显式确认正式保存
 
-保留宿主安全机制（计划 §1.6）：取消（stop 标志 + epoch 兜底）、步预算
-`STEP_BUDGET_EXCEEDED`（上限 100,000 逻辑步）、调用深度
-`CALL_DEPTH_EXCEEDED`（上限 32，Package 函数本地解释递归）。
+离线验证、原文编辑、模板测试和历史查看不依赖 AI，也不需要连接设备。AI 生成功能会检查插件安装与运行状态、模型配置及绑定该配置版本的视觉能力探测。配置变动后旧探测失效。
 
-## 6. 模板引用与重命名
+报告分类：`passed`（通过）、`failed`（逻辑或匹配失败）、`insufficient_evidence`（证据不足）、`unsupported`（不支持）。只有每份选中素材都通过，才可保存“已验证正式版本”。编辑 YAML、模板或参数会使旧报告失效。
 
-脚本/函数中 `find / wait_find / tap_template / wait_disappear` 的
-`template` 实参用模板短名；模板重命名经 AST 同步改写（`yaml.resource.*`，
-文本字面量不误改）。V1 起模板引用改写收敛为上述四个函数 + 任意调用步骤的
-`template` 键。
+候选草稿保存在独立候选空间，失败不会污染正式脚本或模板。正式保存原子提交脚本、模板与版本记录，并检查原资源版本；历史中的“撤销此变更”将该次变更涉及的脚本与模板恢复到变更前状态，保留无关资源，必须明确确认。通过只证明素材已记录路径，不证明未出现分支或任意新操作的游戏效果。
 
-### 跳出循环：`break`
+## 运行记录、错误与图像
 
-`break: {}` 无参数，退出当前脚本或函数内最近一层 `repeat` 或 `times > 1` 的模板匹配循环，继续执行循环后的步骤。
-可以放在循环内的 `if`、`match_templates` 分支中；嵌套循环只退出内层。
-`return` 则直接结束整个当前脚本或函数。
+运行记录通过 `run_id` 查询，包含步骤、调用、参数、返回值、匹配、输入、取消和错误。诊断包含 `code / path / message`，有定位信息时界面显示源路径；版本不一致时使用只读源提示，不错误跳到当前编辑行。
 
-```yaml
-run:
-  - repeat: 10
-    do:
-      - find: ready.png
-        as: hit
-      - if: $hit
-        then:
-          - break: {}
-      - sleep: 1s
-  - log: 检查结束
-```
+- `GET /api/runs/:run_id/events?after=0`：事件分页
+- `GET /api/runs/:run_id/trace?after=0&limit=100`：图像目录、证据缺口、开关与过期状态
+- `GET /api/runs/:run_id/trace/images/:image_id`：受认证保护的原图；过期返回 410
+- 同一图像地址加 `?template=true` 可查看其对应的冻结模板图像
+- `POST /api/runs/:run_id/trace/retain`：显式保留已结束且未过期的证据，受持久存储限额约束
 
-可视化编辑器「添加步骤 → 流程 → 跳出循环」生成同样语法。
-空写 `break:` 也表示无参数；不接受值、`as` 或子步骤。
-循环外使用报 `yaml.break.outside_loop`，参数形态错误报 `yaml.break.shape`。
-每个函数单独校验作用域，被调用函数不能通过 `break` 跳出调用方的循环。
+`trace.frame_id` 是调用栈帧，`image_id` 才是图像身份，两者不混用。步骤详情显示关联缩略图、原图、搜索框与命中框；图像缺失、Trace 关闭、采集缺口与过期均明确提示。文字事件不能被显示成不存在的图像证据。
 
-默认模板等待超时可在设置页的“自动化”中修改（初始 10s），作用于 `wait_find`、`tap_template`、`wait_disappear` 未显式传入的 `timeout`。每次运行开始冻结设置，运行途中不改变；显式实参和自定义函数参数默认值优先，可视化编辑器“恢复默认”会移除实参。设置由插件持久化，不是 YAML 关键字或 Core 全局配置。
+“交给 AI 分析”仅附上用户选定的脚本和相关运行 ID，由受限工具读取必要上下文。分析不获取设备控制租约；模型只保留待审核建议，不直接修改当前候选或正式资源。用户在自动化面板确认“应用到候选”后，旧报告失效，需重新验证再确认正式保存。
 
+## 验证边界
 
-### 运行详情与调试
-
-运行提交成功后，编辑区自动切换到运行详情；结束后保留，点击「返回编辑」恢复原编辑器。编辑器的「运行详情 / 历史记录」入口可以查询当前设备、当前脚本或函数最近 30 次运行。
-
-服务端按 `run_id` 保存步骤开始/结束、函数调用、实际参数（含原生默认值）、返回值、分支选择、循环进度、模板匹配、点击和 `log` 消息。无需连接投屏；刷新页面或服务重启后仍可查询。只从升级后的新运行开始记录，旧运行没有补录。运行记录与事件跟随设置中的日志保留天数清理，0 表示不自动清理；服务异常重启时未完成记录标为中断。
-
-详情按步骤展示耗时和结果，函数内部步骤、参数与返回值、模板轮询可展开。障碍模板命中及点击也会记录。向上滚动暂停跟随，点击「回到最新」恢复；「复制日志」复制当前已加载事件（长运行分批读取）。错误可按执行源版本定位；原文件已变化或当前有未保存修改时使用只读定位提示，避免错位或丢失编辑。
-
-Core API：`GET /api/runs?device_id=...&entrypoint=...` 返回最近运行，`GET /api/runs/:run_id/events?after=0` 返回 `{events,next,has_more}`（每页最多 500 条）；事件 ID 作为增量游标，均需登录。结构化记录不再依赖 WebRTC 事件缓存。
-
-
-### 自动化点击/按键前后延迟
-
-设置 → 自动化提供「点击/按键前延迟」「点击/按键后延迟」，默认均为 **300ms**；可配置 0～60000ms 的整数，0 关闭对应等待。设置持久化，每次运行开始冻结，保存后从下一次运行生效，无需重启。步骤中不提供对应参数。
-
-`tap`、`wait_find` 的目标自动点击、`tap_template`、障碍模板点击共用同一逻辑：确定位置 → 点击前等待 → 按下/松开 → 点击后等待。不会重复追加原先模板点击后的固定 300ms。点击前等待不会重新匹配；匹配等待成功后的点击延迟会增加函数总耗时，障碍处理中的延迟计入本轮轮询耗时。
-
-`key` 复用这两个延迟设置：动作前等待 → 发送按键 → 动作后等待，适用于 `press/down/up`；原有保存值保持有效。只匹配而不点击（包括无障碍的 `wait_find(click: false)`）不增加延迟；滑动、投屏手动点击和手动按键不受影响。等待期间支持取消，运行详情显示实际的前后等待时间。
+本地确定性测试可以覆盖解析、无设备素材验证、错误定位、版本冲突、取消、迟到结果和界面保存门槛。真实 Android/CDP 输入效果、实际游戏素材质量与真实模型视觉能力需要单独实测，不能用协议桩或组件测试替代。

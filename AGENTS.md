@@ -1,5 +1,15 @@
 # AGENTS.md
 
+## 2026-10-06 AI 自动化升级（覆盖下文旧 YAML V1 说明）
+
+本分支进入 0.3.0 开发：YAML 显式 `version: 2`，视觉表面语法降入同一权威解释器，生产与离线验证共用语义。旧的无版本语法拒绝执行；不新增兼容解释器。函数库也声明版本 2。用户入口以原文编辑、AI 生成/修改和模板工具为主，旧可视化表单不得重写无法表达的新语法。
+
+视频插件只制作演示素材，不承担流程生成；gamer-yaml 管理候选、验证、正式保存与回退；gamer-ai 提供可选的模型与受控诊断能力。模型请求/回放无设备租约；真正输入仍经过原控制屏障。素材可携带原片段，回放复用 Core 精确帧能力并严格禁止外部副作用。
+
+Runtime Trace 是现有 journal 的图片证据扩展；调用栈 frame_id 不是 image_id。截图开关不关闭基本日志，异常尽力保留实际判断帧。临时证据、素材、私有候选/历史生命周期分离，按配额清理不跨目录。
+
+实施边界与验收见 `docs/plans/gamer_ai_automation_contracts.md`、`docs/reference/YAML.md`、`docs/reference/RUNTIME_TRACE.md`。真实设备、游戏、模型效果与受环境限制的浏览器/ICE 验收单列，不能将本地合成测试当成真实效果通过。
+
 ## 2026-09-24 官方插件分仓
 
 `plugins/` 是 `jesongit/gamer-plugins` 的固定提交 submodule；更新源码需 `git submodule update --init --recursive`，不得默认跟随远端最新提交。插件改动在插件仓提交，再更新主仓 gitlink。独立构建消费插件仓 sdk/ 固定快照，来源与哈希在 sdk/lock.json；主仓 `node tools/check-plugin-sdk.mjs` 保证接口一致。主仓 `tools/build-plugins.ps1` 为本地市场包装入口，开发 UI 联调使用 `tools/build-plugin-ui.mjs`；`web` 的普通 build 仅构建壳，发行流水线显式构建插件。host/ 仍参加宿主编译，变更仍需要宿主发布。

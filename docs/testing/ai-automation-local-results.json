@@ -1,0 +1,686 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-05T21:30:05Z",
+  "scope": "isolated local HTTP integration; real server/router/auth/plugins/parser/interpreter/NCC; synthetic evidence and deterministic protocol provider",
+  "results": [
+    {
+      "name": "isolated server, real authentication, no devices",
+      "status": "passed",
+      "seconds": 1.306,
+      "detail": {
+        "loopback": "http://127.0.0.1:37279",
+        "server_sha256": "4352a41a19df1763ffa0c393b59ef5fffbea56330cf97473dc3d850bd77c6188",
+        "executed_binary_mtime_ns": 1791235758271577674,
+        "build_label": "2026-10-05 final host0.3.0 build5; YAML0.2.0 video0.2.0 AI0.4.0; runtime contract2; production300ms defaults",
+        "executed_isolated_copy": true
+      }
+    },
+    {
+      "name": "install current YAML plugin",
+      "status": "passed",
+      "seconds": 0.155,
+      "detail": {
+        "plugin": "gamer-yaml",
+        "version": "0.2.0",
+        "archive_sha256": "97ac5dba0ac5a26e0d0ca60734e289828e21ffc934a40af48303ca219df49028",
+        "wasm_sha256": "405da33bb7b242425d997e55fa5c853dcac14a90a3ba8a5fc957e225a80a2893",
+        "settings_before": {
+          "after_click_ms": 300,
+          "before_click_ms": 300,
+          "default_timeout_secs": 10
+        },
+        "fixture_production_settings": {
+          "after_click_ms": 300,
+          "before_click_ms": 300,
+          "default_timeout_secs": 10
+        }
+      }
+    },
+    {
+      "name": "install current video plugin",
+      "status": "passed",
+      "seconds": 0.033,
+      "detail": {
+        "plugin": "gamer-video",
+        "version": "0.2.0",
+        "archive_sha256": "5a8f05a29fa9629175a88e998074cc809cf36debf98d8ceb0803cba44d945d9e",
+        "wasm_sha256": null
+      }
+    },
+    {
+      "name": "real MP4 extraction and portable sample.create",
+      "status": "passed",
+      "seconds": 1.589,
+      "detail": {
+        "frames": 10,
+        "end_us": 1800000,
+        "original_capture_base_pts_us": 90000000,
+        "archive_sha256": "67e751f1645eaf571a96acc4ddfbd10ccfa969a79bb4d17dab43a7a197c75639",
+        "clip_archive_sha256": "9b58979ee382643f9fc97c9b73ec840b73aef3b5f1729b64c399dc238fd88023",
+        "recording_removed_before_portable_read": true
+      }
+    },
+    {
+      "name": "portable samples, production import parser, tamper rejection",
+      "status": "passed",
+      "seconds": 0.062,
+      "detail": {
+        "samples": 4,
+        "portable_sha256": "b4caa114555addd54ff935ab7fec0e19ec36ea28479232ebb1e03bcb4dfea24c",
+        "original_media_directory": "never created"
+      }
+    },
+    {
+      "name": "no-AI editor and A/C-confirm B-absent real replay",
+      "status": "passed",
+      "seconds": 0.27,
+      "detail": {
+        "status": "passed",
+        "consumed_actions": [
+          2,
+          1,
+          2
+        ],
+        "fingerprint": "d7be4813b0c88ae7d341cc0974cb04169ab6539b6648e8f3f5450766562b78b3"
+      }
+    },
+    {
+      "name": "archived clip supplies unlisted runtime frames with no source media",
+      "status": "passed",
+      "seconds": 3.96,
+      "detail": {
+        "state": "passed",
+        "consumed_actions": 2,
+        "contradictory_png_rejected": true,
+        "archived_video_sha256": "0dd6150884721f4e4dc6739746fca4635013bdaf9334888926c71d28f523416d",
+        "runtime_clip_observations": 1,
+        "runtime_clip_pts_us": [
+          700000
+        ],
+        "original_media_and_frames_removed": true
+      }
+    },
+    {
+      "name": "portable replay works while video plugin is disabled",
+      "status": "passed",
+      "seconds": 0.156,
+      "detail": {
+        "state": "passed",
+        "video_running": false
+      }
+    },
+    {
+      "name": "wrong action cannot pass or save",
+      "status": "passed",
+      "seconds": 0.101,
+      "detail": {
+        "status": "failed",
+        "samples": [
+          {
+            "sample": "sample-a",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": "claim",
+                "frame_id": "f0",
+                "message": "kind=failed; message=capability operation failed: ACTION_MISMATCH: \"claim\" 目标或手势属性不一致 [source:run[0].then[0]]",
+                "path": "run[0]"
+              }
+            ]
+          },
+          {
+            "sample": "sample-b",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": "claim",
+                "frame_id": "f0",
+                "message": "kind=failed; message=capability operation failed: ACTION_MISMATCH: \"claim\" 目标或手势属性不一致 [source:run[0].then[0]]",
+                "path": "run[0]"
+              }
+            ]
+          },
+          {
+            "sample": "sample-c",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": "claim",
+                "frame_id": "f0",
+                "message": "kind=failed; message=capability operation failed: ACTION_MISMATCH: \"claim\" 目标或手势属性不一致 [source:run[0].then[0]]",
+                "path": "run[0]"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing template cannot pass or save",
+      "status": "passed",
+      "seconds": 0.096,
+      "detail": {
+        "status": "failed",
+        "samples": [
+          {
+            "sample": "sample-a",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": "claim",
+                "frame_id": "f0",
+                "message": "kind=failed; message=capability resource was not found: 模板 claim.png [source:run[0]]",
+                "path": "run[0]"
+              }
+            ]
+          },
+          {
+            "sample": "sample-b",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": "claim",
+                "frame_id": "f0",
+                "message": "kind=failed; message=capability resource was not found: 模板 claim.png [source:run[0]]",
+                "path": "run[0]"
+              }
+            ]
+          },
+          {
+            "sample": "sample-c",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": "claim",
+                "frame_id": "f0",
+                "message": "kind=failed; message=capability resource was not found: 模板 claim.png [source:run[0]]",
+                "path": "run[0]"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "wrong goal template cannot pass or save",
+      "status": "passed",
+      "seconds": 0.161,
+      "detail": {
+        "status": "insufficient_evidence",
+        "samples": [
+          {
+            "sample": "sample-a",
+            "status": "insufficient_evidence",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": null,
+                "frame_id": "f6",
+                "message": "kind=failed; message=capability operation failed: EVIDENCE_END_EXHAUSTED: 所请求观察时刻超过记录 END，不能提前查看 END 冒充当前画面 [source:run[2]]",
+                "path": "run[2]"
+              }
+            ]
+          },
+          {
+            "sample": "sample-b",
+            "status": "insufficient_evidence",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": null,
+                "frame_id": "f5",
+                "message": "kind=failed; message=capability operation failed: EVIDENCE_END_EXHAUSTED: 等待需要 END 之后的未知画面 [source:run[2]]",
+                "path": "run[2]"
+              }
+            ]
+          },
+          {
+            "sample": "sample-c",
+            "status": "insufficient_evidence",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": null,
+                "frame_id": "f6",
+                "message": "kind=failed; message=capability operation failed: EVIDENCE_END_EXHAUSTED: 所请求观察时刻超过记录 END，不能提前查看 END 冒充当前画面 [source:run[2]]",
+                "path": "run[2]"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing finish cannot pass or save",
+      "status": "passed",
+      "seconds": 0.143,
+      "detail": {
+        "status": "failed",
+        "samples": [
+          {
+            "sample": "sample-a",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": null,
+                "frame_id": "f3",
+                "message": "GOAL_NOT_REACHED: 脚本未在最后一次动作后验证 finish 目标",
+                "path": "run[2]"
+              }
+            ]
+          },
+          {
+            "sample": "sample-b",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": null,
+                "frame_id": "f4",
+                "message": "GOAL_NOT_REACHED: 脚本未在最后一次动作后验证 finish 目标",
+                "path": "run[2]"
+              }
+            ]
+          },
+          {
+            "sample": "sample-c",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": null,
+                "frame_id": "f3",
+                "message": "GOAL_NOT_REACHED: 脚本未在最后一次动作后验证 finish 目标",
+                "path": "run[2]"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "all-sample gate retains B failure while A/C pass",
+      "status": "passed",
+      "seconds": 0.144,
+      "detail": {
+        "status": "failed",
+        "samples": [
+          {
+            "sample": "sample-a",
+            "status": "passed",
+            "diagnostics": []
+          },
+          {
+            "sample": "sample-b",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": null,
+                "frame_id": "f4",
+                "message": "kind=failed; message=VISUAL_TIMEOUT: 必需视觉目标 confirm.png 在 250ms 内未出现 [source:run[1]]",
+                "path": "run[1]"
+              }
+            ]
+          },
+          {
+            "sample": "sample-c",
+            "status": "passed",
+            "diagnostics": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "negative END cannot be hidden by earlier success",
+      "status": "passed",
+      "seconds": 0.174,
+      "detail": {
+        "status": "failed",
+        "samples": [
+          {
+            "sample": "sample-a",
+            "status": "passed",
+            "diagnostics": []
+          },
+          {
+            "sample": "sample-b",
+            "status": "passed",
+            "diagnostics": []
+          },
+          {
+            "sample": "sample-c",
+            "status": "passed",
+            "diagnostics": []
+          },
+          {
+            "sample": "sample-negative",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": null,
+                "frame_id": "f7",
+                "message": "kind=failed; message=GOAL_END_MISMATCH: END 画面不满足已达到目标: VISUAL_TIMEOUT: 必需视觉目标 done.png 在 0ms 内未出现 [source:run[2]]",
+                "path": "run[2]"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "revision stale report, atomic save and joint rollback",
+      "status": "passed",
+      "seconds": 0.427,
+      "detail": {
+        "commit": "f8350adb-4078-4db4-bbbc-0e1d0dde7c32",
+        "rollback": "aa4a01b5-8e56-4db9-9d70-e42d167ac053",
+        "conflict_rejected": true,
+        "production_settings_change_rejected": true
+      }
+    },
+    {
+      "name": "trace HTTP authorization and absent evidence",
+      "status": "passed",
+      "seconds": 0.004,
+      "detail": "auth and absent-evidence behavior only; real-target image capture deferred"
+    },
+    {
+      "name": "local-only AI protocol probe and readiness",
+      "status": "passed",
+      "seconds": 0.088,
+      "detail": {
+        "provider": "deterministic loopback protocol stub; NOT real model quality",
+        "checks": [
+          {
+            "name": "model",
+            "ok": true
+          },
+          {
+            "name": "image_input",
+            "ok": true
+          },
+          {
+            "name": "function_calling",
+            "ok": true
+          },
+          {
+            "name": "tool_image_feedback",
+            "ok": true
+          },
+          {
+            "name": "tool_result_roundtrip",
+            "ok": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "AI generation and bounded correction use real validation",
+      "status": "passed",
+      "seconds": 3.215,
+      "detail": {
+        "generation": "passed",
+        "clip_generation": "passed",
+        "retry_attempts": 2,
+        "bounded_reason": "no_progress",
+        "token_budget_stopped_before_request": true,
+        "attempted_sample_deletion_rejected": true
+      }
+    },
+    {
+      "name": "held-out D uses identical generated script and templates without provider exposure",
+      "status": "passed",
+      "seconds": 0.132,
+      "detail": {
+        "held_out_sample": "sample-d",
+        "status": "passed",
+        "consumed_actions": 1,
+        "sent_to_provider": false,
+        "generated_selection_unchanged": true,
+        "crop_source_samples": [
+          "sample-a"
+        ],
+        "exact_template_sha256s": {
+          "claim.png": "f240e632be57b43fdbe9ba3693d5cde21a773e751e518d43df24b9b9328e5735",
+          "confirm.png": "23fc1148de9f02a8b3e855c7919095c93a27351a894261cef27ee4b0d9540acd",
+          "done.png": "cccf18675cb1f4b366397c8a9078d1ab42e866623e2c0abca82e25f2104e3a16"
+        },
+        "interpretation": "synthetic replay coverage only; not real-model generalization"
+      }
+    },
+    {
+      "name": "context change keeps asynchronous result in original package",
+      "status": "passed",
+      "seconds": 0.243,
+      "detail": {
+        "result_package": "acceptance",
+        "selected_other_package_unmodified": true
+      }
+    },
+    {
+      "name": "cancelled late result cannot write or cross packages",
+      "status": "passed",
+      "seconds": 0.546,
+      "detail": {
+        "state": "cancelled",
+        "cross_package_candidates": 0,
+        "unknown_usage": true,
+        "automatic_retry_blocked_without_request": true,
+        "manual_validation": "passed"
+      }
+    },
+    {
+      "name": "configuration change rejects late model result",
+      "status": "passed",
+      "seconds": 0.204,
+      "detail": {
+        "state": "failed",
+        "reason": "model_version_conflict: 配置已变更，丢弃迟到结果",
+        "re_probe_required": true
+      }
+    },
+    {
+      "name": "AI disable rejects late result; ordinary validation still works",
+      "status": "passed",
+      "seconds": 0.392,
+      "detail": {
+        "late_result_state": "failed",
+        "ordinary_validation": "passed"
+      }
+    }
+  ],
+  "model_stub_skipped": false,
+  "clip_replay_skipped": false,
+  "model_stub_requests": [
+    {
+      "kind": "probe.model",
+      "model": "local-deterministic-protocol-stub",
+      "images": 0,
+      "sample_ids": []
+    },
+    {
+      "kind": "probe.images_and_tools",
+      "model": "local-deterministic-protocol-stub",
+      "images": 1,
+      "sample_ids": []
+    },
+    {
+      "kind": "probe.images_and_tools",
+      "model": "local-deterministic-protocol-stub",
+      "images": 1,
+      "sample_ids": []
+    },
+    {
+      "kind": "probe.images_and_tools",
+      "model": "local-deterministic-protocol-stub",
+      "images": 2,
+      "sample_ids": []
+    },
+    {
+      "kind": "generation.valid",
+      "model": "local-deterministic-protocol-stub",
+      "images": 22,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    },
+    {
+      "kind": "generation.valid",
+      "model": "local-deterministic-protocol-stub",
+      "images": 8,
+      "sample_ids": [
+        "clip-sample"
+      ]
+    },
+    {
+      "kind": "generation.bad_action",
+      "model": "local-deterministic-protocol-stub",
+      "images": 22,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    },
+    {
+      "kind": "generation.bad_action",
+      "model": "local-deterministic-protocol-stub",
+      "images": 22,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    },
+    {
+      "kind": "generation.drop_sample",
+      "model": "local-deterministic-protocol-stub",
+      "images": 22,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    },
+    {
+      "kind": "generation.valid",
+      "model": "local-deterministic-protocol-stub",
+      "images": 22,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    },
+    {
+      "kind": "generation.valid",
+      "model": "local-deterministic-protocol-stub",
+      "images": 22,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    },
+    {
+      "kind": "generation.valid",
+      "model": "local-deterministic-protocol-stub",
+      "images": 22,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    },
+    {
+      "kind": "probe.model",
+      "model": "changed-local-protocol-stub",
+      "images": 0,
+      "sample_ids": []
+    },
+    {
+      "kind": "probe.images_and_tools",
+      "model": "changed-local-protocol-stub",
+      "images": 1,
+      "sample_ids": []
+    },
+    {
+      "kind": "probe.images_and_tools",
+      "model": "changed-local-protocol-stub",
+      "images": 1,
+      "sample_ids": []
+    },
+    {
+      "kind": "probe.images_and_tools",
+      "model": "changed-local-protocol-stub",
+      "images": 2,
+      "sample_ids": []
+    },
+    {
+      "kind": "generation.valid",
+      "model": "changed-local-protocol-stub",
+      "images": 22,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    }
+  ],
+  "deferred": [
+    "real Android/CDP recording and coordinate alignment",
+    "actual game input and lifecycle",
+    "real model image understanding, generation quality and cost",
+    "live-target runtime Trace image capture",
+    "browser/UI acceptance (separate supported browser session)"
+  ],
+  "artifact_provenance": {
+    "server_sha256": "4352a41a19df1763ffa0c393b59ef5fffbea56330cf97473dc3d850bd77c6188",
+    "harness_sha256": "6cf6c5532381fb8dbe2805155ab4ed0cc43465338aea49d54c48e1001406531e",
+    "plugins": {
+      "gamer-yaml": {
+        "version": "0.2.0",
+        "archive_sha256": "97ac5dba0ac5a26e0d0ca60734e289828e21ffc934a40af48303ca219df49028",
+        "ui_sha256": {
+          "ui/plugin.js": "c6807a3dba7ab67cae6402dfee743da531c2edf295f23e3be6ae049f732fd578",
+          "ui/style.css": "0503211117b6cc5fdba437eaea23e9b7a8b1be334ad1295d5b69a24e0f105090"
+        },
+        "ui_matches_current_dist": true,
+        "wasm_sha256": "405da33bb7b242425d997e55fa5c853dcac14a90a3ba8a5fc957e225a80a2893"
+      },
+      "gamer-video": {
+        "version": "0.2.0",
+        "archive_sha256": "5a8f05a29fa9629175a88e998074cc809cf36debf98d8ceb0803cba44d945d9e",
+        "ui_sha256": {
+          "ui/plugin.js": "167b6a672d25cca4bb4f9db75b66146365dbe9f0cb9cfa8425668dab0afd7de9",
+          "ui/style.css": "4c800181e70dd7cf07224292762a9c1661a811e67ca638baba8e89aafd147639"
+        },
+        "ui_matches_current_dist": true
+      },
+      "gamer-ai": {
+        "version": "0.4.0",
+        "archive_sha256": "d9b931763c28793de9c840befce12fbcc34f9c541458f17f0cfd752a5ff425e6",
+        "ui_sha256": {
+          "ui/plugin.js": "e83a00ce515e23881c1ab610abe28fd57ab1dab44dd2c3fe50c24d521c2ea261",
+          "ui/style.css": "8c39b3c58a12455e126de6c5caa6f75f4d20f1fc3bdb06f2b102776180fbd912"
+        },
+        "ui_matches_current_dist": true
+      }
+    }
+  },
+  "separate_browser_status": {
+    "status": "blocked",
+    "reason": "Supported cloud-browser navigation to loopback failed with net::ERR_BLOCKED_BY_CLIENT; no workaround attempted"
+  }
+}

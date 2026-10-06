@@ -1,290 +1,137 @@
-# YAML 案例教程
+# YAML v2 自动化入门
 
-先选配置包，在「自动化」中新建脚本，再粘贴案例。找图需要先在同一配置包的「模板」中准备图片；运行前选好设备和目标应用。下面每个脚本代码块都是独立案例，模板名和坐标按实际画面修改。不写 `version` 字段。
+自动化工作台提供“脚本”“函数”“模板”和“AI 生成与验证”。当前脚本必须声明 `version: 2`，通过原文编辑保存，不再用旧步骤表单重写源码。完整语法见 [YAML v2 参考](../reference/YAML.md)。
 
-`#` 后面是注释。标「可选」的参数行可以整行删除，使用默认行为；被注释掉的参数，去掉开头的 `#` 即可填写。编辑器只自动展开无默认值的必填参数，可选参数和有默认值的参数点击按钮才展开。
+## 1. 先准备配置包与证据
 
-所有函数都有可选的 `name` 参数，控制可视化卡片的显示文字；不写时使用对应中文名。配置包函数默认使用说明，未写说明则使用函数名。填写后卡片只展示 `name` 的值，调用目标不变。所有内置 `timeout` 默认都是 `10s`，仍可显式覆盖。
+配置包存放脚本和模板，设备是执行目标，两者分开选择。没有连接设备时仍可编辑、检查源码、测试模板和验证素材。
 
-## 1. 等按钮出现，再点击
+先准备三类画面证据：任务入口、必要动作前后、真正完成后的画面。停止录制只是录制结束，不证明目标成功。视频工作台可以生成自包含 `.gamersample`，导出后不依赖原电脑的录制目录；没有操作日志的普通视频只能当视觉参考。
+
+在“模板”页制作按钮与完成状态的模板。下面示例使用 `claim.png`、可选弹窗 `confirm.png` 与完成画面 `done.png`，请先用实际素材制作对应文件，不要直接把占位文件名当成可运行资源。
+
+## 2. 第一个完整流程
+
+在“脚本”中新建 `daily.yaml`，输入：
 
 ```yaml
-name: 打开指南                 # 可选：脚本说明名，不是文件名
-run:                         # 必填：按顺序执行的步骤
-  - wait_find:
-      name: 等待模板出现 # 可选：可视化显示名称
-      template: 指南.png      # 必填，无默认值：要找的模板
-      click: false           # 可选，默认 true：此例随后单独 tap，所以关闭自动点击
-      obstacles: []          # 可选，默认 []：按顺序检查并点击障碍模板，如 [关闭公告.png, 关闭提示.png]
-      # threshold: 0.8       # 可选，默认 0.8：匹配阈值
-      # timeout: 10s        # 可选，默认 10s：最多等待多久
-      # interval: 250ms      # 可选，默认 250ms：多久找一次
-      # region: [0, 0, 1, 1] # 可选，无固定默认值：[x, y, 宽, 高]，范围 0～1
-                            # 不填 region：按模板文件名的区域后缀搜索，无后缀则全屏
-    as: guide               # 可选：把结果存为 guide；没找到时结果为 null
-
-  - if: $guide              # 找到了才点击；$guide 表示读取刚才的结果
+version: 2
+name: 每日奖励
+targets:
+  claim:
+    template: claim.png
+    threshold: 0.8
+  confirm:
+    template: confirm.png
+  done:
+    template: done.png
+run:
+  - id: claim_reward
+    wait: claim
+    timeout: 10s
+    as: button
     then:
-      - tap:
-          name: 点击 # 可选：可视化显示名称
-          position: $guide.center # 必填，无默认值：点击找到的位置
-      - sleep: 1s           # 时长必填，无默认值；这里等 1 秒
-    else:
-      - log:
-          name: 日志 # 可选：可视化显示名称
-          message: 没找到指南 # 必填，无默认值：日志内容
-          # level: info     # 可选，默认 info；可用 debug / info / warn / error
+      - tap: $button
+  - optional:
+      find: confirm
+      timeout: 0ms
+      as: popup
+      then:
+        - tap: $popup
+  - finish: done
+    timeout: 10s
 ```
 
-坐标范围为 `0～1`，左上角是 `[0,0]`，右下角是 `[1,1]`。时间可写 `500ms`、`1.5s`、`2min`，纯数字表示毫秒。
+点击“校验源码”检查语法和结构；保存时服务端再次检查，并拒绝覆盖别人更新的版本。错误显示路径、代码和原因，原文及注释不会被自动改写。
 
-所有找图函数的 `region` 都可省略：模板文件名的 `#a/u/d/l/r/ul/ur/dl/dr` 后缀分别表示全屏、上、下、左、右、左上、右上、左下、右下区域，无后缀则全屏。例如图片叫 `指南#ur.png`，脚本可用唯一短名 `指南.png`，保留 `.png`。
+这里有三个不同的承诺：
 
-匹配对象的 `center` 是相对坐标，`score` 是匹配分数，`x/y/width/height` 是像素位置和大小，`region` 是相对区域对象。没找到返回 `null`，先用 `if` 判断，再读取 `.center`。
+- `wait` 必须在期限内找到目标，只观察，不点击
+- `optional` 默认仅检查一次，没有弹窗便跳过，但模板丢失或设备错误仍然失败
+- `finish` 要观察到完成画面；不能因为已经执行最后一次点击就说任务完成
 
-## 2. 另外三种找图操作
+## 3. 先验证素材，再连设备
+
+在“AI 生成与验证”选择一个或多个素材。已经由视频工作台生成的素材可直接选择；跨电脑文件用“导入自包含素材包”导入。没有 AI 时选择“手写源码离线验证”，粘贴上面的源码并创建候选。
+
+填写真实目标，例如“从奖励页点击领取，若弹出确认则确认，最终看到已领取状态”。所有选中素材固定进入候选。点击“验证全部素材”，检查每一份报告：
+
+- 通过：这份素材记录的路径、动作和完成条件吻合
+- 逻辑或匹配失败：需要修改流程、阈值、模板或目标
+- 证据不足：需要补录相应画面或动作，不能假称通过
+- 不支持：回放不执行外部副作用，需要调整受测流程或补充支持
+
+只有全部素材通过且没有未验证修改，才可以“确认保存正式版本”。脚本、模板和版本记录一起提交。“保留候选草稿”只保留工作进度，不写入正式资源。历史中的“撤销此变更”会撤销该次变更涉及的资源；操作前会明确确认。
+
+通过素材验证不证明未录到的分支正确，也不保证游戏会对任意新操作产生相同结果。最后仍需在实际目标执行同一脚本，检查输入与视觉结果。
+
+## 4. 函数复用与参数
+
+在“函数”页新建或选择 `_function.yaml`。整个函数库以原文保存；运行函数下拉框只选择测试入口，不会删除其他函数。
 
 ```yaml
+version: 2
+functions:
+  announce:
+    params:
+      message:
+        type: string
+        default: 已完成
+    run:
+      - log: $message
+      - return: true
+```
+
+调用函数并保持真实完成条件：
+
+```yaml
+version: 2
+targets:
+  done:
+    template: done.png
 run:
-  - find:                     # 只找一次，返回匹配对象或 null；没有 timeout / interval 参数
-      name: 查找模板 # 可选：可视化显示名称
-      template: 指南.png        # 必填，无默认值
-      threshold: 0.8           # 可选，默认 0.8
-      region: [0, 0, 1, 1]     # 可选；省略时按模板后缀确定区域
-    as: current               # 可选：保存返回值
-  - log: $current             # 简写：值传给第一个参数，这里就是 message
-
-  - tap_template:             # 找到就点击中心，随后等 300ms；没找到不点击
-      name: 点击模板 # 可选：可视化显示名称
-      template: 指南.png        # 必填，无默认值
-      threshold: 0.8           # 可选，默认 0.8
-      timeout: 10s             # 可选，默认 10s；显式写 0ms 只找一次
-      interval: 100ms          # 可选，默认 100ms（轮询时生效）
-      region: [0, 0, 1, 1]     # 可选；省略时按模板后缀确定区域
-    as: tapped                # 可选：匹配对象或 null
-
-  - wait_disappear:           # 等模板消失；已消失返回 true，超时仍在返回 false
-      name: 等待模板消失 # 可选：可视化显示名称
-      template: 指南.png        # 必填，无默认值
-      threshold: 0.8           # 可选，默认 0.8
-      timeout: 10s            # 可选，默认 10s
-      interval: 250ms          # 可选，默认 250ms
-      region: [0, 0, 1, 1]     # 可选；省略时按模板后缀确定区域
-    as: gone
-  - log: $gone
+  - wait: done
+    timeout: 10s
+  - announce:
+      message: 已观察到领取完成
+  - finish: done
+    timeout: 0ms
 ```
 
-`wait_find` 等出现，默认点击命中中心并等待 `300ms`；`click: false` 不点击目标，可用于后续单独点击或判断状态。设置 `obstacles` 后，每轮先按列表顺序检查障碍，命中首个就点击并等下一轮，没有障碍命中才检查目标；障碍处理计入总超时，不受 `click: false` 影响。`wait_disappear` 等消失；轮询间隔最低为 `50ms`。超时未命中是正常返回且不点击目标；模板文件不存在、参数错误等会终止运行并报错。
+函数名在当前配置包内唯一，同名冲突报错。手动运行使用参数默认值，仅缺少必填值时弹出表单；定时任务可显式配置参数。
 
-## 3. 启停应用、滑动、按键和输入文字
+参数类型：
 
-```yaml
-run:
-  - launch:
-      name: 启动应用 # 可选：可视化显示名称
-      package: com.example.game # 可选：改成实际 Android 应用包名；省略则用设备配置的应用
-  - sleep:
-      name: 等待 # 可选：可视化显示名称
-      duration: 2s            # 必填，无默认值：launch 是冷启动，这里等待 2 秒
-  - tap: [0.5, 0.5]           # position 的简写；也可写 tap: {position: {x: 0.5, y: 0.5}}
-  - swipe:
-      name: 滑动 # 可选：可视化显示名称
-      from: [0.5, 0.8]        # 必填，无默认值：起点
-      to: [0.5, 0.2]          # 必填，无默认值：终点
-      duration: 300ms         # 可选，默认 300ms
-  - input_text:
-      name: 输入文本 # 可选：可视化显示名称
-      text: 你好               # 必填，无默认值：先确保输入框已获得焦点
-  - key:
-      name: 按键 # 可选：可视化显示名称
-      key: BACK               # 必填，无默认值：如 BACK / HOME，或数字 keycode
-      action: press           # 可选，默认 press；down 为按下，up 为松开
-  - stop_app:
-      name: 停止应用 # 可选：可视化显示名称
-      package: com.example.game # 可选：省略则用设备配置的应用
-```
+| 类型 | 含义 |
+| --- | --- |
+| `any` | 任意 JSON 值 |
+| `boolean` | 布尔值 |
+| `integer` | 整数 |
+| `number` | 数值 |
+| `string` | 字符串 |
+| `list` | 列表 |
+| `object` | 对象 |
+| `duration` | 时长，例如 500ms、2s |
+| `point` | 坐标点 |
+| `template` | 模板名 |
+| `key` | 按键 |
 
-使用设备配置的应用时，写 `launch: {}`、`stop_app: {}` 即可。这里的 `package` 是 Android 应用包名，与保存脚本的配置包 ID 分开。这些操作函数以及 `sleep`、`log` 都返回 `null`。
+表达式使用 `$name.field` 引用，字面量美元符号以 `$$` 转义。`find`、`tap`、`swipe`、`key`、比较函数等低层能力仍可调用；全部参数与默认值以原生函数目录为准，不从旧教程推测。对于状态流程优先用 `wait / optional / finish`。
 
-## 4. 运行参数、变量、循环和提前结束
+## 5. AI 生成与调试
 
-```yaml
-name: 重复点击
-params:                       # 可选：运行时可填写或覆盖的参数
-  target:
-    type: point               # 每个参数必填 type，无默认类型
-    required: true            # 必填参数，无默认值；运行前必须传入 target
-    desc: 点击位置             # 可选说明
-  times:
-    type: integer
-    default: 3                # 可选参数，默认 3；required 不写默认为 false
-  note:
-    type: string              # 可选参数，无默认值；本案例不使用它，可不填
-vars:                         # 可选：脚本内的固定字面量
-  pause: 500ms
-  label: 点击完成
-run:
-  - repeat: $times            # 次数必填：非负整数或整数引用；0 表示不执行
-    do:                       # 循环体必填，可写空列表 []
-      - tap: $target
-      - sleep: $pause
-  - log: $label
-  - return: {ok: true, count: $times} # 返回对象并结束当前脚本；return 步骤可省略
-```
+AI 是可选能力。生成页展示插件安装/运行、模型配置及当前配置的视觉能力探测状态；更换模型或端点后不能沿用旧探测。
 
-`$times` 读取变量，`$guide.center` 读取对象字段；步骤中的数组、对象也可以嵌套引用。`vars` 和参数 `default` 是字面量，不展开引用。要输出以 `$` 开头的文本，可写 `log: $$price`，输出 `$price`。不支持 `$times + 1`、字符串插值或数组下标。
+选择素材与目标后，可以启动有界 AI 生成：设定最大尝试次数、耗时和 Token 预算。模型会产生候选模板与源码，服务端验证全部素材，必要时携带失败证据继续修正。缺证据、预算耗尽或没有进展时会停止说明原因，可保留草稿或取消。
 
-`if` 的 `then` 必填，`else` 可选。只有 `false` 和 `null` 算条件不成立，`0`、空字符串也算成立；数值判断先调用比较函数。`return` 放在分支或循环内也会结束当前脚本或函数；`break: {}` 只退出最近一层 `repeat`，循环后的步骤继续执行；循环外不允许使用，也不能跳出调用方的循环。不支持 `while`、`try/catch`。
+运行失败时，在日志中查看图像证据与模板命中框，或点击“交给 AI 分析”。普通脚本附件用于只读诊断；在候选页点击“交给 AI 审阅候选”可同时附上素材、候选和验证报告。只发送所选任务需要的上下文到已配置模型，不获取设备控制租约。
 
-参数的全部类型如下；脚本和自定义函数使用同一套声明方式。`default`、`required`、`desc` 都可选，默认值必须符合 `type`。
+AI 提出的修改先显示为待审核建议。确认“应用到候选”会使旧报告失效；重新验证后，还需要单独确认正式保存。聊天里分析原因不等于授权替换正式脚本。
 
-| type | 值示例 |
-|---|---|
-| `any` | `null`、`true`、数字、字符串、列表或对象 |
-| `boolean` | `true` / `false` |
-| `integer` | `3` |
-| `number` | `0.8` |
-| `string` | `你好` |
-| `list` | `[1, 2, 3]` |
-| `object` | `{name: 张三}` |
-| `duration` | `500ms` / `1s` / `2min` / `500` |
-| `point` | `[0.5, 0.8]` 或 `{x: 0.5, y: 0.8}` |
-| `template` | `指南.png` |
-| `key` | `HOME` / `BACK` / 数字 keycode |
+## 6. 运行记录与维护
 
-## 5. 比较后决定是否执行
+连接实际设备后点击“运行”。参数、步骤、模板匹配和错误记录按运行 ID 保存，刷新页面后仍可查看。图像证据的 ID 与调用栈帧 ID 不同；Trace 关闭、采集缺口、图像过期分别提示，不拿其他截图替代。
 
-六个比较函数的 `a`、`b` 都必填，无默认值；`eq/ne` 可比较任意值，`gt/ge/lt/le` 只接受数字，都返回布尔值。
+发生版本冲突时，先保留需要的改稿，再明确放弃并重载最新版本，避免覆盖他人修改。编辑器不会强制写入。图片过期不等于文字日志丢失；重要的已结束运行可在存储限额内选择长期保留证据。
 
-```yaml
-vars:
-  count: 3
-run:
-  - eq: {name: 等于, a: $count, b: 3}     # 等于；a、b 必填
-    as: equal
-  - ne: {name: 不等于, a: $count, b: 0}     # 不等于；a、b 必填
-    as: not_equal
-  - gt: {name: 大于, a: $count, b: 2}     # 大于；a、b 必填
-    as: greater
-  - ge: {name: 大于等于, a: $count, b: 3}     # 大于等于；a、b 必填
-    as: enough
-  - lt: {name: 小于, a: $count, b: 5}     # 小于；a、b 必填
-    as: less
-  - le: {name: 小于等于, a: $count, b: 3}     # 小于等于；a、b 必填
-    as: at_most
-  - if: $enough
-    then:
-      - log: 数量足够
-    else:
-      - log: 数量不足
-  - return: $enough
-```
-
-## 6. 把重复步骤做成自定义函数
-
-在当前配置包的「函数」中定义函数。下面是默认函数库 `automations/_function.yaml` 的完整文件格式：
-
-```yaml
-functions:                    # 函数库必填的顶层包装，可在下面并列定义多个函数
-  每日任务跳转:                 # 调用名；中文函数名可用
-    description: 等待并点击入口 # 可选说明
-    params:                   # 可选：函数入参
-      template:
-        type: template        # type 必填
-        required: true        # 必填，无默认值
-      timeout:
-        type: duration
-        default: 3s           # 可选，默认 3s
-    vars:                     # 可选：只属于这个函数
-      done: 已进入任务
-    returns:                  # 可选：返回值说明，仅用于提示，不做运行时类型校验
-      type: boolean
-    run:                      # 必填：函数步骤
-      - tap_template:
-          template: $template
-          timeout: $timeout
-        as: hit
-      - if: $hit
-        then:
-          - log: $done
-          - return: true      # 提前结束当前函数，把 true 返回给调用方
-      - return: false
-```
-
-保存函数后，在同一配置包新建脚本调用：
-
-```yaml
-run:
-  - 每日任务跳转:
-      template: 指南.png        # 必填，无默认值
-      # timeout: 10s          # 可选；不写使用函数声明的 3s
-    as: success               # 可选：接收函数返回值
-  - if: $success
-    then:
-      - log: 可以继续后续任务
-    else:
-      - log: 入口没找到
-  - return: $success
-```
-
-函数通过参数接收数据、通过 `return` 返回结果，不能直接读取调用方的局部变量。函数也能调用当前配置包的其他函数。函数名允许汉字、小写字母、数字、下划线，不能以数字开头；不能与内置函数、其他自定义函数或 `if/repeat/return/match_templates/break` 重名。参数名和变量名使用小写字母、数字、下划线，不能以数字开头。
-
-默认函数库可放多个函数；手动拆分时文件名用 `_function其他名称.yaml`，同样放在 `automations/`。调用只写函数名，不带文件名或目录；不要把 `functions:` 写进普通脚本。
-
-## 7. 按模板选择动作
-
-`match_templates` 将模板与对应动作放在同一步。每轮共用一帧，按列表顺序匹配，
-首个命中后只执行它的 `do`，全部未命中才执行可选 `else`。不会自动点击，也不会自动循环。
-分支 `as` 可选，匹配结果仅在对应分支内有效（同名外部变量在分支结束后恢复）；
-动作报错会终止运行，`return` 仍结束当前脚本或函数。`threshold` 默认 0.8，支持变量引用；
-每个模板按自己的文件名区域搜索。模板列表限制 1..64 项。
-
-```yaml
-run:
-  - match_templates:
-      threshold: 0.8
-      cases:
-        - template: 指南.png
-          as: hit
-          do:
-            - tap: $hit          # 直接点击匹配结果中心（Gamer beta.7 + 插件 beta.2；旧版使用 $hit.center）
-      else:
-        - log: 未识别到页面
-```
-
-编辑器「添加步骤 → 模板分支」提供普通模板选择框（搜索、缩略图、框选与匹配）、
-分支动作、结果变量以及上移/下移和增删按钮；上下顺序即匹配优先级，支持撤销重做。
-
-只想识别、不分派动作时，可以单独调用底层 `find_any`。它返回首个命中的匹配对象
-（额外带 `index`，从 0 开始，以及输入的 `template` 名），全部未命中返回 `null`。
-
-```yaml
-run:
-  - find_any:
-      templates: [指南.png]
-      threshold: 0.8
-      name: 判断当前页面
-    as: found
-  - return: $found
-```
-
-## 8. 保存与运行
-
-通知也是普通函数调用。先在通知助手全局配置通道，脚本可使用通道 ID；不填写 `channel` 使用全局默认通道。通知插件未安装或停用时，步骤仍可编辑和保存，执行跳过发送并继续；返回值的 `accepted` 仅表示提交成功，实际结果查看发送记录。
-
-```yaml
-run:
-  - notify:
-      content: 数据库备份已完成
-      title: 备份完成       # 可选：标题
-      channel: wechat      # 可选：全局通道 ID
-      name: 发送完成通知   # 可选：可视化名称
-    as: delivery
-  - log: 流程继续
-```
-
-任务结果通知在任务编辑页分别配置成功、失败、取消、跳过的通道和文案，不要求脚本包含 `notify`，也不会与脚本通知合并。详见[通知助手](notifications.md)。
-
-先保存模板和函数，再保存调用它们的脚本。手动运行时填写必填参数；可选参数有默认值的，不填则使用默认值。可先在「函数」中测试一个函数，再运行完整脚本。定时执行时，在「任务」中选择 YAML 执行器、对应配置包和脚本，填写运行参数与时间后保存任务。
-
-本页覆盖当前全部 **20 个内置函数**及六种步骤（函数调用、`if`、`repeat`、`break`、`return`、`match_templates`）。细节和诊断说明见 [YAML 参考](../reference/YAML.md)。
+本地无设备测试与模型协议桩验证不能替代真实设备和真实模型测试。实际录制时序、游戏素材质量、模型视觉与费用行为应单独验收。
