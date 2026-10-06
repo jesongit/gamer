@@ -357,6 +357,11 @@ const SCRIPT_ID_ALLOWS: &[Allow] = &[
     },
     // —— 其他映射点 ——
     Allow {
+        file: "api/tests/runtime_trace.rs",
+        snippet: "script_id: \"p/main.yaml\".into()",
+        reason: "cfg(test)：Trace HTTP 夹具构造现有 RunRecord 展示字段，不解释脚本语义",
+    },
+    Allow {
         file: "capabilities/adapters/run.rs",
         snippet: "record.run_id, record.script_id",
         reason: "capability run.submit 冲突消息映射（busy 展示字段透传）",
@@ -460,6 +465,11 @@ const DEPENDENCY_PATTERNS: &[&str] = &["extensions::gamer_yaml", "extensions::ke
 
 /// §14.2 白名单：组合根装配点 + cfg(test) 夹具，逐条申报。
 const DEPENDENCY_ALLOWS: &[Allow] = &[
+    Allow {
+        file: "main.rs",
+        snippet: "extensions::gamer_yaml::generation::GenerationService::new",
+        reason: "组合根：装配扩展所有的离线候选服务；Core 不解释生成或脚本逻辑",
+    },
     // —— 生产：组合根（main.rs 的 RuntimeServices::start）是唯一装配点 ——
     Allow {
         file: "main.rs",
@@ -1491,7 +1501,7 @@ async fn architecture_guard_isolation_yaml_task_survives_extension_absence_and_r
 
     // 保存脚本资源（Package API；gamer-yaml 扩展钩子已注册 = V1 校验生效，
     // 内容为 V1 直接通过）后派发进入执行层：202 + run 记录（不再 424）。
-    let script = "run:
+    let script = "version: 2\nrun:
   - log: guard isolation
 ";
     let (status, created) = post_json(

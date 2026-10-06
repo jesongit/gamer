@@ -305,6 +305,15 @@ pub(crate) fn build_router_with_extensions(
             post(runs::api_dispatch_run).get(runs::api_run_history),
         )
         .route("/api/runs/:run_id/events", get(runs::api_run_events))
+        .route("/api/runs/:run_id/trace", get(runs::api_run_trace))
+        .route(
+            "/api/runs/:run_id/trace/images/:image_id",
+            get(runs::api_run_trace_image),
+        )
+        .route(
+            "/api/runs/:run_id/trace/retain",
+            post(runs::api_retain_run_trace),
+        )
         .route("/api/devices/:id/run", get(runs::api_device_run))
         .route("/api/runs/:run_id", get(runs::api_get_run))
         .route("/api/runs/:run_id/cancel", post(runs::api_cancel_run))

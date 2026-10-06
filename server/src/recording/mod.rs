@@ -78,7 +78,7 @@ pub struct SegmentMeta {
     pub start_us: u64,
     pub duration_us: u64,
     /// 段首帧原始媒体 PTS（微秒）。**事件时间轴 ↔ 媒体 PTS 的整数映射基准**：
-    /// `media_pts_us = timeline_us - start_us + base_pts_us`（会话单调钟与
+    /// 原始输入 PTS 仅供诊断；文件媒体 PTS 从 0 起。`media_pts_us = timeline_us - start_us`（会话单调钟与
     /// 媒体时钟同刻度对齐，整数微秒、不混用浏览器时间）。
     #[serde(default)]
     pub base_pts_us: u64,
@@ -92,7 +92,7 @@ impl SegmentMeta {
     /// 本阶段由录制测试锁定语义。
     #[allow(dead_code)]
     pub fn media_pts_for_timeline(&self, timeline_us: u64) -> u64 {
-        self.base_pts_us + timeline_us.saturating_sub(self.start_us)
+        timeline_us.saturating_sub(self.start_us)
     }
 }
 
@@ -108,6 +108,9 @@ pub struct RecordingSessionMeta {
     /// 会话时间轴（一段或多段；不同会话的时间戳绝不拼接）。
     pub segments: Vec<SegmentMeta>,
     pub event_count: u64,
+    /// Evidence loss is durable and must prevent claiming an offline sample is complete.
+    #[serde(default)]
+    pub evidence_issues: Vec<String>,
     pub error: Option<String>,
 }
 
@@ -233,6 +236,9 @@ struct TouchGesture {
     last_y: u32,
     down_us: u64,
     operation_id: String,
+    max_drift: u32,
+    unsupported: bool,
+    points: Vec<(u64, u32, u32)>,
 }
 
 struct KeyPending {
@@ -272,7 +278,7 @@ impl EventLog {
         }
     }
 
-    fn append(&mut self, record: &InputEventRecord) {
+    fn append(&mut self, record: &InputEventRecord) -> anyhow::Result<()> {
         if self.file.is_none() || self.lines >= EVENTS_FILE_MAX_LINES {
             self.file_seq += 1;
             let path = self.dir.join(format!("events-{:04}.jsonl", self.file_seq));
@@ -286,23 +292,18 @@ impl EventLog {
                     self.lines = 0;
                 }
                 Err(e) => {
-                    warn!(path = %path.display(), err = %e, "事件文件打开失败，事件丢弃");
-                    return;
+                    return Err(e.into());
                 }
             }
         }
-        match serde_json::to_string(record) {
-            Ok(mut line) => {
-                line.push('\n');
-                if let Some(f) = self.file.as_mut() {
-                    // 事件写入失败不致命：计数已进 meta，读侧按实际文件为准
-                    if f.write_all(line.as_bytes()).is_ok() {
-                        self.lines += 1;
-                    }
-                }
-            }
-            Err(e) => warn!(err = %e, "事件序列化失败"),
-        }
+        let mut line = serde_json::to_vec(record)?;
+        line.push(b'\n');
+        self.file
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("event file unavailable"))?
+            .write_all(&line)?;
+        self.lines += 1;
+        Ok(())
     }
 
     fn close(&mut self) {
@@ -330,6 +331,7 @@ struct SessionState {
     evt_counter: u64,
     touch: HashMap<u64, TouchGesture>,
     keys: HashMap<u32, KeyPending>,
+    named_keys: HashMap<String, KeyPending>,
     frames_since_space_check: u32,
 }
 
@@ -370,7 +372,14 @@ impl SessionState {
             status: "accepted".to_string(),
         };
         self.meta.event_count += 1;
-        self.events.append(&record);
+        if let Err(error) = self.events.append(&record) {
+            self.evidence_issue(format!("event_write_failed: {error}"));
+        }
+    }
+    fn evidence_issue(&mut self, issue: String) {
+        if self.meta.evidence_issues.len() < 64 && !self.meta.evidence_issues.contains(&issue) {
+            self.meta.evidence_issues.push(issue);
+        }
     }
 }
 
@@ -584,6 +593,7 @@ impl SessionShared {
                 debug_segment_closed(&self.id.0, &media_id.0, &summary, seg.frames);
             }
             Err(e) => {
+                st.evidence_issue(format!("segment_finalize_failed: {e}"));
                 // 段废弃：素材停在 importing（不出现在媒体列表），已收口的
                 // 前序段完好。
                 warn!(
@@ -617,6 +627,38 @@ impl SessionShared {
         ) {
             return st.meta.clone();
         }
+        let partial_touches = std::mem::take(&mut st.touch);
+        for (_, gesture) in partial_touches {
+            let duration = st.elapsed_us().saturating_sub(gesture.down_us);
+            st.emit(
+                &self.id.0,
+                "gesture_incomplete",
+                json!({"x":gesture.x0,"y":gesture.y0,"duration_us":duration}),
+                gesture.down_us,
+                gesture.operation_id,
+            );
+        }
+        let partial_keys = std::mem::take(&mut st.keys);
+        for (code, key) in partial_keys {
+            let duration = st.elapsed_us().saturating_sub(key.down_us);
+            st.emit(
+                &self.id.0,
+                "key_incomplete",
+                json!({"code":code,"duration_us":duration}),
+                key.down_us,
+                key.operation_id,
+            );
+        }
+        for (name, key) in std::mem::take(&mut st.named_keys) {
+            let duration = st.elapsed_us().saturating_sub(key.down_us);
+            st.emit(
+                &self.id.0,
+                "key_incomplete",
+                json!({"code":name,"duration_us":duration}),
+                key.down_us,
+                key.operation_id,
+            );
+        }
         st.meta.state = RecordingState::Finalizing;
         self.stopping.store(true, Ordering::Release);
         self.stop_notify.notify_waiters();
@@ -624,6 +666,10 @@ impl SessionShared {
         st.meta.state = target;
         st.meta.ended_at = Some(now_rfc3339());
         st.meta.error = error;
+        if st.dropped_frames > 0 {
+            let count = st.dropped_frames;
+            st.evidence_issue(format!("frames_dropped: {count}"));
+        }
         st.events.close();
         self.persist(st);
         self.inner.release_device(&self.device_id, &self.id.0);
@@ -730,7 +776,21 @@ impl SessionShared {
         match action {
             TOUCH_DOWN => {
                 if st.touch.len() >= MAX_ACTIVE_GESTURES {
+                    st.evidence_issue("gesture_limit_exceeded".into());
                     return;
+                }
+                if let Some(old) = st.touch.remove(&pointer_id) {
+                    st.emit(
+                        &self.id.0,
+                        "gesture_incomplete",
+                        json!({"reason":"repeated_down","duration_us":now_us.saturating_sub(old.down_us)}),
+                        old.down_us,
+                        old.operation_id,
+                    );
+                }
+                let simultaneous = !st.touch.is_empty();
+                for gesture in st.touch.values_mut() {
+                    gesture.unsupported = true;
                 }
                 let operation_id = st.next_op();
                 st.touch.insert(
@@ -742,29 +802,70 @@ impl SessionShared {
                         last_y: y,
                         down_us: now_us,
                         operation_id,
+                        max_drift: 0,
+                        unsupported: simultaneous,
+                        points: vec![(0, x, y)],
                     },
                 );
             }
             TOUCH_UP => {
-                if let Some(g) = st.touch.remove(&pointer_id) {
-                    let drift = g.x0.abs_diff(g.last_x).max(g.y0.abs_diff(g.last_y));
-                    let (kind, payload) = if drift <= TAP_MAX_DRIFT {
-                        ("tap", json!({ "x": g.x0, "y": g.y0 }))
+                if let Some(mut g) = st.touch.remove(&pointer_id) {
+                    let duration = now_us.saturating_sub(g.down_us);
+                    g.max_drift = g.max_drift.max(g.x0.abs_diff(x).max(g.y0.abs_diff(y)));
+                    g.points.push((duration, x, y));
+                    let kind = if g.unsupported {
+                        "gesture_unsupported"
+                    } else if g.max_drift > TAP_MAX_DRIFT {
+                        "swipe"
+                    } else if duration > 700_000 {
+                        "long_press"
                     } else {
-                        (
-                            "swipe",
-                            json!({ "x": g.x0, "y": g.y0, "x2": g.last_x, "y2": g.last_y }),
-                        )
+                        "tap"
                     };
+                    let mut payload = json!({"x":g.x0,"y":g.y0,"duration_us":duration});
+                    if kind != "tap" {
+                        payload["x2"] = json!(x);
+                        payload["y2"] = json!(y);
+                        payload["points"] = json!(g.points);
+                    }
                     st.emit(&self.id.0, kind, payload, g.down_us, g.operation_id);
+                } else {
+                    st.evidence_issue("touch_up_without_down".into());
+                    let op = st.next_op();
+                    st.emit(
+                        &self.id.0,
+                        "gesture_incomplete",
+                        json!({"reason":"up_without_down","x":x,"y":y}),
+                        now_us,
+                        op,
+                    );
                 }
             }
-            // MOVE 及其他动作只更新轨迹
-            _ => {
+            2 => {
                 if let Some(g) = st.touch.get_mut(&pointer_id) {
                     g.last_x = x;
                     g.last_y = y;
+                    g.max_drift = g.max_drift.max(g.x0.abs_diff(x).max(g.y0.abs_diff(y)));
+                    if g.points.len() < 256 {
+                        g.points.push((now_us.saturating_sub(g.down_us), x, y));
+                    } else {
+                        g.unsupported = true;
+                    }
+                } else {
+                    st.evidence_issue("move_without_down".into());
                 }
+            }
+            _ => {
+                if let Some(g) = st.touch.remove(&pointer_id) {
+                    st.emit(
+                        &self.id.0,
+                        "gesture_unsupported",
+                        json!({"reason":"unsupported_touch_action","action":action,"duration_us":now_us.saturating_sub(g.down_us)}),
+                        g.down_us,
+                        g.operation_id,
+                    );
+                }
+                st.evidence_issue(format!("unsupported_touch_action: {action}"));
             }
         }
     }
@@ -779,8 +880,12 @@ impl SessionShared {
         let now_us = st.elapsed_us();
         match action {
             KEY_DOWN => {
-                if st.keys.len() >= MAX_ACTIVE_GESTURES || st.keys.contains_key(&code) {
-                    return; // 自动重复的 down 不重开手势（保持首个 down 时刻）
+                if st.keys.contains_key(&code) {
+                    return;
+                } // repeat retains the initial down
+                if st.keys.len() >= MAX_ACTIVE_GESTURES {
+                    st.evidence_issue("key_limit_exceeded".into());
+                    return;
                 }
                 let operation_id = st.next_op();
                 st.keys.insert(
@@ -795,16 +900,86 @@ impl SessionShared {
                 Some(p) => st.emit(
                     &self.id.0,
                     "key",
-                    json!({ "code": code }),
+                    json!({ "code": code, "duration_us": now_us.saturating_sub(p.down_us) }),
                     p.down_us,
                     p.operation_id,
                 ),
                 None => {
+                    st.evidence_issue("key_up_without_down".into());
                     let op = st.next_op();
-                    st.emit(&self.id.0, "key", json!({ "code": code }), now_us, op);
+                    st.emit(
+                        &self.id.0,
+                        "key_incomplete",
+                        json!({ "code": code }),
+                        now_us,
+                        op,
+                    );
                 }
             },
             _ => {}
+        }
+    }
+
+    /// Browser named keys preserve their actual namespace and down/up duration.
+    fn on_named_key(&self, action: &str, name: &str) {
+        let mut st = self.state.lock();
+        if st.meta.state != RecordingState::Recording {
+            return;
+        }
+        let now = st.elapsed_us();
+        match action {
+            "down" => {
+                if st.named_keys.contains_key(name) {
+                    return;
+                }
+                if st.named_keys.len() >= MAX_ACTIVE_GESTURES {
+                    st.evidence_issue("named_key_limit_exceeded".into());
+                    return;
+                }
+                let operation_id = st.next_op();
+                st.named_keys.insert(
+                    name.into(),
+                    KeyPending {
+                        down_us: now,
+                        operation_id,
+                    },
+                );
+            }
+            "up" => {
+                if let Some(key) = st.named_keys.remove(name) {
+                    st.emit(
+                        &self.id.0,
+                        "key",
+                        json!({"code":name,"duration_us":now.saturating_sub(key.down_us)}),
+                        key.down_us,
+                        key.operation_id,
+                    );
+                } else {
+                    let op = st.next_op();
+                    st.evidence_issue("named_key_up_without_down".into());
+                    st.emit(&self.id.0, "key_incomplete", json!({"code":name}), now, op);
+                }
+            }
+            "press" => {
+                let op = st.next_op();
+                st.emit(
+                    &self.id.0,
+                    "key",
+                    json!({"code":name,"duration_us":0}),
+                    now,
+                    op,
+                );
+            }
+            _ => {
+                let op = st.next_op();
+                st.emit(
+                    &self.id.0,
+                    "key_incomplete",
+                    json!({"code":name,"reason":"unsupported_key_action"}),
+                    now,
+                    op,
+                );
+            }
         }
     }
 
@@ -856,37 +1031,49 @@ impl SessionShared {
     }
 }
 
+#[cfg(test)]
 fn read_events_dir(media_dir: &Path) -> Vec<InputEventRecord> {
+    read_events_checked(media_dir).unwrap()
+}
+
+fn read_events_checked(media_dir: &Path) -> anyhow::Result<Vec<InputEventRecord>> {
     let recording_dir = media_dir.join("recording");
-    let mut files: Vec<PathBuf> = match std::fs::read_dir(&recording_dir) {
-        Ok(rd) => rd
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                let name = p
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                name.starts_with("events-") && name.ends_with(".jsonl")
-            })
-            .collect(),
-        Err(_) => Vec::new(),
+    let entries = match std::fs::read_dir(&recording_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
     };
-    files.sort();
-    let mut out = Vec::new();
-    for path in files {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        for line in text.lines() {
-            // 容忍正在写入的最后一行（半行 JSON 解析失败即跳过）
-            if let Ok(record) = serde_json::from_str::<InputEventRecord>(line) {
-                out.push(record);
-            }
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("events-") && name.ends_with(".jsonl") {
+            files.push(entry.path());
         }
     }
-    out.sort_by_key(|e| e.timeline_us); // 稳定排序：同刻保持文件顺序
-    out
+    files.sort();
+    let mut out = Vec::new();
+    let mut ids = std::collections::HashSet::new();
+    for path in files {
+        anyhow::ensure!(!path.is_symlink(), "recording_events_corrupt: symlink");
+        let text = std::fs::read_to_string(&path)?;
+        for (line_no, line) in text.lines().enumerate() {
+            let record: InputEventRecord = serde_json::from_str(line).map_err(|e| {
+                anyhow::anyhow!(
+                    "recording_events_corrupt: {}:{}: {e}",
+                    path.display(),
+                    line_no + 1
+                )
+            })?;
+            anyhow::ensure!(
+                ids.insert(record.event_id.clone()),
+                "recording_events_corrupt: duplicate event id"
+            );
+            out.push(record);
+        }
+    }
+    out.sort_by_key(|e| e.timeline_us);
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1001,6 +1188,7 @@ impl RecordingService {
             ended_at: None,
             segments: Vec::new(),
             event_count: 0,
+            evidence_issues: Vec::new(),
             error: None,
         };
         let shared = Arc::new(SessionShared {
@@ -1029,6 +1217,7 @@ impl RecordingService {
                 evt_counter: 0,
                 touch: HashMap::new(),
                 keys: HashMap::new(),
+                named_keys: HashMap::new(),
                 frames_since_space_check: 0,
             }),
         });
@@ -1182,17 +1371,13 @@ impl RecordingService {
                     .or_else(|| self.load_from_disk(&meta.id).map(|(_, dir)| dir));
                 let events_available = meta.event_count > 0
                     && source.is_some_and(|dir| {
-                        std::fs::read_dir(dir.join("recording")).is_ok_and(|entries| {
-                            entries.flatten().any(|entry| {
-                                let name = entry.file_name().to_string_lossy().into_owned();
-                                name.starts_with("events-")
-                                    && name.ends_with(".jsonl")
-                                    && entry
-                                        .metadata()
-                                        .is_ok_and(|meta| meta.is_file() && meta.len() > 0)
-                            })
-                        })
-                    });
+                        read_events_checked(&dir)
+                            .is_ok_and(|events| events.len() >= meta.event_count as usize)
+                    })
+                    && !meta
+                        .evidence_issues
+                        .iter()
+                        .any(|issue| issue.starts_with("event_write_failed"));
                 let mut value = serde_json::to_value(meta)?;
                 value["missing_media"] = json!(missing);
                 value["events_available"] = json!(events_available);
@@ -1324,12 +1509,18 @@ impl RecordingService {
             .or_else(|| self.load_from_disk(id));
         source
             .map(|(meta, dir)| {
-                let events = read_events_dir(&dir);
-                if meta.event_count > 0 && events.is_empty() {
+                let events = read_events_checked(&dir)?;
+                if events.len() < meta.event_count as usize {
                     return Err(anyhow::anyhow!(
-                        "recording_events_missing: 录制事件来源素材已删除"
+                        "recording_events_missing: 录制事件缺失或写入失败"
                     ));
                 }
+                anyhow::ensure!(
+                    meta.evidence_issues
+                        .iter()
+                        .all(|issue| !issue.starts_with("event_write_failed")),
+                    "recording_events_missing: 事件写入失败"
+                );
                 Ok(events)
             })
             .ok_or_else(|| {
@@ -1507,26 +1698,30 @@ pub(crate) fn observe_browser(device_id: &str, value: &serde_json::Value) {
             let action = match value["action"].as_str().unwrap_or("move") {
                 "down" => TOUCH_DOWN,
                 "up" => TOUCH_UP,
-                _ => 2,
+                "move" => 2,
+                _ => 3,
             };
             shared.on_touch(action, 0, x, y);
         }
         "text" => shared.on_text(value["text"].as_str().unwrap_or("")),
-        "key" if value["action"].as_str().unwrap_or("press") != "up" => {
+        "key" => shared.on_named_key(
+            value["action"].as_str().unwrap_or("press"),
+            value["key"].as_str().unwrap_or(""),
+        ),
+        _ => {
             let mut st = shared.state.lock();
             if st.meta.state == RecordingState::Recording {
-                let op = st.next_op();
                 let time = st.elapsed_us();
+                let op = st.next_op();
                 st.emit(
                     &shared.id.0,
-                    "named_key",
-                    json!({"name":value["key"],"action":value["action"]}),
+                    "input_unsupported",
+                    json!({"input_type":value["type"],"reason":"unsupported_browser_input"}),
                     time,
                     op,
                 );
             }
         }
-        _ => {}
     }
 }
 
@@ -1789,6 +1984,7 @@ mod tests {
                     ended_at: None,
                     segments: Vec::new(),
                     event_count: 0,
+                    evidence_issues: Vec::new(),
                     error: None,
                 },
                 origin: Instant::now(),
@@ -1806,6 +2002,7 @@ mod tests {
                 evt_counter: 0,
                 touch: HashMap::new(),
                 keys: HashMap::new(),
+                named_keys: HashMap::new(),
                 frames_since_space_check: 0,
             }),
         });
@@ -2015,15 +2212,15 @@ mod tests {
         // 整数映射：事件媒体 PTS ≥ 段首帧 PTS，且 ≤ 段末帧 PTS（+段时长容差）
         let media_pts = seg.media_pts_for_timeline(evt.timeline_us);
         assert!(
-            media_pts >= seg.base_pts_us && media_pts <= seg.base_pts_us + seg.duration_us + 1,
+            media_pts <= seg.duration_us + 1,
             "映射出的媒体 PTS {media_pts} 应落在段帧区间 [{}, {}]",
             seg.base_pts_us,
             seg.base_pts_us + seg.duration_us
         );
         // 早于段起点的事件时刻截断为段首帧 PTS
         assert_eq!(
-            seg.media_pts_for_timeline(seg.start_us - 10),
-            seg.base_pts_us
+            seg.media_pts_for_timeline(seg.start_us.saturating_sub(10)),
+            0
         );
         std::fs::remove_dir_all(root).ok();
     }
@@ -2063,7 +2260,8 @@ mod tests {
         let events = shared.read_events();
         assert_eq!(events.len(), 2, "原始流压缩为两条语义事件：{events:?}");
         assert_eq!(events[0].kind, "tap");
-        assert_eq!(events[0].payload, json!({"x": 820, "y": 460}));
+        assert_eq!(events[0].payload["x"], 820);
+        assert!(events[0].payload["duration_us"].is_u64());
         assert_eq!(events[0].source, "manual");
         assert_eq!(events[0].status, "accepted");
         assert_eq!(events[0].schema_version, 1);
@@ -2076,10 +2274,9 @@ mod tests {
             }
         );
         assert_eq!(events[1].kind, "swipe");
-        assert_eq!(
-            events[1].payload,
-            json!({"x": 100, "y": 100, "x2": 300, "y2": 200})
-        );
+        assert_eq!(events[1].payload["x2"], 300);
+        assert_eq!(events[1].payload["y2"], 200);
+        assert!(events[1].payload["duration_us"].is_u64());
         // operation_id 唯一且事件 id 唯一
         assert_ne!(events[0].operation_id, events[1].operation_id);
         assert_ne!(events[0].event_id, events[1].event_id);
@@ -2104,7 +2301,7 @@ mod tests {
         let events = shared.read_events();
         assert_eq!(events.len(), 3, "{events:?}");
         assert_eq!(events[0].kind, "key");
-        assert_eq!(events[0].payload, json!({"code": 42}));
+        assert_eq!(events[0].payload["code"], 42);
         assert_eq!(events[1].kind, "text");
         assert_eq!(
             events[1].payload,
@@ -2118,9 +2315,122 @@ mod tests {
                 && !serialized.contains("超级密码"),
             "事件流不得包含明文: {serialized}"
         );
-        assert_eq!(events[2].kind, "key");
+        assert_eq!(events[2].kind, "key_incomplete");
         assert_eq!(events[2].payload, json!({"code": 100}));
         assert!(events.iter().all(|e| e.meta_ok()));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn incomplete_held_keys_keep_the_entire_active_interval() {
+        let root = temp_root("held-key-interval");
+        let shared = test_session(&root, "dev");
+        {
+            let mut st = shared.state.lock();
+            st.origin = Instant::now() - Duration::from_millis(100);
+            st.keys.insert(
+                7,
+                KeyPending {
+                    down_us: 10,
+                    operation_id: "held".into(),
+                },
+            );
+        }
+        shared.finalize_stop();
+        let events = shared.read_events();
+        let key = &events[0];
+        assert_eq!(key.kind, "key_incomplete");
+        assert_eq!(key.timeline_us, 10);
+        assert!(
+            key.timeline_us + key.payload["duration_us"].as_u64().unwrap() >= 100_000,
+            "selecting START during a held key must retain overlap evidence"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn named_browser_keys_preserve_name_duration_and_partial_status() {
+        let root = temp_root("named-key");
+        let shared = test_session(&root, "browser-test");
+        shared.on_named_key("press", "Enter");
+        shared.on_named_key("down", "ArrowLeft");
+        shared.on_named_key("up", "ArrowLeft");
+        shared.on_named_key("down", "Shift");
+        shared.finalize_stop();
+        let e = shared.read_events();
+        assert_eq!(e.len(), 3);
+        assert_eq!(e[0].kind, "key");
+        assert_eq!(e[0].payload["code"], "Enter");
+        assert!(e[1].payload["duration_us"].is_u64());
+        assert_eq!(e[2].kind, "key_incomplete");
+        assert!(e[2].payload["duration_us"].is_u64());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn swipe_uses_up_endpoint_and_records_duration_and_path() {
+        let root = temp_root("up-endpoint");
+        let shared = test_session(&root, "dev");
+        shared.on_touch(TOUCH_DOWN, 1, 10, 10);
+        shared.on_touch(TOUCH_UP, 1, 100, 200);
+        let events = shared.read_events();
+        assert_eq!(events[0].kind, "swipe");
+        assert_eq!(events[0].payload["x2"], 100);
+        assert_eq!(events[0].payload["y2"], 200);
+        assert!(events[0].payload["duration_us"].is_u64());
+        assert_eq!(events[0].payload["points"].as_array().unwrap().len(), 2);
+        std::fs::remove_dir_all(root).ok();
+    }
+    #[test]
+    fn simultaneous_and_partial_gestures_are_never_plain_taps() {
+        let root = temp_root("partial");
+        let shared = test_session(&root, "dev");
+        shared.on_touch(TOUCH_DOWN, 1, 10, 10);
+        shared.on_touch(TOUCH_DOWN, 2, 20, 20);
+        shared.on_touch(TOUCH_UP, 1, 10, 10);
+        shared.finalize_stop();
+        let events = shared.read_events();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().any(|e| e.kind == "gesture_unsupported"));
+        assert!(events.iter().any(|e| e.kind == "gesture_incomplete"));
+        std::fs::remove_dir_all(root).ok();
+    }
+    #[test]
+    fn event_write_failure_is_durable_and_event_reads_fail_closed() {
+        let root = temp_root("write-failure");
+        let shared = test_session(&root, "dev");
+        let invalid = root.join("not-a-directory");
+        std::fs::write(&invalid, b"file").unwrap();
+        shared.state.lock().events.dir = invalid;
+        shared.on_touch(TOUCH_DOWN, 1, 10, 10);
+        shared.on_touch(TOUCH_UP, 1, 10, 10);
+        let meta = shared.finalize_stop();
+        assert_eq!(meta.event_count, 1);
+        assert!(meta
+            .evidence_issues
+            .iter()
+            .any(|s| s.starts_with("event_write_failed")));
+        let service = RecordingService {
+            inner: shared.inner.clone(),
+        };
+        assert!(service.events(&shared.id).is_err());
+        std::fs::remove_dir_all(root).ok();
+    }
+    #[test]
+    fn corrupt_event_line_is_not_silently_dropped() {
+        let root = temp_root("corrupt-event");
+        let shared = test_session(&root, "dev");
+        shared.on_touch(TOUCH_DOWN, 1, 10, 10);
+        shared.on_touch(TOUCH_UP, 1, 10, 10);
+        shared.finalize_stop();
+        let path = shared.dir.join("recording/events-0001.jsonl");
+        let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        f.write_all(b"{bad json}\n").unwrap();
+        let service = RecordingService {
+            inner: shared.inner.clone(),
+        };
+        assert!(service.events(&shared.id).is_err());
+        assert_eq!(service.history().unwrap()[0]["events_available"], false);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -2170,6 +2480,7 @@ mod tests {
             ended_at: None,
             segments: Vec::new(),
             event_count: 3,
+            evidence_issues: Vec::new(),
             error: None,
         };
         std::fs::write(

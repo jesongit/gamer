@@ -68,6 +68,11 @@ impl DecodedFrame {
         }
     }
 
+    /// Content identity independent of PNG compression/metadata.
+    pub fn pixel_sha256(&self) -> String {
+        format!("{:x}", Sha256::digest(self.rgb.as_raw()))
+    }
+
     pub fn dimensions(&self) -> (u32, u32) {
         self.rgb.dimensions()
     }
@@ -76,7 +81,7 @@ impl DecodedFrame {
         self.rgb.get_pixel_checked(x, y).map(|pixel| pixel.0)
     }
 
-    fn image(&self) -> &RgbImage {
+    pub(crate) fn image(&self) -> &RgbImage {
         &self.rgb
     }
 }
@@ -583,8 +588,11 @@ fn match_template_with_source(
     let t_w = tw2 as usize;
     let t_h = th2 as usize;
 
-    // NCC 滑动窗口（步长 2，最后精化到相邻像素）
-    let step = 2usize;
+    // Tiny high-frequency targets can have nearly zero correlation one pixel
+    // away. A stride-2 winner elsewhere then never refines the exact match.
+    // Exhaust the four pixel parities for <=16x16 source templates; preserve
+    // the existing coarse/refine path for larger targets.
+    let step = if tw <= 16 && th <= 16 { 1usize } else { 2usize };
     let xs: Vec<u32> = x_range.clone().step_by(step).collect();
     let ys: Vec<u32> = y_range.clone().step_by(step).collect();
 
@@ -2036,5 +2044,61 @@ mod effective_region_tests {
             None
         );
         assert_eq!(effective_search_region(None, None, 1000, 1000), None);
+    }
+}
+
+#[cfg(test)]
+mod tiny_template_parity_tests {
+    use super::*;
+    fn encode(image: &RgbImage) -> Vec<u8> {
+        let mut output = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut output, image::ImageFormat::Png)
+            .unwrap();
+        output.into_inner()
+    }
+    #[test]
+    fn tiny_exact_targets_match_every_pixel_parity_and_boundary() {
+        let template = RgbImage::from_fn(9, 9, |x, y| {
+            let v = ((x * 73 + y * 151 + x * y * 29) % 251) as u8;
+            image::Rgb([v, v.wrapping_mul(3), v.wrapping_add(41)])
+        });
+        let png = encode(&template);
+        let start = Instant::now();
+        for (x, y) in [(20, 14), (21, 14), (20, 15), (21, 15), (0, 0), (55, 39)] {
+            let mut screen = RgbImage::from_fn(64, 48, |x, y| {
+                image::Rgb([((x * 17 + y * 3) % 67) as u8; 3])
+            });
+            image::imageops::replace(&mut screen, &template, x, y);
+            let matched = match_decoded_frame(
+                &DecodedFrame::from_rgb(screen),
+                &DecodedMatchRequest {
+                    template_png: png.clone(),
+                    threshold: Some(0.99),
+                    region: None,
+                    color: false,
+                },
+            )
+            .unwrap()
+            .expect("exact tiny crop must not depend on pixel parity");
+            assert_eq!((matched.x, matched.y), (x as u32, y as u32));
+            assert!(matched.score >= 0.99999);
+        }
+        let absent = DecodedFrame::from_rgb(RgbImage::from_pixel(64, 48, image::Rgb([42, 42, 42])));
+        assert!(match_decoded_frame(
+            &absent,
+            &DecodedMatchRequest {
+                template_png: png,
+                threshold: Some(0.99),
+                region: None,
+                color: false
+            }
+        )
+        .unwrap()
+        .is_none());
+        eprintln!(
+            "tiny NCC parity+boundary+negative (7 matches,64x48,9x9): {:?}",
+            start.elapsed()
+        );
     }
 }

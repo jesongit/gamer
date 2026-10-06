@@ -3708,7 +3708,7 @@ entry = "plugin.wasm"
         let running_values = serde_json::json!({
             "package_id": "native-call",
             "name": "running",
-            "yaml": "run:\n  - log: running\n"
+            "yaml": "version: 2\nrun:\n  - log: running\n"
         });
         service
             .call_extension(
@@ -3723,7 +3723,7 @@ entry = "plugin.wasm"
         let blocked_values = serde_json::json!({
             "package_id": "native-call",
             "name": "blocked",
-            "yaml": "run:\n  - log: blocked\n"
+            "yaml": "version: 2\nrun:\n  - log: blocked\n"
         });
         let error = service
             .call_extension(
@@ -3800,7 +3800,7 @@ entry = "plugin.wasm"
                 serde_json::json!({
                     "package_id": "stale-call",
                     "name": "must-not-write",
-                    "yaml": "run:\n  - log: stale\n"
+                    "yaml": "version: 2\nrun:\n  - log: stale\n"
                 }),
             )
             .await
@@ -3849,7 +3849,7 @@ entry = "plugin.wasm"
                 serde_json::json!({
                     "package_id": "permission-call",
                     "name": "must-not-write",
-                    "yaml": "run:\n  - log: blocked\n"
+                    "yaml": "version: 2\nrun:\n  - log: blocked\n"
                 }),
             )
             .await
@@ -3917,7 +3917,7 @@ entry = "plugin.wasm"
         let values = serde_json::json!({
             "package_id": package.as_str(),
             "name": "from-video",
-            "yaml": "run:\n  - log: from video\n"
+            "yaml": "version: 2\nrun:\n  - log: from video\n"
         });
         let video_context = service.plugin_call_context(&video).await.unwrap();
         service
@@ -3933,7 +3933,7 @@ entry = "plugin.wasm"
             "package_id": package.as_str(),
             "caller": video.as_str(),
             "name": "spoofed",
-            "yaml": "run:\n  - log: spoofed\n"
+            "yaml": "version: 2\nrun:\n  - log: spoofed\n"
         });
         let attacker_context = service.plugin_call_context(&attacker).await.unwrap();
         let error = service
@@ -3949,7 +3949,7 @@ entry = "plugin.wasm"
         let wrong_package = serde_json::json!({
             "package_id": "other-context",
             "name": "wrong-package",
-            "yaml": "run:\n  - log: wrong package\n"
+            "yaml": "version: 2\nrun:\n  - log: wrong package\n"
         });
         let error = service
             .call_extension_from_plugin(&video_context, &yaml, action, wrong_package)
@@ -3970,7 +3970,7 @@ entry = "plugin.wasm"
                 serde_json::json!({
                     "package_id": package.as_str(),
                     "name": "stale-context",
-                    "yaml": "run:\n  - log: stale\n"
+                    "yaml": "version: 2\nrun:\n  - log: stale\n"
                 }),
             )
             .await

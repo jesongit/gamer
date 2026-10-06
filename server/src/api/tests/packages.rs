@@ -67,19 +67,60 @@ async fn package_activity_rejects_delete_and_overwrite_with_conflict_without_cha
 
 #[tokio::test]
 async fn package_sources_are_authenticated_persistent_settings_independent_of_packages() {
-    let t = build_app("package-sources",test_credential("admin123"),Default::default());
+    let t = build_app(
+        "package-sources",
+        test_credential("admin123"),
+        Default::default(),
+    );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
-    let response = post_json(&t,&sid,"/api/package-sources",serde_json::json!({"repository":"git@github.com:Owner/Repo.git","enabled":true})).await;
-    assert_eq!(response.status(),StatusCode::OK);
-    let sources=json_body(response).await;
-    let source=sources.as_array().unwrap().iter().find(|s|s["repository"]=="owner/repo").unwrap();
-    let id=source["id"].as_str().unwrap();
-    let bad=post_json(&t,&sid,"/api/package-sources",serde_json::json!({"repository":"https://evil.invalid/o/r","enabled":true})).await;
-    assert_eq!(bad.status(),StatusCode::BAD_REQUEST);
-    let removed=send(&t.app,req("DELETE",&format!("/api/package-sources/{id}"),None,&[("cookie".into(),sid.clone())],None)).await;
-    assert_eq!(removed.status(),StatusCode::OK);
-    let missing=send(&t.app,req("GET",&format!("/api/package-sources/{id}/archives/demo/1.0.0?sha256=abc"),None,&[("cookie".into(),sid)],None)).await;
-    assert_eq!(missing.status(),StatusCode::BAD_GATEWAY);
+    let response = post_json(
+        &t,
+        &sid,
+        "/api/package-sources",
+        serde_json::json!({"repository":"git@github.com:Owner/Repo.git","enabled":true}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let sources = json_body(response).await;
+    let source = sources
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["repository"] == "owner/repo")
+        .unwrap();
+    let id = source["id"].as_str().unwrap();
+    let bad = post_json(
+        &t,
+        &sid,
+        "/api/package-sources",
+        serde_json::json!({"repository":"https://evil.invalid/o/r","enabled":true}),
+    )
+    .await;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    let removed = send(
+        &t.app,
+        req(
+            "DELETE",
+            &format!("/api/package-sources/{id}"),
+            None,
+            &[("cookie".into(), sid.clone())],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(removed.status(), StatusCode::OK);
+    let missing = send(
+        &t.app,
+        req(
+            "GET",
+            &format!("/api/package-sources/{id}/archives/demo/1.0.0?sha256=abc"),
+            None,
+            &[("cookie".into(), sid)],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::BAD_GATEWAY);
 }
 
 // Package REST 冒烟（plan §2-§15 / §23 验收链）：建包 → 写资源 → 读资源 →
@@ -95,7 +136,9 @@ fn resource_url(pkg: &str, plugin: &str, path: &str) -> String {
 }
 
 async fn create_package(t: &TestApp, sid: &str, mut body: serde_json::Value) -> HttpResponse<Body> {
-    if body.get("targets").is_none() { body["targets"] = serde_json::json!({"android":{"packages":["*"]}}); }
+    if body.get("targets").is_none() {
+        body["targets"] = serde_json::json!({"android":{"packages":["*"]}});
+    }
     post_json(t, sid, "/api/packages", body).await
 }
 
@@ -143,7 +186,7 @@ async fn template_replace_updates_region_color_and_references_without_losing_ori
     );
     let root = t.dir.join("packages/replace.test/plugins/gamer-yaml");
     let original = std::fs::read(root.join(old)).unwrap();
-    let script = "run:\n  - find: reward#100_200_500_500.png\n";
+    let script = "version: 2\nrun:\n  - find: reward#100_200_500_500.png\n";
     let response = put_package_text(
         &t,
         &sid,
@@ -282,7 +325,7 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
     }
 
     // ---- 写资源：文本（JSON body）+ 字节（raw body）----
-    let script = "run:\n  - log: ok\n";
+    let script = "version: 2\nrun:\n  - log: ok\n";
     let resp = send(
         &t.app,
         req(
@@ -499,7 +542,7 @@ async fn package_import_conflicts_then_atomic_overwrite() {
             &resource_url("official.imp", "gamer-yaml", "automations/first.yaml"),
             None,
             &json_headers(sid.clone()),
-            Some(serde_json::json!({"content": "run:\n  - log: v1\n"}).to_string()),
+            Some(serde_json::json!({"content": "version: 2\nrun:\n  - log: v1\n"}).to_string()),
         ),
     )
     .await;
@@ -564,7 +607,7 @@ async fn package_import_conflicts_then_atomic_overwrite() {
             &json_headers(sid.clone()),
             Some(
                 serde_json::json!({
-                    "content": "run:\n  - log: v2\n",
+                    "content": "version: 2\nrun:\n  - log: v2\n",
                     "force": true,
                 })
                 .to_string(),
@@ -850,7 +893,7 @@ async fn template_upload_rename_rewrites_references_and_still_matches() {
 
     // ---- 2. 保存引用该模板的 V1 脚本与函数库 ----
     let script =
-        "run:\n  - find:\n      template: reward.png\n      region: [0, 0, 1, 1]\n    as: hit\n";
+        "version: 2\nrun:\n  - find:\n      template: reward.png\n      region: [0, 0, 1, 1]\n    as: hit\n";
     let resp = put_package_text(
         &t,
         &sid,

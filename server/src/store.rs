@@ -947,6 +947,7 @@ pub struct VacuumReport {
 }
 
 pub struct Store {
+    pub(crate) trace: Arc<crate::runtime_trace::TraceStore>,
     /// 数据库主文件路径（vacuum 前后取文件大小用）
     path: PathBuf,
     tx: SyncSender<DbCommand>,
@@ -998,6 +999,7 @@ impl Store {
             }
         }
         let store = Self {
+            trace: crate::runtime_trace::TraceStore::open(&cfg.data_dir, cfg.trace.clone())?,
             path: db_path(&cfg.data_dir),
             tx,
             worker: Mutex::new(Some(worker)),

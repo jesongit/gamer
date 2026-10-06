@@ -30,8 +30,8 @@
 
 use std::sync::Arc;
 
-use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
+use axum::body::{to_bytes, Bytes};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -647,19 +647,41 @@ pub(super) async fn api_put_plugin_resource(
     State(st): State<AppState>,
     Path((pkg, plugin, path)): Path<(String, String, String)>,
     Query(query): Query<PutResourceQuery>,
-    headers: HeaderMap,
-    body: Bytes,
+    request: Request,
 ) -> Response {
     if !is_valid_scope_id(&plugin) {
         return ApiError::bad_request(format!("plugin id 非法: {plugin:?}")).into_response();
     }
     let path = path.trim().to_string();
     let validate_ctx = (pkg.clone(), plugin.clone());
+    let headers = request.headers().clone();
     let is_json = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(|v| v.to_ascii_lowercase().contains("application/json"))
         .unwrap_or(false);
+    let store = store_of(&st);
+    if let Err(error) = store.resource_path(&pkg, &plugin, &path) {
+        return ApiError::bad_request(error.to_string()).into_response();
+    }
+    let limit = if is_json {
+        16 * 1024 * 1024
+    } else {
+        store.resource_upload_limit(&plugin, &path)
+    };
+    // Request is read here rather than by Bytes so the registered resource
+    // owner can opt into a bounded archive upload without raising every API's
+    // body allowance. Enforce the limit while reading, not after buffering.
+    let body = match to_bytes(request.into_body(), limit).await {
+        Ok(body) => body,
+        Err(_) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(json!({"error":"resource_body_limit", "max_bytes":limit})),
+            )
+                .into_response();
+        }
+    };
     if is_json {
         if query.new_path.is_some() {
             return ApiError::bad_request("new_path 仅支持字节资源替换").into_response();

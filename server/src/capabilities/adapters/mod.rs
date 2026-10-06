@@ -83,7 +83,9 @@ pub(crate) fn build_registry(
     let input = Arc::new(InputAdapter::new(device.clone(), touch.clone()));
     let frame_store = Arc::new(FrameStore::new());
     let resource = Arc::new(ResourceAdapter::new(resources));
-    let frame = Arc::new(FrameAdapter::new(devices.clone(), frame_store.clone()));
+    let frame = Arc::new(
+        FrameAdapter::new(devices.clone(), frame_store.clone()).with_trace(db.trace.clone()),
+    );
     let vision = Arc::new(VisionAdapter::new(frame_store, resource.clone()));
 
     CapabilityRegistry::builder()

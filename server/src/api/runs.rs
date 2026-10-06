@@ -179,9 +179,12 @@ pub(super) async fn api_get_run(
     match st.runs.get_run(&run_id) {
         Some(rec) => Json(serde_json::to_value(&rec).unwrap_or_else(|_| serde_json::json!({})))
             .into_response(),
-        None => match st.db.stored_run(run_id).await {
+        None => match st.db.stored_run(run_id.clone()).await {
             Ok(Some(record)) => Json(record).into_response(),
-            Ok(None) => err_response(StatusCode::NOT_FOUND, "run_not_found"),
+            Ok(None) => match st.db.trace.retained_record(&run_id) {
+                Some(record) => Json(record).into_response(),
+                None => err_response(StatusCode::NOT_FOUND, "run_not_found"),
+            },
             Err(error) => ApiError::internal(error.to_string()).into_response(),
         },
     }
@@ -248,5 +251,86 @@ pub(super) async fn api_cancel_run(
             })),
         )
             .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct TraceQuery {
+    #[serde(default)]
+    after: u64,
+    #[serde(default = "trace_page_limit")]
+    limit: usize,
+}
+fn trace_page_limit() -> usize {
+    100
+}
+
+/// Small authenticated pages, with explicit gaps/expiry. Never returns file paths.
+pub(super) async fn api_run_trace(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<TraceQuery>,
+) -> Response {
+    match st.db.stored_run(id.clone()).await {
+        Ok(None)
+            if st.runs.get_run(&id).is_none() && st.db.trace.retained_record(&id).is_none() =>
+        {
+            return err_response(StatusCode::NOT_FOUND, "run_not_found")
+        }
+        Err(error) => return ApiError::internal(error.to_string()).into_response(),
+        _ => {}
+    }
+    let mut response = Json(st.db.trace.page(&id, q.after, q.limit)).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        "private, no-store".parse().unwrap(),
+    );
+    response
+}
+#[derive(Deserialize)]
+pub(super) struct TraceImageQuery {
+    #[serde(default)]
+    template: bool,
+}
+pub(super) async fn api_run_trace_image(
+    State(st): State<AppState>,
+    Path((id, image)): Path<(String, String)>,
+    Query(q): Query<TraceImageQuery>,
+) -> Response {
+    let trace = st.db.trace.clone();
+    match tokio::task::spawn_blocking(move || trace.read_image(&id, &image, q.template)).await {
+        Ok(Ok(Some(bytes))) => (
+            [
+                (axum::http::header::CONTENT_TYPE, "image/png"),
+                (axum::http::header::CACHE_CONTROL, "private, no-store"),
+                (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Ok(Ok(None)) => err_response(StatusCode::NOT_FOUND, "trace_image_not_found"),
+        Ok(Err(error)) if error.to_string() == "trace_expired" => {
+            err_response(StatusCode::GONE, "trace_expired")
+        }
+        Ok(Err(error)) if error.to_string().starts_with("invalid") => {
+            ApiError::bad_request(error.to_string()).into_response()
+        }
+        _ => err_response(StatusCode::GONE, "trace_image_unavailable"),
+    }
+}
+/// Explicit durable copy with a separate quota. Temporary cleanup never touches it.
+pub(super) async fn api_retain_run_trace(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let trace = st.db.trace.clone();
+    match tokio::task::spawn_blocking(move || trace.retain(&id)).await {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(error)) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error":error.to_string()})),
+        )
+            .into_response(),
+        Err(error) => ApiError::internal(error.to_string()).into_response(),
     }
 }

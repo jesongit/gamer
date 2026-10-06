@@ -52,20 +52,30 @@ async fn optional_task_configuration_survives_without_plugin_and_omitted_update(
 /// enable/disable 走显式状态迁移（Active ↔ Suspended+"disabled"）。
 #[tokio::test]
 async fn unified_task_crud_and_enable_disable_lifecycle() {
-    let t = build_app(
-        "task-crud",
-        test_credential("admin123"),
-        Default::default(),
-    );
+    let t = build_app("task-crud", test_credential("admin123"), Default::default());
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
     // POST 创建 → 201 + 嵌套形状
-    let resp = post_json(&t, &sid, "/api/tasks", task_body("Daily", YAML_RUNNER, "com.example.game/daily.yaml")).await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/tasks",
+        task_body("Daily", YAML_RUNNER, "com.example.game/daily.yaml"),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{:?}",
+        json_body(resp).await
+    );
     let created = json_body(resp).await;
     let task_id = created["id"].as_str().unwrap().to_string();
     assert_eq!(created["runner"]["runner_id"], YAML_RUNNER);
-    assert_eq!(created["runner"]["entrypoint"], "com.example.game/daily.yaml");
+    assert_eq!(
+        created["runner"]["entrypoint"],
+        "com.example.game/daily.yaml"
+    );
     assert_eq!(created["schedule"]["provider_id"], "cron");
     assert_eq!(created["schedule"]["config"]["expression"], "0 8 * * *");
     assert_eq!(created["state"], "active");
@@ -100,13 +110,25 @@ async fn unified_task_crud_and_enable_disable_lifecycle() {
     assert_eq!(json_body(resp).await["name"], "Daily-renamed");
 
     // disable → Suspended + reason=disabled；enable → Active
-    let resp = post_json(&t, &sid, &format!("/api/tasks/{task_id}/disable"), serde_json::json!({})).await;
+    let resp = post_json(
+        &t,
+        &sid,
+        &format!("/api/tasks/{task_id}/disable"),
+        serde_json::json!({}),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
     let disabled = json_body(resp).await;
     assert_eq!(disabled["state"], "suspended");
     assert_eq!(disabled["enabled"], false);
     assert_eq!(disabled["suspend_reason"], "disabled");
-    let resp = post_json(&t, &sid, &format!("/api/tasks/{task_id}/enable"), serde_json::json!({})).await;
+    let resp = post_json(
+        &t,
+        &sid,
+        &format!("/api/tasks/{task_id}/enable"),
+        serde_json::json!({}),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
     let enabled = json_body(resp).await;
     assert_eq!(enabled["state"], "active");
@@ -142,22 +164,40 @@ async fn task_can_be_saved_with_unknown_runner_and_provider() {
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
     let body = task_body("Future", "future.runner", "daily");
     let resp = post_json(&t, &sid, "/api/tasks", body).await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{:?}",
+        json_body(resp).await
+    );
     let task_id = json_body(resp).await["id"].as_str().unwrap().to_string();
     let resp = get_json(&t, &sid, &format!("/api/tasks/{task_id}")).await;
-    assert_eq!(json_body(resp).await["runner"]["runner_id"], "future.runner");
+    assert_eq!(
+        json_body(resp).await["runner"]["runner_id"],
+        "future.runner"
+    );
 
     // 未注册 provider 同样放行保存
     let mut body = task_body("FutureSchedule", YAML_RUNNER, "daily");
     body["schedule"] = serde_json::json!({"provider_id": "thirdparty.calendar", "config": {}});
     let resp = post_json(&t, &sid, "/api/tasks", body).await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{:?}",
+        json_body(resp).await
+    );
 
     // 已注册 provider 必须接受 config（cron 表达式非法 → 400）
     let mut body = task_body("BadCron", YAML_RUNNER, "daily");
     body["schedule"]["config"]["expression"] = serde_json::json!("not a cron");
     let resp = post_json(&t, &sid, "/api/tasks", body).await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{:?}", json_body(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "{:?}",
+        json_body(resp).await
+    );
 }
 
 /// ADR-12 验收：runner 缺失时任务进入 dependency_missing 状态且**不删除**；
@@ -181,8 +221,19 @@ async fn missing_runner_marks_task_dependency_missing_and_keeps_it() {
     let task_id = json_body(resp).await["id"].as_str().unwrap().to_string();
 
     // 立即运行：424 + dependency_unavailable
-    let resp = post_json(&t, &sid, &format!("/api/tasks/{task_id}/run"), serde_json::json!({})).await;
-    assert_eq!(resp.status(), StatusCode::FAILED_DEPENDENCY, "{:?}", json_body(resp).await);
+    let resp = post_json(
+        &t,
+        &sid,
+        &format!("/api/tasks/{task_id}/run"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FAILED_DEPENDENCY,
+        "{:?}",
+        json_body(resp).await
+    );
     let err = json_body(resp).await;
     assert_eq!(err["code"], "dependency_unavailable");
     assert_eq!(err["runner_id"], "missing.runner");
@@ -195,7 +246,13 @@ async fn missing_runner_marks_task_dependency_missing_and_keeps_it() {
     assert!(task["next_wakeup"].is_null(), "依赖缺失任务必须休眠");
 
     // 显式 enable/resume 仍可恢复（恢复语义 Wave2 收口，本期不删除任务即可）
-    let resp = post_json(&t, &sid, &format!("/api/tasks/{task_id}/enable"), serde_json::json!({})).await;
+    let resp = post_json(
+        &t,
+        &sid,
+        &format!("/api/tasks/{task_id}/enable"),
+        serde_json::json!({}),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(json_body(resp).await["state"], "active");
 }
@@ -227,7 +284,12 @@ async fn task_presets_use_new_schema_and_instantiate_independently() {
         }),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{:?}",
+        json_body(resp).await
+    );
     let preset = json_body(resp).await;
     assert_eq!(preset["runner"]["runner_id"], "missing.runner");
     assert_eq!(preset["schedule"]["provider_id"], "cron");
@@ -258,7 +320,12 @@ async fn task_presets_use_new_schema_and_instantiate_independently() {
         }),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{:?}",
+        json_body(resp).await
+    );
     let task = json_body(resp).await;
     let task_id = task["id"].as_str().unwrap().to_string();
     assert_eq!(task["app"]["content_package"], "official.xxx");
@@ -267,7 +334,13 @@ async fn task_presets_use_new_schema_and_instantiate_independently() {
     assert_eq!(task["schedule"], schedule);
 
     // Missing runner：立即运行 424，任务保留为 dependency_missing
-    let resp = post_json(&t, &sid, &format!("/api/tasks/{task_id}/run"), serde_json::json!({})).await;
+    let resp = post_json(
+        &t,
+        &sid,
+        &format!("/api/tasks/{task_id}/run"),
+        serde_json::json!({}),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::FAILED_DEPENDENCY);
     let resp = get_json(&t, &sid, &format!("/api/tasks/{task_id}")).await;
     let task = json_body(resp).await;
@@ -284,7 +357,13 @@ async fn task_presets_use_new_schema_and_instantiate_independently() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(json_body(resp).await["state"], "suspended");
-    let resp = post_json(&t, &sid, &format!("/api/tasks/{task_id}/resume"), serde_json::json!({})).await;
+    let resp = post_json(
+        &t,
+        &sid,
+        &format!("/api/tasks/{task_id}/resume"),
+        serde_json::json!({}),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let resumed = json_body(resp).await;
     assert_eq!(resumed["state"], "active");
@@ -324,7 +403,11 @@ async fn runner_and_schedule_provider_lists_are_exposed() {
     let runners = json_body(resp).await;
     // 测试装配与生产组合根等价：gamer-yaml 扩展 Running 期间其 runner 在册；
     // 裸 Core（无扩展 start）为空的语义由 scheduler 单测锁定
-    assert_eq!(runners.as_array().unwrap().len(), 1, "装配含 gamer-yaml runner");
+    assert_eq!(
+        runners.as_array().unwrap().len(),
+        1,
+        "装配含 gamer-yaml runner"
+    );
     assert_eq!(runners[0]["runner_id"], "gamer-yaml");
     assert_eq!(runners[0]["owner_extension_id"], "gamer-yaml");
 
@@ -418,7 +501,7 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
     // 1. 保存带参数声明的 V1 脚本（TaskBoard 参数表单的数据源 = entrypoint schema）
-    let resp = put_package_text(&t, &sid, "com.example.game", "gamer-yaml", "automations/daily.yaml", "params:\n  msg:\n    type: string\n    default: \"默认\"\n  count:\n    type: integer\n    default: 3\nrun:\n  - log: $msg\n").await;
+    let resp = put_package_text(&t, &sid, "com.example.game", "gamer-yaml", "automations/daily.yaml", "version: 2\nparams:\n  msg:\n    type: string\n    default: \"默认\"\n  count:\n    type: integer\n    default: 3\nrun:\n  - log: $msg\n").await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
 
     // 2. TaskBoard 保存任务：payload.args 携带用户填写的稀疏实参
@@ -439,7 +522,12 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
         }),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{:?}",
+        json_body(resp).await
+    );
     let task_id = json_body(resp).await["id"].as_str().unwrap().to_string();
 
     // 3. 立即运行：202 + run_id（门禁在 runner 边界重绑参数后交 RunManager）
@@ -450,8 +538,16 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::ACCEPTED, "{:?}", json_body(resp).await);
-    let run_id = json_body(resp).await["run_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        resp.status(),
+        StatusCode::ACCEPTED,
+        "{:?}",
+        json_body(resp).await
+    );
+    let run_id = json_body(resp).await["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // 4. 执行器收到的 payload = 绑定后的全量参数对象（gamer-yaml 私有 wire：
     //    {target, args: <对象>, strict_args: false}）；任务实参覆盖默认值，
@@ -514,7 +610,7 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
 
     // 6. 非法 payload 门禁（任务保存时 payload 不透明，运行时才校验）：
     //    必填参数缺失 → 400 + 结构化诊断消息。
-    let resp = put_package_text(&t, &sid, "com.example.game", "gamer-yaml", "automations/required.yaml", "params:\n  secret:\n    type: string\n    required: true\nrun:\n  - log: $secret\n").await;
+    let resp = put_package_text(&t, &sid, "com.example.game", "gamer-yaml", "automations/required.yaml", "version: 2\nparams:\n  secret:\n    type: string\n    required: true\nrun:\n  - log: $secret\n").await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
     let resp = post_json(
         &t,
@@ -533,7 +629,12 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
         }),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{:?}",
+        json_body(resp).await
+    );
     let missing_id = json_body(resp).await["id"].as_str().unwrap().to_string();
     let resp = post_json(
         &t,
@@ -542,7 +643,12 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{:?}", json_body(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "{:?}",
+        json_body(resp).await
+    );
     let body = json_body(resp).await;
     assert!(
         body["error"]
@@ -587,10 +693,18 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{:?}", json_body(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "{:?}",
+        json_body(resp).await
+    );
     let body = json_body(resp).await;
     assert!(
-        body["error"].as_str().unwrap_or_default().contains("类型 string 不符"),
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("类型 string 不符"),
         "类型不符必须诊断: {body}"
     );
 
@@ -618,7 +732,12 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::ACCEPTED, "{:?}", json_body(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::ACCEPTED,
+        "{:?}",
+        json_body(resp).await
+    );
     // 陈旧键被宽松丢弃、存活值保留，任务不受牵连（保持 Active）
     let task = json_body(get_json(&t, &sid, &format!("/api/tasks/{missing_id}")).await).await;
     assert_eq!(task["state"], "active");

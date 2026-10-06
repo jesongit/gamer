@@ -39,6 +39,34 @@ pub struct FrameStamp {
 /// retention, and screenshot encoding policy.
 #[async_trait]
 pub trait FrameService: Send + Sync {
+    /// Persist the exact consumed frame, including failed matches. A disabled
+    /// automatic trace still retains the last consumed frame for root errors.
+    async fn trace_frame(
+        &self,
+        _frame: FrameHandle,
+        _metadata: serde_json::Value,
+        _forced: bool,
+    ) -> CapabilityResult<Option<String>> {
+        Ok(None)
+    }
+    /// Capture an explicitly identified boundary/error image. Never relabel a
+    /// previously consumed image as a fresh capture.
+    async fn trace_capture(
+        &self,
+        _device: &DeviceHandle,
+        _metadata: serde_json::Value,
+        _forced: bool,
+    ) -> CapabilityResult<Option<String>> {
+        Ok(None)
+    }
+    async fn trace_snapshot(
+        &self,
+        _run_id: String,
+        _snapshot: serde_json::Value,
+    ) -> CapabilityResult<()> {
+        Ok(())
+    }
+
     /// Size and identity read together, for converting literal relative coordinates.
     /// Android and browser adapters identify the live session epoch and its
     /// coordinate revision. Equal dimensions do not imply the same session.

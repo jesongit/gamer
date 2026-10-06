@@ -422,7 +422,13 @@ mod update_flow_tests {
             .unwrap();
 
         // 建脚本并提交一个永不结束的 run
-        save_task_script(&t, &sid, "forever.yaml", "run:\n  - log: loop\n").await;
+        save_task_script(
+            &t,
+            &sid,
+            "forever.yaml",
+            "version: 2\nrun:\n  - log: loop\n",
+        )
+        .await;
         let resp = post_json(
             &t,
             &sid,
@@ -498,7 +504,13 @@ mod update_flow_tests {
         let t = build_update_rig("txn-business");
         let sid = sid_of(&t).await;
         // 预建包：资源列表语义 = 包必须存在（dormant 插件目录为空列表）
-        save_task_script(&t, &sid, "pre-update.yaml", "run:\n  - log: pre\n").await;
+        save_task_script(
+            &t,
+            &sid,
+            "pre-update.yaml",
+            "version: 2\nrun:\n  - log: pre\n",
+        )
+        .await;
         t.controller.set_status(staged_status("upd-busy"));
         let _release = t.controller.hold_prepare();
 
@@ -523,7 +535,13 @@ mod update_flow_tests {
             assert_eq!(resp.status(), StatusCode::OK, "{uri}");
         }
         // 业务写也照常（脚本创建）
-        save_task_script(&t, &sid, "during-update.yaml", "run:\n  - log: x\n").await;
+        save_task_script(
+            &t,
+            &sid,
+            "during-update.yaml",
+            "version: 2\nrun:\n  - log: x\n",
+        )
+        .await;
     }
 
     /// QA-006④：无候选（idle）install → 409 update_not_available（矩阵行）

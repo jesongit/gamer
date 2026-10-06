@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 
 use super::super::{
     CapabilityError, CapabilityResult, ColorSample, FrameHandle, FramePoint, MatchBox,
@@ -84,12 +85,53 @@ impl VisionService for VisionAdapter {
         frame: FrameHandle,
         template: TemplateQuery,
     ) -> CapabilityResult<MatchOutcome> {
-        let (frame, request) = self.request(frame, &template).await?;
-        crate::matcher::compute::run(move || crate::matcher::match_decoded_frame(&frame, &request))
-            .await
-            .map_err(|error| CapabilityError::Failed(error.to_string()))?
-            .map(Self::map_match)
-            .map_err(|error| CapabilityError::Failed(error.to_string()))
+        let handle = frame;
+        let (frame, request) = match self.request(frame, &template).await {
+            Ok(request) => request,
+            Err(error) => {
+                self.frames.record_match(
+                    handle,
+                    serde_json::json!({"error":error.to_string(),"found":false}),
+                    None,
+                );
+                return Err(error);
+            }
+        };
+        let bytes = request.template_png.clone();
+        let mut details = serde_json::json!({
+            "template": self.resources.id(template.template()).map(|id| id.composite_key()).unwrap_or_default(),
+            "template_file": self.resources.file_name(template.template()).ok(),
+            "template_sha256": format!("{:x}", Sha256::digest(&bytes)),
+            "region": request.region, "threshold": request.threshold.unwrap_or(0.8),
+            "color_check": request.color,
+        });
+        let result = crate::matcher::compute::run(move || {
+            crate::matcher::match_decoded_frame(&frame, &request)
+        })
+        .await
+        .map_err(|error| CapabilityError::Failed(error.to_string()))
+        .and_then(|result| {
+            result
+                .map(Self::map_match)
+                .map_err(|error| CapabilityError::Failed(error.to_string()))
+        });
+        match &result {
+            Ok(MatchOutcome::Found(found)) => {
+                details["found"] = true.into();
+                details["score"] = found.score.into();
+                details["match_box"] =
+                    serde_json::json!([found.x, found.y, found.width, found.height]);
+            }
+            Ok(MatchOutcome::NotFound) => {
+                details["found"] = false.into();
+            }
+            Err(error) => {
+                details["found"] = false.into();
+                details["error"] = error.to_string().into();
+            }
+        }
+        self.frames.record_match(handle, details, Some(bytes));
+        result
     }
 
     async fn match_many(

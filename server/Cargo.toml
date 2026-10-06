@@ -1,6 +1,6 @@
 [package]
 name = "gamer-server"
-version = "0.2.17"
+version = "0.3.0"
 edition = "2021"
 description = "Gamer 游戏自动化助手服务端：scrcpy 设备控制 + WebRTC 推流 + 模板匹配 + YAML 自动化 + 定时任务"
 
@@ -12,6 +12,8 @@ default = ["wasm-runtime"]
 wasm-runtime = ["dep:wasmtime"]
 
 [dependencies]
+tempfile = "3"
+yaml-interp = { path = "../plugins/gamer-yaml/interpreter" }
 # Web 框架
 axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
@@ -80,14 +82,10 @@ zip = "2"
 saphyr-parser = "0.0.12"
 
 [dev-dependencies]
-tempfile = "3"
 wat = "1"
 wit-component = "0.254.0"
 # router 集成测试用 oneshot 驱动（tower ServiceExt）
 tower = { version = "0.4", features = ["util"] }
-# V1 权威解释器：仅测试原生编译（生产执行走 WASM guest，同一份源码；
-# 计划 Phase 2：不为测试另写参考解释器）
-yaml-interp = { path = "../plugins/gamer-yaml/interpreter" }
 
 [target.'cfg(windows)'.dependencies]
 gamer-updater = { path = "../updater" }

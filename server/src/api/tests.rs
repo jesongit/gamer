@@ -467,6 +467,9 @@ mod sec_tests {
     mod keymaps_tests {
         include!("tests/keymaps.rs");
     }
+    mod runtime_trace_tests {
+        include!("tests/runtime_trace.rs");
+    }
     mod runs_tests {
         include!("tests/runs.rs");
     }

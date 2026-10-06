@@ -230,6 +230,9 @@ pub struct Config {
     /// 仅 GB_LOG 指向文件时生效；0 = 永不清理
     #[serde(default = "default_log_retain_days")]
     pub log_retain_days: u32,
+    /// Temporary runtime image evidence; independent of base log retention.
+    #[serde(default)]
+    pub trace: crate::runtime_trace::TraceConfig,
     /// 专用计算池并发上限（NCC 匹配 / PNG 解码等 CPU 密集工作，阶段 5
     /// PERF-003）：这些工作提交到独立 rayon 线程池执行，不占 Tokio 核心线程；
     /// 该值同时限制池线程数与在途任务数（池满排队等待，不丢弃）。
@@ -298,6 +301,7 @@ impl Default for Config {
             probe_encoder: false,
             idle_power_secs: default_idle_power_secs(),
             log_retain_days: default_log_retain_days(),
+            trace: Default::default(),
             compute_max_concurrency: 0,
             auth: AuthConfig::default(),
             update: UpdateConfig::default(),

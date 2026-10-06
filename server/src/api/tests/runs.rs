@@ -83,7 +83,7 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     // 建函数库（V1 functions: 包装 + 参数声明；Phase 1 起函数库存 automations/_function.yaml）
     let body = serde_json::json!({
         "name": "_function.yaml",
-        "content": "functions:
+        "content": "version: 2\nfunctions:
   login:
     params:
       who:
@@ -98,7 +98,15 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     });
     let name = body["name"].as_str().unwrap().to_string();
     let content = body["content"].as_str().unwrap().to_string();
-    let resp = put_package_text(&t, &sid, "com.test.app", "gamer-yaml", &format!("automations/{name}"), &content).await;
+    let resp = put_package_text(
+        &t,
+        &sid,
+        "com.test.app",
+        "gamer-yaml",
+        &format!("automations/{name}"),
+        &content,
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
 
     // 错误的显式资源上下文必须在提交时拒绝，不能等到 WASM 编译后读取模板才报错。
@@ -107,7 +115,10 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
         body["content_package"] = serde_json::json!(package);
         let resp = post_json(&t, &sid, "/api/runs", body).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{package}");
-        assert!(json_body(resp).await["error"].as_str().unwrap().contains("配置 id"));
+        assert!(json_body(resp).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("配置 id"));
     }
 
     // 未知函数 → 结构化 not_found（组合注册表按名寻址，runner 边界判定，400 透传）
@@ -174,12 +185,21 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
 
     let denied = get_json(&t, "", "/api/runs?device_id=d1").await;
     assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
-    let history = json_body(get_json(&t, &sid, "/api/runs?device_id=d1&entrypoint=com.test.app%23login").await).await;
+    let history = json_body(
+        get_json(
+            &t,
+            &sid,
+            "/api/runs?device_id=d1&entrypoint=com.test.app%23login",
+        )
+        .await,
+    )
+    .await;
     assert_eq!(history.as_array().unwrap().len(), 1);
     assert_eq!(history[0]["run_id"], run_id);
     let other = json_body(get_json(&t, &sid, "/api/runs?device_id=other").await).await;
     assert!(other.as_array().unwrap().is_empty());
-    let page = json_body(get_json(&t, &sid, &format!("/api/runs/{run_id}/events?after=0")).await).await;
+    let page =
+        json_body(get_json(&t, &sid, &format!("/api/runs/{run_id}/events?after=0")).await).await;
     assert_eq!(page["events"], serde_json::json!([]));
     assert_eq!(page["has_more"], false);
 
@@ -208,12 +228,21 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
         "run must reach running before cancellation assertions"
     );
     let context = contexts.lock().unwrap()[0].clone();
-    assert_eq!(context.content_package.as_ref().unwrap().as_str(), "com.test.app");
-    assert_eq!(context.android_package.as_ref().unwrap().as_str(), "com.example.game");
+    assert_eq!(
+        context.content_package.as_ref().unwrap().as_str(),
+        "com.test.app"
+    );
+    assert_eq!(
+        context.android_package.as_ref().unwrap().as_str(),
+        "com.example.game"
+    );
     // 执行阶段模板寻址必须能构造合法的资源三元组，不能把 #函数名带进 Package。
     crate::core::ResourceId::new(
-        context.content_package.unwrap().as_str(), "gamer-yaml", "templates/指南.png"
-    ).unwrap();
+        context.content_package.unwrap().as_str(),
+        "gamer-yaml",
+        "templates/指南.png",
+    )
+    .unwrap();
 
     // 设备互斥：同设备第二个函数运行 → 409，busy 摘要携带展示标签
     let resp = post_json(
@@ -287,11 +316,19 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     // 设备恢复：取消后可再次提交（脚本入口同样带 args）
     let body = serde_json::json!({
         "name": "runme.yaml",
-        "content": "params:\n  msg:\n    type: string\n    default: \"默认\"\nrun:\n  - log: $msg\n",
+        "content": "version: 2\nparams:\n  msg:\n    type: string\n    default: \"默认\"\nrun:\n  - log: $msg\n",
     });
     let name = body["name"].as_str().unwrap().to_string();
     let content = body["content"].as_str().unwrap().to_string();
-    let resp = put_package_text(&t, &sid, "com.test.app", "gamer-yaml", &format!("automations/{name}"), &content).await;
+    let resp = put_package_text(
+        &t,
+        &sid,
+        "com.test.app",
+        "gamer-yaml",
+        &format!("automations/{name}"),
+        &content,
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
     let resp = post_json(
         &t,
@@ -408,5 +445,9 @@ async fn dispatch_requires_device_with_configured_android_package() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(json_body(resp).await["error"], "not_found", "前置校验已过，缺脚本");
+    assert_eq!(
+        json_body(resp).await["error"],
+        "not_found",
+        "前置校验已过，缺脚本"
+    );
 }

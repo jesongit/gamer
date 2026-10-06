@@ -1031,13 +1031,18 @@ impl DeviceManager {
     /// 已解码帧（capability / 模板匹配链路）：帧缓存按需解码，直接拿解码后
     /// 的 RGB 帧（无 PNG 编码/解码往返，与 REST 截图共享同一次解码缓存）。
     /// 帧缓存不可用/失败时回退 adb 截图（该边界本身产出 PNG，需一次 PNG 解码）。
-    pub async fn screenshot_frame(&self, id: &str) -> anyhow::Result<crate::matcher::DecodedFrame> {
+    pub(crate) async fn screenshot_frame(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<(crate::matcher::DecodedFrame, String, &'static str)> {
         if crate::targets::is_browser(id) {
             let (png, _) = self.browsers.session(id)?.capture().await?;
-            return crate::matcher::compute::run(move || {
-                crate::matcher::DecodedFrame::from_png(&png)
-            })
-            .await?;
+            let captured_at =
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let frame =
+                crate::matcher::compute::run(move || crate::matcher::DecodedFrame::from_png(&png))
+                    .await??;
+            return Ok((frame, captured_at, "capture_completed"));
         }
         let (device, cache) = {
             let map = self.devices.read();
@@ -1047,14 +1052,20 @@ impl DeviceManager {
             (rt.device.clone(), rt.frame_cache.clone())
         };
         if let Some(fc) = cache {
-            match fc.decode_latest_frame().await {
-                Ok(Some(frame)) => {
+            match fc.decode_latest_frame_timestamped().await {
+                Ok(Some((frame, received_at))) => {
                     debug!(
                         "screenshot decoded on demand: {}x{}",
                         frame.width(),
                         frame.height()
                     );
-                    return frame.to_decoded_frame();
+                    let captured_at = chrono::Utc::now()
+                        - chrono::Duration::from_std(received_at.elapsed()).unwrap_or_default();
+                    return Ok((
+                        frame.to_decoded_frame()?,
+                        captured_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                        "frame_received",
+                    ));
                 }
                 Ok(None) => debug!("frame cache: no decodable frames yet (waiting first IDR)"),
                 Err(e) => warn!("frame cache decode failed: {}", e),
@@ -1063,7 +1074,12 @@ impl DeviceManager {
         let png = self
             .screenshot_png_via_adb(&device, &Self::serial_of(&device))
             .await?;
-        crate::matcher::DecodedFrame::from_png(&png)
+        let captured_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        Ok((
+            crate::matcher::DecodedFrame::from_png(&png)?,
+            captured_at,
+            "capture_completed",
+        ))
     }
 
     /// 截图（PNG，HTTP 边界）：帧缓存按需解码（每次全新解码最新帧，天然实时，

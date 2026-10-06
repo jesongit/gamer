@@ -104,6 +104,7 @@ pub(crate) fn native_call_action(
 ) -> Option<ExtensionResult<serde_json::Value>> {
     package_publisher::call(id.as_str(), action, values, data_dir)
         .or_else(|| gamer_yaml::native_call_action(id.as_str(), action, values, data_dir))
+        .or_else(|| video::sample::call(id.as_str(), action, values, data_dir))
 }
 
 /// Side-effect-free native action lookup used by the lifecycle gate before
@@ -114,6 +115,7 @@ pub(crate) fn is_public_native_action(id: &ExtensionId, action: &str) -> bool {
         || live::accepts(id.as_str(), action)
         || package_publisher::accepts(id.as_str(), action)
         || gamer_yaml::is_public_native_action(id.as_str(), action)
+        || video::sample::accepts(id.as_str(), action)
 }
 
 pub(crate) fn native_action_expected_caller(
@@ -123,11 +125,14 @@ pub(crate) fn native_action_expected_caller(
     if id.as_str() == notify::ID && action == notify::SEND {
         return Some(gamer_yaml::YAML_EXTENSION_ID);
     }
-    gamer_yaml::native_action_expected_caller(id.as_str(), action)
+    ai::expected_caller(id.as_str(), action)
+        .or_else(|| gamer_yaml::native_action_expected_caller(id.as_str(), action))
 }
 
 pub(crate) fn native_action_requires_package_context(id: &ExtensionId, action: &str) -> bool {
     gamer_yaml::native_action_requires_package_context(id.as_str(), action)
+        || video::sample::accepts(id.as_str(), action)
+        || ai::requires_package_context(id.as_str(), action)
 }
 
 pub(crate) fn native_action_required_permissions(
@@ -139,6 +144,7 @@ pub(crate) fn native_action_required_permissions(
         .or_else(|| live::permissions(id.as_str(), action))
         .or_else(|| package_publisher::permissions(id.as_str(), action))
         .or_else(|| gamer_yaml::native_action_required_permissions(id.as_str(), action))
+        .or_else(|| video::sample::permissions(id.as_str(), action))
 }
 
 pub(crate) fn native_action_caller_permissions(
@@ -148,7 +154,8 @@ pub(crate) fn native_action_caller_permissions(
     if id.as_str() == notify::ID && action == notify::SEND {
         return Some(&[Permission::NotifySend]);
     }
-    gamer_yaml::native_action_caller_permissions(id.as_str(), action)
+    ai::caller_permissions(id.as_str(), action)
+        .or_else(|| gamer_yaml::native_action_caller_permissions(id.as_str(), action))
 }
 
 /// 公开动作目录（能力发现读端，简化计划 Phase 4）：目标插件原生声明的版本化
@@ -156,8 +163,11 @@ pub(crate) fn native_action_caller_permissions(
 /// 集合由 `service.rs::declarative_actions` 从 manifest 读出，两条目录在
 /// `service.capability_actions` 合并。
 pub(crate) fn native_public_actions(id: &ExtensionId) -> Vec<serde_json::Value> {
+    if id.as_str() == video::VIDEO_EXTENSION_ID {
+        return video::sample::catalog();
+    }
     if id.as_str() == ai::ID {
-        return ai::ACTIONS.iter().map(|action| serde_json::json!({"action":action,"version":1,"surface":"native","permissions":ai::permissions(id.as_str(),action).unwrap_or_default().iter().map(|permission|permission.as_str()).collect::<Vec<_>>()})).collect();
+        return ai::ACTIONS.iter().map(|action| serde_json::json!({"action":action,"version":1,"surface":"native","caller":ai::expected_caller(id.as_str(),action),"permissions":ai::permissions(id.as_str(),action).unwrap_or_default().iter().map(|permission|permission.as_str()).collect::<Vec<_>>()})).collect();
     }
     if id.as_str() == notify::ID {
         return notify::ACTIONS.iter().map(|action| serde_json::json!({"action":action,"version":1,"surface":"native","permissions":["notify.send"]})).collect();

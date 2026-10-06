@@ -38,6 +38,7 @@ mod recording;
 mod resources;
 mod run_journal;
 mod run_manager;
+mod runtime_trace;
 mod scheduler;
 mod settings;
 mod shutdown;
@@ -350,6 +351,9 @@ impl RuntimeServices {
         auth: Arc<api::auth::AuthState>,
         drain_slot: DrainSlot,
     ) -> anyhow::Result<Self> {
+        // Prime shared media configuration before native extension calls can
+        // request it with only their data-root context.
+        let _media = media::service(cfg);
         let packages = Arc::new(resources::PackageStore::open(cfg)?);
         // 全新安装开箱即用：包存储为空时播种「默认配置」包（targets=`*`、
         // 零插件依赖）。播种失败（如残留损坏的 default 目录）只告警不阻断启动。
@@ -398,6 +402,16 @@ impl RuntimeServices {
             &cfg.data_dir,
         )?);
         runs.register_executor(extensions::ai::ID, ai_service.executor());
+        let generation_service = Arc::new(
+            extensions::gamer_yaml::generation::GenerationService::new(
+                packages.clone(),
+                runs.clone(),
+            )
+            .with_diagnostics(db.clone())
+            .with_ffmpeg_path(cfg.ffmpeg_path.clone()),
+        );
+        generation_service.recover_all()?;
+        generation_service.attach_model_canceller(ai_service.automation_canceller());
         let yaml_registrar = Arc::new(
             extensions::gamer_yaml::timer_yaml::YamlTimerRunnerRegistrar::new(
                 scheduler.clone(),
@@ -414,6 +428,7 @@ impl RuntimeServices {
             extensions::ExtensionService::for_data_root(cfg.data_dir.clone(), capabilities)
                 .with_runner_registrar(runner_registrar)
                 .with_builtin_service(ai_service.clone())
+                .with_builtin_service(generation_service.clone())
                 .with_builtin_service(Arc::new(extensions::notify::NotifyService::new(
                     &cfg.data_dir,
                 )?))
@@ -429,6 +444,8 @@ impl RuntimeServices {
                 )?)),
         );
         ai_service.attach(&extensions);
+        generation_service.attach(&extensions);
+        ai_service.attach_automation(&generation_service);
         scheduler.set_result_hook(extensions::notify::task::result_hook(
             Arc::downgrade(&extensions),
             db.clone(),

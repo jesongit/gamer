@@ -43,10 +43,29 @@ impl ResourceLease {
 /// `packages/<package>/plugins/<plugin>/` 前缀内。
 #[async_trait]
 pub trait ResourceService: Send + Sync {
+    /// Release a frozen lease after its owning run; ordinary resource handles are unaffected.
+    fn release_frozen(&self, _resource: ResourceHandle) {}
+    /// Immutable content lease, so an in-flight run never reads a half-updated resource.
+    async fn freeze(&self, _resource: ResourceHandle) -> CapabilityResult<ResourceHandle> {
+        Err(super::CapabilityError::Unavailable(
+            "资源宿主不支持冻结版本",
+        ))
+    }
+    async fn fingerprint(&self, _resource: ResourceHandle) -> CapabilityResult<String> {
+        Err(super::CapabilityError::Unavailable(
+            "资源宿主不支持内容指纹",
+        ))
+    }
+
     async fn resolve(&self, id: &ResourceId) -> CapabilityResult<ResourceHandle>;
 
     async fn open(&self, resource: ResourceHandle) -> CapabilityResult<ResourceLease>;
 
     /// 解析后的实际文件名（模板含 `#区域` 后缀，供搜索区域推断/回显）。
     async fn resolved_file_name(&self, handle: ResourceHandle) -> CapabilityResult<String>;
+
+    /// Logical plugin-relative path of the resolved immutable content.
+    async fn resolved_path(&self, handle: ResourceHandle) -> CapabilityResult<String> {
+        self.resolved_file_name(handle).await
+    }
 }

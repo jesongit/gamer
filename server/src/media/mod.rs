@@ -319,6 +319,8 @@ const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Core 媒体库服务。进程级单例（[`service`]），组合根零接线：
 /// 处理器用 `State<AppState>` 取 `cfg` 后惰性初始化。
 pub struct MediaService {
+    local_mp4_only: bool,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     data_root: PathBuf,
     ffmpeg_path: String,
     /// metadata.json 读写的进程内串行化（写走 tmp+rename 原子替换）。
@@ -332,12 +334,58 @@ pub struct MediaService {
 impl MediaService {
     pub fn open(data_root: PathBuf, ffmpeg_path: String) -> anyhow::Result<Self> {
         Ok(Self {
+            local_mp4_only: false,
+            cancel: None,
             data_root,
             ffmpeg_path,
             io_lock: Mutex::new(()),
             frame_gen: Mutex::new(HashSet::new()),
             frame_gen_cv: Condvar::new(),
         })
+    }
+
+    /// Scoped offline callers can cancel external probes/decodes; ordinary
+    /// media services retain their existing timeout-only behavior.
+    pub fn with_cancel(mut self, cancel: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
+    /// A private validator can restrict untrusted bytes to self-contained MP4.
+    /// Disable external tracks/aliases and all network protocols; no playlist
+    /// auto-detection or external URL/file indirection is permitted.
+    pub fn restrict_to_local_mp4(mut self) -> Self {
+        self.local_mp4_only = true;
+        self
+    }
+    fn constrain_input(&self, command: &mut Command) {
+        if self.local_mp4_only {
+            command.args([
+                "-protocol_whitelist",
+                "file,pipe",
+                "-f",
+                "mov",
+                "-enable_drefs",
+                "0",
+                "-use_absolute_path",
+                "0",
+            ]);
+        }
+    }
+
+    /// Authoritative bulk presentation index for deterministic timeline consumers.
+    pub fn frame_positions(&self, id: &MediaId) -> anyhow::Result<Vec<FramePosition>> {
+        Self::validate_id(id)?;
+        Ok(self
+            .frame_table(id)?
+            .pts_us
+            .iter()
+            .enumerate()
+            .map(|(index, pts)| FramePosition {
+                index: index as u32,
+                pts_us: *pts,
+            })
+            .collect())
     }
 
     /// 数据根目录（`data/media`）；供诊断/测试断言，V1 无进程内消费者。
@@ -706,6 +754,7 @@ impl MediaService {
     fn generate_frame_table(&self, path: &Path) -> anyhow::Result<FrameTable> {
         let ffprobe = self.ffprobe_exec();
         let mut cmd = crate::background_process::command(&ffprobe);
+        self.constrain_input(&mut cmd);
         cmd.args([
             "-v",
             "quiet",
@@ -718,7 +767,13 @@ impl MediaService {
             "-show_packets",
         ])
         .arg(path);
-        let output = match run_with_timeout(&ffprobe, &mut cmd, TOOL_TIMEOUT) {
+        let output = match run_with_timeout(
+            &ffprobe,
+            &mut cmd,
+            TOOL_TIMEOUT,
+            self.cancel.as_deref(),
+            self.local_mp4_only.then_some(16 * 1024 * 1024),
+        ) {
             Ok(output) => output,
             Err(err) => {
                 return Err(MediaError::unsupported(format!(
@@ -732,8 +787,18 @@ impl MediaService {
                 stderr_tail(&output.stderr)
             )));
         }
-        let parsed: PacketsJson = serde_json::from_slice(&output.stdout)
-            .map_err(|e| MediaError::unsupported(format!("ffprobe 包输出解析失败: {e}")))?;
+        let parsed: PacketsJson = if self.local_mp4_only {
+            let bounded: BoundedPacketsJson =
+                serde_json::from_slice(&output.stdout).map_err(|e| {
+                    MediaError::unsupported(format!("ffprobe bounded packet index: {e}"))
+                })?;
+            PacketsJson {
+                packets: bounded.packets,
+            }
+        } else {
+            serde_json::from_slice(&output.stdout)
+                .map_err(|e| MediaError::unsupported(format!("ffprobe 包输出解析失败: {e}")))?
+        };
         let mut pts_us: Vec<u64> = parsed
             .packets
             .iter()
@@ -1081,6 +1146,7 @@ impl MediaService {
         }
         let ffprobe = self.ffprobe_exec();
         let mut cmd = crate::background_process::command(&ffprobe);
+        self.constrain_input(&mut cmd);
         cmd.args([
             "-v",
             "quiet",
@@ -1090,7 +1156,13 @@ impl MediaService {
             "-show_streams",
         ])
         .arg(file);
-        let output = match run_with_timeout(&ffprobe, &mut cmd, TOOL_TIMEOUT) {
+        let output = match run_with_timeout(
+            &ffprobe,
+            &mut cmd,
+            TOOL_TIMEOUT,
+            self.cancel.as_deref(),
+            self.local_mp4_only.then_some(16 * 1024 * 1024),
+        ) {
             Ok(output) => output,
             Err(err) => {
                 return Err(MediaError::unsupported(format!(
@@ -1159,6 +1231,7 @@ impl MediaService {
     /// 同一 PNG 字节（ffmpeg 单帧 PNG 编码确定性）。
     fn ffmpeg_extract(&self, path: &Path, req: &FrameRequest) -> anyhow::Result<Vec<u8>> {
         let mut cmd = crate::background_process::command(&self.ffmpeg_path);
+        self.constrain_input(&mut cmd);
         cmd.args(["-nostdin", "-v", "error"]);
         if let Some(pts_us) = req.pts_us {
             let secs = format!("{}", pts_us as f64 / 1_000_000.0);
@@ -1189,8 +1262,14 @@ impl MediaService {
             "png",
             "pipe:1",
         ]);
-        let output = run_with_timeout("ffmpeg", &mut cmd, TOOL_TIMEOUT)
-            .map_err(|e| anyhow::anyhow!("ffmpeg 抽帧失败: {e:#}"))?;
+        let output = run_with_timeout(
+            "ffmpeg",
+            &mut cmd,
+            TOOL_TIMEOUT,
+            self.cancel.as_deref(),
+            self.local_mp4_only.then_some(64 * 1024 * 1024),
+        )
+        .map_err(|e| anyhow::anyhow!("ffmpeg 抽帧失败: {e:#}"))?;
         if !output.status.success() || output.stdout.is_empty() {
             // 帧越界（pts/index 超出媒体范围）与解码失败同为 400 语义：
             // 参数未落在媒体可表达范围
@@ -1459,6 +1538,39 @@ struct PacketsJson {
     packets: Vec<PacketPts>,
 }
 
+#[derive(Deserialize)]
+struct BoundedPacketsJson {
+    #[serde(default, deserialize_with = "bounded_packets")]
+    packets: Vec<PacketPts>,
+}
+fn bounded_packets<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<PacketPts>, D::Error> {
+    struct Visitor;
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = Vec<PacketPts>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("at most200000 video packets")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut packets = Vec::new();
+            while let Some(packet) = seq.next_element()? {
+                if packets.len() >= 200_000 {
+                    return Err(serde::de::Error::custom(
+                        "video packet index budget exceeded",
+                    ));
+                }
+                packets.push(packet);
+            }
+            Ok(packets)
+        }
+    }
+    deserializer.deserialize_seq(Visitor)
+}
+
 #[derive(Debug, Deserialize)]
 struct PacketPts {
     #[serde(default, rename = "pts_time")]
@@ -1511,33 +1623,66 @@ fn stderr_tail(stderr: &[u8]) -> String {
 /// 同步执行外部工具 + 超时击杀：stdout/stderr 由读线程排空（避免管道写满
 /// 死锁），主循环 `try_wait` 轮询至退出或超时（超时 → kill + 收割）。
 /// 仅限 blocking 池内调用（REST handler 经 `run_blocking_api`）。
-fn run_with_timeout(program: &str, cmd: &mut Command, timeout: Duration) -> anyhow::Result<Output> {
+fn run_with_timeout(
+    program: &str,
+    cmd: &mut Command,
+    timeout: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    output_limit: Option<usize>,
+) -> anyhow::Result<Output> {
+    if cancel.is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Relaxed)) {
+        anyhow::bail!("CANCELLED: {program} 已取消");
+    }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("启动 {program} 失败: {e}"))?;
-    let mut stdout = child
+    let stdout = child
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("{program} 无 stdout"))?;
-    let mut stderr = child
+    let stderr = child
         .stderr
         .take()
         .ok_or_else(|| anyhow::anyhow!("{program} 无 stderr"))?;
+    let exceeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let read_limit = output_limit.map(|n| n as u64 + 1).unwrap_or(u64::MAX);
+    let flag = exceeded.clone();
     let stdout_reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
-        let _ = stdout.read_to_end(&mut buf);
+        let _ = stdout.take(read_limit).read_to_end(&mut buf);
+        if output_limit.is_some_and(|max| buf.len() > max) {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         buf
     });
+    let flag = exceeded.clone();
     let stderr_reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf);
+        let _ = stderr.take(read_limit).read_to_end(&mut buf);
+        if output_limit.is_some_and(|max| buf.len() > max) {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         buf
     });
     let deadline = Instant::now() + timeout;
     let status = loop {
+        if exceeded.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            anyhow::bail!("{program} output exceeds bounded buffer");
+        }
+        if cancel.is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Relaxed)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            anyhow::bail!("CANCELLED: {program} 已取消");
+        }
         match child.try_wait()? {
             Some(status) => break status,
             None if Instant::now() >= deadline => {
@@ -1554,6 +1699,10 @@ fn run_with_timeout(program: &str, cmd: &mut Command, timeout: Duration) -> anyh
     let stderr_buf = stderr_reader
         .join()
         .map_err(|_| anyhow::anyhow!("{program} stderr 读线程异常退出"))?;
+    anyhow::ensure!(
+        !output_limit.is_some_and(|max| stdout_buf.len() > max || stderr_buf.len() > max),
+        "{program} output exceeds bounded buffer"
+    );
     Ok(Output {
         status,
         stdout: stdout_buf,
@@ -1564,6 +1713,30 @@ fn run_with_timeout(program: &str, cmd: &mut Command, timeout: Duration) -> anyh
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn scoped_media_tool_cancellation_kills_and_reaps_process() {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        let mut command = Command::new("sleep");
+        command.arg("10");
+        let started = Instant::now();
+        let error = run_with_timeout(
+            "sleep",
+            &mut command,
+            Duration::from_secs(20),
+            Some(&stop),
+            None,
+        )
+        .unwrap_err();
+        thread.join().unwrap();
+        assert!(error.to_string().contains("CANCELLED"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
 
     fn test_service(root: &Path) -> MediaService {
         MediaService::open(root.to_path_buf(), "gamer-no-such-ffmpeg".into()).unwrap()

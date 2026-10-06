@@ -565,6 +565,17 @@ impl FrameCache {
     /// 无帧（会话刚建立/刚清空）时等首个 IDR ≤1.5s；解码失败时仅当失败仍对应当前
     /// 快照才清空 GOP，随后等待新 IDR 重试一次。
     pub async fn decode_latest_frame(&self) -> anyhow::Result<Option<Arc<DecodedScreen>>> {
+        Ok(self
+            .decode_latest_frame_timestamped()
+            .await?
+            .map(|(frame, _)| frame))
+    }
+
+    /// Receipt time belongs to the exact encoded snapshot, not to completion of
+    /// decoding or a later request. This remains truthful for static screens.
+    pub(crate) async fn decode_latest_frame_timestamped(
+        &self,
+    ) -> anyhow::Result<Option<(Arc<DecodedScreen>, Instant)>> {
         let ffmpeg = self.ffmpeg_path.lock().clone();
         let decode_budget = Arc::clone(&self.decode_budget);
         let mut decode_error = None;
@@ -584,7 +595,7 @@ impl FrameCache {
             let snapshot_latest_frame_at = snapshot.latest_frame_at;
             if let Some(frame) = self.cached_decoded_frame(key, snapshot.frame_sequence) {
                 self.record_frame_dims(&frame);
-                return Ok(Some(frame));
+                return Ok(Some((frame, snapshot_latest_frame_at)));
             }
             let ffmpeg_for_decode = ffmpeg.clone();
             let decode_budget = Arc::clone(&decode_budget);
@@ -607,7 +618,7 @@ impl FrameCache {
                     if self.is_snapshot_current(key) {
                         self.record_frame_dims(&decoded.frame);
                         self.store_decoded_frame(key, decoded.frame.clone());
-                        return Ok(Some(decoded.frame.clone()));
+                        return Ok(Some((decoded.frame.clone(), snapshot_latest_frame_at)));
                     }
 
                     // 不能返回被替换的 config/GOP（代际已推进 = 编码器重启/新 IDR）。

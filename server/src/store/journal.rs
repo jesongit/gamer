@@ -21,7 +21,15 @@ impl Store {
         &self,
         record: &crate::run_manager::RunRecord,
     ) -> anyhow::Result<()> {
+        self.trace.register(
+            &record.run_id,
+            record.finished_at.map(|time| time.to_rfc3339()),
+        );
         let record = serde_json::to_value(record)?;
+        self.trace.record(
+            record["run_id"].as_str().unwrap_or_default(),
+            record.clone(),
+        );
         self.request(move |conn| {
             conn.execute("INSERT INTO run_records(run_id,device_id,entrypoint,started_at,finished_at,record)
                 VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(run_id) DO UPDATE SET finished_at=excluded.finished_at,record=excluded.record",
@@ -119,6 +127,7 @@ impl Store {
             let cutoff = cutoff.clone();
             let count = self.request(move |conn| Ok(conn.execute("DELETE FROM run_records WHERE run_id IN (SELECT run_id FROM run_records WHERE finished_at IS NOT NULL AND finished_at<?1 LIMIT 50)", [cutoff])?))?;
             if count == 0 {
+                self.trace.prune_history(days);
                 return Ok(());
             }
         }

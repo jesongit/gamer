@@ -92,6 +92,43 @@ pub fn sanitize_rel_path(rel: &str) -> anyhow::Result<Vec<String>> {
         .collect()
 }
 
+/// Resolve a resource name against a frozen/listed namespace using the same
+/// exact-first, unique hash-suffix convention as PackageStore. Directory
+/// identity is preserved; only the filename's suffix comparison folds ASCII case.
+pub(crate) fn resolve_short_relative_path<'a>(
+    path: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+) -> anyhow::Result<String> {
+    sanitize_rel_path(path)?;
+    let candidates = candidates.into_iter().collect::<Vec<_>>();
+    if candidates.contains(&path) {
+        return Ok(path.to_string());
+    }
+    let (directory, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let (base, extension) = name
+        .rsplit_once('.')
+        .ok_or_else(|| anyhow::anyhow!("资源不存在: {path}"))?;
+    let prefix = format!("{}#", base.to_ascii_lowercase());
+    let dotted = format!(".{}", extension.to_ascii_lowercase());
+    let mut matching = candidates
+        .into_iter()
+        .filter(|candidate| {
+            let (parent, filename) = candidate.rsplit_once('/').unwrap_or(("", candidate));
+            let filename = filename.to_ascii_lowercase();
+            parent == directory && filename.starts_with(&prefix) && filename.ends_with(&dotted)
+        })
+        .collect::<Vec<_>>();
+    matching.sort_unstable();
+    match matching.as_slice() {
+        [only] => Ok((*only).to_string()),
+        [] => anyhow::bail!("资源不存在: {path}"),
+        _ => anyhow::bail!(
+            "资源 {path} 匹配到多个候选：{}，请用完整文件名指定",
+            matching.join("、")
+        ),
+    }
+}
+
 fn sanitize_segment(seg: &str) -> Option<String> {
     if seg.is_empty()
         || seg == "."
@@ -575,6 +612,13 @@ pub struct SaveBinaryValidation<'a> {
 /// 单插件资源内容钩子。扩展在组合根注册（gamer-yaml / gamer-keymap）；
 /// 未注册 = 该插件资源保存不做内容校验（裸 Core 语义）。
 pub trait ResourceHandler: Send + Sync {
+    /// Bounded request allowance for binary resources owned by this handler.
+    /// The default retains the ordinary resource limit; larger archives opt in
+    /// only for their own validated paths. Core does not interpret their format.
+    fn max_upload_bytes(&self, _path: &str) -> usize {
+        16 * 1024 * 1024
+    }
+
     /// 保存前内容校验；Err = 结构化诊断 JSON（HTTP 400 透传，格式由扩展定）。
     fn validate_save(&self, _req: SaveValidation<'_>) -> Result<(), Value> {
         Ok(())
@@ -994,6 +1038,7 @@ impl PackageStore {
         plugin: &str,
         path: &str,
     ) -> anyhow::Result<Option<ResourceEntry>> {
+        let _guard = RESOURCE_WRITE_LOCK.lock();
         let Ok(disk) = self.resource_path(pkg, plugin, path) else {
             return Ok(None);
         };
@@ -1083,6 +1128,7 @@ impl PackageStore {
         plugin: &str,
         path: &str,
     ) -> anyhow::Result<Option<Vec<u8>>> {
+        let _guard = RESOURCE_WRITE_LOCK.lock();
         let Ok(disk) = self.resource_path(pkg, plugin, path) else {
             return Ok(None);
         };
@@ -1263,6 +1309,7 @@ impl PackageStore {
     /// UTF-8 可解码且 ≤ [`TEXT_RESOURCE_MAX_BYTES`]；文本条目合并 handler 注记。
     /// 按 path 字典序。
     pub fn list(&self, pkg: &str, plugin: &str, prefix: &str) -> anyhow::Result<Vec<ListEntry>> {
+        let _guard = RESOURCE_WRITE_LOCK.lock();
         let plugin_root = self.plugin_dir(pkg, plugin)?;
         let root = if prefix.trim().is_empty() {
             plugin_root.clone()
@@ -1372,6 +1419,7 @@ impl PackageStore {
         plugin: &str,
         path: &str,
     ) -> anyhow::Result<PathBuf> {
+        let _guard = RESOURCE_WRITE_LOCK.lock();
         let disk = self.resource_path(pkg, plugin, path)?;
         if disk.is_file() {
             return Ok(disk);
@@ -1384,30 +1432,22 @@ impl PackageStore {
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow::anyhow!("资源路径文件名无效: {path}"))?;
-        let Some((base, ext)) = name.rsplit_once('.') else {
-            anyhow::bail!("资源不存在: {pkg}/{plugin}/{path}");
-        };
-        let prefix = format!("{}#", base.to_ascii_lowercase());
-        let dotted = format!(".{}", ext.to_ascii_lowercase());
-        let mut candidates: Vec<String> = std::fs::read_dir(&dir)
+        let parent = path.rsplit_once('/').map(|(parent, _)| parent);
+        let candidates: Vec<String> = std::fs::read_dir(&dir)
             .into_iter()
             .flatten()
             .flatten()
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter(|candidate| {
-                let lower = candidate.to_ascii_lowercase();
-                lower.starts_with(&prefix) && lower.ends_with(&dotted)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            // Exact files were handled above. A directory or dangling link at
+            // the exact name must not shadow an existing #suffix file.
+            .filter(|candidate| candidate != name)
+            .map(|name| match parent {
+                Some(parent) => format!("{parent}/{name}"),
+                None => name,
             })
             .collect();
-        candidates.sort();
-        match candidates.len() {
-            1 => Ok(dir.join(&candidates[0])),
-            0 => anyhow::bail!("资源不存在: {pkg}/{plugin}/{path}"),
-            _ => anyhow::bail!(
-                "资源 {path} 匹配到多个候选：{}，请用完整文件名指定",
-                candidates.join("、")
-            ),
-        }
+        let relative = resolve_short_relative_path(path, candidates.iter().map(String::as_str))?;
+        Ok(self.plugin_dir(pkg, plugin)?.join(relative))
     }
 
     // ---------- 钩子注册 ----------
@@ -1426,6 +1466,14 @@ impl PackageStore {
             .expect("resource handler registry poisoned")
             .get(plugin)
             .cloned()
+    }
+
+    /// Binary upload allowance, bounded even when a handler requests more.
+    pub fn resource_upload_limit(&self, plugin: &str, path: &str) -> usize {
+        self.handler(plugin)
+            .map(|handler| handler.max_upload_bytes(path))
+            .unwrap_or(16 * 1024 * 1024)
+            .clamp(1, 128 * 1024 * 1024)
     }
 
     /// 保存前内容校验：分发到已注册 handler；未注册 = 通过（裸 Core 语义）。
@@ -1640,6 +1688,40 @@ mod tests {
                 .content,
             "old.bin"
         );
+    }
+
+    #[test]
+    fn upload_limits_are_owner_scoped_and_globally_bounded() {
+        struct ArchiveOwner;
+        impl ResourceHandler for ArchiveOwner {
+            fn max_upload_bytes(&self, path: &str) -> usize {
+                match path {
+                    "samples/demo.bin" => 128 * 1024 * 1024,
+                    "too-large.bin" => usize::MAX,
+                    "zero.bin" => 0,
+                    _ => 16 * 1024 * 1024,
+                }
+            }
+        }
+        let (store, _) = temp_store("upload-limits");
+        store.register_handler("archive.owner", std::sync::Arc::new(ArchiveOwner));
+        assert_eq!(
+            store.resource_upload_limit("unknown", "samples/demo.bin"),
+            16 * 1024 * 1024
+        );
+        assert_eq!(
+            store.resource_upload_limit("archive.owner", "samples/demo.bin"),
+            128 * 1024 * 1024
+        );
+        assert_eq!(
+            store.resource_upload_limit("archive.owner", "ordinary.png"),
+            16 * 1024 * 1024
+        );
+        assert_eq!(
+            store.resource_upload_limit("archive.owner", "too-large.bin"),
+            128 * 1024 * 1024
+        );
+        assert_eq!(store.resource_upload_limit("archive.owner", "zero.bin"), 1);
     }
 
     // ---------- id / 路径校验 ----------
@@ -2143,6 +2225,38 @@ required = false
         assert!(store.plugin_dir("../escape", "gamer-yaml").is_err());
     }
 
+    #[test]
+    fn frozen_short_paths_keep_exact_precedence_ambiguity_and_directory_scope() {
+        let candidates = [
+            "ui/button#100_100_200_200.png",
+            "other/button#300_300_400_400.png",
+        ];
+        assert_eq!(
+            resolve_short_relative_path("ui/button.png", candidates).unwrap(),
+            candidates[0]
+        );
+        assert!(resolve_short_relative_path("button.png", candidates).is_err());
+        assert!(resolve_short_relative_path("ui/missing.png", candidates).is_err());
+        let ambiguous = [
+            candidates[0],
+            "ui/button#200_200_300_300.png",
+            candidates[1],
+        ];
+        assert!(resolve_short_relative_path("ui/button.png", ambiguous)
+            .unwrap_err()
+            .to_string()
+            .contains("多个"));
+        let exact = [ambiguous[0], ambiguous[1], "ui/button.png"];
+        assert_eq!(
+            resolve_short_relative_path("ui/button.png", exact).unwrap(),
+            "ui/button.png"
+        );
+        assert_eq!(
+            resolve_short_relative_path("ui/BUTTON.PNG", candidates).unwrap(),
+            candidates[0]
+        );
+        assert!(resolve_short_relative_path("other/../ui/button.png", candidates).is_err());
+    }
     #[test]
     fn short_path_disambiguation_matches_unique_hash_suffix() {
         let (store, _dir) = temp_store("shortname");

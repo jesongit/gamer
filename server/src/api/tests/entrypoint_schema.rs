@@ -4,11 +4,15 @@ use super::*;
 //
 // - GET /api/runners/:runner_id/entrypoint?entrypoint=<资源id>：V1 params
 //   schema（`schema` = 参数声明数组：name/type/required/default/desc；前端
-//   不为取参数而解析 YAML）；旧 v3 源（version 字段）→ yaml.version.removed。
+//   不为取参数而解析 YAML）；旧 v3 源（version 字段）→ yaml.version.unsupported。
 // - POST /api/runs：手动运行参数绑定（缺必填/未知键/类型不符前置 400）；
 //   旧 v3 存量源提交即版本迁移错误（无 fallback）。
 
-fn dispatch_body_for(entrypoint: &str, device_id: &str, payload: serde_json::Value) -> serde_json::Value {
+fn dispatch_body_for(
+    entrypoint: &str,
+    device_id: &str,
+    payload: serde_json::Value,
+) -> serde_json::Value {
     serde_json::json!({
         "runner_id": "gamer-yaml",
         "entrypoint": entrypoint,
@@ -17,13 +21,7 @@ fn dispatch_body_for(entrypoint: &str, device_id: &str, payload: serde_json::Val
     })
 }
 
-async fn save_resource(
-    t: &TestApp,
-    sid: &str,
-    kind: &str,
-    name: &str,
-    content: &str,
-) {
+async fn save_resource(t: &TestApp, sid: &str, kind: &str, name: &str, content: &str) {
     // 建包（幂等：已存在即 409，忽略）
     let _ = post_json(
         t,
@@ -40,9 +38,7 @@ async fn save_resource(
             &format!("/api/packages/com.test.app/plugins/gamer-yaml/resources/{kind}/{name}.yaml"),
             None,
             &json_headers(sid.to_string()),
-            Some(
-                serde_json::json!({ "content": content, "force": true }).to_string(),
-            ),
+            Some(serde_json::json!({ "content": content, "force": true }).to_string()),
         ),
     )
     .await;
@@ -57,14 +53,19 @@ async fn save_resource(
 /// 直写分区目录（绕过保存期校验，构造「盘上已有」的存量资源形态）。
 fn write_partition_file(t: &TestApp, kind_dir: &str, name: &str, content: &str) {
     // 直写包插件目录（新布局 packages/<pkg>/plugins/gamer-yaml/<kind>）
-    let dir = t.dir
+    let dir = t
+        .dir
         .join("packages/com.test.app/plugins/gamer-yaml")
         .join(kind_dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(name), content).unwrap();
 }
 
-async fn describe_entrypoint(t: &TestApp, sid: &str, entrypoint: &str) -> (StatusCode, serde_json::Value) {
+async fn describe_entrypoint(
+    t: &TestApp,
+    sid: &str,
+    entrypoint: &str,
+) -> (StatusCode, serde_json::Value) {
     let uri = format!(
         "/api/runners/gamer-yaml/entrypoint?entrypoint={}",
         urlencode(entrypoint)
@@ -91,7 +92,11 @@ fn urlencode(raw: &str) -> String {
 /// 前端数据源）；未知 runner → 404 runner_not_found。
 #[tokio::test]
 async fn runner_functions_endpoint_serves_native_catalog() {
-    let t = build_app("fn-catalog", test_credential("admin123"), Default::default());
+    let t = build_app(
+        "fn-catalog",
+        test_credential("admin123"),
+        Default::default(),
+    );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
     let resp = get_json(&t, &sid, "/api/runners/gamer-yaml/functions").await;
@@ -108,7 +113,12 @@ async fn runner_functions_endpoint_serves_native_catalog() {
     assert_eq!(tap["params"][0]["name"], "position");
     assert_eq!(tap["params"][0]["type"], "point");
     let wait_find = functions.iter().find(|f| f["name"] == "wait_find").unwrap();
-    let timeout = wait_find["params"].as_array().unwrap().iter().find(|p| p["name"] == "timeout").unwrap();
+    let timeout = wait_find["params"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "timeout")
+        .unwrap();
     assert_eq!(timeout["default"], "10s");
 
     let resp = get_json(&t, &sid, "/api/runners/no.such/functions").await;
@@ -118,12 +128,12 @@ async fn runner_functions_endpoint_serves_native_catalog() {
 
 /// V1 schema（参数声明数组）+ 旧 v3 源版本迁移诊断 + not_found/invalid/未知 runner。
 #[tokio::test]
-async fn entrypoint_schema_endpoint_serves_v1_and_rejects_legacy_sources() {
+async fn entrypoint_schema_endpoint_serves_v2_and_rejects_legacy_sources() {
     let t = build_app("ep-schema", test_credential("admin123"), Default::default());
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
     // 显式带 version 的旧 v3 源直写分区（保存边界已拒收，见 write_partition_file 注）：
-    // describe 必须报 yaml.version.removed（V1 无 version 字段，无 fallback）
+    // describe 必须报 yaml.version.unsupported（V1 无 version 字段，无 fallback）
     write_partition_file(
         &t,
         "automations",
@@ -135,7 +145,7 @@ async fn entrypoint_schema_endpoint_serves_v1_and_rejects_legacy_sources() {
         &sid,
         "automations",
         "v1daily",
-        "params:\n  msg:\n    type: string\n    default: \"默认\"\n    desc: 消息\n  wait:\n    type: duration\n    default: 2s\n  count:\n    type: integer\n    default: 3\nrun:\n  - log: $msg\n",
+        "version: 2\nparams:\n  msg:\n    type: string\n    default: \"默认\"\n    desc: 消息\n  wait:\n    type: duration\n    default: 2s\n  count:\n    type: integer\n    default: 3\nrun:\n  - log: $msg\n",
     )
     .await;
     save_resource(
@@ -143,7 +153,7 @@ async fn entrypoint_schema_endpoint_serves_v1_and_rejects_legacy_sources() {
         &sid,
         "automations",
         "v1req",
-        "params:\n  secret:\n    type: string\n    required: true\nrun:\n  - log: $secret\n",
+        "version: 2\nparams:\n  secret:\n    type: string\n    required: true\nrun:\n  - log: $secret\n",
     )
     .await;
     // V1 函数库直写分区（Phase 1：函数库存 automations/ 内的 _function*.yaml）
@@ -151,15 +161,19 @@ async fn entrypoint_schema_endpoint_serves_v1_and_rejects_legacy_sources() {
         &t,
         "automations",
         "_function.yaml",
-        "functions:\n  greet:\n    params:\n      who:\n        type: string\n        default: \"玩家\"\n      times:\n        type: integer\n        default: 2\n    run:\n      - log: $who\n",
+        "version: 2\nfunctions:\n  greet:\n    params:\n      who:\n        type: string\n        default: \"玩家\"\n      times:\n        type: integer\n        default: 2\n    run:\n      - log: $who\n",
     );
 
-    // 旧 v3 源 → 版本迁移 invalid（yaml.version.removed，无 fallback）
+    // 旧 v3 源 → 版本迁移 invalid（yaml.version.unsupported，无 fallback）
     let (status, v3) = describe_entrypoint(&t, &sid, "com.test.app/v3daily.yaml").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{v3}");
     assert_eq!(v3["error"], "invalid_script");
     assert!(
-        v3["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "yaml.version.removed"),
+        v3["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "yaml.version.unsupported"),
         "旧 v3 源必须报版本迁移诊断: {v3}"
     );
 
@@ -197,7 +211,12 @@ async fn entrypoint_schema_endpoint_serves_v1_and_rejects_legacy_sources() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
     assert_eq!(missing["error"], "not_found");
     // 解析失败 → 400 invalid_script（直写坏源：保存期校验本就会拒绝它）
-    write_partition_file(&t, "automations", "broken.yaml", "run:\n  - if: $x\n");
+    write_partition_file(
+        &t,
+        "automations",
+        "broken.yaml",
+        "version: 2\nrun:\n  - if: $x\n",
+    );
     let (status, broken) = describe_entrypoint(&t, &sid, "com.test.app/broken.yaml").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{broken}");
     assert_eq!(broken["error"], "invalid_script");
@@ -218,7 +237,7 @@ async fn entrypoint_schema_endpoint_serves_v1_and_rejects_legacy_sources() {
 /// POST /api/runs V1 脚本手动运行：无参（默认值）/显式传参 202 + resolved_args；
 /// 缺必填 / 未知键 / 类型不符前置 400 invalid_args。
 #[tokio::test]
-async fn v1_manual_runs_flow_through_param_binding() {
+async fn v2_manual_runs_flow_through_param_binding() {
     let t = build_app("ep-v1run", test_credential("admin123"), Default::default());
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
@@ -233,7 +252,7 @@ async fn v1_manual_runs_flow_through_param_binding() {
         &sid,
         "automations",
         "v1opt",
-        "params:\n  msg:\n    type: string\n    default: \"默认\"\n  fast:\n    type: boolean\n    default: false\n  wait:\n    type: duration\n    default: 2s\n  count:\n    type: integer\n    default: 3\nrun:\n  - log: $msg\n",
+        "version: 2\nparams:\n  msg:\n    type: string\n    default: \"默认\"\n  fast:\n    type: boolean\n    default: false\n  wait:\n    type: duration\n    default: 2s\n  count:\n    type: integer\n    default: 3\nrun:\n  - log: $msg\n",
     )
     .await;
     save_resource(
@@ -241,7 +260,7 @@ async fn v1_manual_runs_flow_through_param_binding() {
         &sid,
         "automations",
         "v1req",
-        "params:\n  secret:\n    type: string\n    required: true\nrun:\n  - log: $secret\n",
+        "version: 2\nparams:\n  secret:\n    type: string\n    required: true\nrun:\n  - log: $secret\n",
     )
     .await;
     // V1 函数库直写分区（函数运行参数从目标函数声明解析）
@@ -249,7 +268,7 @@ async fn v1_manual_runs_flow_through_param_binding() {
         &t,
         "automations",
         "_function.yaml",
-        "functions:\n  greet:\n    params:\n      who:\n        type: string\n        default: \"玩家\"\n      times:\n        type: integer\n        default: 2\n    run:\n      - log: $who\n",
+        "version: 2\nfunctions:\n  greet:\n    params:\n      who:\n        type: string\n        default: \"玩家\"\n      times:\n        type: integer\n        default: 2\n    run:\n      - log: $who\n",
     );
 
     // 无参运行：202 + resolved_args 为默认值合并视图
@@ -300,8 +319,11 @@ async fn v1_manual_runs_flow_through_param_binding() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let j = json_body(resp).await;
     assert_eq!(j["error"], "invalid_args");
-    assert!(j["diagnostics"].as_array().unwrap().iter().any(|d| d["code"]
-        == "param.args.missing_required"));
+    assert!(j["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d["code"] == "param.args.missing_required"));
 
     // 未知键 → 400 param.args.unknown
     let resp = post_json(
@@ -317,8 +339,11 @@ async fn v1_manual_runs_flow_through_param_binding() {
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let j = json_body(resp).await;
-    assert!(j["diagnostics"].as_array().unwrap().iter().any(|d| d["code"]
-        == "param.args.unknown"));
+    assert!(j["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d["code"] == "param.args.unknown"));
 
     // 类型不符 → 400 param.args.type_mismatch
     let resp = post_json(
@@ -334,8 +359,11 @@ async fn v1_manual_runs_flow_through_param_binding() {
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let j = json_body(resp).await;
-    assert!(j["diagnostics"].as_array().unwrap().iter().any(|d| d["code"]
-        == "param.args.type_mismatch"));
+    assert!(j["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d["code"] == "param.args.type_mismatch"));
 
     // V1 函数库 entrypoint（函数运行参数从函数声明解析）
     let resp = post_json(
@@ -377,7 +405,11 @@ async fn v1_manual_runs_flow_through_param_binding() {
     let j = json_body(resp).await;
     assert_eq!(j["error"], "invalid_script");
     assert!(
-        j["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "yaml.version.removed"),
+        j["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "yaml.version.unsupported"),
         "旧 v3 脚本手动运行必须报版本迁移诊断: {j}"
     );
 
