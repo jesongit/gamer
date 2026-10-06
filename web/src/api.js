@@ -374,24 +374,6 @@ export const api = {
     const rep = await req('GET', `/api/recording/${encodeURIComponent(requireId(id, 'recording_id'))}/events`)
     return Array.isArray(rep?.events) ? rep.events : []
   },
-  // YAML v3 草稿生成：经现有扩展 call 通路（扩展 id 字面量唯一归宿 =
-  // gamer-plugin-ids.js，本文件不出现 id 字面量）。返回 {yaml, diagnostics}；
-  // 兼容 {ok, data} 信封形态。
-  createVideoDraft: async (recordingId, eventIds) => {
-    const rep = await req(
-      'POST',
-      `/api/extensions/${encodeURIComponent(GAMER_YAML_PLUGIN_ID)}/call`,
-      {
-        action: 'automation.create_draft',
-        values: {
-          recording_id: requireId(recordingId, 'recording_id'),
-          event_ids: Array.isArray(eventIds) ? eventIds : [],
-        },
-      },
-    )
-    return rep && typeof rep === 'object' && rep.data && typeof rep.data === 'object' ? rep.data : rep
-  },
-
   // ---- Package（plan §7-§11：Package = 配置数据上下文，独立 Package ID）----
   listPackages: () => req('GET', '/api/packages'),
   createPackage: (p) => req('POST', '/api/packages', p),
@@ -636,6 +618,8 @@ export const api = {
   // 统一运行实例（run_id 主键）：单次查询 RunRecord / 按次取消（终态以查询为准）
   listRunHistory: (deviceId, entrypoint, before) => req('GET', `/api/runs?${new URLSearchParams({device_id: deviceId, ...(entrypoint ? {entrypoint} : {}), ...(before ? {before} : {})})}`),
   getRunEvents: (runId, after = 0) => req('GET', `/api/runs/${encodeURIComponent(runId)}/events?after=${after}`),
+  getRunTrace: (runId, after = 0, limit = 100) => req('GET', `/api/runs/${encodeURIComponent(requireId(runId, 'run_id'))}/trace?${new URLSearchParams({ after: String(after), limit: String(limit) })}`),
+  retainRunTrace: (runId) => req('POST', `/api/runs/${encodeURIComponent(requireId(runId, 'run_id'))}/trace/retain`),
   getRun: async (runId) => requireRunResponse(await req('GET', `/api/runs/${encodeURIComponent(requireId(runId, 'run_id'))}`)),
   cancelRun: async (runId) => {
     const id = requireId(runId, 'run_id')

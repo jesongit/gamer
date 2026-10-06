@@ -47,7 +47,7 @@ describe('P5-MEDIA 素材库与录制历史', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('视频已不存在或未生成')
     expect(wrapper.text()).toContain('无操作记录')
-    expect(wrapper.find('[data-testid="recording-history-draft"]').element.disabled).toBe(true)
+    expect(wrapper.find('[data-testid="recording-history-sample"]').element.disabled).toBe(true)
     const remove = () => wrapper.find('[data-testid="recording-history-delete"]')
     await remove().trigger('click')
     expect(videoApi.deleteRecording).not.toHaveBeenCalled()
@@ -64,12 +64,12 @@ describe('P5-MEDIA 素材库与录制历史', () => {
     wrapper.unmount()
   })
 
-  it('丢失事件的录制不能生成脚本；仍有关联视频时不能删除历史', async () => {
+  it('丢失事件的录制不能制作素材包；仍有关联视频时不能删除历史', async () => {
     videoApi.recordingHistory.mockResolvedValue([{id: 'lost-events', state: 'completed', event_count: 3, events_available: false, segments: [{media_id: 'recording-a', duration_us: 10e6}], missing_media: []}])
     const wrapper = mount(MediaLibrary, {props: {mediaList: MEDIA}})
     await flushPromises()
     expect(wrapper.text()).toContain('操作记录已丢失')
-    expect(wrapper.find('[data-testid="recording-history-draft"]').element.disabled).toBe(true)
+    expect(wrapper.find('[data-testid="recording-history-sample"]').element.disabled).toBe(true)
     expect(wrapper.find('[data-testid="recording-history-delete"]').element.disabled).toBe(true)
     await wrapper.find('[data-testid="recording-history-select"]').trigger('click')
     expect(videoApi.recordingEvents).not.toHaveBeenCalled()
@@ -101,7 +101,7 @@ describe('P5-MEDIA 素材库与录制历史', () => {
     expect(wrapper.emitted('select')).toEqual([['recording-a']])
     expect(wrapper.emitted('recording-selected')).toBeUndefined()
     expect(wrapper.find('[data-testid="recording-detail"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="recording-history-draft"]').element.disabled).toBe(true)
+    expect(wrapper.find('[data-testid="recording-history-sample"]').element.disabled).toBe(true)
     expect(wrapper.find('[data-testid="recording-id-input"]').exists()).toBe(false)
     wrapper.unmount()
   })

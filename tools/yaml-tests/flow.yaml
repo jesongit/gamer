@@ -1,3 +1,5 @@
+# Isolated engine test fixture; complete visual tasks must declare finish.
+version: 2
 name: YAML 流程与全部参数类型验收
 params:
   anything: {type: any, default: null}

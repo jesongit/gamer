@@ -20,6 +20,19 @@ beforeEach(() => {
 
 afterEach(() => vi.unstubAllGlobals())
 
+it('keeps trace pagination and retention scoped to the selected run', async () => {
+  fetch.mockResolvedValue(jsonRes(200, { images: [] }))
+  await api.getRunTrace('run#one', 4, 25)
+  const [url] = fetch.mock.calls[0]
+  expect(url).toContain('/api/runs/run%23one/trace?')
+  const query = new URL(url, 'http://localhost').searchParams
+  expect(query.get('after')).toBe('4')
+  expect(query.get('limit')).toBe('25')
+  await api.retainRunTrace('run#one')
+  expect(fetch.mock.calls[1][0]).toContain('/api/runs/run%23one/trace/retain')
+  expect(fetch.mock.calls[1][1].method).toBe('POST')
+})
+
 it('loads device-wide run history and encodes the earlier-page cursor independently of an entrypoint', async () => {
   fetch.mockResolvedValue(jsonRes(200, []))
   await api.listRunHistory('device:5555')

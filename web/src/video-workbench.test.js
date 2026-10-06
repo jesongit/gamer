@@ -32,8 +32,9 @@ vi.mock('../../plugins/gamer-video/ui/src/components/video/videoApi', async (imp
       recordingEvents: vi.fn(async () => []),
       recordingHistory: vi.fn(async () => []),
       recordingStatus: vi.fn(async () => ({ id: 'rec-1', segments: [] })),
-      createVideoDraft: vi.fn(async () => ({ yaml: '', diagnostics: [] })),
-      saveDraft: vi.fn(async () => ({ id: 'pkg/draft-1.yaml', path: 'automations/draft-1.yaml', package_id: 'pkg' })),
+      listSamples: vi.fn(async () => []),
+      createSample: vi.fn(async () => ({ manifest: { id: 's1' } })),
+      sampleUrl: vi.fn(() => '/sample'),
       createTemplateFromFrame: vi.fn(async () => ({ name: 'tpl.png', short_name: 'tpl.png' })),
       visionTestTemplate: vi.fn(async () => ({ hit: true, score: 0.9 })),
       getMedia: vi.fn(async () => ({ id: 'm1', refs: [] })),
@@ -54,14 +55,13 @@ vi.mock('./components/console/useConsoleStage', async (importOriginal) => {
   return { ...actual, requestStageMedia: vi.fn() }
 })
 
-// VideoDraft 保存成功后的 automation.open_editor 导航（router.push 可观察）
+// Shared router stub for workbench navigation
 const routerPush = vi.fn(async () => {})
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: routerPush, currentRoute: { value: { query: {} } } }),
 }))
 
 import MediaLibrary from '../../plugins/gamer-video/ui/src/components/video/MediaLibrary.vue'
-import VideoDraft from '../../plugins/gamer-video/ui/src/components/video/VideoDraft.vue'
 import VideoProjects from '../../plugins/gamer-video/ui/src/components/video/VideoProjects.vue'
 import VideoTimeline from '../../plugins/gamer-video/ui/src/components/video/VideoTimeline.vue'
 import VideoWorkbench from '../../plugins/gamer-video/ui/src/components/video/VideoWorkbench.vue'
@@ -137,13 +137,13 @@ describe('VideoWorkbench 宿主装配', () => {
     expect(videoApi.listMedia).toHaveBeenCalled()
     expect(videoApi.listProjectEntries).toHaveBeenCalledWith('pkg')
     expect(w.find('[data-testid="media-library"]').exists()).toBe(true)
-    for (const key of ['library', 'projects', 'draft']) {
+    for (const key of ['library', 'projects', 'sample']) {
       expect(w.find(`[data-testid="workbench-tab-${key}"]`).exists()).toBe(true)
     }
     // 素材库行渲染；项目分区与草稿分区未激活
     expect(w.findAll('[data-testid="media-row"]')).toHaveLength(2)
     expect(w.find('[data-testid="video-timeline"]').exists()).toBe(false)
-    expect(w.find('[data-testid="video-draft"]').exists()).toBe(false)
+    expect(w.find('[data-testid="video-samples"]').exists()).toBe(false)
     w.unmount()
   })
 
@@ -410,9 +410,9 @@ describe('VideoWorkbench 项目编辑流', () => {
     videoApi.recordingHistory.mockResolvedValue([{id: 'rec-42', state: 'completed', event_count: 1, segments: []}])
     const entry = { ...PROJECT_ENTRY, content: projectJson({ recording: { recording_id: 'rec-42' } }) }
     const w = await mountOpenProject(entry)
-    await w.find('[data-testid="project-open-draft"]').trigger('click')
-    expect(w.find('[data-testid="video-draft"]').exists()).toBe(true)
-    expect(w.find('[data-testid="draft-recording-id"]').element.value).toBe('rec-42')
+    await w.find('[data-testid="project-open-sample"]').trigger('click')
+    expect(w.find('[data-testid="video-samples"]').exists()).toBe(true)
+    expect(w.find('[data-testid="sample-recording"]').element.value).toBe('rec-42')
     w.unmount()
   })
 })
@@ -582,7 +582,7 @@ describe('VideoTimeline 时间轴区', () => {
     ])
     videoApi.mediaFrames.mockResolvedValue({
       frame_count: 100, first_pts_us: 0, last_pts_us: 65000000,
-      current: { index: 36, pts_us: 1201000 },
+      current: { index: 36, pts_us: 1200000 },
     })
     const w = mount(VideoTimeline, { props: { media: MEDIA[0], markers: [], calibration: CAL, recordingId: 'rec-1' } })
     await flushPromises()
@@ -601,7 +601,7 @@ describe('VideoTimeline 时间轴区', () => {
     // 点击跳帧：事件 PTS（1000+1200000）→ 服务端解析展示帧身份
     await rows[0].trigger('click')
     await flushPromises()
-    expect(videoApi.mediaFrames).toHaveBeenCalledWith('m1', { ptsUs: 1201000 })
+    expect(videoApi.mediaFrames).toHaveBeenCalledWith('m1', { ptsUs: 1200000 })
     expect(w.find('[data-testid="frame-image"]').attributes('src')).toBe('/api/media/m1/frame?index=36&max_width=640')
     w.unmount()
   })
@@ -717,162 +717,8 @@ describe('MediaLibrary 素材库区', () => {
 })
 
 // ---------------------------------------------------------------------------
-// VideoDraft 草稿区状态流转（Phase 7 §10.3 可编辑工作流）
+// Sample lifecycle coverage lives in video-sample-isolation.test.js
 // ---------------------------------------------------------------------------
-
-describe('VideoDraft 草稿区状态流转（Phase 7 可编辑工作流）', () => {
-  const mountDraft = (recordingId = 'rec-9', yamlReady = true) =>
-    mount(VideoDraft, { props: { recordingId, packageId: 'pkg', yamlReady } })
-
-  it('载入事件：时间轴升序渲染 kind/时间/来源；全选/清空驱动已选数', async () => {
-    const wrapper = mountDraft()
-    videoApi.recordingEvents.mockResolvedValue(EVENTS)
-    await flushPromises()
-    await wrapper.find('[data-testid="draft-load"]').trigger('click')
-    await flushPromises()
-
-    expect(videoApi.recordingEvents).toHaveBeenCalledWith('rec-9')
-    const rows = wrapper.findAll('.event-row')
-    expect(rows).toHaveLength(2)
-    expect(rows[0].text()).toContain('swipe')
-    expect(rows[0].text()).toContain('1.200s')
-    expect(rows[1].text()).toContain('tap')
-    expect(wrapper.find('[data-testid="draft-generate"]').attributes('disabled')).toBeDefined()
-
-    await wrapper.find('[data-testid="draft-select-all"]').trigger('click')
-    expect(wrapper.find('[data-testid="draft-generate"]').text()).toContain('草稿（2）')
-    await wrapper.find('[data-testid="draft-clear"]').trigger('click')
-    expect(wrapper.find('[data-testid="draft-generate"]').attributes('disabled')).toBeDefined()
-    wrapper.unmount()
-  })
-
-  it('yaml 依赖门禁（§10.1）：未 Running 时生成禁用 + 依赖横幅，注释/重排仍可见', async () => {
-    const wrapper = mountDraft('rec-9', false)
-    videoApi.recordingEvents.mockResolvedValue(EVENTS)
-    await flushPromises()
-    await wrapper.find('[data-testid="draft-load"]').trigger('click')
-    await flushPromises()
-    expect(wrapper.find('[data-testid="draft-dep-banner"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="draft-generate"]').attributes('disabled')).toBeDefined()
-    await wrapper.find('[data-testid="draft-select-all"]').trigger('click')
-    expect(wrapper.find('[data-testid="draft-generate"]').attributes('disabled')).toBeDefined()
-    wrapper.unmount()
-  })
-
-  it('勾选+注释 → 生成：createVideoDraft(recordingId, 顺序 ids, comments)，展示 yaml/诊断/回查 source', async () => {
-    const wrapper = mountDraft()
-    videoApi.recordingEvents.mockResolvedValue(EVENTS)
-    videoApi.createVideoDraft.mockResolvedValue({
-      yaml: 'version: 3\nsteps:\n  - tap: [100, 200]',
-      diagnostics: [{ event_id: 'e2', reason: 'multi_touch_not_supported' }],
-      source: { recording_id: 'rec-9', events: [
-        { event_id: 'e1', kind: 'swipe', timeline_us: 1200000, selected: true, mapped: true },
-        { event_id: 'e2', kind: 'tap', timeline_us: 5200000, selected: true, mapped: false },
-      ] },
-    })
-    await flushPromises()
-    await wrapper.find('[data-testid="draft-load"]').trigger('click')
-    await flushPromises()
-
-    await wrapper.find('[data-testid="draft-event-check-e1"]').setValue(true)
-    await wrapper.find('[data-testid="draft-event-comment-e1"]').setValue('打开背包')
-    await wrapper.find('[data-testid="draft-generate"]').trigger('click')
-    await flushPromises()
-
-    expect(videoApi.createVideoDraft).toHaveBeenCalledWith('rec-9', ['e1'], { e1: '打开背包' })
-    expect(wrapper.find('[data-testid="draft-yaml"]').text()).toContain('tap: [100, 200]')
-    const diags = wrapper.find('[data-testid="draft-diagnostics"]')
-    expect(diags.text()).toContain('e2')
-    expect(diags.text()).toContain('multi_touch_not_supported')
-    expect(wrapper.find('[data-testid="draft-source-line"]').text()).toContain('rec-9')
-    expect(wrapper.text()).toContain('草稿不会自动执行')
-    wrapper.unmount()
-  })
-
-  it('重排（↑↓）改变生成顺序；保存草稿 → automation.save_draft + open_editor 导航', async () => {
-    const wrapper = mountDraft()
-    videoApi.recordingEvents.mockResolvedValue(EVENTS)
-    videoApi.createVideoDraft.mockResolvedValue({
-      yaml: 'version: 3\nsteps:\n  - log: ok', diagnostics: [],
-      source: { recording_id: 'rec-9', events: [] },
-    })
-    videoApi.saveDraft.mockResolvedValue({ id: 'pkg/my-draft.yaml', path: 'automations/my-draft.yaml', package_id: 'pkg' })
-    await flushPromises()
-    await wrapper.find('[data-testid="draft-load"]').trigger('click')
-    await flushPromises()
-
-    await wrapper.find('[data-testid="draft-event-check-e2"]').setValue(true)
-    await wrapper.find('[data-testid="draft-event-check-e1"]').setValue(true)
-    // 选中顺序 = 勾选顺序（e2, e1）；e1 上移 → e1, e2
-    await wrapper.find('[data-testid="draft-event-up-e1"]').trigger('click')
-
-    await wrapper.find('[data-testid="draft-generate"]').trigger('click')
-    await flushPromises()
-    expect(videoApi.createVideoDraft).toHaveBeenCalledWith('rec-9', ['e1', 'e2'], {})
-
-    await wrapper.find('[data-testid="draft-save-name"]').setValue('my-draft')
-    await wrapper.find('[data-testid="draft-save"]').trigger('click')
-    await flushPromises()
-    expect(videoApi.saveDraft).toHaveBeenCalledWith({
-      packageId: 'pkg', name: 'my-draft', yaml: 'version: 3\nsteps:\n  - log: ok', overwrite: false,
-    })
-    // automation.open_editor（前端契约）：路由切到自动化面板
-    expect(routerPush).toHaveBeenCalledWith(expect.objectContaining({
-      query: expect.objectContaining({ panel: 'gamer-yaml:automation' }),
-    }))
-    wrapper.unmount()
-  })
-
-  it('保存重名冲突给出可理解提示（overwrite 引导）', async () => {
-    const wrapper = mountDraft()
-    videoApi.recordingEvents.mockResolvedValue(EVENTS)
-    videoApi.createVideoDraft.mockResolvedValue({ yaml: 'version: 3\nsteps: []', diagnostics: [], source: null })
-    videoApi.saveDraft.mockRejectedValue(new Error('自动化脚本已存在: pkg/d.yaml（确认覆盖请带 overwrite:true）'))
-    await flushPromises()
-    await wrapper.find('[data-testid="draft-load"]').trigger('click')
-    await flushPromises()
-    await wrapper.find('[data-testid="draft-select-all"]').trigger('click')
-    await wrapper.find('[data-testid="draft-generate"]').trigger('click')
-    await flushPromises()
-    await wrapper.find('[data-testid="draft-save-name"]').setValue('d')
-    await wrapper.find('[data-testid="draft-save"]').trigger('click')
-    await flushPromises()
-    expect(wrapper.find('[data-testid="draft-error"]').text()).toContain('覆盖同名')
-    wrapper.unmount()
-  })
-
-  it('生成失败 / 空事件会话走错误与空态分支', async () => {
-    const wrapper = mountDraft()
-    videoApi.recordingEvents.mockResolvedValue([])
-    await flushPromises()
-    await wrapper.find('[data-testid="draft-load"]').trigger('click')
-    await flushPromises()
-    expect(wrapper.text()).toContain('没有可映射的操作事件')
-    wrapper.unmount()
-
-    const wrapper2 = mountDraft()
-    videoApi.recordingEvents.mockResolvedValue(EVENTS)
-    videoApi.createVideoDraft.mockRejectedValue(new Error('extension not running'))
-    await flushPromises()
-    await wrapper2.find('[data-testid="draft-load"]').trigger('click')
-    await flushPromises()
-    await wrapper2.find('[data-testid="draft-select-all"]').trigger('click')
-    await wrapper2.find('[data-testid="draft-generate"]').trigger('click')
-    await flushPromises()
-    expect(wrapper2.find('[data-testid="draft-error"]').text()).toContain('extension not running')
-    wrapper2.unmount()
-  })
-
-  it('录制完成后宿主带入会话 id：recordingId prop 变化自动载入事件', async () => {
-    const wrapper = mount(VideoDraft, { props: { recordingId: '', packageId: 'pkg', yamlReady: true } })
-    videoApi.recordingEvents.mockResolvedValue(EVENTS)
-    await wrapper.setProps({ recordingId: 'rec-77' })
-    await flushPromises()
-    expect(wrapper.find('[data-testid="draft-recording-id"]').element.value).toBe('rec-77')
-    expect(videoApi.recordingEvents).toHaveBeenCalledWith('rec-77')
-    wrapper.unmount()
-  })
-})
 
 // ---------------------------------------------------------------------------
 // Phase 8 遗留 #2：项目保存/删除 → 媒体引用全量替换同步（契约 §2.1）

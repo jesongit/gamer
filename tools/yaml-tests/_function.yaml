@@ -1,3 +1,5 @@
+# Isolated engine test fixture; complete visual tasks must declare finish.
+version: 2
 functions:
   每日任务跳转:
     params:

@@ -36,9 +36,10 @@ vi.mock('../../plugins/gamer-video/ui/src/components/video/videoApi', async impo
       setMediaRefs: vi.fn(),
       recordingEvents: vi.fn(),
       recordingHistory: vi.fn(),
+      recordingStatus: vi.fn(async id => ({id, state: "completed", segments: [{media_id:"media-a",start_us:0,duration_us:2000000}]})),
       gamerYamlCapabilities: vi.fn(),
-      createVideoDraft: vi.fn(),
-      saveDraft: vi.fn(),
+      listSamples: vi.fn(async () => []),
+      sampleUrl: vi.fn(() => "/sample"),
     },
   }
 })
@@ -106,11 +107,7 @@ function installDefaults() {
     event_id: 'event-a', kind: 'tap', source: 'manual', status: 'accepted',
     timeline_us: 10, payload: { x: 1, y: 2 },
   }])
-  videoApi.createVideoDraft.mockResolvedValue({
-    yaml: 'run:\n  - tap: [1, 2]\n', diagnostics: [],
-    source: { recording_id: 'recording-a', events: [] },
-  })
-  videoApi.saveDraft.mockResolvedValue({ id: 'pkg-a/automations/from-video.yaml', package_id: 'pkg-a' })
+
 }
 
 beforeEach(() => {
@@ -126,40 +123,32 @@ async function mountWorkbench(projectEntries) {
 }
 
 describe('P5-WB-INTEGRATOR VideoWorkbench 父装配', () => {
-  it('录制下拉切换到另一设备不会取消正在载入的事件，也不把当前应用套到未知设备', async () => {
-    videoApi.recordingHistory.mockResolvedValue([{id: 'other-recording', device_id: 'removed-device', event_count: 1, state: 'completed', segments: []}])
+  it('recording selection waits for current event evidence without borrowing device context', async () => {
+    videoApi.recordingHistory.mockResolvedValue([{ id: 'other-recording', device_id: 'removed-device', event_count: 1, state: 'completed', segments: [] }])
     let resolveEvents
     videoApi.recordingEvents.mockReturnValue(new Promise(resolve => { resolveEvents = resolve }))
     const wrapper = await mountWorkbench()
-    await wrapper.find('[data-testid="workbench-tab-draft"]').trigger('click')
-    await wrapper.find('[data-testid="draft-recording-id"]').setValue('other-recording')
+    await wrapper.find('[data-testid="workbench-tab-sample"]').trigger('click')
+    await wrapper.find('[data-testid="sample-recording"]').setValue('other-recording')
     await flushPromises()
-    expect(wrapper.find('[data-testid="draft-context"]').text()).toContain('removed-device')
-    expect(wrapper.find('[data-testid="draft-context"]').text()).not.toContain('com.example.game')
-    resolveEvents([{event_id: 'other-event', kind: 'tap', source: 'manual', timeline_us: 10, payload: {x: 1, y: 2}}])
-    await flushPromises()
-    expect(wrapper.find('[data-testid="draft-event-check-other-event"]').exists()).toBe(true)
+    expect(videoApi.recordingStatus).toHaveBeenCalledWith('other-recording')
+    resolveEvents([{ event_id: 'other-event', kind: 'tap' }]); await flushPromises()
+    expect(wrapper.find('[data-testid="video-samples"]').text()).toContain('1 个已记录操作')
+    expect(store.deviceId).toBe('device-a')
     wrapper.unmount()
   })
-  it('选择录制自动载入；切换页签保留选择、注释、草稿和保存名称', async () => {
+  it('switching tabs preserves sample name and goal without reloading recording evidence', async () => {
     const wrapper = await mountWorkbench()
-    await wrapper.find('[data-testid="workbench-tab-draft"]').trigger('click')
-    await wrapper.find('[data-testid="draft-recording-id"]').setValue('recording-a')
-    await flushPromises()
-    await wrapper.find('[data-testid="draft-select-all"]').trigger('click')
-    await wrapper.find('[data-testid="draft-event-comment-event-a"]').setValue('测试注释')
-    await wrapper.find('[data-testid="draft-generate"]').trigger('click')
-    await flushPromises()
-    await wrapper.find('[data-testid="draft-save-name"]').setValue('keep-me')
+    await wrapper.find('[data-testid="workbench-tab-sample"]').trigger('click')
+    await wrapper.find('[data-testid="sample-recording"]').setValue('recording-a'); await flushPromises()
+    await wrapper.find('[data-testid="sample-name"]').setValue('keep-me')
+    await wrapper.find('[data-testid="sample-goal"]').setValue('reward claimed')
     const calls = videoApi.recordingEvents.mock.calls.length
     await wrapper.find('[data-testid="workbench-tab-projects"]').trigger('click')
-    expect(wrapper.find('[data-testid="video-draft"]').element.parentElement.style.display).toBe('none')
-    await wrapper.find('[data-testid="workbench-tab-draft"]').trigger('click')
-    await flushPromises()
-    expect(wrapper.find('[data-testid="draft-save-name"]').element.value).toBe('keep-me')
-    expect(wrapper.find('[data-testid="draft-event-comment-event-a"]').element.value).toBe('测试注释')
-    expect(wrapper.find('[data-testid="draft-event-check-event-a"]').element.checked).toBe(true)
-    expect(wrapper.find('[data-testid="draft-yaml"]').text()).toContain('tap:')
+    expect(wrapper.find('[data-testid="video-samples"]').element.parentElement.style.display).toBe('none')
+    await wrapper.find('[data-testid="workbench-tab-sample"]').trigger('click'); await flushPromises()
+    expect(wrapper.find('[data-testid="sample-name"]').element.value).toBe('keep-me')
+    expect(wrapper.find('[data-testid="sample-goal"]').element.value).toBe('reward claimed')
     expect(videoApi.recordingEvents).toHaveBeenCalledTimes(calls)
     wrapper.unmount()
   })
@@ -197,12 +186,11 @@ describe('P5-WB-INTEGRATOR VideoWorkbench 父装配', () => {
     videoApi.listMedia.mockResolvedValueOnce([MEDIA_A, MEDIA_B])
     await wrapper.find('[data-testid="media-retry"]').trigger('click')
     await flushPromises()
-    await wrapper.find('[data-testid="recording-history-draft"]').trigger('click')
+    await wrapper.find('[data-testid="recording-history-sample"]').trigger('click')
     await flushPromises()
-    expect(wrapper.find('[data-testid="video-draft"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="draft-context"]').text()).toContain('配置：pkg-a')
-    expect(wrapper.find('[data-testid="draft-context"]').text()).toContain('设备：device-a')
-    expect(wrapper.find('[data-testid="draft-context"]').text()).toContain('Android：com.example.game')
+    expect(wrapper.find('[data-testid="video-samples"]').exists()).toBe(true)
+    expect(videoApi.listSamples).toHaveBeenCalledWith('pkg-a')
+    expect(wrapper.find('[data-testid="sample-recording"]').element.value).toBe('recording-a')
     expect(videoApi.recordingEvents).toHaveBeenCalledWith('recording-a')
     wrapper.unmount()
   })
@@ -273,23 +261,15 @@ describe('P5-WB-INTEGRATOR VideoWorkbench 父装配', () => {
     wrapper.unmount()
   })
 
-  it('草稿生成、保存和打开编辑器沿用来源 Package，不要求手工输入 recording id', async () => {
+  it('recording selection opens package-scoped sample preparation without generating scripts', async () => {
     const wrapper = await mountWorkbench()
-    await wrapper.find('[data-testid="recording-history-draft"]').trigger('click')
+    await wrapper.find('[data-testid="recording-history-sample"]').trigger('click')
     await flushPromises()
-    await wrapper.find('[data-testid="draft-select-all"]').trigger('click')
-    await wrapper.find('[data-testid="draft-generate"]').trigger('click')
-    await flushPromises()
-    await wrapper.find('[data-testid="draft-save-name"]').setValue('from-video')
-    await wrapper.find('[data-testid="draft-save"]').trigger('click')
-    await flushPromises()
-    expect(videoApi.createVideoDraft).toHaveBeenCalledWith('recording-a', ['event-a'], {})
-    expect(videoApi.saveDraft).toHaveBeenCalledWith({
-      packageId: 'pkg-a', name: 'from-video', yaml: 'run:\n  - tap: [1, 2]\n', overwrite: false,
-    })
-    expect(routerPush).toHaveBeenCalledWith(expect.objectContaining({
-      query: expect.objectContaining({ panel: 'gamer-yaml:automation' }),
-    }))
+    expect(wrapper.find('[data-testid="video-samples"]').exists()).toBe(true)
+    expect(videoApi.recordingStatus).toHaveBeenCalledWith('recording-a')
+    expect(videoApi.listSamples).toHaveBeenCalledWith('pkg-a')
+    expect(videoApi.createVideoDraft).toBeUndefined()
+    expect(videoApi.saveDraft).toBeUndefined()
     wrapper.unmount()
   })
 })

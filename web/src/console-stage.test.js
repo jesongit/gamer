@@ -42,6 +42,7 @@ import { useConsoleStage, formatStageClock } from './components/console/useConso
 import { useConsoleTemplates } from '../../plugins/gamer-yaml/ui/src/components/console/useConsoleTemplates'
 
 const { api: realApi } = await vi.importActual('./api')
+const { videoApi: realVideoApi } = await vi.importActual('../../plugins/gamer-video/ui/src/components/video/videoApi')
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -145,21 +146,13 @@ describe('api.js 媒体与录制合同方法', () => {
     expect(fetch.mock.calls[0][0]).toBe('/api/recording/r-1/events')
   })
 
-  it('createVideoDraft → POST 扩展 call 通路 action=automation.create_draft，兼容 {ok,data} 信封', async () => {
-    const data = { yaml: 'version: 3\nsteps: []', diagnostics: [] }
+  it('sample creation uses video public actions and never calls YAML generation', async () => {
+    const data = { manifest: { id: 'sample-1' } }
     fetch.mockResolvedValueOnce(jsonRes(200, { ok: true, data }))
-    await expect(realApi.createVideoDraft('r-1', ['e1', 'e2'])).resolves.toBe(data)
-    const [url, options] = fetch.mock.calls[0]
-    expect(url).toBe('/api/extensions/gamer-yaml/call')
-    expect(options.method).toBe('POST')
-    expect(JSON.parse(options.body)).toEqual({
-      action: 'automation.create_draft',
-      values: { recording_id: 'r-1', event_ids: ['e1', 'e2'] },
-    })
-
-    const bare = { yaml: 'version: 3\nsteps: []', diagnostics: [{ event_id: 'e9', reason: 'multi_touch' }] }
-    fetch.mockResolvedValueOnce(jsonRes(200, bare))
-    await expect(realApi.createVideoDraft('r-1', [])).resolves.toEqual(bare)
+    const values = { package_id: 'pkg', recording_id: 'r1', goal: { description: 'done', confirmed: true } }
+    await expect(realVideoApi.createSample(values)).resolves.toBe(data)
+    expect(fetch.mock.calls[0][0]).toBe('/api/extensions/gamer-video/call')
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ action: 'sample.create', values })
   })
 })
 

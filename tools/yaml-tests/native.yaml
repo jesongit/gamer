@@ -1,3 +1,5 @@
+# Isolated engine test fixture; complete visual tasks must declare finish.
+version: 2
 name: YAML 全部 20 个内置函数验收（仅限测试设备）
 run:
   - launch: {}

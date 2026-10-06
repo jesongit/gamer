@@ -160,13 +160,13 @@ describe('recordingEvents 事件对齐', () => {
     expect(segmentForTimeline([], 0)).toBeNull()
   })
 
-  it('eventMediaPosition：media_pts = base_pts_us + timeline_us − start_us（整数微秒）', () => {
+  it('eventMediaPosition：media_pts = timeline_us − start_us（整数微秒）', () => {
     const position = eventMediaPosition({ timeline_us: 1_200_000 }, SEGMENTS)
     expect(position.media_id).toBe('seg-a')
-    expect(position.pts_us).toBe(1_000 + 1_200_000)
+    expect(position.pts_us).toBe(1_200_000)
     const inSecondSegment = eventMediaPosition({ timeline_us: 6_000_000 }, SEGMENTS)
     expect(inSecondSegment.media_id).toBe('seg-b')
-    expect(inSecondSegment.pts_us).toBe(60_000 + 1_000_000)
+    expect(inSecondSegment.pts_us).toBe(1_000_000)
     expect(eventMediaPosition({ timeline_us: 99_000_000 }, SEGMENTS)).toBeNull()
   })
 
@@ -179,7 +179,7 @@ describe('recordingEvents 事件对齐', () => {
     expect(views.map(view => view.event.event_id)).toEqual(['e1', 'e2', 'e3'])
     expect(views[0].sourceLabel).toBe('手动')
     expect(views[1].sourceLabel).toBe('脚本')
-    expect(views[0].ptsUs).toBe(1_201_000)
+    expect(views[0].ptsUs).toBe(1_200_000)
     expect(views[2].unmapped).toBe(true)
     expect(views[2].ptsUs).toBeNull()
     expect(eventSourceLabel('keymap')).toBe('键映射')
