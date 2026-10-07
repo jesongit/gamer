@@ -31,6 +31,7 @@
       :key="stage.mediaId"
       ref="mediaVideoElement"
       :src="stage.mediaSrc"
+      :muted="props.audioMuted"
       preload="auto"
       playsinline
       tabindex="-1"

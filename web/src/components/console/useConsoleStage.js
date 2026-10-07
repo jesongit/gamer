@@ -119,6 +119,8 @@ export function useConsoleStage({
 
   let mediaBinding = null
   let pollTimer = null
+  let recordingPollSeq = 0
+  let recordingOperationSeq = 0
   let inputWarned = false
   let mediaLoadSeq = 0
   let frameOperationSeq = 0
@@ -573,6 +575,7 @@ export function useConsoleStage({
   const TERMINAL_STATES = new Set(['completed', 'interrupted', 'failed', 'cancelled'])
 
   async function pollActiveSession() {
+    const request = ++recordingPollSeq
     const id = devId()
     if (!id) {
       activeSession.value = null
@@ -580,6 +583,7 @@ export function useConsoleStage({
     }
     try {
       const rep = await api.activeRecording(id)
+      if (disposed || request !== recordingPollSeq || id !== devId()) return
       // 404（无活动会话）已在 api 层归一为 null；非会话形态的响应同样视为无会话
       activeSession.value = rep && typeof rep === 'object' && typeof rep.id === 'string' ? rep : null
     } catch { /* 轮询失败静默：按钮态保持上一次结果 */ }
@@ -599,25 +603,32 @@ export function useConsoleStage({
     if (!id) return toast?.('请先选择设备', 'warn')
     if (targetCapabilities?.()?.recording === false) return toast?.('当前目标尚不支持录制', 'warn')
     if (!canDeviceInput.value || !connected?.value) return toast?.('请先连接设备再开始录制', 'warn')
+    const operation = ++recordingOperationSeq
     recordingBusy.value = true
     try {
-      activeSession.value = await api.recordingStart(id)
+      const result = await api.recordingStart(id)
+      if (disposed || operation !== recordingOperationSeq || id !== devId()) return
+      activeSession.value = result
       toast?.('录制已开始（服务端执行，浏览器可关闭）', 'success')
     } catch (e) {
       toast?.('开始录制失败：' + e.message, 'error')
     } finally {
-      recordingBusy.value = false
+      if (operation === recordingOperationSeq) recordingBusy.value = false
     }
   }
 
   async function stopRecording() {
     const session = activeSession.value
     if (!session?.id) return
+    const id = devId(), generationAtStart = generation.value
+    const operation = ++recordingOperationSeq
     recordingBusy.value = true
     try {
       const done = await api.recordingStop(session.id)
+      if (disposed || operation !== recordingOperationSeq || id !== devId() || generationAtStart !== generation.value) return
       activeSession.value = null
       await refreshMedia()
+      if (disposed || operation !== recordingOperationSeq || id !== devId() || generationAtStart !== generation.value) return
       // 录制产出已入媒体库：切到视频来源打开新素材（segments 时间轴分段保序）
       const mediaId = done?.segments?.length ? done.segments[done.segments.length - 1].media_id : ''
       if (mediaId) {
@@ -630,7 +641,7 @@ export function useConsoleStage({
       toast?.('停止录制失败：' + e.message, 'error')
       void pollActiveSession()
     } finally {
-      recordingBusy.value = false
+      if (operation === recordingOperationSeq) recordingBusy.value = false
     }
   }
 
@@ -642,8 +653,25 @@ export function useConsoleStage({
 
   // 设备切换后旧会话态作废（录制归属设备，服务端权威；下一轮轮询恢复按钮态）
   function onDeviceChanged() {
+    recordingPollSeq += 1
+    recordingOperationSeq += 1
+    recordingBusy.value = false
     activeSession.value = null
     void pollActiveSession()
+  }
+
+  // A focused tile change is also a frame-source boundary, even live -> live.
+  // Invalidate pending captures/media requests before projecting the new target.
+  function onTargetChanged() {
+    mediaLoadSeq += 1
+    frameOperationSeq += 1
+    generation.value += 1
+    pauseMedia()
+    detachMediaVideo()
+    kind.value = 'live'
+    frameReady.value = false
+    stageFrame.value = null
+    onDeviceChanged()
   }
 
   // 项目面板联动（Phase 6）：消费 stageMediaRequest（最新一条生效）。
@@ -729,6 +757,7 @@ export function useConsoleStage({
     setRate,
     pollActiveSession,
     onDeviceChanged,
+    onTargetChanged,
     /** 指定帧裁切桥（useConsoleTemplates 注入）：kind/ready/generation 访问器 +
      *  captureFrame 指定帧冻结。generation 供调用方做过期判定。 */
     templateBridge: {

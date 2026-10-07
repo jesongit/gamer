@@ -58,7 +58,9 @@ describe('Console 视觉组件拆分静态回归', () => {
 
   it('顶部工具条只保留设备/应用/输入模式/通用功能，插件专属入口不残留', () => {
     const toolbar = template.slice(template.indexOf('class="toolbar"'), template.indexOf('<DeviceStage'))
-    expect(toolbar).toContain('v-model="store.deviceId"')
+    expect(toolbar).toContain(':value="store.deviceId"')
+    expect(toolbar).toContain('addAndSelectTarget($event.target.value)')
+    expect(toolbar).not.toContain('v-model="store.deviceId"')
     expect(toolbar).toContain('flushAndConnect')
     expect(toolbar).toContain('refreshDevices')
     expect(toolbar).toContain('<UiIcon name="more" />')
@@ -291,8 +293,10 @@ describe('Console 视觉组件拆分静态回归', () => {
   })
   it('Console 仍保留唯一页面级清理入口，未伪造真机 WebRTC 冒烟', () => {
     expect(consoleSource).toContain('onUnmounted(() => {')
-    expect(consoleSource).toContain('cleanup(true)')
-    expect(consoleSource).toContain('useWebRtcLifecycle')
+    expect(consoleSource).toContain('for (const session of Object.values(sessions)) session.close()')
+    const targetPreview = read('./components/console/TargetPreviewSession.vue')
+    expect(targetPreview).toContain('rtc.cleanup(true)')
+    expect(targetPreview).toContain('useWebRtcLifecycle')
   })
 
   it('连接成功即刷新设备列表（下拉在线/离线随建链更新，不必手动刷新）', () => {
@@ -389,7 +393,7 @@ describe('Console 视觉组件拆分静态回归', () => {
       expect(source).not.toContain('no_snapshot')
     }
     expect(layout).toContain('api.cancelRun(rid)')
-    expect(consoleImpl).toContain('api.getRun(rid)')
+    expect(read('./console/multiview-state.mjs')).toContain('api.getRun(previous)')
     expect(taskBoard).toContain('api.runTaskNow(')
     expect(consoleImpl).toContain('putTemplateBytes(existing.name, payload.dataB64, payload.pkg, expectedVersion, targetName)')
     expect(consoleImpl).not.toContain('api.replaceTemplateImage(')

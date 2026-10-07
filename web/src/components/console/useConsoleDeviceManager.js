@@ -31,6 +31,9 @@ export function useConsoleDeviceManager({
   sendControl,
   /** 服务端权威控制状态的 UI 镜像；缺省保持已有调用方契约。 */
   guardManualInput = () => true,
+  selectTarget,
+  beforeTargetRemoval = () => true,
+  onTargetRemoved,
 }) {
   const confirmDialog = useConfirmDialog()
   const beginReport = operationReporter(feedback, '', toast)
@@ -203,7 +206,8 @@ export function useConsoleDeviceManager({
       devicesData.value = list
       // 当前设备已不存在（被删）→ 选中第一台
       if (!list.some(x => x.id === store.deviceId)) {
-        store.deviceId = list[0]?.id || null
+        if (selectTarget) await selectTarget(list[0]?.id || null)
+        else store.deviceId = list[0]?.id || null
       }
       const d = current.value
       // 仅编辑模式重新载入表单（不覆盖进行中的"新增"表单）
@@ -265,7 +269,7 @@ export function useConsoleDeviceManager({
       await api.updateDevice(d.id, payload)
       await loadData()
       const nd = devices.value.find(x => x.id === d.id)
-      if (nd) loadForm(nd)
+      if (nd && store.deviceId === nd.id) loadForm(nd)
       settingsOpen.value = false
       report(wasConnected && castingChanged ? '配置已保存，投屏参数变更，自动重连中…' : '配置已保存', 'success')
     } catch (e) {
@@ -317,13 +321,13 @@ export function useConsoleDeviceManager({
       const r = await api.createDevice(payload)
       await loadData()
       // 新增成功后切换到新设备：先断开旧设备连接，避免画面/控制仍指向旧设备
-      if (connected.value || consoleRuntime.reconnectTimer.value) {
-        consoleRuntime.cancelReconnect()
-        cleanup(true)
+      if (selectTarget) await selectTarget(r.id)
+      else {
+        if (connected.value || consoleRuntime.reconnectTimer.value) { consoleRuntime.cancelReconnect(); cleanup(true) }
+        store.deviceId = r.id
       }
-      store.deviceId = r.id
       const nd = devices.value.find(x => x.id === r.id)
-      if (nd) loadForm(nd)
+      if (nd && store.deviceId === nd.id) loadForm(nd)
       settingsOpen.value = false
       toast('设备已添加，点击连接开始投屏', 'success')
     } catch (e) {
@@ -335,7 +339,7 @@ export function useConsoleDeviceManager({
     const d = current.value
     if (!d) return
     if (!await confirmDialog(`确定删除设备 ${d.name}？`, { title: '删除设备', confirmText: '删除', danger: true })) return
-    if (store.deviceId !== d.id) return
+    if (store.deviceId !== d.id || !await beforeTargetRemoval(d.id)) return
     try {
       await api.deleteDevice(d.id)
       if (connected.value || consoleRuntime.reconnectTimer.value) {
@@ -343,7 +347,8 @@ export function useConsoleDeviceManager({
         cleanup(true)
       }
       devicesData.value = devices.value.filter(x => x.id !== d.id)
-      if (devices.value.length) {
+      if (onTargetRemoved) await onTargetRemoved(d.id)
+      else if (devices.value.length) {
         store.deviceId = devices.value[0].id
         loadForm(devices.value[0])
       } else {
@@ -378,6 +383,7 @@ export function useConsoleDeviceManager({
       report('请先选择设备', 'warn')
       return
     }
+    const targetId = store.deviceId
     const key = appCacheKey()
     const cached = force ? null : appCache.get(key)
     // 5 分钟内直接用缓存，应用列表不是经常变（手动读取可强制刷新）
@@ -388,11 +394,13 @@ export function useConsoleDeviceManager({
     }
     appLoading.value = true
     try {
-      const list = await api.listApps(store.deviceId)
+      const list = await api.listApps(targetId)
+      appCache.set(key, { list: list || [], ts: Date.now() })
+      if (store.deviceId !== targetId) return
       appList.value = list || []
-      appCache.set(key, { list: appList.value, ts: Date.now() })
       if (!silent) report(`已读取 ${appList.value.length} 个应用`, 'success')
     } catch (e) {
+      if (store.deviceId !== targetId) return
       appList.value = []
       report('读取应用失败：' + e.message, 'error')
     } finally {
@@ -585,6 +593,7 @@ export function useConsoleDeviceManager({
 
   // 设备选择持久化：刷新后自动恢复选中设备（运行态/画面恢复的前提）
   watch(() => store.deviceId, id => {
+    appList.value = []
     if (id) localStorage.setItem('gb_device_id', id)
   })
 

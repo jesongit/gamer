@@ -53,10 +53,11 @@ export async function loadPackages({ force = false, api: apiOverride } = {}) {
 /** 切换当前 Package（§38：Package-aware UI 自动联动；持久化到本地）。 */
 export function selectPackage(packageId) {
   const id = packageId || null
-  if (id && !packageStore.packages.some(p => p.id === id)) return
+  if (id && !packageStore.packages.some(p => p.id === id)) return false
   packageStore.currentPackageId = id
   // 同步编辑守卫可能恢复旧包；持久化最终被接受的上下文。
   writeStoredId(packageStore.currentPackageId)
+  return packageStore.currentPackageId === id
 }
 
 /** 包列表变化后（新建/导入/删除/复制）刷新并保持/回落当前包。 */

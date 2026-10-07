@@ -401,3 +401,15 @@ describe('Console 运行参数接线', () => {
     expect(read('./api.js')).toContain('getEntrypointParams: (runnerId, entrypoint)')
   })
 })
+
+it('explicit per-target run args preserve optional false/zero and bypass cross-target suggestion storage', async () => {
+  const storage = { getItem: vi.fn(() => '{"count":99,"enabled":true}'), setItem: vi.fn() }
+  const exec = vi.fn().mockResolvedValue({ run_id: 'configured' })
+  const flow = useRunArgsFlow({ exec, storage, loadParams: async () => ({ schema: [
+    { name: 'count', type: 'integer', required: false, default: 5 },
+    { name: 'enabled', type: 'boolean', required: false, default: true },
+  ] }) })
+  await flow.begin({ id: 'pkg/file.yaml', deviceId: 'a', useConfiguredArgs: true, initialArgs: { count: 0, enabled: false } })
+  expect(exec).toHaveBeenCalledWith(expect.objectContaining({ deviceId: 'a', args: { count: 0, enabled: false } }))
+  expect(storage.getItem).not.toHaveBeenCalled(); expect(storage.setItem).not.toHaveBeenCalled()
+})

@@ -17,6 +17,7 @@ export function useWebrtcStats({
   getLastDragInputAt,
 }) {
   let statsTimer = null
+  let statsGeneration = 0
   let delaySpikes = 0
   let hadVideo = false
   let videoBytesAdvanced = false
@@ -43,9 +44,11 @@ export function useWebrtcStats({
   }
 
   function startStats() {
+    const generation = ++statsGeneration
     if (statsTimer) clearInterval(statsTimer)
     statsTimer = setInterval(async () => {
-      if (!getPeerConnection()) return
+      const peer = getPeerConnection()
+      if (!peer || generation !== statsGeneration) return
       const v = videoElement.value
       // 两级黑屏处理（静态屏 MTK 编码器对 reset 响应极慢，实测要多次才吐 IDR）：
       // 8s 仍无可解码帧 → 先补一次 reset_video 要 IDR，继续等到 16s；仍黑屏才重连。
@@ -115,7 +118,8 @@ export function useWebrtcStats({
         }
       }
       try {
-        const stats = await getPeerConnection().getStats()
+        const stats = await peer.getStats()
+        if (generation !== statsGeneration || peer !== getPeerConnection()) return
         let fpsCount = 0
         stats.forEach(s => {
           if (s.type === 'inbound-rtp' && s.kind === 'video') {
@@ -204,6 +208,7 @@ export function useWebrtcStats({
   }
 
   function stopStats() {
+    statsGeneration++
     if (statsTimer) {
       clearInterval(statsTimer)
       statsTimer = null

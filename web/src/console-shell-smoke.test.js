@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import './test-plugin-modules'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 // Console 壳挂载冒烟：phase-05 拆分后 Console.vue 只保留装配接线，
 // 这里用 stub 依赖整体挂载一次，捕获 setup 阶段的引用错误/TDZ/组合顺序问题。
@@ -37,6 +37,12 @@ vi.mock('vue-router', () => ({
 import { mount, flushPromises } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { store } from './store'
+import { multiviewWorkspace } from './console/multiview-workspace'
+beforeEach(() => {
+  multiviewWorkspace.stopPolling()
+  Object.assign(multiviewWorkspace.state, { targetIds: [], selectedTargetId: null, gridSize: 4, configs: {}, pending: {}, errors: {} })
+  store.deviceId = null
+})
 import { api } from './api'
 import Console from './views/Console.vue'
 import ConsoleVideoStage from './components/console/ConsoleVideoStage.vue'
@@ -157,11 +163,12 @@ describe('浏览器投屏的真实舞台输入接线', () => {
       close() { this.readyState = 3 }
     }
     vi.stubGlobal('WebSocket', Socket)
+    api.listDevices.mockResolvedValue([{ id: 'browser-check', name: '浏览器检查', status: 'offline' }])
     const wrapper = mount(Console, { attachTo: document.body, global: { stubs: { Teleport: true } } })
     try {
       await vi.advanceTimersByTimeAsync(2100)
-      store.deviceId = 'browser-check'
-      await nextTick()
+      await wrapper.find('select[aria-label="设备列表"]').setValue('browser-check')
+      await flushPromises()
       await wrapper.find('.tb-device-group .btn-primary').trigger('click')
       await flushPromises()
       const stamp = { target: 'browser-check', epoch: 'one', revision: 1 }

@@ -85,6 +85,15 @@ export function useConsoleWorkspacePanels({
     }
   }
 
+  function releaseRemoteGamepads() {
+    for (const [key, value] of gamepadSnapshot) {
+      const [, kind, index] = key.split(':')
+      if (kind === 'button' && (value.pressed || value.value)) keymap.handleInputEvent({ kind: 'gamepad_button', index: Number(index), pressed: false, value: 0 })
+      if (kind === 'axis' && value) keymap.handleInputEvent({ kind: 'gamepad_axis', index: Number(index), value: 0 })
+    }
+    gamepadSnapshot.clear()
+  }
+
   /** 由 Console 的 onMounted 在首刷扩展后调用（保持原有轮询启动时序）。 */
   function startExtensionPolling() {
     if (extensionUiPollTimer) return
@@ -154,6 +163,7 @@ export function useConsoleWorkspacePanels({
     extensionsReady,
     refreshServerExtensions,
     startExtensionPolling,
+    releaseRemoteGamepads,
     syncPanelFromRoute,
     openPanel,
     fallbackPanel,

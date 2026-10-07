@@ -20,12 +20,12 @@
         <div class="tb-row tb-context-row">
           <div class="tb-group tb-device-group" role="group" aria-label="设备连接">
             <span class="tb-label">设备</span>
-            <select v-model="store.deviceId" class="select mono tb-dev-select" :disabled="forceReconnecting" aria-label="设备列表" @change="onDeviceSelect">
+            <select :value="store.deviceId" class="select mono tb-dev-select" :disabled="forceReconnecting" aria-label="设备列表" @change="addAndSelectTarget($event.target.value)">
               <option :value="null">选择设备…</option>
               <option v-for="d in devices" :key="d.id" :value="d.id">{{ d.name }} · {{ d.status === 'online' ? '在线' : '离线' }}</option>
             </select>
             <button v-if="!connected" class="btn btn-sm btn-primary" :disabled="!store.deviceId || connecting || forceReconnecting" @click="flushAndConnect"><UiIcon name="connect" />{{ forceReconnecting ? '强制重连中…' : connecting ? '连接中…' : '连接' }}</button>
-            <button v-else class="btn btn-sm" @click="disconnect"><UiIcon name="disconnect" />断开</button>
+            <button v-else class="btn btn-sm" @click="closeSelectedPreview"><UiIcon name="disconnect" />关闭预览</button>
             <button class="btn btn-sm" :disabled="scanning || forceReconnecting" @click="refreshDevices" title="刷新设备" aria-label="刷新设备"><UiIcon name="refresh" />刷新</button>
             <div class="tb-more-wrap">
               <button
@@ -129,7 +129,73 @@
       </Teleport>
 
       <BrowserTargetModal v-if="browserModal" :target="browserEdit" @close="browserModal = false" @saved="browserSaved" />
-      <DeviceStage
+      <div class="multiview-toolbar" data-keyboard-ignore="true">
+        <strong>多画面</strong>
+        <button class="btn btn-sm" :class="{ active: workspace.state.gridSize === 4 }" @click="changeGridSize(4)">4 格</button>
+        <button class="btn btn-sm" :class="{ active: workspace.state.gridSize === 9 }" @click="changeGridSize(9)">9 格</button>
+        <button v-if="expandedTarget" class="btn btn-sm" @click="expandedTarget = null">返回网格</button>
+        <button class="btn btn-sm btn-primary" :disabled="batchBusy || !!expandedTarget || !visibleTargets.length" @click="startVisibleTargets">启动当前 {{ visibleTargets.length }} 格</button>
+        <button class="btn btn-sm btn-danger" :disabled="batchBusy || !!expandedTarget || !visibleTargets.length" @click="stopVisibleTargets">停止当前网格脚本</button>
+        <span v-if="expandedTarget" role="status">返回网格后可批量操作；当前可单独运行或停止此格</span>
+        <span v-if="hiddenCount" role="status">另有 {{ hiddenCount }} 个隐藏目标（{{ hiddenRunningCount }} 个运行中）</span>
+      </div>
+      <div v-if="batchResult" class="multiview-result" role="status">{{ batchResult }}</div>
+      <div v-show="workspace.state.targetIds.length || stageCtl.view.kind !== 'media'" class="multiview-grid" :class="{ expanded: !!expandedTarget, nine: workspace.state.gridSize === 9 }">
+        <section v-for="id in workspace.state.targetIds" :key="id" v-show="visibleTargets.includes(id) && (!expandedTarget || expandedTarget === id)"
+          class="target-cell" :class="{ selected: id === store.deviceId }" :aria-label="targetName(id)">
+          <div class="target-heading" data-keyboard-ignore="true">
+            <button class="target-name" :aria-pressed="id === store.deviceId" @click="selectTarget(id)">{{ id === store.deviceId ? '● ' : '' }}{{ targetName(id) }}</button>
+            <span class="target-status">{{ targetStatus(id) }}</span>
+            <button class="btn btn-sm" :disabled="!!workspace.state.pending[id]" @click="startOneTarget(id)" title="运行该目标记住的脚本">运行</button>
+            <button class="btn btn-sm" :disabled="!workspace.getRun(id)" @click="stopOneTarget(id)" title="停止该目标脚本">停止</button>
+            <button class="btn btn-sm" @click="toggleExpanded(id)" :title="expandedTarget === id ? '返回网格' : '放大画面'">{{ expandedTarget === id ? '还原' : '放大' }}</button>
+            <button class="btn btn-sm" @click="closeTargetPreview(id)" title="只关闭预览，脚本继续运行">关闭预览</button>
+            <button class="btn btn-sm" @click="removeTargetCell(id)" title="移出网格，脚本继续运行">×</button>
+          </div>
+          <div v-if="workspace.state.errors[id]" class="target-error" role="status">{{ workspace.state.errors[id] }}</div>
+          <div class="target-surface">
+      <TargetPreviewSession
+        :target-id="id" :selected="id === store.deviceId"
+        @register="registerSession" @connected="onTargetConnected" @control-message="onTargetControlMessage"
+        :bridge="deviceStageBridge"
+        :current-name="targetName(id)"
+        :show-hit="id === store.deviceId && (showHit)"
+        :hit-miss="hitMiss"
+        :hit-style="hitStyle"
+        :hit-label="hitLabel"
+        :selecting="id === store.deviceId && (selecting)"
+        :sel-style="selStyle"
+        :script-fx="id === store.deviceId ? scriptFx : emptyFx"
+        :keymap-overlay="id === store.deviceId ? keymapOverlay : []"
+        :bridge-overlays="id === store.deviceId ? bridgeOverlayView : []"
+        :fx-tap-style="fxTapStyle"
+        :fx-swipe-style="fxSwipeStyle"
+        :fx-hit-style="fxHitStyle"
+        :loupe="id === store.deviceId ? loupe : emptyLoupe"
+        :stage="id === store.deviceId ? stageCtl.view : null"
+        :selection-mode="id === store.deviceId && (picking || !!cellPick.mode || selecting)"
+        :on-mouse-down="event => { if (id === store.deviceId) onMouseDown(event) }"
+        :on-mouse-move="event => { if (id === store.deviceId) onMouseMove(event) }"
+        :on-mouse-up="event => { if (id === store.deviceId) onMouseUp(event) }"
+        :on-wheel="event => { if (id === store.deviceId) onWheel(event) }"
+        :on-video-mouse-leave="event => { if (id === store.deviceId) onVideoMouseLeave(event) }"
+        @video-mounted="onTargetVideoMounted"
+        @wrap-mounted="onTargetWrapMounted"
+        @loupe-mounted="el => { if (id === store.deviceId) onLoupeMounted(el) }"
+        @media-video-mounted="el => { if (id === store.deviceId) onStageMediaVideoMounted(el) }"
+      />
+            <button v-if="id !== store.deviceId" class="target-select-shield" :aria-label="'选择 ' + targetName(id) + '，本次点击不会操作设备'" @click.stop="selectTarget(id)"><span>点击选择</span></button>
+          </div>
+        </section>
+        <div v-for="slot in emptySlots" :key="'empty-' + slot" v-show="!expandedTarget" class="target-empty">
+          <span>添加目标到画面 {{ visibleTargets.length + slot }}</span>
+          <select class="select" aria-label="添加画面目标" value="" @change="addAndSelectTarget($event.target.value); $event.target.value = ''">
+            <option value="">选择设备或浏览器…</option>
+            <option v-for="target in availableTargets" :key="target.id" :value="target.id">{{ target.name }}</option>
+          </select>
+        </div>
+      </div>
+      <DeviceStage v-if="!workspace.state.targetIds.length" v-show="stageCtl.view.kind === 'media'"
         :browser-preview="isBrowser ? browserPreview.view : null"
         :on-browser-loaded="browserPreview.loaded"
         :bridge="deviceStageBridge"
@@ -194,6 +260,10 @@
     ></div>
     <!-- 右：动态 Extension Workspace；二次裁切弹窗仍挂在面板层级，任何页签可见。 -->
     <aside class="panel" :style="{ width: isGlobalPage ? '100%' : `${panelWidth}px` }">
+      <div v-if="!isGlobalPage" class="panel-target-context" role="status" aria-live="polite">
+        <strong :title="store.deviceId ? `${targetName(store.deviceId)} · ${store.deviceId}` : '未选择画面'">当前操作目标：{{ store.deviceId ? targetName(store.deviceId) : '未选择画面' }}</strong>
+        <span>{{ store.deviceId ? '右侧操作对应选中画面' : '请先选择画面' }}</span>
+      </div>
       <PluginWorkspace
         :navigation-target="navigationReady ? '#gamer-main-navigation' : ''"
         :package-context="packageContext"
@@ -226,7 +296,7 @@
       :open="runArgsFlow.modal.open"
       :title="runArgsFlow.modal.title"
       :desc="runArgsFlow.modal.desc"
-      submit-label="▶ 运行"
+      :submit-label="runArgsFlow.modal.submitLabel"
       :params="runArgsFlow.modal.params"
       :initial-args="runArgsFlow.modal.initialArgs"
       :suggestions="runArgsFlow.modal.suggestions"
@@ -255,14 +325,15 @@ import { createOperationFeedback, OPERATION_FEEDBACK_KEY } from '../workspace/op
 // Console 壳：模板装配 + 各拆分模块接线。逻辑按域拆分至 components/console/ 下的
 // composables（设备管理 / 模板裁切 / bridge overlay / 脚本运行 / 按键映射 /
 // 传输统计 / workspace 面板接线），本文件保留投屏连接、输入控制与跨模块 glue。
-import { computed, nextTick, onMounted, onUnmounted, provide, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, provide, reactive, ref, shallowReactive, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { store, devicesData, scriptsData, templatesData, useToast, appStartedDevices } from '../store'
+import { store, devicesData, scriptsData, templatesData, useToast, appStartedDevices, projectDeviceRun } from '../store'
 import { toDeviceCoord as mapControlCoord } from '../console/geometry'
 import { api } from '../api'
 import DeviceStage from '../workspace/DeviceStage.vue'
+import TargetPreviewSession from '../components/console/TargetPreviewSession.vue'
+import { multiviewWorkspace as workspace } from '../console/multiview-workspace'
 import BrowserTargetModal from '../components/console/BrowserTargetModal.vue'
-import { useBrowserPreview } from '../components/console/useBrowserPreview'
 import PackageContextBar from '../workspace/PackageContextBar.vue'
 import PluginWorkspace from '../workspace/PluginWorkspace.vue'
 import { createPanelRegistry, DEFAULT_PANEL_KEY } from '../workspace/registry'
@@ -273,7 +344,6 @@ import { createServerUiContributionAdapter } from '../workspace/plugin-center/ad
 import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'
 import RunConflictModal from '../components/RunConflictModal.vue'
 import { useConsoleRuntime } from '../composables/useConsoleRuntime'
-import { useWebRtcLifecycle } from '../composables/useWebRtcLifecycle'
 import { usePackageContext } from '../composables/usePackageContext'
 import { loadPackages, currentPackageId, selectPackage } from '../package-store'
 import { createKeyboardController, shouldIgnoreKeyboardTarget } from '../keyboard-control'
@@ -289,6 +359,7 @@ import { createPluginCallAdapter } from '../components/console/current-api-adapt
 
 const toast = useToast()
 const navigationReady = ref(false)
+let consoleDisposed = false
 const operationFeedback = createOperationFeedback()
 provide(OPERATION_FEEDBACK_KEY, operationFeedback)
 const route = useRoute()
@@ -296,21 +367,23 @@ const router = useRouter()
 
 // ---------- 共享基础状态（跨拆分模块的连接/画面/包名状态，由本壳统一持有） ----------
 // 侧边栏已移除：右侧面板默认 340px，宽度由分隔条手动调整。
-const superseded = ref(false)
-const manualClose = ref(false)
-const connected = ref(false)
-const connecting = ref(false)
-const errorMsg = ref('')
-const fps = ref(0)
-const delay = ref(0)
-const res = ref('—')
-const bitrate = ref('—')
-const audioMuted = ref(true)
-const consoleEl = ref(null)
-const stageFocusEl = ref(null)
-const toolbarEl = ref(null)
-const videoWrap = ref(null)
-const videoElement = ref(null)
+const sessions = shallowReactive({})
+const selectedSession = computed(() => sessions[store.deviceId] || null)
+function sessionRef(key, initial) {
+  const fallback = ref(initial)
+  return computed({ get: () => selectedSession.value?.[key]?.value ?? fallback.value,
+    set: value => { const target = selectedSession.value?.[key]; if (target) target.value = value; else fallback.value = value } })
+}
+const superseded = sessionRef('superseded', false)
+const manualClose = sessionRef('manualClose', false)
+const connected = sessionRef('connected', false)
+const connecting = sessionRef('connecting', false)
+const errorMsg = sessionRef('errorMsg', '')
+const fps = ref(0), delay = ref(0), res = sessionRef('resolution', '—'), bitrate = ref('—')
+const audioMuted = sessionRef('audioMuted', true)
+const consoleEl = ref(null), stageFocusEl = ref(null), toolbarEl = ref(null)
+const videoWrap = sessionRef('videoWrap', null)
+const videoElement = sessionRef('videoElement', null)
 const keyboardFocused = ref(false)
 const keyboardMode = ref('game')
 const keymapPressed = reactive(new Set())
@@ -396,6 +469,9 @@ const {
   cleanup,
   sendControl,
   guardManualInput: inputControl.requireManual,
+  selectTarget: id => addAndSelectTarget(id),
+  beforeTargetRemoval: id => beforeTargetChange(null),
+  onTargetRemoved: id => removeTargetCell(id),
 })
 
 // ---------- 键盘与按键映射控制器（映射层命中时消费事件，未命中才交给 keyboard） ----------
@@ -438,20 +514,35 @@ async function refreshBrowserPages() {
 async function bindBrowserPage(id) {
   if (!id) return
   if (!inputControl.requireManual()) return
-  try { await api.bindBrowser(store.deviceId, id); cleanup(true); await connect(true); await refreshBrowserPages() } catch (e) { toast(e.message, 'error') }
+  const target = store.deviceId, session = selectedSession.value
+  try {
+    await api.bindBrowser(target, id)
+    if (store.deviceId === target) releaseSelectedInput()
+    session?.close(); await session?.connect(true)
+    if (store.deviceId === target) await refreshBrowserPages()
+  } catch (e) { toast(e.message, 'error') }
 }
-const browserPreview = useBrowserPreview({
-  deviceId: () => store.deviceId, connected, connecting, errorMsg, toast,
-  onEvent: data => onControlMessage({ data: JSON.stringify(data) }),
-  onConnected() { startLogPolling(); refreshDeviceStatus(); refreshBrowserPages() },
-  onDisconnected() { stopLogPolling() },
-})
-async function browserSaved(id) { cleanup(true); browserModal.value = false; await loadData(); store.deviceId = id }
+const emptyBrowserView = reactive({ src: '', width: 0, height: 0, fps: 0 })
+const browserPreview = {
+  get view() { return selectedSession.value?.browser.view || emptyBrowserView },
+  loaded: event => selectedSession.value?.browser.loaded(event),
+  connect: () => selectedSession.value?.browser.connect(),
+  close: () => selectedSession.value?.browser.close(),
+  release: () => selectedSession.value?.browser.release(),
+  send: value => selectedSession.value?.browser.send(value) || false,
+  captureFrame: () => selectedSession.value?.browser.captureFrame(),
+}
+async function browserSaved(id) { browserModal.value = false; await loadData(); await addAndSelectTarget(id) }
 async function closeBrowserTarget() {
-  try { await api.closeBrowser(store.deviceId); cleanup(true); await refreshDeviceStatus() } catch (e) { toast(e.message, 'error') }
+  const id = store.deviceId, session = selectedSession.value
+  if (!await confirmDialog(`关闭 ${targetName(id)} 的浏览器？这会影响此目标正在运行的任务。`, { title: '关闭浏览器', confirmText: '关闭浏览器' })) return
+  try { await api.closeBrowser(id); if (store.deviceId === id) releaseSelectedInput(); session?.close(); await refreshDeviceStatus() } catch (e) { toast(e.message, 'error') }
 }
 async function removeBrowserTarget() {
-  try { await api.deleteBrowser(store.deviceId); cleanup(true); store.deviceId = null; await loadData() } catch (e) { toast(e.message, 'error') }
+  const id = store.deviceId
+  if (!beforeTargetChange(null) || !await confirmDialog(`删除浏览器目标 ${targetName(id)}？`, { title: '删除浏览器目标', confirmText: '删除' })) return
+  if (!beforeTargetChange(null)) return
+  try { await api.deleteBrowser(id); await removeTargetCell(id); await loadData() } catch (e) { toast(e.message, 'error') }
 }
 const stageCtl = useConsoleStage({
   toast,
@@ -540,9 +631,10 @@ const {
   clearCallParamsCache, editorMatchThreshold, onTemplateRenamed,
   startRunStatusPoll, restoreRunState, onBeforeUnload,
   refreshScripts,
-  scriptPanel, functionsPanel, beforePackageChange,
+  scriptPanel, functionsPanel, beforePackageChange, beforeTargetChange, projectTargetConfig,
 } = useConsoleScriptRunner({
   toast,
+  multiviewWorkspace: workspace,
   packageId: currentPackageId,
   restorePackage: selectPackage,
   consoleRuntime,
@@ -641,7 +733,7 @@ const serverUiAdapter = createServerUiContributionAdapter(panelRegistry, {
   load: () => api.listExtensions(),
 })
 const {
-  refreshServerExtensions, startExtensionPolling, openPanel, fallbackPanel,
+  refreshServerExtensions, startExtensionPolling, releaseRemoteGamepads, openPanel, fallbackPanel,
 } = useConsoleWorkspacePanels({
   route,
   router,
@@ -706,118 +798,20 @@ provide(PANEL_REGISTRY_KEY, panelRegistry)
 provide(WORKSPACE_CONTEXT_KEY, workspaceContext)
 
 // ---------- WebRTC 连接 ----------
-const webrtcLifecycle = useWebRtcLifecycle({
-  // 包一层 connectDevice：捕获服务端 app_started（建会话探测/会话内启动过应用），
-  // 手动连接与自动重连两条路径都能及时把设备记入「已启动」，抑制未启动提示
-  api: {
-    ...api,
-    connectDevice: async (id) => {
-      const rep = await api.connectDevice(id)
-      if (rep?.app_started && id) appStartedDevices.add(id)
-      return rep
-    },
-  },
-  deviceIdRef: computed(() => store.deviceId),
-  connectedRef: connected,
-  connectingRef: connecting,
-  errorMsgRef: errorMsg,
-  supersededRef: superseded,
-  manualCloseRef: manualClose,
-  toast,
-  onConnectStart() {
-    errorMsg.value = ''
-    connecting.value = true
-  },
-  onConnectSuccess() {
-    startStats()
-    startLogPolling()
-    // 连接成功（手动/自动重连/接管同路径）即拉一次设备列表：下拉里的
-    // 「在线/离线」标签随建链更新，不再停留「离线」等用户手动刷新
-    refreshDeviceStatus()
-    // 后台预取已装应用（§27 读取应用）：工具条「当前应用」徽章显示软件名、
-    // 设备设置弹窗的包名候选随连结合；静默失败不打扰投屏（5 分钟缓存）
-    loadApps({ silent: true })
-  },
-  onDisconnect() {
-    keymap.releaseAll()
-    syncKeymapPressed()
-    keyboard.releaseAll()
-    keyboardFocused.value = false
-    stopStats()
-    stopLogPolling()
-    connected.value = false
-    resetWatchdogs()
-    if (videoElement.value) videoElement.value.srcObject = null
-    hideLoupe()
-  },
-  onChannelOpen() {
-    connected.value = true
-    connecting.value = false
-    controlChannel = webrtcLifecycle.getControlChannel()
-    keyboardChannelWarned = false
-    keyboardFocused.value = document.activeElement === stageFocusEl.value
-    videoConnectTs = Date.now()
-    resetBlackWatchdog()
-    // 该设备本会话已启动过应用（手动/脚本拉起/脚本仍在运行）→ 重连不再弹提示
-    appHintDismissed.value = store.running
-      || (store.deviceId ? appStartedDevices.has(store.deviceId) : false)
-    sendControl({ type: 'audio', on: !audioMuted.value })
-    operationFeedback.setCore({ text: '投屏已连接', tone: 'success' })
-  },
-  onChannelClose() {
-    keymap.releaseAll()
-    syncKeymapPressed()
-    keyboard.releaseAll()
-    connected.value = false
-    controlChannel = null
-  },
-  onRemoteTrack({ event, pc: currentPc }) {
-    if (event.target !== currentPc) return
-    mediaStream = event.streams[0] || new MediaStream([event.track])
-    if (event.track.kind === 'audio') event.track.enabled = !audioMuted.value
-    if (videoElement.value) {
-      videoElement.value.srcObject = mediaStream
-      videoElement.value.play().catch(() => {})
-    }
-    const v = event.track
-    v.addEventListener('unmute', () => {
-      setTimeout(() => {
-        const w = (videoElement.value?.naturalWidth || videoElement.value?.videoWidth) || 0
-        const h = (videoElement.value?.naturalHeight || videoElement.value?.videoHeight) || 0
-        if (w) res.value = `${w}x${h}`
-      }, 200)
-    })
-  },
-  onControlMessage(e) {
-    onControlMessage(e)
-  },
-  // taken_over 处理收敛在 useWebRtcLifecycle 内部（superseded 置位 + toast +
-  // 错误栏持久文案「已被其它页面接管」），此处不再重复挂 onSignalMessage——
-  // 旧的双份 toast/置位会让提示重复且不落持久横幅
-  onPeerDisposed() {
-    controlChannel = null
-    mediaStream = null
-  },
-})
-
-function scheduleReconnect() {
-  webrtcLifecycle.scheduleReconnect({ superseded })
+const webrtcLifecycle = {
+  getPeerConnection: () => selectedSession.value?.rtc.getPeerConnection(),
+  getControlChannel: () => selectedSession.value?.rtc.getControlChannel(),
+  scheduleReconnect: options => selectedSession.value?.rtc.scheduleReconnect(options),
+  cleanup: manual => selectedSession.value?.rtc.cleanup(manual),
 }
-
+function scheduleReconnect() { webrtcLifecycle.scheduleReconnect({ superseded }) }
 async function connect(manual = false) {
-  if (isBrowser.value) { await browserPreview.connect(); return }
-  await webrtcLifecycle.connect(manual)
+  await nextTick()
+  if (consoleDisposed) return
+  await selectedSession.value?.connect(manual)
 }
-
-/** 释放 WebRTC 资源；manual=true 表示主动关闭（不触发自动重连） */
-function cleanup(manual = false) {
-  browserPreview.close()
-  keymap.releaseAll()
-  syncKeymapPressed()
-  keyboard.releaseAll()
-  webrtcLifecycle.cleanup(manual)
-  consoleRuntime.cleanup()
-}
+/** Close only the current viewer, never the backend target or its run. */
+function cleanup() { releaseSelectedInput(); selectedSession.value?.close(); consoleRuntime.cleanup() }
 
 function handleVideoSilence() {
   if (manualClose.value || !connected.value || !store.deviceId) return
@@ -834,10 +828,18 @@ const REST_FALLBACK_CONTROL_TYPES = new Set([
 
 /** 键盘是有状态的 DOWN/UP 流，只允许走 DataChannel；不能复用 sendControl 的
  * REST fallback，否则通道断开时一次 keydown 会被错误降级为不兼容的 press。 */
+let releasingInput = false
+function isReleaseMessage(obj) {
+  return (obj.type === 'touch' && obj.action === 'up')
+    || (obj.type === 'key' && obj.action === 1)
+    || (obj.type === 'input_event' && (['key_up', 'mouse_up'].includes(obj.event?.type)
+      || (obj.event?.type === 'gamepad_button' && !obj.event.pressed && !obj.event.value)
+      || (obj.event?.type === 'gamepad_axis' && !obj.event.value)))
+}
 function sendKeyboardControl(obj) {
   if (!inputControl.guardDeviceInput(obj)) return false
   // 安全红线：视频来源（媒体模式）为离线只读，舞台产生的键盘/按键映射输入一律拒绝
-  if (!stageCtl.guardDeviceInput(obj)) return false
+  if (!(releasingInput && isReleaseMessage(obj)) && !stageCtl.guardDeviceInput(obj)) return false
   if (isBrowser.value) {
     if (obj.type === 'touch') {
       if (obj.pointer_id !== 0) { toast('当前目标不支持持续触控映射', 'warn'); return false }
@@ -847,7 +849,7 @@ function sendKeyboardControl(obj) {
     if (obj.type === 'input_event' || obj.type === 'text' || obj.type === 'tap') return browserPreview.send(obj)
     toast('此操作不适用于浏览器目标', 'warn'); return false
   }
-  const channel = webrtcLifecycle.getControlChannel() || controlChannel
+  const channel = webrtcLifecycle.getControlChannel()
   if (channel && channel.readyState === 'open') {
     channel.send(JSON.stringify(obj))
     keyboardChannelWarned = false
@@ -864,7 +866,7 @@ function sendControl(obj) {
   if (!inputControl.guardDeviceInput(obj)) return false
   // 安全红线：视频来源（媒体模式）为离线只读——鼠标触控/滚轮/按键/启停应用等
   // 舞台产生的设备输入在统一输入路由处拒绝（含 REST fallback 之前的全部路径）
-  if (!stageCtl.guardDeviceInput(obj)) return false
+  if (!(releasingInput && isReleaseMessage(obj)) && !stageCtl.guardDeviceInput(obj)) return false
   if (isBrowser.value) {
     if (obj.type === 'touch') return browserPreview.send({ type: 'pointer', action: obj.action, x: obj.x, y: obj.y })
     if (obj.type === 'scroll') return browserPreview.send({ type: 'scroll', x: obj.x, y: obj.y, delta_x: obj.scroll_x || 0, delta_y: obj.scroll_y || 0 })
@@ -876,7 +878,7 @@ function sendControl(obj) {
   if ((obj.type === 'touch' && obj.action === 'move') || obj.type === 'scroll' || obj.type === 'swipe') {
     lastDragInputAt = Date.now()
   }
-  const channel = webrtcLifecycle.getControlChannel() || controlChannel
+  const channel = webrtcLifecycle.getControlChannel()
   if (channel && channel.readyState === 'open') {
     channel.send(JSON.stringify(obj))
     return true
@@ -911,10 +913,6 @@ function sendControl(obj) {
 function sendTouchPhase(action, pointerId, x, y) {
   return sendControl(buildTouchPhase(action, pointerId, x, y))
 }
-
-// let controlChannel/mediaStream：与 WebRTC 生命周期同寿（由上方回调赋值）。
-let controlChannel = null
-let mediaStream = null
 
 // ---------- 键盘焦点区域与工具条 ----------
 
@@ -978,7 +976,7 @@ function toggleKeyboardMode() {
  *  与 onChannelOpen 建链时的 audio 消息同词表 */
 function toggleAudio() {
   audioMuted.value = !audioMuted.value
-  sendControl({ type: 'audio', on: !audioMuted.value })
+  selectedSession.value?.setMuted(audioMuted.value)
   operationFeedback.setCore({ text: audioMuted.value ? '已静音' : '已取消静音' })
 }
 
@@ -991,6 +989,7 @@ watch(keyboardMode, mode => {
 
 function onWindowBlur() {
   if (isBrowser.value) browserPreview.release()
+  releaseRemoteGamepads()
   keymap.releaseAll()
   syncKeymapPressed()
   keyboard.releaseAll()
@@ -1277,20 +1276,8 @@ watch(inputControl.manualAllowed, allowed => {
 // 切换实时/视频时：绝不自动恢复按键按下状态，清指针（拖拽/待发 move）、键盘焦点
 // （keymap/keyboard 残留按下全部释放）、框选进行态与旧来源的叠加层标记
 watch(() => stageCtl.view.kind, () => {
-  if (isBrowser.value) browserPreview.release()
-  cancelPendingMove()
-  touchState.active = false
-  keymap.releaseAll()
-  syncKeymapPressed()
-  keyboard.releaseAll()
-  keyboardFocused.value = false
-  picking.value = false
-  selecting.value = false
-  hideLoupe()
-  scriptFx.tap.show = false
-  scriptFx.swipe.show = false
-  scriptFx.hit.show = false
-})
+  releaseSelectedInput()
+}, { flush: 'sync' })
 
 function fullscreen() {
   const target = stageCtl.view.kind === 'media' ? videoWrap.value?.parentElement : videoWrap.value
@@ -1299,6 +1286,134 @@ function fullscreen() {
 
 function onVideoMounted(el) { videoElement.value = el }
 function onVideoWrapMounted(el) { videoWrap.value = el }
+
+// ---------- Multi-target layout and atomic focus projection ----------
+const visibleTargets = computed(() => workspace.visibleTargetIds)
+const availableTargets = computed(() => devices.value.filter(target => !workspace.state.targetIds.includes(target.id)))
+const emptySlots = computed(() => Math.max(0, workspace.state.gridSize - visibleTargets.value.length))
+const hiddenCount = computed(() => workspace.state.targetIds.length - visibleTargets.value.length)
+const hiddenRunningCount = computed(() => workspace.state.targetIds.filter(id => !visibleTargets.value.includes(id) && workspace.getRun(id)).length)
+const expandedTarget = ref(null), batchBusy = ref(false), batchResult = ref('')
+const emptyFx = Object.freeze({ tap: { show: false }, swipe: { show: false }, hit: { show: false } })
+const emptyLoupe = Object.freeze({ show: false })
+function targetName(id) { return devices.value.find(device => device.id === id)?.name || id }
+function targetStatus(id) {
+  const session = sessions[id]
+  const run = workspace.getRun(id)
+  const preview = session?.connecting.value ? '连接中' : session?.connected.value ? '预览中' : '预览关闭'
+  return `${preview} · ${run ? (run.status === 'paused' ? '脚本已暂停' : '脚本运行中') : '空闲'}`
+}
+function registerSession(id, session) { if (session) sessions[id] = session; else delete sessions[id] }
+function onTargetVideoMounted(id, el) { if (sessions[id]) sessions[id].videoElement.value = el }
+function onTargetWrapMounted(id, el) { if (sessions[id]) sessions[id].videoWrap.value = el }
+function onTargetControlMessage(id, event) { if (id === store.deviceId) onControlMessage(event) }
+function onTargetConnected(id) {
+  refreshDeviceStatus()
+  if (id !== store.deviceId) return
+  startStats(); startLogPolling()
+  if (id.startsWith('browser-')) refreshBrowserPages()
+  else loadApps({ silent: true })
+}
+function releaseSelectedInput() {
+  releasingInput = true
+  try {
+  cancelPendingMove()
+  if (touchState.active) sendTouchPhase('up', 0, touchState.lastX, touchState.lastY)
+  touchState.active = false
+  gestureOrigin = null
+  browserPreview.release()
+  releaseRemoteGamepads()
+  keymap.releaseAll(); syncKeymapPressed(); keyboard.releaseAll()
+  keyboardFocused.value = false
+  selectedSession.value?.setMuted(true)
+  picking.value = false; selecting.value = false
+  cancelCellPick(); cancelBridgeRegionSelect(); cancelCrop(); hideLoupe()
+  scriptFx.tap.show = false; scriptFx.swipe.show = false; scriptFx.hit.show = false
+  } finally { releasingInput = false }
+}
+const focusOptions = {
+  beforeChange: id => {
+    if (saving.value || configApplying.value || forceReconnecting.value || appSelectSaving.value) { toast('当前目标操作尚未结束，请稍后切换', 'warn'); return false }
+    return beforeTargetChange(id)
+  },
+  project: id => {
+    // Refusal leaves both the old visual focus and sidebar untouched.
+    releaseSelectedInput()
+    if (!projectTargetConfig(id)) return false
+    stageCtl.onTargetChanged()
+    stopStats(); resetWatchdogs(); resetBlackWatchdog(); stopLogPolling()
+    videoConnectTs = Date.now(); lastDragInputAt = 0
+    store.deviceId = id
+    projectDeviceRun(id)
+    onLoupeMounted(sessions[id]?.loupeElement.value || null)
+    const device = devices.value.find(item => item.id === id)
+    if (device) loadForm(device)
+    else mode.value = 'edit'
+    fps.value = 0; delay.value = 0; bitrate.value = '—'
+    if (sessions[id]?.connected.value) onTargetConnected(id)
+    return true
+  },
+}
+async function selectTarget(id) {
+  const ok = await workspace.selectTarget(id, focusOptions)
+  if (ok && expandedTarget.value) expandedTarget.value = id
+  return ok
+}
+async function addAndSelectTarget(id) {
+  if (!id) return selectTarget(null)
+  const added = !workspace.state.targetIds.includes(id)
+  if (added && !workspace.addTarget(id)) { toast('最多同时保留 9 个目标，请先移出一个画面', 'warn'); return }
+  if (!workspace.visibleTargetIds.includes(id)) {
+    await workspace.setGridSize(9, focusOptions)
+    toast('已切换到 9 格，显示新增目标', 'info')
+  }
+  await selectTarget(id)
+}
+async function changeGridSize(size) {
+  if (await workspace.setGridSize(size, focusOptions)) expandedTarget.value = null
+}
+async function toggleExpanded(id) {
+  if (expandedTarget.value === id) { expandedTarget.value = null; return }
+  if (await selectTarget(id)) expandedTarget.value = id
+}
+function closeTargetPreview(id) {
+  if (id === store.deviceId) releaseSelectedInput()
+  sessions[id]?.close()
+}
+function closeSelectedPreview() { closeTargetPreview(store.deviceId) }
+async function removeTargetCell(id) {
+  const running = !!workspace.getRun(id)
+  if (!await workspace.removeTarget(id, focusOptions)) return
+  if (expandedTarget.value === id) expandedTarget.value = null
+  if (running) toast(`${targetName(id)} 的脚本仍在后台运行，可重新添加此目标查看或停止`, 'info')
+}
+function reportBatch(results) {
+  const labels = { started: '已启动', stopping: '正在停止', skipped: '跳过', error: '失败' }
+  batchResult.value = results.length ? results.map(result => `${targetName(result.targetId)}：${labels[result.status] || result.status}${result.reason ? '（' + result.reason + '）' : ''}`).join('；') : '当前网格没有运行中的脚本'
+}
+async function startOneTarget(id) { reportBatch([await workspace.startTarget(id)]) }
+async function startVisibleTargets() {
+  if (expandedTarget.value) return
+  batchBusy.value = true
+  try { reportBatch(await workspace.startVisible()) } finally { batchBusy.value = false }
+}
+async function confirmStops(snapshot, { batch = false } = {}) {
+  if (!snapshot.length) { reportBatch([]); return }
+  const names = snapshot.map(item => targetName(item.targetId)).join('、')
+  if (!await confirmDialog(`停止 ${names} 的当前脚本？预览和应用将保留。`, { title: '停止脚本', confirmText: '停止脚本' })) return
+  if (batch && expandedTarget.value) { toast('请先返回网格，再批量停止脚本', 'info'); return }
+  batchBusy.value = true
+  try { reportBatch(await workspace.stopCaptured(snapshot)) } finally { batchBusy.value = false }
+}
+async function stopVisibleTargets() {
+  if (expandedTarget.value) return
+  await confirmStops(workspace.captureVisibleStops(), { batch: true })
+}
+async function stopOneTarget(id) { await confirmStops(workspace.captureVisibleStops().filter(item => item.targetId === id)) }
+watch(connected, value => {
+  if (value) { startStats(); startLogPolling(); videoConnectTs = Date.now(); resetBlackWatchdog() }
+  else { stopStats(); stopLogPolling(); resetWatchdogs() }
+})
 
 // ---------- 生命周期 ----------
 
@@ -1322,13 +1437,34 @@ onMounted(async () => {
   // 首次进入仅选中第一台设备，等待用户点连接（不主动建会话，尊重空闲低功耗）
   const spaPreselected = !!store.deviceId
   await loadData()
-  loadPackages().catch(() => {})
+  if (consoleDisposed) return
+  await loadPackages().catch(() => {})
+  if (consoleDisposed) return
   await refreshServerExtensions()
+  if (consoleDisposed) return
   startExtensionPolling()
   if (!store.deviceId) {
     const saved = localStorage.getItem('gb_device_id')
     store.deviceId = (saved && devices.value.find(d => d.id === saved)) ? saved : (devices.value[0]?.id || null)
   }
+  const legacyId = store.deviceId
+  if (!workspace.state.targetIds.length && legacyId) {
+    workspace.addTarget(legacyId)
+    workspace.updateConfig(legacyId, { packageId: currentPackageId.value || '', scriptId: '' })
+  }
+  const initialTarget = workspace.state.selectedTargetId || workspace.visibleTargetIds[0] || null
+  // Restored layout may already mark this target selected; explicitly project once.
+  if (initialTarget && projectTargetConfig(initialTarget)) {
+    store.deviceId = initialTarget
+    projectDeviceRun(initialTarget)
+    workspace.state.selectedTargetId = initialTarget
+  } else if (initialTarget) {
+    // Missing package still allows monitoring; sidebar stays empty until reconfigured.
+    store.deviceId = initialTarget
+  }
+  workspace.startPolling()
+  await nextTick()
+  if (consoleDisposed) return
   const d = current.value
   if (d) loadForm(d)
   else { mode.value = 'edit'; store.deviceId = null }
@@ -1342,9 +1478,13 @@ onMounted(async () => {
   // 当前契约为 active:false 或 active:true + 嵌套完整 RunRecord，含来源标签；
   // 恢复运行状态/选中脚本/状态轮询与日志（不依赖投屏连接是否恢复成功）
   if (store.deviceId) await restoreRunState()
+  if (consoleDisposed) return
   // 画面恢复：SPA 内返回（store 存活）或刷新后脚本运行中/设备会话在线（此前正在
   // 投屏）→ 自动连接；设备空闲离线则保持首次进入行为；遇 conflict 不抢（connect 内处理）
   if (store.deviceId && (spaPreselected || store.running || current.value?.status === 'online' || sessionStorage.getItem('gamer-update-device') === store.deviceId)) connect(false)
+  for (const id of workspace.state.targetIds) {
+    if (id !== store.deviceId && devices.value.find(device => device.id === id)?.status === 'online') sessions[id]?.connect(false)
+  }
   sessionStorage.removeItem('gamer-update-device')
   // 其他页面已启动脚本时，本页接管状态轮询（脚本结束后复位运行状态）
   if (store.running && store.runId) startRunStatusPoll()
@@ -1353,6 +1493,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  consoleDisposed = true
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('beforeunload', onBeforeUnload)
   window.removeEventListener('gamer-before-update-reload', onBeforeUnload)
@@ -1368,11 +1509,41 @@ onUnmounted(() => {
   if (fxTapTimer) { clearTimeout(fxTapTimer); fxTapTimer = null }
   if (fxSwipeTimer) { clearTimeout(fxSwipeTimer); fxSwipeTimer = null }
   if (fxHitTimer) { clearTimeout(fxHitTimer); fxHitTimer = null }
-  cleanup(true)
+  for (const session of Object.values(sessions)) session.close()
+  workspace.stopPolling()
 })
 </script>
 
 <style scoped>
+.panel-target-context { flex:none; display:flex; flex-direction:column; gap:3px; padding:10px 12px; border-bottom:1px solid var(--border); border-left:3px solid var(--accent); background:var(--bg-1); }
+.panel-target-context strong { color:var(--accent); font-size:13px; line-height:1.5; overflow-wrap:anywhere; }
+.panel-target-context span { color:var(--text-2); font-size:12px; line-height:1.4; }
+
+.multiview-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding:7px 9px; border-bottom:1px solid var(--border); font-size:12px; }
+.multiview-toolbar strong { margin-right:4px; }
+.multiview-toolbar span { color:var(--text-2); }
+.multiview-result { flex:none; max-height:70px; overflow:auto; padding:6px 10px; font-size:12px; color:var(--text-1); background:var(--bg-2); }
+.multiview-grid { flex:1; min-height:0; overflow:auto; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); grid-auto-rows:minmax(180px,1fr); gap:7px; padding:7px; }
+.multiview-grid.nine { grid-template-columns:repeat(3,minmax(0,1fr)); grid-auto-rows:minmax(160px,1fr); }
+.multiview-grid.expanded { grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(0,1fr); }
+.target-cell { min-width:0; min-height:0; display:flex; flex-direction:column; border:2px solid var(--border); border-radius:7px; overflow:hidden; background:var(--bg-1); }
+.target-cell.selected { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
+.target-heading { display:flex; align-items:center; flex-wrap:wrap; gap:4px; padding:5px; border-bottom:1px solid var(--border); }
+.target-heading .btn { padding:2px 5px; font-size:11px; }
+.target-name { flex:1; min-width:60px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-0); border:0; background:none; text-align:left; cursor:pointer; }
+.target-cell.selected .target-name { color:var(--accent); }
+.target-status { font-size:11px; color:var(--text-2); }
+.target-error { padding:4px 7px; color:var(--danger); font-size:11px; }
+.target-surface { position:relative; display:flex; flex:1; min-height:110px; min-width:0; }
+.target-surface :deep(.video-wrap) { min-height:110px; }
+.target-surface :deep(.player-stage) { min-width:0; width:100%; }
+.target-select-shield { position:absolute; inset:0; z-index:9; border:0; background:transparent; color:white; cursor:pointer; }
+.target-select-shield span { position:absolute; bottom:8px; left:50%; transform:translateX(-50%); background:#0009; border-radius:4px; padding:4px 8px; font-size:11px; }
+.target-empty { min-height:140px; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:10px; padding:12px; border:1px dashed var(--border); color:var(--text-2); font-size:12px; }
+.target-empty .select { max-width:100%; }
+@media(max-width:1100px) { .multiview-grid.nine { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media(max-width:600px) { .multiview-grid,.multiview-grid.nine { grid-template-columns:minmax(0,1fr); grid-auto-rows:minmax(230px,1fr); } }
+
 .tb-operation-row.tb-browser-row { flex-wrap: nowrap; }
 .tb-browser-group { flex: 1; }
 .tb-page-select { flex: 1; width: 100px; min-width: 50px; max-width: 260px; font-size: 13px; text-overflow: ellipsis; }

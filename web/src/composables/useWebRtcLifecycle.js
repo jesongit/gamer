@@ -1,5 +1,5 @@
 import { useConfirmDialog } from '../components/ui/useConfirmDialog'
-import { ref } from 'vue'
+import { getCurrentScope, onScopeDispose, ref, shallowRef, watch } from 'vue'
 
 function makeNoop() {}
 
@@ -33,289 +33,306 @@ export function useWebRtcLifecycle({
   onSignalClose = makeNoop,
 } = {}) {
   const confirmDialog = useConfirmDialog()
-  const reconnectTimer = ref(null)
+  const reconnectTimer = shallowRef(null)
   const reconnectAttempts = ref(0)
 
-  let ws = null
-  let pc = null
-  let controlChannel = null
-  let connectLock = false
-  let forceTakeover = false
+  // Each connect owns an immutable target and its own resources. Neither a late
+  // promise nor a queued browser callback may act on a replacement connection.
+  const CANCELLED = Symbol('cancelled connection')
+  let generation = 0
+  let active = null
+  let connectLock = null
   let closedByCleanup = false
 
+  const current = attempt => active === attempt && attempt.generation === generation
+    && attempt.deviceId === deviceIdRef?.value
+  const live = (attempt, link) => current(attempt) && attempt.link === link && !link.disposed
+  const details = (attempt, extra = {}) => ({ deviceId: attempt.deviceId, ...extra })
+
   function cancelReconnect() {
-    if (reconnectTimer.value) {
+    if (reconnectTimer.value !== null) {
       clearTimeout(reconnectTimer.value)
       reconnectTimer.value = null
     }
   }
 
-  function scheduleReconnect({ superseded } = {}) {
-    if (reconnectTimer.value || !deviceIdRef?.value) return false
+  function scheduleReconnect({ superseded = supersededRef } = {}) {
+    if (closedByCleanup || reconnectTimer.value !== null || !deviceIdRef?.value) return false
     if (superseded?.value) {
       if (errorMsgRef) errorMsgRef.value = TAKEN_OVER_MSG
       return false
     }
+    const target = deviceIdRef.value
+    const epoch = generation
     const delay = [3000, 6000, 12000][Math.min(reconnectAttempts.value, 2)]
-    const attemptNo = reconnectAttempts.value + 1
-    reconnectAttempts.value = attemptNo
-    // 长时间停机（服务端重建等）会连续重试：仅前两次弹 toast，之后静默重试
-    // 并把状态写进错误栏，避免每 12s 一条提示刷屏
-    if (attemptNo <= 2) {
-      toast(`连接已断开，${delay / 1000} 秒后自动重连…`, 'warn')
-    } else if (errorMsgRef) {
-      errorMsgRef.value = `连接已断开，自动重连中…（第 ${attemptNo} 次）`
-    }
-    reconnectTimer.value = setTimeout(() => {
+    const attemptNo = ++reconnectAttempts.value
+    if (attemptNo <= 2) toast(`连接已断开，${delay / 1000} 秒后自动重连…`, 'warn')
+    else if (errorMsgRef) errorMsgRef.value = `连接已断开，自动重连中…（第 ${attemptNo} 次）`
+    const timer = setTimeout(() => {
+      if (reconnectTimer.value !== timer) return
       reconnectTimer.value = null
+      if (epoch !== generation || target !== deviceIdRef.value || closedByCleanup) return
       if (superseded?.value) {
         if (errorMsgRef) errorMsgRef.value = TAKEN_OVER_MSG
         return
       }
       connect(false)
     }, delay)
+    reconnectTimer.value = timer
     return true
   }
 
-  function stopPeer({ manual = false, preserveReconnect = false } = {}) {
-    const currentPc = pc
-    const currentWs = ws
-    pc = null
-    ws = null
-    controlChannel = null
-    if (!preserveReconnect) cancelReconnect()
-    if (currentPc) {
-      manualCloseRef.value = manual
-      try { currentPc.close() } catch (e) {}
-      onPeerDisposed({ pc: currentPc, manual })
+  function disposeLink(attempt, manual = false) {
+    const link = attempt?.link
+    if (!link || link.disposed) return
+    link.disposed = true
+    link.cancel()
+    for (const cancel of [...link.pending]) cancel()
+    for (const channel of link.channels) {
+      channel.onopen = channel.onclose = channel.onmessage = null
+      try { channel.close() } catch {}
     }
-    if (currentWs) {
-      try { currentWs.close() } catch (e) {}
+    if (link.pc) {
+      link.pc.ontrack = link.pc.ondatachannel = null
+      try { link.pc.close() } catch {}
+      onPeerDisposed(details(attempt, { pc: link.pc, manual }))
     }
+    if (link.ws) {
+      link.ws.onopen = link.ws.onmessage = link.ws.onerror = link.ws.onclose = null
+      try { link.ws.close() } catch {}
+    }
+    link.controlChannel = null
   }
 
   function cleanup(manual = false) {
-    confirmDialog.cancel()
+    const previous = active
+    const hadWork = !!previous || reconnectTimer.value !== null
+    active = null
+    connectLock = null
+    generation++
     closedByCleanup = true
+    confirmDialog.cancel()
     cancelReconnect()
     reconnectAttempts.value = 0
-    stopPeer({ manual, preserveReconnect: true })
+    previous?.cancel()
+    disposeLink(previous, manual)
     connectedRef.value = false
     connectingRef.value = false
-    if (!manual) manualCloseRef.value = false
-    onDisconnect({ manual })
+    manualCloseRef.value = manual
+    if (hadWork) onDisconnect({ manual, deviceId: previous?.deviceId })
   }
 
-  function bindControlChannel(channel) {
-    if (!channel) return null
-    controlChannel = channel
+  // Cancel API/SDP waits immediately as well as ignoring their eventual result.
+  async function waitFor(attempt, link, promise) {
+    const result = await Promise.race([promise, attempt.cancelled, link.cancelled])
+    if (result === CANCELLED || !live(attempt, link)) throw CANCELLED
+    return result
+  }
+
+  function waitEvent(attempt, link, setup, timeout, message) {
+    return waitFor(attempt, link, new Promise((resolve, reject) => {
+      let settled = false
+      let dispose = makeNoop
+      let timer
+      const finish = (value, error = false) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        link.pending.delete(cancel)
+        dispose()
+        if (error) reject(value)
+        else resolve(value)
+      }
+      const cancel = () => finish(CANCELLED)
+      link.pending.add(cancel)
+      timer = setTimeout(() => finish(new Error(message), true), timeout)
+      dispose = setup(value => finish(value), error => finish(error, true)) || makeNoop
+      if (settled) dispose()
+    }))
+  }
+
+  function bindControlChannel(attempt, link, channel) {
+    if (!channel) return
+    link.channels.add(channel)
+    link.controlChannel = channel
+    const valid = () => live(attempt, link) && link.controlChannel === channel
     channel.onopen = () => {
-      onChannelOpen({ controlChannel: channel })
+      if (!valid()) return
       reconnectAttempts.value = 0
+      onChannelOpen(details(attempt, { controlChannel: channel }))
     }
     channel.onclose = () => {
-      onChannelClose({ controlChannel: channel })
-      if (!manualCloseRef.value && !supersededRef.value && !closedByCleanup) {
-        scheduleReconnect({ superseded: supersededRef })
-      }
-      manualCloseRef.value = false
+      if (!valid()) return
+      connectedRef.value = false
+      onChannelClose(details(attempt, { controlChannel: channel }))
+      if (!valid()) return
+      connectingRef.value = false
+      disposeLink(attempt, false)
+      if (current(attempt) && !manualCloseRef.value && !supersededRef.value) scheduleReconnect()
     }
-    return channel
+    channel.onmessage = event => { if (valid()) onControlMessage(event) }
   }
 
-  async function doConnect() {
-    if (!deviceIdRef?.value) return toast('请先选择设备（设备页签下拉框）', 'error')
-    if (pc) stopPeer({ manual: true })
+  async function doConnect(attempt, force = false) {
+    const link = { pc: null, ws: null, controlChannel: null, channels: new Set(), pending: new Set(), disposed: false }
+    link.cancelled = new Promise(resolve => { link.cancel = () => resolve(CANCELLED) })
+    attempt.link = link
+    connectingRef.value = true
+    manualCloseRef.value = false
     supersededRef.value = false
     errorMsgRef.value = ''
-    connectingRef.value = true
-    onConnectStart()
-
+    onConnectStart(details(attempt))
+    let deviceConnected = false
     try {
-      await api.connectDevice(deviceIdRef.value)
-    } catch (e) {
-      connectingRef.value = false
-      errorMsgRef.value = '设备连接失败：' + e.message
-      onConnectFinish({ ok: false, error: e })
-      return false
-    }
-
-    try {
+      if (!live(attempt, link)) throw CANCELLED
+      await waitFor(attempt, link, api.connectDevice(attempt.deviceId))
+      deviceConnected = true
       const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-      ws = new WebSocket(`${wsProto}//${location.host}/ws/device/${deviceIdRef.value}`)
-      await new Promise((resolve, reject) => {
+      const ws = link.ws = new WebSocket(`${wsProto}//${location.host}/ws/device/${attempt.deviceId}`)
+      await waitEvent(attempt, link, (resolve, reject) => {
         ws.onopen = () => {
-          onSignalOpen({ ws })
+          if (!live(attempt, link)) return
+          onSignalOpen(details(attempt, { ws }))
           resolve()
         }
         ws.onerror = () => reject(new Error('信令连接失败'))
-      })
+        ws.onclose = () => reject(new Error('信令连接已关闭'))
+      }, 10000, '信令连接超时')
 
-      // 不配 STUN：浏览器↔服务端同机/局域网直连走 host 候选即可（跨网不在
-      // 支持范围）；Google STUN 国内不可达，白等收集超时反而拖慢建连
-      pc = new RTCPeerConnection()
-      onPeerCreated({ pc })
+      ws.onclose = () => {
+        if (!live(attempt, link)) return
+        connectedRef.value = false
+        connectingRef.value = false
+        onSignalClose(details(attempt, { ws }))
+        if (!live(attempt, link)) return
+        disposeLink(attempt, false)
+        if (current(attempt) && !manualCloseRef.value && !supersededRef.value) scheduleReconnect()
+      }
+
+      const pc = link.pc = new RTCPeerConnection()
+      onPeerCreated(details(attempt, { pc }))
+      if (!live(attempt, link)) throw CANCELLED
       pc.addTransceiver('video', { direction: 'recvonly' })
       pc.addTransceiver('audio', { direction: 'recvonly' })
-
-      const originalChannel = bindControlChannel(pc.createDataChannel('control'))
-      if (originalChannel) originalChannel.onmessage = ev => onControlMessage(ev)
-
-      pc.ontrack = e => onRemoteTrack({ event: e, pc })
-      pc.ondatachannel = e => {
-        const channel = bindControlChannel(e.channel)
-        if (channel) channel.onmessage = ev => onControlMessage(ev)
+      bindControlChannel(attempt, link, pc.createDataChannel('control'))
+      pc.ontrack = event => { if (live(attempt, link)) onRemoteTrack(details(attempt, { event, pc })) }
+      pc.ondatachannel = event => {
+        if (live(attempt, link)) bindControlChannel(attempt, link, event.channel)
+        else { try { event.channel.close() } catch {} }
       }
-
-      const offer = await pc.createOffer()
-      await pc.setLocalDescription(offer)
-      // createOffer 返回的 SDP 不含任何 a=candidate（候选由 setLocalDescription
-      // 后的 localDescription 携带）。直接把 createOffer 的结果发给服务端
-      // （webrtc-rs 非 trickle，不收后续 candidate 消息）= 服务端零远端候选 →
-      // ICE 零 pair，容器部署下只剩「浏览器对 answer 候选的 prflx 回路」一条
-      // 通路可走。等收集完成再发 localDescription；受限网络收集可能不结束，
-      // 2000ms 兜底按现状发送（Chrome 官方 demo waitIceGatheringComplete 同口径）
-      await new Promise((resolve) => {
-        if (pc.iceGatheringState === 'complete') return resolve()
-        // 最小实现（单测 FakePeer 等）无候选收集 API：直接放行不等待
-        if (typeof pc.addEventListener !== 'function' || typeof pc.removeEventListener !== 'function') {
-          return resolve()
-        }
-        let settle = false
-        const done = () => {
-          if (settle) return
-          settle = true
-          clearTimeout(timer)
-          pc.removeEventListener('icegatheringstatechange', onGather)
-          resolve()
-        }
-        const timer = setTimeout(done, 2000)
-        const onGather = () => {
-          if (pc.iceGatheringState === 'complete') done()
-        }
-        pc.addEventListener('icegatheringstatechange', onGather)
-      })
-      const offerToSend = pc.localDescription ?? offer
-      const answer = await new Promise((resolve, reject) => {
-        ws.onmessage = evt => {
+      const offer = await waitFor(attempt, link, pc.createOffer())
+      await waitFor(attempt, link, pc.setLocalDescription(offer))
+      // The server is non-trickle: send localDescription after gathering host
+      // candidates, bounded to two seconds for networks that never finish ICE.
+      if (pc.iceGatheringState !== 'complete' && typeof pc.addEventListener === 'function'
+        && typeof pc.removeEventListener === 'function') {
+        await waitEvent(attempt, link, resolve => {
+          const onGather = () => { if (pc.iceGatheringState === 'complete') resolve() }
+          pc.addEventListener('icegatheringstatechange', onGather)
+          const timer = setTimeout(resolve, 2000)
+          return () => { clearTimeout(timer); pc.removeEventListener('icegatheringstatechange', onGather) }
+        }, 2100, 'ICE 收集超时')
+      }
+      let answerPending = true
+      const answer = await waitEvent(attempt, link, (resolve, reject) => {
+        ws.onerror = () => reject(new Error('信令连接失败'))
+        ws.onmessage = event => {
+          if (!live(attempt, link)) return
           try {
-            const msg = JSON.parse(evt.data)
-            onSignalMessage({ type: 'signal', message: msg, ws })
-            if (msg.type === 'answer') resolve(msg.sdp)
-            else if (msg.type === 'conflict') reject({ conflict: true })
-            else if (msg.type === 'error') reject(new Error(msg.error || '信令错误'))
-          } catch (err) {
-            reject(err)
-          }
+            const message = JSON.parse(event.data)
+            onSignalMessage(details(attempt, { type: 'signal', message, ws }))
+            if (!live(attempt, link)) return
+            if (message.type === 'taken_over') {
+              supersededRef.value = true
+              errorMsgRef.value = TAKEN_OVER_MSG
+              toast('连接已被其他页面接管', 'warn')
+              cancelReconnect()
+              connectedRef.value = false
+              connectingRef.value = false
+              onChannelClose(details(attempt, { controlChannel: link.controlChannel }))
+              disposeLink(attempt, true)
+            } else if (answerPending) {
+              if (message.type === 'answer') resolve(message.sdp)
+              else if (message.type === 'conflict') reject({ conflict: true })
+              else if (message.type === 'error') reject(new Error(message.error || '信令错误'))
+            }
+          } catch (error) { if (answerPending) reject(error) }
         }
-        ws.send(JSON.stringify({ type: 'offer', sdp: offerToSend, force: forceTakeover }))
-        setTimeout(() => reject(new Error('信令超时')), 10000)
-      })
-      onOfferAnswer({ offer, answer })
-      await pc.setRemoteDescription(new RTCSessionDescription(answer))
-
-      ws.onmessage = evt => {
-        try {
-          const msg = JSON.parse(evt.data)
-          onSignalMessage({ type: 'signal', message: msg, ws })
-          if (msg.type === 'taken_over') {
-            supersededRef.value = true
-            // 持久横幅 + toast：superseded=true 同时阻断自动重连（conflict 放弃
-            // 接管路径同口径），只留手动「连接」按钮重新进入
-            if (errorMsgRef) errorMsgRef.value = TAKEN_OVER_MSG
-            toast('连接已被其他页面接管', 'warn')
-          }
-        } catch (e) {}
-      }
-
+        ws.send(JSON.stringify({ type: 'offer', sdp: pc.localDescription ?? offer, force }))
+      }, 10000, '信令超时')
+      answerPending = false
+      onOfferAnswer(details(attempt, { offer, answer }))
+      if (!live(attempt, link)) throw CANCELLED
+      await waitFor(attempt, link, pc.setRemoteDescription(new RTCSessionDescription(answer)))
       connectedRef.value = true
       connectingRef.value = false
-      closedByCleanup = false
-      // 自动重连发起的 doConnect 开头会对残留旧 pc 调 stopPeer({manual:true})
-      // 置位 manualCloseRef 且随后无人复位：不复位则下一次服务端主动踢连接
-      // （配置变更踢 viewer / watchdog 确死强拆）会被 onclose 守卫误判为手动
-      // 关闭而跳过自动重连，页面定格最后一帧永不重试
-      manualCloseRef.value = false
-      reconnectAttempts.value = 0 // 连接成功即重置退避计数（不依赖调用方回调）
-      onConnectSuccess({ pc, ws })
-      onConnectFinish({ ok: true })
+      reconnectAttempts.value = 0
+      onConnectSuccess(details(attempt, { pc, ws }))
+      if (live(attempt, link)) onConnectFinish(details(attempt, { ok: true }))
       return true
-    } catch (e) {
+    } catch (error) {
+      if (error === CANCELLED || !live(attempt, link)) return
       connectingRef.value = false
-      if (e && e.conflict) {
-        stopPeer({ manual: true, preserveReconnect: true })
-        onConnectFinish({ ok: false, conflict: true })
-        throw e
+      connectedRef.value = false
+      disposeLink(attempt, true)
+      if (!current(attempt)) return
+      if (error?.conflict) {
+        onConnectFinish(details(attempt, { ok: false, conflict: true }))
+        throw error
       }
-      errorMsgRef.value = e.message
-      stopPeer({ manual: true, preserveReconnect: true })
-      onConnectFinish({ ok: false, error: e })
+      errorMsgRef.value = (deviceConnected ? '' : '设备连接失败：') + error.message
+      onConnectFinish(details(attempt, { ok: false, error }))
       return false
     }
   }
 
   async function connect(manual = false) {
-    if (connectLock || connectingRef.value || connectedRef.value) {
-      console.warn('[webrtc] connect ignored (lock/connecting/connected)')
-      return
-    }
-    connectLock = true
-    forceTakeover = false
+    if (connectLock || connectingRef.value || connectedRef.value) return
+    if (!deviceIdRef?.value) return toast('请先选择设备（设备页签下拉框）', 'error')
+    if (!manual && supersededRef.value) return
+    cancelReconnect()
+    const previous = active
+    active = null
+    previous?.cancel()
+    disposeLink(previous, true)
+    const attempt = { deviceId: deviceIdRef.value, generation: ++generation, link: null }
+    attempt.cancelled = new Promise(resolve => { attempt.cancel = () => resolve(CANCELLED) })
+    active = connectLock = attempt
+    closedByCleanup = false
     try {
-      const ok = await doConnect()
-      // 自动重连链路必须续链：服务端停机/重启窗口内 connectDevice、信令 ws
-      // 都会失败，doConnect 走失败分支 return false——这里不补排下一次重试，
-      // 重连就永久停摆，页面定格成死图只能手动刷新（实测构建停机 4 分钟即复现）
-      if (ok === false && !manual) scheduleReconnect({ superseded: supersededRef })
-    } catch (e) {
-      if (e && e.conflict) {
-        if (manual) {
-          const targetDevice = deviceIdRef.value
-          const confirmed = await confirmDialog(`设备 ${deviceIdRef.value} 正在其他页面投屏。\n\n确认接管连接？对方页面将断开且不会自动重连。`, { title: '接管投屏连接', confirmText: '接管连接' })
-          if (targetDevice !== deviceIdRef.value) return
-          if (confirmed) {
-            forceTakeover = true
-            try {
-              await doConnect()
-            } finally {
-              forceTakeover = false
-            }
-          } else {
-            connectingRef.value = false
-            errorMsgRef.value = '设备正在其他页面使用'
-          }
-        } else {
-          connectingRef.value = false
-          errorMsgRef.value = '设备已在其他页面连接，本页已停止重连'
-          toast(errorMsgRef.value, 'warn')
-        }
+      const ok = await doConnect(attempt)
+      if (current(attempt) && ok === false && !manual) scheduleReconnect()
+    } catch (error) {
+      if (!current(attempt) || !error?.conflict) return
+      if (manual) {
+        const confirmed = await Promise.race([
+          confirmDialog(`设备 ${attempt.deviceId} 正在其他页面投屏。\n\n确认接管连接？对方页面将断开且不会自动重连。`, { title: '接管投屏连接', confirmText: '接管连接' }),
+          attempt.cancelled,
+        ])
+        if (!current(attempt)) return
+        if (confirmed === true) await doConnect(attempt, true).catch(error => {
+          if (current(attempt) && error?.conflict) errorMsgRef.value = '设备正在其他页面使用'
+        })
+        else errorMsgRef.value = '设备正在其他页面使用'
+      } else {
+        supersededRef.value = true
+        errorMsgRef.value = '设备已在其他页面连接，本页已停止重连'
+        toast(errorMsgRef.value, 'warn')
       }
     } finally {
-      connectLock = false
+      if (connectLock === attempt) connectLock = null
     }
   }
 
-  function getControlChannel() {
-    return controlChannel
-  }
+  // Synchronous invalidation also covers a target changing away and back before
+  // the old REST request/offer resolves. Vue owns this watcher in component scope.
+  watch(() => deviceIdRef?.value, () => cleanup(true), { flush: 'sync' })
+  if (getCurrentScope()) onScopeDispose(() => cleanup(true))
 
-  function getPeerConnection() {
-    return pc
-  }
-
-  function hasActivePeer() {
-    return !!pc
-  }
-
+  const getControlChannel = () => active?.link?.disposed ? null : active?.link?.controlChannel ?? null
+  const getPeerConnection = () => active?.link?.disposed ? null : active?.link?.pc ?? null
   return {
-    reconnectTimer,
-    reconnectAttempts,
-    connect,
-    cleanup,
-    cancelReconnect,
-    scheduleReconnect,
-    getControlChannel,
-    getPeerConnection,
-    hasActivePeer,
+    reconnectTimer, reconnectAttempts, connect, cleanup, cancelReconnect, scheduleReconnect,
+    getControlChannel, getPeerConnection, hasActivePeer: () => !!getPeerConnection(),
   }
 }

@@ -23,8 +23,8 @@ export const store = reactive({
 //   activeByDevice  device_id → run_id 反查（一设备至多一个活动 run）
 //   last            最近一条终态记录（success|failed|cancelled）
 export const runRegistry = reactive({
-  byId: {},
-  activeByDevice: {},
+  byId: Object.create(null),
+  activeByDevice: Object.create(null),
   last: null,
 })
 
@@ -34,11 +34,11 @@ export const runRegistry = reactive({
 export const appStartedDevices = new Set()
 
 export function findRun(runId) {
-  return (runId && runRegistry.byId[runId]) || null
+  return (runId && Object.hasOwn(runRegistry.byId, runId) && runRegistry.byId[runId]) || null
 }
 
 export function getActiveRun(deviceId) {
-  const rid = deviceId && runRegistry.activeByDevice[deviceId]
+  const rid = deviceId && Object.hasOwn(runRegistry.activeByDevice, deviceId) && runRegistry.activeByDevice[deviceId]
   return rid ? findRun(rid) : null
 }
 
@@ -49,6 +49,19 @@ export function resetStoreRunState() {
   store.runScript = null
   store.runStep = ''
   store.runProgress = 0
+}
+
+/** Project existing authority into the single focused panel; switching never changes runs. */
+export function projectDeviceRun(deviceId) {
+  resetStoreRunState()
+  const rec = getActiveRun(deviceId)
+  if (rec && deviceId === store.deviceId) {
+    store.running = true
+    store.runId = rec.run_id
+    store.runScript = rec.display || rec.entrypoint || rec.script_id || null
+    if (rec.state === 'stopping') store.runStep = '正在停止…'
+  }
+  return rec
 }
 
 /**
