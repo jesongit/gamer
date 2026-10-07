@@ -16,12 +16,12 @@
 mod live_decoder;
 pub(crate) mod output;
 pub(crate) mod stream_mux;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex};
@@ -316,7 +316,7 @@ const MAX_FRAME_MAX_WIDTH: u32 = 8192;
 /// ffprobe/ffmpeg 单次执行超时（探测大文件 seek 可能偏慢，给足余量）。
 const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Core 媒体库服务。进程级单例（[`service`]），组合根零接线：
+/// Core 媒体库服务。同数据目录共用实例（[`service`]），组合根零接线：
 /// 处理器用 `State<AppState>` 取 `cfg` 后惰性初始化。
 pub struct MediaService {
     local_mp4_only: bool,
@@ -1294,16 +1294,22 @@ struct ProbeOutcome {
     duration_us: Option<u64>,
 }
 
-/// 进程级媒体服务（惰性装配；不加 AppState 字段，避免组合根签名扩散）。
-static MEDIA: OnceLock<Arc<MediaService>> = OnceLock::new();
+/// 按数据目录惰性装配；同目录活动请求共用元数据锁和帧生成去重状态。
+/// 弱引用不延长服务生命周期，过期条目在下次访问时清理。
+static MEDIA: OnceLock<Mutex<HashMap<PathBuf, Weak<MediaService>>>> = OnceLock::new();
 
 pub fn service(cfg: &Config) -> Arc<MediaService> {
-    MEDIA
-        .get_or_init(|| {
-            let root = cfg.data_dir.join("media");
-            Arc::new(MediaService::open(root, cfg.ffmpeg_path.clone()).expect("media service init"))
-        })
-        .clone()
+    let root = cfg.data_dir.join("media");
+    let mut services = MEDIA.get_or_init(|| Mutex::new(HashMap::new())).lock();
+    services.retain(|_, service| service.strong_count() > 0);
+    if let Some(service) = services.get(&root).and_then(Weak::upgrade) {
+        return service;
+    }
+    let service = Arc::new(
+        MediaService::open(root.clone(), cfg.ffmpeg_path.clone()).expect("media service init"),
+    );
+    services.insert(root, Arc::downgrade(&service));
+    service
 }
 
 // ---------- 纯函数助手（单测覆盖） ----------
@@ -1817,6 +1823,43 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("original.mp4"), b"x").unwrap();
         write_metadata(&dir, &meta_fixture(id, created_at, refs)).unwrap();
+    }
+
+    #[test]
+    fn service_isolates_data_roots_and_reuses_live_instances() {
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        let first_cfg = Config {
+            data_dir: first_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let second_cfg = Config {
+            data_dir: second_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        for cfg in [&first_cfg, &second_cfg] {
+            seed_media_dir(
+                &cfg.data_dir.join("media"),
+                "sharedid",
+                "2026-09-07T01:00:00Z",
+                vec![],
+            );
+        }
+        let first = service(&first_cfg);
+        let second = service(&second_cfg);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&first, &service(&first_cfg.clone())));
+        let id = MediaId("sharedid".into());
+        first.rename(&id, "first.mp4").unwrap();
+        second.rename(&id, "second.mp4").unwrap();
+        assert_eq!(first.get(&id).unwrap().name, "first.mp4");
+        assert_eq!(second.get(&id).unwrap().name, "second.mp4");
+
+        let expired = Arc::downgrade(&first);
+        drop(first);
+        assert!(expired.upgrade().is_none());
+        assert_eq!(service(&first_cfg).get(&id).unwrap().name, "first.mp4");
+        assert!(Arc::ptr_eq(&second, &service(&second_cfg)));
     }
 
     #[test]
