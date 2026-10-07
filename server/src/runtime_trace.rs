@@ -1162,7 +1162,11 @@ mod tests {
         std::fs::write(dir.path().join("packages/permanent.png"), b"permanent").unwrap();
         let id = submit(&store, "run", 9, "consumed", true, false).unwrap();
         store.flush();
-        store.register("run", Some("2026-10-05T10:00:00Z".into()));
+        // Registration/retention use the real clock. Keep completion recent so
+        // this boundary test does not expire merely because its calendar date
+        // has passed; exercise the exact TTL through cleanup's explicit clock.
+        let finished = Utc::now();
+        store.register("run", Some(finished.to_rfc3339()));
         store.flush();
         store.retain("run").unwrap();
         {
@@ -1171,14 +1175,14 @@ mod tests {
                 &store.root,
                 &store.state,
                 &store.cfg,
-                "2026-10-06T09:59:59Z".parse().unwrap(),
+                finished + chrono::Duration::hours(24) - chrono::Duration::seconds(1),
             );
             assert_eq!(store.state.lock().unwrap().runs["run"].status, "available");
             cleanup(
                 &store.root,
                 &store.state,
                 &store.cfg,
-                "2026-10-06T10:00:00Z".parse().unwrap(),
+                finished + chrono::Duration::hours(24),
             );
             assert_eq!(store.state.lock().unwrap().runs["run"].status, "expired");
         }
