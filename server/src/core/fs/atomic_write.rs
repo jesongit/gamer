@@ -81,8 +81,23 @@ fn replace_file(temp: &Path, path: &Path) -> std::io::Result<()> {
         fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
     }
 
-    let from: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
-    let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // Rust file IO accepts long paths, but this direct Win32 call needs the
+    // verbatim absolute prefix. The target may not exist yet, so resolve its
+    // existing parent rather than canonicalizing the target itself.
+    let from_path = std::fs::canonicalize(temp)?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "replacement target has no filename",
+        )
+    })?;
+    let to_path = std::fs::canonicalize(parent)?.join(name);
+    let from: Vec<u16> = from_path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<u16> = to_path.as_os_str().encode_wide().chain(Some(0)).collect();
     // MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
     for attempt in 0..8 {
         let ok = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0x1 | 0x8) };
@@ -114,4 +129,29 @@ fn replace_lock() -> &'static Mutex<()> {
 #[cfg(not(unix))]
 fn sync_parent(_parent: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod long_path_tests {
+    use super::*;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[test]
+    fn atomic_replacement_supports_long_unicode_history_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root
+            .path()
+            .join("版本历史".repeat(32))
+            .join("保存回退".repeat(32))
+            .join("真实模板".repeat(32))
+            .join("template.png");
+        assert!(path.as_os_str().encode_wide().count() > 260);
+        atomic_write(&path, b"original pixels").unwrap();
+        atomic_write(&path, b"replacement pixels").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement pixels");
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
+    }
 }

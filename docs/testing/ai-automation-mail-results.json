@@ -1,0 +1,1687 @@
+{
+  "verified_at": "2026-10-06T07:34:08.077470300+00:00",
+  "scope": "real recorded sample offline replay and atomic formal save; no live game execution",
+  "package_id": "hsr",
+  "script": "邮件领取.yaml",
+  "candidate_id": "c39edf89-de2f-44fe-81a3-a1f84819ab19",
+  "candidate_revision": 5,
+  "candidate_sha256": "f7a7e6fad389a82a483a709d609d71d0dd3f424235af036cb1d6a4a983b90fb0",
+  "resource_version": "f7b518340c2ea09a8fdebebfbab1d9baae6cee07eabc7bd7fd390a9158388f05",
+  "resource_revision_id": "ccc9bf3e-bad2-4098-add1-73a624690ca0",
+  "source_sha256": "0a542d6e50056aaa98a96adfb5b17ebd311d34af5ba048e0d6a956907bc2973e",
+  "execution_settings": {
+    "after_click_ms": 300,
+    "before_click_ms": 300,
+    "default_timeout_secs": 3
+  },
+  "tested_args": {},
+  "report": {
+    "candidate_sha256": "f7a7e6fad389a82a483a709d609d71d0dd3f424235af036cb1d6a4a983b90fb0",
+    "diagnostics": [],
+    "samples": [
+      {
+        "consumed_actions": 6,
+        "content_sha256": "afd9a604fab10cd0f25b2787ef9c2e9c33e3dab8016fa92b1d560776b1cf1f15",
+        "diagnostics": [],
+        "events": [
+          {
+            "ev": "run_start"
+          },
+          {
+            "desc": "观察视觉目标",
+            "ev": "step_start",
+            "path": "run[0]",
+            "source_id": "open_phone_menu"
+          },
+          {
+            "data": {
+              "args": {
+                "interval": "250ms",
+                "region": [
+                  0,
+                  0,
+                  0.0729166667,
+                  0.1666666667
+                ],
+                "required": true,
+                "template": "mailflow_open_menu.png",
+                "threshold": 0.9,
+                "timeout": "10s"
+              },
+              "function": "observe",
+              "path": "run[0]"
+            },
+            "ev": "detail",
+            "name": "arguments"
+          },
+          {
+            "ev": "replay_vision",
+            "found": true,
+            "image_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-0",
+            "region": [
+              0,
+              0,
+              140,
+              180
+            ],
+            "template": "mailflow_open_menu.png",
+            "template_sha256": "a295421b607212a0b633eb10fc623288904465b7d205abef11647d4875cbb633",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 349386
+          },
+          {
+            "data": {
+              "as": "open_menu",
+              "function": "observe",
+              "value": {
+                "_frame": {
+                  "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                  "revision": 0,
+                  "target": "offline-replay"
+                },
+                "_observed_at_ms": 0,
+                "center": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 0,
+                  "x": 0.025,
+                  "y": 0.0824074074074074
+                },
+                "height": 50,
+                "region": {
+                  "height": 0.16666666666666666,
+                  "width": 0.07291666666666667,
+                  "x": 0.0,
+                  "y": 0.0
+                },
+                "score": 0.9994357824325562,
+                "width": 38,
+                "x": 29,
+                "y": 64
+              }
+            },
+            "ev": "detail",
+            "name": "result"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[0]",
+            "source_id": "open_phone_menu"
+          },
+          {
+            "desc": "如果 $open_menu",
+            "ev": "step_start",
+            "path": "run[0]",
+            "source_id": "open_phone_menu"
+          },
+          {
+            "data": {
+              "condition": {
+                "_frame": {
+                  "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                  "revision": 0,
+                  "target": "offline-replay"
+                },
+                "_observed_at_ms": 0,
+                "center": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 0,
+                  "x": 0.025,
+                  "y": 0.0824074074074074
+                },
+                "height": 50,
+                "region": {
+                  "height": 0.16666666666666666,
+                  "width": 0.07291666666666667,
+                  "x": 0.0,
+                  "y": 0.0
+                },
+                "score": 0.9994357824325562,
+                "width": 38,
+                "x": 29,
+                "y": 64
+              },
+              "kind": "if",
+              "path": "run[0]",
+              "selected": "then"
+            },
+            "ev": "detail",
+            "name": "branch"
+          },
+          {
+            "desc": "点击",
+            "ev": "step_start",
+            "path": "run[0].then[0]",
+            "source_id": "run[0].then[0]"
+          },
+          {
+            "data": {
+              "args": {
+                "position": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 0,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 0,
+                    "x": 0.025,
+                    "y": 0.0824074074074074
+                  },
+                  "height": 50,
+                  "region": {
+                    "height": 0.16666666666666666,
+                    "width": 0.07291666666666667,
+                    "x": 0.0,
+                    "y": 0.0
+                  },
+                  "score": 0.9994357824325562,
+                  "width": 38,
+                  "x": 29,
+                  "y": 64
+                }
+              },
+              "function": "tap",
+              "path": "run[0].then[0]"
+            },
+            "ev": "detail",
+            "name": "arguments"
+          },
+          {
+            "ev": "replay_action_alignment",
+            "event_id": "evt-000000001",
+            "evidence_timeline_us": 649386,
+            "proof": {
+              "kind": "matched_template",
+              "observed_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-0",
+              "recorded_before_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-82",
+              "template": "mailflow_open_menu.png"
+            },
+            "recorded_timeline_us": 1986912,
+            "script_timeline_us": 649386,
+            "time_shift_us": 1337526
+          },
+          {
+            "data": {
+              "as": null,
+              "function": "tap",
+              "value": null
+            },
+            "ev": "detail",
+            "name": "result"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[0].then[0]",
+            "source_id": "run[0].then[0]"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[0]",
+            "source_id": "open_phone_menu"
+          },
+          {
+            "desc": "观察视觉目标",
+            "ev": "step_start",
+            "path": "run[1]",
+            "source_id": "enter_mail"
+          },
+          {
+            "data": {
+              "args": {
+                "interval": "250ms",
+                "region": [
+                  0.9375,
+                  0.25,
+                  0.0572916667,
+                  0.1296296296
+                ],
+                "required": true,
+                "template": "mailflow_open_mail.png",
+                "threshold": 0.9,
+                "timeout": "10s"
+              },
+              "function": "observe",
+              "path": "run[1]"
+            },
+            "ev": "detail",
+            "name": "arguments"
+          },
+          {
+            "ev": "replay_vision",
+            "found": false,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:93",
+            "region": [
+              1800,
+              270,
+              110,
+              140
+            ],
+            "template": "mailflow_open_mail.png",
+            "template_sha256": "2817965846cee69b642f995177435f48e72c95c83d9603bb8e597128ba4f918d",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 2278982
+          },
+          {
+            "ev": "replay_vision",
+            "found": false,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:99",
+            "region": [
+              1800,
+              270,
+              110,
+              140
+            ],
+            "template": "mailflow_open_mail.png",
+            "template_sha256": "2817965846cee69b642f995177435f48e72c95c83d9603bb8e597128ba4f918d",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 2578184
+          },
+          {
+            "ev": "replay_vision",
+            "found": false,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:108",
+            "region": [
+              1800,
+              270,
+              110,
+              140
+            ],
+            "template": "mailflow_open_mail.png",
+            "template_sha256": "2817965846cee69b642f995177435f48e72c95c83d9603bb8e597128ba4f918d",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 2837675
+          },
+          {
+            "ev": "replay_vision",
+            "found": true,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:120",
+            "region": [
+              1800,
+              270,
+              110,
+              140
+            ],
+            "template": "mailflow_open_mail.png",
+            "template_sha256": "2817965846cee69b642f995177435f48e72c95c83d9603bb8e597128ba4f918d",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 3079069
+          },
+          {
+            "data": {
+              "as": "open_mail",
+              "function": "observe",
+              "value": {
+                "_frame": {
+                  "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                  "revision": 0,
+                  "target": "offline-replay"
+                },
+                "_observed_at_ms": 1350,
+                "center": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 1350,
+                  "x": 0.9666666666666668,
+                  "y": 0.31666666666666665
+                },
+                "height": 65,
+                "region": {
+                  "height": 0.12962962962962962,
+                  "width": 0.057291666666666664,
+                  "x": 0.9375,
+                  "y": 0.25
+                },
+                "score": 0.993253529071808,
+                "width": 56,
+                "x": 1828,
+                "y": 310
+              }
+            },
+            "ev": "detail",
+            "name": "result"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[1]",
+            "source_id": "enter_mail"
+          },
+          {
+            "desc": "如果 $open_mail",
+            "ev": "step_start",
+            "path": "run[1]",
+            "source_id": "enter_mail"
+          },
+          {
+            "data": {
+              "condition": {
+                "_frame": {
+                  "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                  "revision": 0,
+                  "target": "offline-replay"
+                },
+                "_observed_at_ms": 1350,
+                "center": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 1350,
+                  "x": 0.9666666666666668,
+                  "y": 0.31666666666666665
+                },
+                "height": 65,
+                "region": {
+                  "height": 0.12962962962962962,
+                  "width": 0.057291666666666664,
+                  "x": 0.9375,
+                  "y": 0.25
+                },
+                "score": 0.993253529071808,
+                "width": 56,
+                "x": 1828,
+                "y": 310
+              },
+              "kind": "if",
+              "path": "run[1]",
+              "selected": "then"
+            },
+            "ev": "detail",
+            "name": "branch"
+          },
+          {
+            "desc": "点击",
+            "ev": "step_start",
+            "path": "run[1].then[0]",
+            "source_id": "run[1].then[0]"
+          },
+          {
+            "data": {
+              "args": {
+                "position": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 1350,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 1350,
+                    "x": 0.9666666666666668,
+                    "y": 0.31666666666666665
+                  },
+                  "height": 65,
+                  "region": {
+                    "height": 0.12962962962962962,
+                    "width": 0.057291666666666664,
+                    "x": 0.9375,
+                    "y": 0.25
+                  },
+                  "score": 0.993253529071808,
+                  "width": 56,
+                  "x": 1828,
+                  "y": 310
+                }
+              },
+              "function": "tap",
+              "path": "run[1].then[0]"
+            },
+            "ev": "detail",
+            "name": "arguments"
+          },
+          {
+            "ev": "replay_action_alignment",
+            "event_id": "evt-000000002",
+            "evidence_timeline_us": 3395807,
+            "proof": {
+              "kind": "matched_template",
+              "observed_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:120",
+              "recorded_before_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-214",
+              "template": "mailflow_open_mail.png"
+            },
+            "recorded_timeline_us": 4966095,
+            "script_timeline_us": 1999386,
+            "time_shift_us": 2966709
+          },
+          {
+            "data": {
+              "as": null,
+              "function": "tap",
+              "value": null
+            },
+            "ev": "detail",
+            "name": "result"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[1].then[0]",
+            "source_id": "run[1].then[0]"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[1]",
+            "source_id": "enter_mail"
+          },
+          {
+            "desc": "观察视觉目标",
+            "ev": "step_start",
+            "path": "run[2]",
+            "source_id": "receive_all_rewards"
+          },
+          {
+            "data": {
+              "args": {
+                "interval": "250ms",
+                "region": [
+                  0.2473958333,
+                  0.8833333333,
+                  0.0916666667,
+                  0.0509259259
+                ],
+                "required": true,
+                "template": "mailflow_claim_all.png",
+                "threshold": 0.9,
+                "timeout": "10s"
+              },
+              "function": "observe",
+              "path": "run[2]"
+            },
+            "ev": "detail",
+            "name": "arguments"
+          },
+          {
+            "ev": "replay_vision",
+            "found": false,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:231",
+            "region": [
+              475,
+              954,
+              176,
+              55
+            ],
+            "template": "mailflow_claim_all.png",
+            "template_sha256": "8c78167707d166f384769766202f46547318e085807c80514527da2eca14e533",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 5318468
+          },
+          {
+            "ev": "replay_vision",
+            "found": false,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:244",
+            "region": [
+              475,
+              954,
+              176,
+              55
+            ],
+            "template": "mailflow_claim_all.png",
+            "template_sha256": "8c78167707d166f384769766202f46547318e085807c80514527da2eca14e533",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 5580352
+          },
+          {
+            "ev": "replay_vision",
+            "found": false,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:256",
+            "region": [
+              475,
+              954,
+              176,
+              55
+            ],
+            "template": "mailflow_claim_all.png",
+            "template_sha256": "8c78167707d166f384769766202f46547318e085807c80514527da2eca14e533",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 5819336
+          },
+          {
+            "ev": "replay_vision",
+            "found": true,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:269",
+            "region": [
+              475,
+              954,
+              176,
+              55
+            ],
+            "template": "mailflow_claim_all.png",
+            "template_sha256": "8c78167707d166f384769766202f46547318e085807c80514527da2eca14e533",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 6079842
+          },
+          {
+            "data": {
+              "as": "claim_all",
+              "function": "observe",
+              "value": {
+                "_frame": {
+                  "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                  "revision": 0,
+                  "target": "offline-replay"
+                },
+                "_observed_at_ms": 2700,
+                "center": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 2700,
+                  "x": 0.29270833333333335,
+                  "y": 0.9083333333333332
+                },
+                "height": 50,
+                "region": {
+                  "height": 0.05092592592592592,
+                  "width": 0.09166666666666666,
+                  "x": 0.24739583333333337,
+                  "y": 0.8833333333333333
+                },
+                "score": 0.9970667362213136,
+                "width": 154,
+                "x": 485,
+                "y": 956
+              }
+            },
+            "ev": "detail",
+            "name": "result"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[2]",
+            "source_id": "receive_all_rewards"
+          },
+          {
+            "desc": "如果 $claim_all",
+            "ev": "step_start",
+            "path": "run[2]",
+            "source_id": "receive_all_rewards"
+          },
+          {
+            "data": {
+              "condition": {
+                "_frame": {
+                  "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                  "revision": 0,
+                  "target": "offline-replay"
+                },
+                "_observed_at_ms": 2700,
+                "center": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 2700,
+                  "x": 0.29270833333333335,
+                  "y": 0.9083333333333332
+                },
+                "height": 50,
+                "region": {
+                  "height": 0.05092592592592592,
+                  "width": 0.09166666666666666,
+                  "x": 0.24739583333333337,
+                  "y": 0.8833333333333333
+                },
+                "score": 0.9970667362213136,
+                "width": 154,
+                "x": 485,
+                "y": 956
+              },
+              "kind": "if",
+              "path": "run[2]",
+              "selected": "then"
+            },
+            "ev": "detail",
+            "name": "branch"
+          },
+          {
+            "desc": "点击",
+            "ev": "step_start",
+            "path": "run[2].then[0]",
+            "source_id": "run[2].then[0]"
+          },
+          {
+            "data": {
+              "args": {
+                "position": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 2700,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 2700,
+                    "x": 0.29270833333333335,
+                    "y": 0.9083333333333332
+                  },
+                  "height": 50,
+                  "region": {
+                    "height": 0.05092592592592592,
+                    "width": 0.09166666666666666,
+                    "x": 0.24739583333333337,
+                    "y": 0.8833333333333333
+                  },
+                  "score": 0.9970667362213136,
+                  "width": 154,
+                  "x": 485,
+                  "y": 956
+                }
+              },
+              "function": "tap",
+              "path": "run[2].then[0]"
+            },
+            "ev": "detail",
+            "name": "arguments"
+          },
+          {
+            "ev": "replay_action_alignment",
+            "event_id": "evt-000000003",
+            "evidence_timeline_us": 6385948,
+            "proof": {
+              "kind": "matched_template",
+              "observed_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:269",
+              "recorded_before_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-323",
+              "template": "mailflow_claim_all.png"
+            },
+            "recorded_timeline_us": 7176111,
+            "script_timeline_us": 3349386,
+            "time_shift_us": 3826725
+          },
+          {
+            "data": {
+              "as": null,
+              "function": "tap",
+              "value": null
+            },
+            "ev": "detail",
+            "name": "result"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[2].then[0]",
+            "source_id": "run[2].then[0]"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[2]",
+            "source_id": "receive_all_rewards"
+          },
+          {
+            "desc": "观察视觉目标",
+            "ev": "step_start",
+            "path": "run[3]",
+            "source_id": "close_reward_notice"
+          },
+          {
+            "data": {
+              "args": {
+                "interval": "250ms",
+                "region": [
+                  0.4364583333,
+                  0.7388888889,
+                  0.1317708333,
+                  0.1027777778
+                ],
+                "required": true,
+                "template": "mailflow_dismiss_reward.png",
+                "threshold": 0.9,
+                "timeout": "10s"
+              },
+              "function": "observe",
+              "path": "run[3]"
+            },
+            "ev": "detail",
+            "name": "arguments"
+          },
+          {
+            "ev": "replay_vision",
+            "found": false,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:342",
+            "region": [
+              838,
+              798,
+              253,
+              111
+            ],
+            "template": "mailflow_dismiss_reward.png",
+            "template_sha256": "2ce526e00dd70608cd7d49846dcdebfcc5f1e10edf7d71735fdcf80ac57763e2",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 7539607
+          },
+          {
+            "ev": "replay_vision",
+            "found": false,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:354",
+            "region": [
+              838,
+              798,
+              253,
+              111
+            ],
+            "template": "mailflow_dismiss_reward.png",
+            "template_sha256": "2ce526e00dd70608cd7d49846dcdebfcc5f1e10edf7d71735fdcf80ac57763e2",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 7779391
+          },
+          {
+            "ev": "replay_vision",
+            "found": false,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:367",
+            "region": [
+              838,
+              798,
+              253,
+              111
+            ],
+            "template": "mailflow_dismiss_reward.png",
+            "template_sha256": "2ce526e00dd70608cd7d49846dcdebfcc5f1e10edf7d71735fdcf80ac57763e2",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 8040567
+          },
+          {
+            "ev": "replay_vision",
+            "found": false,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:379",
+            "region": [
+              838,
+              798,
+              253,
+              111
+            ],
+            "template": "mailflow_dismiss_reward.png",
+            "template_sha256": "2ce526e00dd70608cd7d49846dcdebfcc5f1e10edf7d71735fdcf80ac57763e2",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 8278568
+          },
+          {
+            "ev": "replay_vision",
+            "found": true,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:392",
+            "region": [
+              838,
+              798,
+              253,
+              111
+            ],
+            "template": "mailflow_dismiss_reward.png",
+            "template_sha256": "2ce526e00dd70608cd7d49846dcdebfcc5f1e10edf7d71735fdcf80ac57763e2",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 8539419
+          },
+          {
+            "data": {
+              "as": "dismiss_reward",
+              "function": "observe",
+              "value": {
+                "_frame": {
+                  "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                  "revision": 0,
+                  "target": "offline-replay"
+                },
+                "_observed_at_ms": 4300,
+                "center": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 4300,
+                  "x": 0.5010416666666667,
+                  "y": 0.7907407407407407
+                },
+                "height": 108,
+                "region": {
+                  "height": 0.10277777777777776,
+                  "width": 0.13177083333333334,
+                  "x": 0.43645833333333334,
+                  "y": 0.7388888888888889
+                },
+                "score": 0.940942883491516,
+                "width": 225,
+                "x": 850,
+                "y": 800
+              }
+            },
+            "ev": "detail",
+            "name": "result"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[3]",
+            "source_id": "close_reward_notice"
+          },
+          {
+            "desc": "如果 $dismiss_reward",
+            "ev": "step_start",
+            "path": "run[3]",
+            "source_id": "close_reward_notice"
+          },
+          {
+            "data": {
+              "condition": {
+                "_frame": {
+                  "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                  "revision": 0,
+                  "target": "offline-replay"
+                },
+                "_observed_at_ms": 4300,
+                "center": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 4300,
+                  "x": 0.5010416666666667,
+                  "y": 0.7907407407407407
+                },
+                "height": 108,
+                "region": {
+                  "height": 0.10277777777777776,
+                  "width": 0.13177083333333334,
+                  "x": 0.43645833333333334,
+                  "y": 0.7388888888888889
+                },
+                "score": 0.940942883491516,
+                "width": 225,
+                "x": 850,
+                "y": 800
+              },
+              "kind": "if",
+              "path": "run[3]",
+              "selected": "then"
+            },
+            "ev": "detail",
+            "name": "branch"
+          },
+          {
+            "desc": "点击",
+            "ev": "step_start",
+            "path": "run[3].then[0]",
+            "source_id": "run[3].then[0]"
+          },
+          {
+            "data": {
+              "args": {
+                "position": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 4300,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 4300,
+                    "x": 0.5010416666666667,
+                    "y": 0.7907407407407407
+                  },
+                  "height": 108,
+                  "region": {
+                    "height": 0.10277777777777776,
+                    "width": 0.13177083333333334,
+                    "x": 0.43645833333333334,
+                    "y": 0.7388888888888889
+                  },
+                  "score": 0.940942883491516,
+                  "width": 225,
+                  "x": 850,
+                  "y": 800
+                }
+              },
+              "function": "tap",
+              "path": "run[3].then[0]"
+            },
+            "ev": "detail",
+            "name": "arguments"
+          },
+          {
+            "ev": "replay_action_alignment",
+            "event_id": "evt-000000004",
+            "evidence_timeline_us": 8845802,
+            "proof": {
+              "kind": "matched_template",
+              "observed_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:392",
+              "recorded_before_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-447",
+              "template": "mailflow_dismiss_reward.png"
+            },
+            "recorded_timeline_us": 9655983,
+            "script_timeline_us": 4949386,
+            "time_shift_us": 4706597
+          },
+          {
+            "data": {
+              "as": null,
+              "function": "tap",
+              "value": null
+            },
+            "ev": "detail",
+            "name": "result"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[3].then[0]",
+            "source_id": "run[3].then[0]"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[3]",
+            "source_id": "close_reward_notice"
+          },
+          {
+            "desc": "观察视觉目标",
+            "ev": "step_start",
+            "path": "run[4]",
+            "source_id": "exit_mail"
+          },
+          {
+            "data": {
+              "args": {
+                "interval": "250ms",
+                "region": [
+                  0.9270833333,
+                  0,
+                  0.0729166667,
+                  0.1018518519
+                ],
+                "required": true,
+                "template": "mailflow_close_mail.png",
+                "threshold": 0.9,
+                "timeout": "10s"
+              },
+              "function": "observe",
+              "path": "run[4]"
+            },
+            "ev": "detail",
+            "name": "arguments"
+          },
+          {
+            "ev": "replay_vision",
+            "found": true,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:466",
+            "region": [
+              1780,
+              0,
+              140,
+              110
+            ],
+            "template": "mailflow_close_mail.png",
+            "template_sha256": "21bf3870c3f6f542637f12d5a27aab3a00afe27f53076cb9b8d5ce8d529fbbba",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 10019653
+          },
+          {
+            "data": {
+              "as": "close_mail",
+              "function": "observe",
+              "value": {
+                "_frame": {
+                  "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                  "revision": 0,
+                  "target": "offline-replay"
+                },
+                "_observed_at_ms": 4900,
+                "center": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 4900,
+                  "x": 0.9604166666666668,
+                  "y": 0.04814814814814815
+                },
+                "height": 60,
+                "region": {
+                  "height": 0.10185185185185185,
+                  "width": 0.07291666666666667,
+                  "x": 0.9270833333333334,
+                  "y": 0.0
+                },
+                "score": 0.9956053495407104,
+                "width": 58,
+                "x": 1815,
+                "y": 22
+              }
+            },
+            "ev": "detail",
+            "name": "result"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[4]",
+            "source_id": "exit_mail"
+          },
+          {
+            "desc": "如果 $close_mail",
+            "ev": "step_start",
+            "path": "run[4]",
+            "source_id": "exit_mail"
+          },
+          {
+            "data": {
+              "condition": {
+                "_frame": {
+                  "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                  "revision": 0,
+                  "target": "offline-replay"
+                },
+                "_observed_at_ms": 4900,
+                "center": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 4900,
+                  "x": 0.9604166666666668,
+                  "y": 0.04814814814814815
+                },
+                "height": 60,
+                "region": {
+                  "height": 0.10185185185185185,
+                  "width": 0.07291666666666667,
+                  "x": 0.9270833333333334,
+                  "y": 0.0
+                },
+                "score": 0.9956053495407104,
+                "width": 58,
+                "x": 1815,
+                "y": 22
+              },
+              "kind": "if",
+              "path": "run[4]",
+              "selected": "then"
+            },
+            "ev": "detail",
+            "name": "branch"
+          },
+          {
+            "desc": "点击",
+            "ev": "step_start",
+            "path": "run[4].then[0]",
+            "source_id": "run[4].then[0]"
+          },
+          {
+            "data": {
+              "args": {
+                "position": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 4900,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 4900,
+                    "x": 0.9604166666666668,
+                    "y": 0.04814814814814815
+                  },
+                  "height": 60,
+                  "region": {
+                    "height": 0.10185185185185185,
+                    "width": 0.07291666666666667,
+                    "x": 0.9270833333333334,
+                    "y": 0.0
+                  },
+                  "score": 0.9956053495407104,
+                  "width": 58,
+                  "x": 1815,
+                  "y": 22
+                }
+              },
+              "function": "tap",
+              "path": "run[4].then[0]"
+            },
+            "ev": "detail",
+            "name": "arguments"
+          },
+          {
+            "ev": "replay_action_alignment",
+            "event_id": "evt-000000005",
+            "evidence_timeline_us": 10325788,
+            "proof": {
+              "kind": "matched_template",
+              "observed_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:466",
+              "recorded_before_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-544",
+              "template": "mailflow_close_mail.png"
+            },
+            "recorded_timeline_us": 11596669,
+            "script_timeline_us": 5549386,
+            "time_shift_us": 6047283
+          },
+          {
+            "data": {
+              "as": null,
+              "function": "tap",
+              "value": null
+            },
+            "ev": "detail",
+            "name": "result"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[4].then[0]",
+            "source_id": "run[4].then[0]"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[4]",
+            "source_id": "exit_mail"
+          },
+          {
+            "desc": "观察视觉目标",
+            "ev": "step_start",
+            "path": "run[5]",
+            "source_id": "return_to_main"
+          },
+          {
+            "data": {
+              "args": {
+                "interval": "250ms",
+                "region": [
+                  0.946875,
+                  0.025,
+                  0.0364583333,
+                  0.062037037
+                ],
+                "required": true,
+                "template": "mailflow_close_menu.png",
+                "threshold": 0.9,
+                "timeout": "10s"
+              },
+              "function": "observe",
+              "path": "run[5]"
+            },
+            "ev": "detail",
+            "name": "arguments"
+          },
+          {
+            "ev": "replay_vision",
+            "found": false,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:564",
+            "region": [
+              1818,
+              27,
+              70,
+              67
+            ],
+            "template": "mailflow_close_menu.png",
+            "template_sha256": "619262526e65b9ea03a26564d930280eaa505716cfc381a2d4e987eab8104dfe",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 11979574
+          },
+          {
+            "ev": "replay_vision",
+            "found": false,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:575",
+            "region": [
+              1818,
+              27,
+              70,
+              67
+            ],
+            "template": "mailflow_close_menu.png",
+            "template_sha256": "619262526e65b9ea03a26564d930280eaa505716cfc381a2d4e987eab8104dfe",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 12218317
+          },
+          {
+            "ev": "replay_vision",
+            "found": true,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:588",
+            "region": [
+              1818,
+              27,
+              70,
+              67
+            ],
+            "template": "mailflow_close_menu.png",
+            "template_sha256": "619262526e65b9ea03a26564d930280eaa505716cfc381a2d4e987eab8104dfe",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 12479053
+          },
+          {
+            "data": {
+              "as": "close_menu",
+              "function": "observe",
+              "value": {
+                "_frame": {
+                  "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                  "revision": 0,
+                  "target": "offline-replay"
+                },
+                "_observed_at_ms": 6000,
+                "center": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 6000,
+                  "x": 0.9651041666666668,
+                  "y": 0.05555555555555555
+                },
+                "height": 60,
+                "region": {
+                  "height": 0.06203703703703704,
+                  "width": 0.036458333333333336,
+                  "x": 0.946875,
+                  "y": 0.025
+                },
+                "score": 0.99105966091156,
+                "width": 58,
+                "x": 1824,
+                "y": 30
+              }
+            },
+            "ev": "detail",
+            "name": "result"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[5]",
+            "source_id": "return_to_main"
+          },
+          {
+            "desc": "如果 $close_menu",
+            "ev": "step_start",
+            "path": "run[5]",
+            "source_id": "return_to_main"
+          },
+          {
+            "data": {
+              "condition": {
+                "_frame": {
+                  "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                  "revision": 0,
+                  "target": "offline-replay"
+                },
+                "_observed_at_ms": 6000,
+                "center": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 6000,
+                  "x": 0.9651041666666668,
+                  "y": 0.05555555555555555
+                },
+                "height": 60,
+                "region": {
+                  "height": 0.06203703703703704,
+                  "width": 0.036458333333333336,
+                  "x": 0.946875,
+                  "y": 0.025
+                },
+                "score": 0.99105966091156,
+                "width": 58,
+                "x": 1824,
+                "y": 30
+              },
+              "kind": "if",
+              "path": "run[5]",
+              "selected": "then"
+            },
+            "ev": "detail",
+            "name": "branch"
+          },
+          {
+            "desc": "点击",
+            "ev": "step_start",
+            "path": "run[5].then[0]",
+            "source_id": "run[5].then[0]"
+          },
+          {
+            "data": {
+              "args": {
+                "position": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 6000,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 6000,
+                    "x": 0.9651041666666668,
+                    "y": 0.05555555555555555
+                  },
+                  "height": 60,
+                  "region": {
+                    "height": 0.06203703703703704,
+                    "width": 0.036458333333333336,
+                    "x": 0.946875,
+                    "y": 0.025
+                  },
+                  "score": 0.99105966091156,
+                  "width": 58,
+                  "x": 1824,
+                  "y": 30
+                }
+              },
+              "function": "tap",
+              "path": "run[5].then[0]"
+            },
+            "ev": "detail",
+            "name": "arguments"
+          },
+          {
+            "ev": "replay_action_alignment",
+            "event_id": "evt-000000006",
+            "evidence_timeline_us": 12786023,
+            "proof": {
+              "kind": "matched_template",
+              "observed_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:588",
+              "recorded_before_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-616",
+              "template": "mailflow_close_menu.png"
+            },
+            "recorded_timeline_us": 13046226,
+            "script_timeline_us": 6649386,
+            "time_shift_us": 6396840
+          },
+          {
+            "data": {
+              "as": null,
+              "function": "tap",
+              "value": null
+            },
+            "ev": "detail",
+            "name": "result"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[5].then[0]",
+            "source_id": "run[5].then[0]"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[5]",
+            "source_id": "return_to_main"
+          },
+          {
+            "desc": "验证完成画面",
+            "ev": "step_start",
+            "path": "run[6]",
+            "source_id": "verify_main_screen"
+          },
+          {
+            "data": {
+              "args": {
+                "interval": "250ms",
+                "region": [
+                  0,
+                  0.8333333333,
+                  0.078125,
+                  0.1388888889
+                ],
+                "required": true,
+                "template": "mailflow_main_screen.png",
+                "threshold": 0.9,
+                "timeout": "10s"
+              },
+              "function": "finish",
+              "path": "run[6]"
+            },
+            "ev": "detail",
+            "name": "arguments"
+          },
+          {
+            "ev": "replay_vision",
+            "found": false,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:634",
+            "region": [
+              0,
+              900,
+              150,
+              150
+            ],
+            "template": "mailflow_main_screen.png",
+            "template_sha256": "2c27a6c4b75bcb59463c2b5a9b3534bb9bd447d3ab7775304a105246dae653ee",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 13417513
+          },
+          {
+            "ev": "replay_vision",
+            "found": true,
+            "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:646",
+            "region": [
+              0,
+              900,
+              150,
+              150
+            ],
+            "template": "mailflow_main_screen.png",
+            "template_sha256": "2c27a6c4b75bcb59463c2b5a9b3534bb9bd447d3ab7775304a105246dae653ee",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 13658265
+          },
+          {
+            "ev": "replay_vision",
+            "found": true,
+            "image_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-702",
+            "region": [
+              0,
+              900,
+              150,
+              150
+            ],
+            "template": "mailflow_main_screen.png",
+            "template_sha256": "2c27a6c4b75bcb59463c2b5a9b3534bb9bd447d3ab7775304a105246dae653ee",
+            "threshold": 0.8999999761581421,
+            "timeline_us": 14779944
+          },
+          {
+            "ev": "sample_end_postcondition",
+            "image_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-702",
+            "ok": true
+          },
+          {
+            "data": {
+              "as": "main_screen",
+              "function": "finish",
+              "value": {
+                "_frame": {
+                  "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                  "revision": 0,
+                  "target": "offline-replay"
+                },
+                "_observed_at_ms": 6850,
+                "center": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 6850,
+                  "x": 0.0296875,
+                  "y": 0.9074074074074074
+                },
+                "height": 60,
+                "region": {
+                  "height": 0.1388888888888889,
+                  "width": 0.078125,
+                  "x": 0.0,
+                  "y": 0.8333333333333334
+                },
+                "score": 0.98823219537735,
+                "width": 60,
+                "x": 27,
+                "y": 950
+              }
+            },
+            "ev": "detail",
+            "name": "result"
+          },
+          {
+            "ev": "step_end",
+            "ok": true,
+            "path": "run[6]",
+            "source_id": "verify_main_screen"
+          },
+          {
+            "ev": "run_end",
+            "ok": true
+          }
+        ],
+        "sample_id": "dbac781ed8dd4d4c895311417a8c9995",
+        "status": "passed"
+      }
+    ],
+    "status": "passed"
+  },
+  "saved_templates": [
+    {
+      "name": "mailflow_open_menu.png",
+      "sha256": "a295421b607212a0b633eb10fc623288904465b7d205abef11647d4875cbb633",
+      "size": [
+        38,
+        50
+      ],
+      "encoding_mode": "RGB",
+      "pixels_match_sample_crop": true
+    },
+    {
+      "name": "mailflow_open_mail.png",
+      "sha256": "2817965846cee69b642f995177435f48e72c95c83d9603bb8e597128ba4f918d",
+      "size": [
+        56,
+        65
+      ],
+      "encoding_mode": "RGB",
+      "pixels_match_sample_crop": true
+    },
+    {
+      "name": "mailflow_claim_all.png",
+      "sha256": "8c78167707d166f384769766202f46547318e085807c80514527da2eca14e533",
+      "size": [
+        154,
+        50
+      ],
+      "encoding_mode": "RGB",
+      "pixels_match_sample_crop": true
+    },
+    {
+      "name": "mailflow_dismiss_reward.png",
+      "sha256": "2ce526e00dd70608cd7d49846dcdebfcc5f1e10edf7d71735fdcf80ac57763e2",
+      "size": [
+        225,
+        108
+      ],
+      "encoding_mode": "RGB",
+      "pixels_match_sample_crop": true
+    },
+    {
+      "name": "mailflow_close_mail.png",
+      "sha256": "21bf3870c3f6f542637f12d5a27aab3a00afe27f53076cb9b8d5ce8d529fbbba",
+      "size": [
+        58,
+        60
+      ],
+      "encoding_mode": "RGB",
+      "pixels_match_sample_crop": true
+    },
+    {
+      "name": "mailflow_close_menu.png",
+      "sha256": "619262526e65b9ea03a26564d930280eaa505716cfc381a2d4e987eab8104dfe",
+      "size": [
+        58,
+        60
+      ],
+      "encoding_mode": "RGB",
+      "pixels_match_sample_crop": true
+    },
+    {
+      "name": "mailflow_main_screen.png",
+      "sha256": "2c27a6c4b75bcb59463c2b5a9b3534bb9bd447d3ab7775304a105246dae653ee",
+      "size": [
+        60,
+        60
+      ],
+      "encoding_mode": "RGB",
+      "pixels_match_sample_crop": true
+    }
+  ],
+  "public_resource_reads_match_validated_bytes": true,
+  "ui": {
+    "saved_report_regression_tests": "25/25 passed",
+    "served_ui_sha256": "3d0fc06234034b97fced5195178babc60e5a38c9edf6c0146cff811572f8a3f3",
+    "served_ui_matches_fresh_build": true
+  },
+  "model": {
+    "name": "glm-5.3-flash",
+    "attempts": 1,
+    "result": "request timed out before generating source",
+    "known_tokens": 0,
+    "unknown_usage": true
+  },
+  "unverified": [
+    "real game input and effects",
+    "unrecorded no-reward or other branches",
+    "other resolutions",
+    "autonomous real-model generation",
+    "normal browser login and full-app navigation"
+  ]
+}

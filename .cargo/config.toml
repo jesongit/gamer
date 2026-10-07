@@ -1,0 +1,10 @@
+# Keep local development/test outputs small, including nested Cargo projects.
+[build]
+incremental = false
+
+# Retain filename/line-number backtraces without full type/variable debug data.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"

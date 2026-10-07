@@ -1,10 +1,10 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-10-05T12:29:52Z",
+  "generated_at": "2026-10-06T18:03:34Z",
   "host_api": "1.0.0",
   "provenance": {
-    "plugin_commit": "b38cf70fa751436e62b3be863a3114fb37540e64",
-    "sdk_host_commit": "dca128ec3d488f4eea4ba65e0b50a07f569af0da"
+    "plugin_commit": "f133d6be7e72222812e69764739691ac67df4481",
+    "sdk_host_commit": "3568008090442700888770f08c00e6351b4aa277"
   },
   "plugins": [
     {
@@ -257,15 +257,16 @@
     },
     {
       "id": "gamer-yaml",
-      "version": "0.1.5",
+      "version": "0.2.2",
       "name": "自动化",
-      "description": "自动化：YAML V1 脚本、函数库与模板的制作与运行",
+      "description": "自动化：YAML v2、AI 素材生成、离线验证与运行诊断",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-yaml-0.1.5.gplugin",
-      "sha256": "202c4fcecc318e4eff6be55e6ce2229bbb9cb4cbbe4d103057802a1fa72e8d77",
-      "size": 456836,
+      "download_url": "/plugins/gamer-yaml-0.2.2.gplugin",
+      "sha256": "9f3dd8268526efe1eae2b40e45625d692fbe03c2f4f8fc258f556f9763288a30",
+      "size": 493759,
       "permissions": [
         "ui.host",
+        "ai.connect",
         "device.read",
         "device.app",
         "input.tap",
@@ -298,7 +299,7 @@
             "order": 25,
             "panel_id": "automation",
             "preferred_width": 440,
-            "requires_device": true,
+            "requires_device": false,
             "runtime": "core",
             "title": "自动化"
           }
@@ -306,7 +307,7 @@
       },
       "execution": {
         "kind": "wasm",
-        "host_version": ">=0.2.7"
+        "host_version": ">=0.3.0"
       }
     }
   ]

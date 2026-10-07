@@ -8,11 +8,12 @@
 //! 不做重编码（样本字节原样进入 mdat，等价于 `-c copy`）。
 //!
 //! 结构：mdat 先流式写入（崩溃只丢当前段，此前已收口的段完好），moov 在
-//! finish 时一次性补写；sha256/字节量在写入时增量计算，finalize 无二次读盘。
+//! finish 时一次性补写；回填 mdat 长度后读取最终文件计算 SHA256，确保摘要与
+//! 可携带素材实际包含的字节一致。字节量仍按写入偏移累计。
 //! 结构合法性由单测锁定（顶层 box 遍历 + 样本表一致性），真实验证走
 //! `#[ignore]` 的 ffprobe 测试（需外部 ffmpeg，见 ignored_playback_smoke）。
 
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
@@ -36,7 +37,6 @@ pub struct MuxSummary {
 pub struct H264Mp4Writer {
     file: io::BufWriter<std::fs::File>,
     offset: u64,
-    hasher: Sha256,
     mdat_size_pos: u64,
     mdat_data_start: u64,
     mdat_bytes: u64,
@@ -62,9 +62,15 @@ impl H264Mp4Writer {
             std::fs::create_dir_all(parent)?;
         }
         let mut w = Self {
-            file: io::BufWriter::new(std::fs::File::create(path)?),
+            file: io::BufWriter::new(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(path)?,
+            ),
             offset: 0,
-            hasher: Sha256::new(),
             mdat_size_pos: 0,
             mdat_data_start: 0,
             mdat_bytes: 0,
@@ -81,10 +87,10 @@ impl H264Mp4Writer {
             samples: 0,
             finished: false,
         };
-        w.write_hashed(&box_bytes(b"ftyp", &ftyp_payload()))?;
+        w.write_bytes(&box_bytes(b"ftyp", &ftyp_payload()))?;
         w.mdat_size_pos = w.offset;
-        w.write_hashed(&0u32.to_be_bytes())?;
-        w.write_hashed(b"mdat")?;
+        w.write_bytes(&0u32.to_be_bytes())?;
+        w.write_bytes(b"mdat")?;
         w.mdat_data_start = w.offset;
         Ok(w)
     }
@@ -150,7 +156,7 @@ impl H264Mp4Writer {
                 "segment exceeds MP4 mdat size limit",
             ));
         }
-        self.write_hashed(&avcc)?;
+        self.write_bytes(&avcc)?;
         self.mdat_bytes += avcc.len() as u64;
         self.sizes.push(avcc.len() as u32);
         if keyframe {
@@ -193,12 +199,25 @@ impl H264Mp4Writer {
         file.seek(SeekFrom::Start(self.mdat_size_pos))?;
         file.write_all(&((self.mdat_bytes + 8) as u32).to_be_bytes())?;
         file.seek(SeekFrom::Start(self.offset))?;
-        self.write_hashed(&moov)?;
+        self.write_bytes(&moov)?;
         self.flush()?;
+        // The mdat size was overwritten after its placeholder was written.
+        // Hashing the original write stream would identify different bytes.
+        let file = self.file.get_mut();
+        file.seek(SeekFrom::Start(0))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let n = file.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
         self.finished = true;
         Ok(MuxSummary {
             size_bytes: self.offset,
-            sha256: hex(&self.hasher.clone().finalize()),
+            sha256: hex(&hasher.finalize()),
             duration_us,
             samples: self.samples,
         })
@@ -347,9 +366,8 @@ impl H264Mp4Writer {
         box_bytes(b"moov", &push_all(box_bytes(b"mvhd", &mvhd), &trak))
     }
 
-    fn write_hashed(&mut self, bytes: &[u8]) -> io::Result<()> {
+    fn write_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.file.write_all(bytes)?;
-        self.hasher.update(bytes);
         self.offset += bytes.len() as u64;
         Ok(())
     }
@@ -571,6 +589,11 @@ mod tests {
 
         let file = std::fs::read(&path).unwrap();
         assert_eq!(file.len() as u64, summary.size_bytes, "size 与实际文件一致");
+        assert_eq!(
+            summary.sha256,
+            hex(&Sha256::digest(&file)),
+            "摘要必须覆盖回填 mdat 长度后的最终文件"
+        );
 
         let top = walk_top(&file);
         assert_eq!(top.len(), 3, "顶层 = ftyp + mdat + moov");

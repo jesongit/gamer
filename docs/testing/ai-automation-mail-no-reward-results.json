@@ -1,0 +1,277 @@
+{
+  "verified_at": "2026-10-06T17:21:11.402750+00:00",
+  "package_id": "hsr",
+  "resolution": [
+    1920,
+    1080
+  ],
+  "initial_failure": {
+    "run_id": "ab2b300e-35d8-45bc-8f27-4036ceab1a1d",
+    "script": "邮件领取.yaml",
+    "target": "mailflow_open_mail.png",
+    "cause": "Template included unread badge absent in actual failure screenshot; original script also required claim and reward popup."
+  },
+  "changes": {
+    "mail_entry_template": "mailflow_open_mail_neutral.png",
+    "claim_enabled_template": "mailflow_claim_available#1.png",
+    "optional_steps": [
+      "claim_if_available",
+      "dismiss_reward_if_present"
+    ],
+    "threshold": 0.9,
+    "source_resolution_preserved": true
+  },
+  "ai_real_device_sessions": [
+    {
+      "session_id": "3c9ee35d-4423-452f-a8d2-982767259acd",
+      "run_id": "cc4eafc9-6528-459d-800e-910765b8bc59",
+      "result": "AI launched configured game and returned to main screen through existing controlled tools."
+    },
+    {
+      "session_id": "62054b54-44d3-4220-8c91-879b0b251bc4",
+      "run_id": "5706399e-fd9e-4e9e-b61f-428af4838b4a",
+      "result": "AI observed 8 read mails with disabled claim-all, opened and closed mailbox/menu, returned to main screen."
+    }
+  ],
+  "ai_diagnostic_request": {
+    "conversation_id": "6bfb10ba-c21b-451c-8cfe-fd6510843911",
+    "state": "error",
+    "error": "AI API 请求超时（未自动重试）",
+    "not_counted_as_success": true
+  },
+  "recordings": {
+    "ai_original": {
+      "id": "ada49cb317344634b0c29c9c6f76b424",
+      "actions": 4,
+      "state": "completed",
+      "sample_status": "unable_to_validate",
+      "reason": "Full original segment exceeds archive bound; boundary initially not exact. Original recording preserved."
+    },
+    "short_real_demonstration": {
+      "id": "23daa65f5d0a4db0ab274fe51d88c5d8",
+      "input_source": "manual",
+      "input_gateway": "Core REST control, accepted and recorded; screenshots inspected before each input",
+      "actions": 4,
+      "state": "completed",
+      "evidence_issues": []
+    }
+  },
+  "new_sample": {
+    "id": "cc4323d4a1f841389840ea343e248ee5",
+    "name": "邮件无可领取奖励（实机完整演示）",
+    "status": "complete",
+    "content_sha256": "20dfa314c908db2f6080798712f563a0094d21524c929eb756ffa38211cb35a2",
+    "diagnostics": [],
+    "start": {
+      "frame_id": "a3814db64a174debbc58da4ae32c68a1-0",
+      "timeline_us": 257687
+    },
+    "end": {
+      "frame_id": "a3814db64a174debbc58da4ae32c68a1-1638",
+      "timeline_us": 27836673
+    }
+  },
+  "saved_candidates": [
+    {
+      "id": "2fab8f03-5ace-43d4-b28b-793a3ceaf5eb",
+      "name": "邮件领取.yaml",
+      "state": "saved",
+      "revision": 1,
+      "report": {
+        "status": "passed",
+        "candidate_sha256": "9b6a900aa72182563b965f37c0642d570c22527e352fc54d0e47cfe74123a396",
+        "diagnostics": [],
+        "samples": [
+          {
+            "sample_id": "dbac781ed8dd4d4c895311417a8c9995",
+            "content_sha256": "afd9a604fab10cd0f25b2787ef9c2e9c33e3dab8016fa92b1d560776b1cf1f15",
+            "status": "passed",
+            "consumed_actions": 6,
+            "diagnostics": []
+          },
+          {
+            "sample_id": "cc4323d4a1f841389840ea343e248ee5",
+            "content_sha256": "20dfa314c908db2f6080798712f563a0094d21524c929eb756ffa38211cb35a2",
+            "status": "passed",
+            "consumed_actions": 4,
+            "diagnostics": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "7578aa94-0a34-4e31-86f9-ae9d4883c4e9",
+      "name": "邮件领取_1080p_AI.yaml",
+      "state": "saved",
+      "revision": 1,
+      "report": {
+        "status": "passed",
+        "candidate_sha256": "9b6a900aa72182563b965f37c0642d570c22527e352fc54d0e47cfe74123a396",
+        "diagnostics": [],
+        "samples": [
+          {
+            "sample_id": "dbac781ed8dd4d4c895311417a8c9995",
+            "content_sha256": "afd9a604fab10cd0f25b2787ef9c2e9c33e3dab8016fa92b1d560776b1cf1f15",
+            "status": "passed",
+            "consumed_actions": 6,
+            "diagnostics": []
+          },
+          {
+            "sample_id": "cc4323d4a1f841389840ea343e248ee5",
+            "content_sha256": "20dfa314c908db2f6080798712f563a0094d21524c929eb756ffa38211cb35a2",
+            "status": "passed",
+            "consumed_actions": 4,
+            "diagnostics": []
+          }
+        ]
+      }
+    }
+  ],
+  "pixel_checks": [
+    {
+      "name": "mailflow_open_menu.png",
+      "size": [
+        38,
+        50
+      ],
+      "source_size": [
+        1920,
+        1080
+      ],
+      "pixel_identical": true
+    },
+    {
+      "name": "mailflow_open_mail_neutral.png",
+      "size": [
+        48,
+        14
+      ],
+      "source_size": [
+        1920,
+        1080
+      ],
+      "pixel_identical": true
+    },
+    {
+      "name": "mailflow_claim_available#1.png",
+      "size": [
+        154,
+        50
+      ],
+      "source_size": [
+        1920,
+        1080
+      ],
+      "pixel_identical": true
+    },
+    {
+      "name": "mailflow_dismiss_reward.png",
+      "size": [
+        225,
+        108
+      ],
+      "source_size": [
+        1920,
+        1080
+      ],
+      "pixel_identical": true
+    },
+    {
+      "name": "mailflow_close_mail.png",
+      "size": [
+        58,
+        60
+      ],
+      "source_size": [
+        1920,
+        1080
+      ],
+      "pixel_identical": true
+    },
+    {
+      "name": "mailflow_close_menu.png",
+      "size": [
+        58,
+        60
+      ],
+      "source_size": [
+        1920,
+        1080
+      ],
+      "pixel_identical": true
+    },
+    {
+      "name": "mailflow_main_screen.png",
+      "size": [
+        60,
+        60
+      ],
+      "source_size": [
+        1920,
+        1080
+      ],
+      "pixel_identical": true
+    }
+  ],
+  "real_device_run": {
+    "record": {
+      "device_id": "9505f9b029404d2b92970018d76417f5",
+      "entrypoint": "hsr/邮件领取.yaml",
+      "finished_at": "2026-10-06T17:19:32.699345400Z",
+      "run_id": "0c81ac05-fd55-4714-a7de-80fedf1ac86c",
+      "runner_id": "gamer-yaml",
+      "script_id": "hsr/邮件领取.yaml",
+      "source": "manual",
+      "started_at": "2026-10-06T17:19:14.203074100Z",
+      "state": "success"
+    },
+    "tap_count": 4,
+    "claim_observations_found": [
+      false,
+      false,
+      false
+    ],
+    "terminal_event": {
+      "ev": "run_end",
+      "id": 15353,
+      "ok": true,
+      "time": "2026-10-06T17:19:32.697Z",
+      "trace": {
+        "frame_id": 0,
+        "parent_frame_id": null,
+        "run_id": "0c81ac05-fd55-4714-a7de-80fedf1ac86c",
+        "source": {
+          "package_id": "hsr",
+          "path": "automations/邮件领取.yaml",
+          "plugin_id": "gamer-yaml",
+          "version": "b3769268f9f9"
+        }
+      }
+    },
+    "input_control": {
+      "phase": "idle",
+      "owner": null,
+      "generation": 4,
+      "manual_allowed": true
+    },
+    "trace_images": 13,
+    "completion_template_score": 0.998172163963318
+  },
+  "limitations": [
+    "Rewarded branch validated against historical real recording; no current live rewards available.",
+    "Actual current mailbox has 8 read mails and no claimable rewards. Literally empty inbox and unexpected dialogs are not live-tested.",
+    "Provider diagnostic timeout is preserved as a failure; live AI sessions and offline/real script acceptance are separate evidence."
+  ],
+  "scope": "Package scripts/templates and tutorial updated; existing AI/Core control, interpreter and matcher used. No source or binary update required for this fix.",
+  "final_scripts": {
+    "邮件领取.yaml": {
+      "version": "b3769268f9f9",
+      "sha256": "b3769268f9f92cbc74a4ca2182ae83cc7eb6ac2edce6ac99d3d09608b2bc54eb"
+    },
+    "邮件领取_1080p_AI.yaml": {
+      "version": "b3769268f9f9",
+      "sha256": "b3769268f9f92cbc74a4ca2182ae83cc7eb6ac2edce6ac99d3d09608b2bc54eb"
+    }
+  },
+  "final_scripts_identical": true
+}

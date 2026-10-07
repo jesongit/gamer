@@ -1,0 +1,2416 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-06T11:25:05Z",
+  "scope": "isolated local HTTP integration; real server/router/auth/plugins/parser/interpreter/NCC; synthetic evidence and deterministic protocol provider",
+  "results": [
+    {
+      "name": "isolated server, real authentication, no devices",
+      "status": "passed",
+      "seconds": 1.412,
+      "detail": {
+        "loopback": "http://127.0.0.1:59040",
+        "server_sha256": "3f63b183d64e2ba6ab0ca31246ca845945809e56caf9712d4dfe4d2887d0b86b",
+        "executed_binary_mtime_ns": 1791285871336795200,
+        "build_label": "jpegli-1080p-all-target-regions-unlimited-sse",
+        "executed_isolated_copy": true
+      }
+    },
+    {
+      "name": "install current YAML plugin",
+      "status": "passed",
+      "seconds": 0.117,
+      "detail": {
+        "plugin": "gamer-yaml",
+        "version": "0.2.1",
+        "archive_sha256": "5c596f0802c11a89f7ba7e1b7bb133429e2e910ae29107a47c0ca3ac3c55211a",
+        "wasm_sha256": "15092bf663f41e8a07132cef5a8c5023e2a04cb3b7fe8f12ea16034439a13f1e",
+        "settings_before": {
+          "after_click_ms": 300,
+          "before_click_ms": 300,
+          "default_timeout_secs": 10
+        },
+        "fixture_production_settings": {
+          "after_click_ms": 300,
+          "before_click_ms": 300,
+          "default_timeout_secs": 10
+        }
+      }
+    },
+    {
+      "name": "install current video plugin",
+      "status": "passed",
+      "seconds": 0.045,
+      "detail": {
+        "plugin": "gamer-video",
+        "version": "0.2.0",
+        "archive_sha256": "a7daa6fe5db801fbc496901c5f4261d461eba49e3a17706a9286a0ce22aa2308",
+        "wasm_sha256": null
+      }
+    },
+    {
+      "name": "real MP4 extraction and portable sample.create",
+      "status": "passed",
+      "seconds": 1.675,
+      "detail": {
+        "frames": 10,
+        "end_us": 1800000,
+        "original_capture_base_pts_us": 90000000,
+        "archive_sha256": "2a4f8cba9d1a56a532b3fbefa9ee4cc8cf15833608009c24b90b15a5c090ebba",
+        "clip_archive_sha256": "2b73480d11672084cfc6083ae0c38f7a98dadd58a5feafbbe655496b4eaf5927",
+        "recording_removed_before_portable_read": true
+      }
+    },
+    {
+      "name": "portable samples, production import parser, tamper rejection",
+      "status": "passed",
+      "seconds": 0.179,
+      "detail": {
+        "samples": 4,
+        "portable_sha256": "587d868621c3db8a3100f7930781dec04532b5b080dfa0a1ebedb8998eb6d01b",
+        "original_media_directory": "never created"
+      }
+    },
+    {
+      "name": "no-AI editor and A/C-confirm B-absent real replay",
+      "status": "passed",
+      "seconds": 0.328,
+      "detail": {
+        "status": "passed",
+        "consumed_actions": [
+          2,
+          1,
+          2
+        ],
+        "fingerprint": "84033df4001143bd9bacc26698bda28247d31c6a7ed7853cc77d9ea0a6ae1cab"
+      }
+    },
+    {
+      "name": "archived clip supplies unlisted runtime frames with no source media",
+      "status": "passed",
+      "seconds": 4.206,
+      "detail": {
+        "state": "passed",
+        "consumed_actions": 2,
+        "contradictory_png_rejected": true,
+        "archived_video_sha256": "d4c40d9293ff01cf76690d4cba18273b3b80200d0aadf260cf934666a8040e1d",
+        "runtime_clip_observations": 1,
+        "runtime_clip_pts_us": [
+          700000
+        ],
+        "original_media_and_frames_removed": true
+      }
+    },
+    {
+      "name": "portable replay works while video plugin is disabled",
+      "status": "passed",
+      "seconds": 0.211,
+      "detail": {
+        "state": "passed",
+        "video_running": false
+      }
+    },
+    {
+      "name": "wrong action cannot pass or save",
+      "status": "passed",
+      "seconds": 0.114,
+      "detail": {
+        "status": "failed",
+        "samples": [
+          {
+            "sample": "sample-a",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": "claim",
+                "frame_id": "f0",
+                "message": "kind=failed; message=capability operation failed: ACTION_MISMATCH: \"claim\" 目标或手势属性不一致 [source:run[0].then[0]]",
+                "path": "run[0]"
+              }
+            ]
+          },
+          {
+            "sample": "sample-b",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": "claim",
+                "frame_id": "f0",
+                "message": "kind=failed; message=capability operation failed: ACTION_MISMATCH: \"claim\" 目标或手势属性不一致 [source:run[0].then[0]]",
+                "path": "run[0]"
+              }
+            ]
+          },
+          {
+            "sample": "sample-c",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": "claim",
+                "frame_id": "f0",
+                "message": "kind=failed; message=capability operation failed: ACTION_MISMATCH: \"claim\" 目标或手势属性不一致 [source:run[0].then[0]]",
+                "path": "run[0]"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing template cannot pass or save",
+      "status": "passed",
+      "seconds": 0.114,
+      "detail": {
+        "status": "failed",
+        "samples": [
+          {
+            "sample": "sample-a",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": "claim",
+                "frame_id": "f0",
+                "message": "kind=failed; message=capability resource was not found: 模板 claim.png [source:run[0]]",
+                "path": "run[0]"
+              }
+            ]
+          },
+          {
+            "sample": "sample-b",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": "claim",
+                "frame_id": "f0",
+                "message": "kind=failed; message=capability resource was not found: 模板 claim.png [source:run[0]]",
+                "path": "run[0]"
+              }
+            ]
+          },
+          {
+            "sample": "sample-c",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": "claim",
+                "frame_id": "f0",
+                "message": "kind=failed; message=capability resource was not found: 模板 claim.png [source:run[0]]",
+                "path": "run[0]"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "wrong goal template cannot pass or save",
+      "status": "passed",
+      "seconds": 0.164,
+      "detail": {
+        "status": "insufficient_evidence",
+        "samples": [
+          {
+            "sample": "sample-a",
+            "status": "insufficient_evidence",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": null,
+                "frame_id": "f6",
+                "message": "kind=failed; message=capability operation failed: EVIDENCE_END_EXHAUSTED: 所请求观察时刻超过记录 END，不能提前查看 END 冒充当前画面 [source:run[2]]",
+                "path": "run[2]"
+              }
+            ]
+          },
+          {
+            "sample": "sample-b",
+            "status": "insufficient_evidence",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": null,
+                "frame_id": "f5",
+                "message": "kind=failed; message=capability operation failed: EVIDENCE_END_EXHAUSTED: 等待需要 END 之后的未知画面 [source:run[2]]",
+                "path": "run[2]"
+              }
+            ]
+          },
+          {
+            "sample": "sample-c",
+            "status": "insufficient_evidence",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": null,
+                "frame_id": "f6",
+                "message": "kind=failed; message=capability operation failed: EVIDENCE_END_EXHAUSTED: 所请求观察时刻超过记录 END，不能提前查看 END 冒充当前画面 [source:run[2]]",
+                "path": "run[2]"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing finish cannot pass or save",
+      "status": "passed",
+      "seconds": 0.148,
+      "detail": {
+        "status": "failed",
+        "samples": [
+          {
+            "sample": "sample-a",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": null,
+                "frame_id": "f3",
+                "message": "GOAL_NOT_REACHED: 脚本未在最后一次动作后验证 finish 目标",
+                "path": "run[2]"
+              }
+            ]
+          },
+          {
+            "sample": "sample-b",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": null,
+                "frame_id": "f4",
+                "message": "GOAL_NOT_REACHED: 脚本未在最后一次动作后验证 finish 目标",
+                "path": "run[2]"
+              }
+            ]
+          },
+          {
+            "sample": "sample-c",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": null,
+                "frame_id": "f3",
+                "message": "GOAL_NOT_REACHED: 脚本未在最后一次动作后验证 finish 目标",
+                "path": "run[2]"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "all-sample gate retains B failure while A/C pass",
+      "status": "passed",
+      "seconds": 0.169,
+      "detail": {
+        "status": "failed",
+        "samples": [
+          {
+            "sample": "sample-a",
+            "status": "passed",
+            "diagnostics": []
+          },
+          {
+            "sample": "sample-b",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": null,
+                "frame_id": "f4",
+                "message": "kind=failed; message=VISUAL_TIMEOUT: 必需视觉目标 confirm.png 在 250ms 内未出现 [source:run[1]]",
+                "path": "run[1]"
+              }
+            ]
+          },
+          {
+            "sample": "sample-c",
+            "status": "passed",
+            "diagnostics": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "negative END cannot be hidden by earlier success",
+      "status": "passed",
+      "seconds": 0.21,
+      "detail": {
+        "status": "failed",
+        "samples": [
+          {
+            "sample": "sample-a",
+            "status": "passed",
+            "diagnostics": []
+          },
+          {
+            "sample": "sample-b",
+            "status": "passed",
+            "diagnostics": []
+          },
+          {
+            "sample": "sample-c",
+            "status": "passed",
+            "diagnostics": []
+          },
+          {
+            "sample": "sample-negative",
+            "status": "failed",
+            "diagnostics": [
+              {
+                "code": "replay.execution",
+                "event_id": null,
+                "frame_id": "f7",
+                "message": "kind=failed; message=GOAL_END_MISMATCH: END 画面不满足已达到目标: VISUAL_TIMEOUT: 必需视觉目标 done.png 在 0ms 内未出现 [source:run[2]]",
+                "path": "run[2]"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "revision stale report, atomic save and joint rollback",
+      "status": "passed",
+      "seconds": 0.55,
+      "detail": {
+        "commit": "79941638-8fcb-400c-a844-2858bc1e112b",
+        "rollback": "1def4c84-f2f0-4021-a849-e22ae92a85d7",
+        "conflict_rejected": true,
+        "production_settings_change_rejected": true
+      }
+    },
+    {
+      "name": "trace HTTP authorization and absent evidence",
+      "status": "passed",
+      "seconds": 0.021,
+      "detail": "auth and absent-evidence behavior only; real-target image capture deferred"
+    },
+    {
+      "name": "local-only AI protocol probe and readiness",
+      "status": "passed",
+      "seconds": 0.151,
+      "detail": {
+        "provider": "deterministic loopback protocol stub; NOT real model quality",
+        "checks": [
+          {
+            "name": "model",
+            "ok": true
+          },
+          {
+            "name": "image_input",
+            "ok": true
+          },
+          {
+            "name": "function_calling",
+            "ok": true
+          },
+          {
+            "name": "tool_image_feedback",
+            "ok": true
+          },
+          {
+            "name": "tool_result_roundtrip",
+            "ok": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "AI generation and bounded correction use real validation",
+      "status": "passed",
+      "seconds": 4.572,
+      "detail": {
+        "generation": "passed",
+        "clip_generation": "passed",
+        "retry_attempts": 2,
+        "bounded_reason": "no_progress",
+        "token_budget_stopped_before_request": true,
+        "attempted_sample_deletion_rejected": true,
+        "invalid_json_preserves_known_usage": true,
+        "unlimited_keeps_unknown_usage_and_allows_correction": true
+      }
+    },
+    {
+      "name": "held-out D uses identical generated script and templates without provider exposure",
+      "status": "passed",
+      "seconds": 0.163,
+      "detail": {
+        "held_out_sample": "sample-d",
+        "status": "passed",
+        "consumed_actions": 1,
+        "sent_to_provider": false,
+        "generated_selection_unchanged": true,
+        "crop_source_samples": [
+          "sample-a"
+        ],
+        "exact_template_sha256s": {
+          "claim.png": "f240e632be57b43fdbe9ba3693d5cde21a773e751e518d43df24b9b9328e5735",
+          "confirm.png": "23fc1148de9f02a8b3e855c7919095c93a27351a894261cef27ee4b0d9540acd",
+          "done.png": "cccf18675cb1f4b366397c8a9078d1ab42e866623e2c0abca82e25f2104e3a16"
+        },
+        "interpretation": "synthetic replay coverage only; not real-model generalization"
+      }
+    },
+    {
+      "name": "context change keeps asynchronous result in original package",
+      "status": "passed",
+      "seconds": 0.348,
+      "detail": {
+        "result_package": "acceptance",
+        "selected_other_package_unmodified": true
+      }
+    },
+    {
+      "name": "cancelled late result cannot write or cross packages",
+      "status": "passed",
+      "seconds": 0.644,
+      "detail": {
+        "state": "cancelled",
+        "cross_package_candidates": 0,
+        "unknown_usage": true,
+        "automatic_retry_blocked_without_request": true,
+        "manual_validation": "passed"
+      }
+    },
+    {
+      "name": "configuration change rejects late model result",
+      "status": "passed",
+      "seconds": 0.259,
+      "detail": {
+        "state": "failed",
+        "reason": "model_version_conflict: 配置已变更，丢弃迟到结果",
+        "re_probe_required": true
+      }
+    },
+    {
+      "name": "AI disable rejects late result; ordinary validation still works",
+      "status": "passed",
+      "seconds": 0.432,
+      "detail": {
+        "late_result_state": "failed",
+        "ordinary_validation": "passed"
+      }
+    }
+  ],
+  "model_stub_skipped": false,
+  "clip_replay_skipped": false,
+  "model_stub_requests": [
+    {
+      "kind": "probe.model",
+      "model": "local-deterministic-protocol-stub",
+      "images": 0,
+      "sample_ids": []
+    },
+    {
+      "kind": "probe.images_and_tools",
+      "model": "local-deterministic-protocol-stub",
+      "images": 1,
+      "sample_ids": []
+    },
+    {
+      "kind": "probe.images_and_tools",
+      "model": "local-deterministic-protocol-stub",
+      "images": 1,
+      "sample_ids": []
+    },
+    {
+      "kind": "probe.images_and_tools",
+      "model": "local-deterministic-protocol-stub",
+      "images": 2,
+      "sample_ids": []
+    },
+    {
+      "kind": "generation.valid",
+      "model": "local-deterministic-protocol-stub",
+      "images": 23,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    },
+    {
+      "kind": "generation.valid",
+      "model": "local-deterministic-protocol-stub",
+      "images": 9,
+      "sample_ids": [
+        "clip-sample"
+      ]
+    },
+    {
+      "kind": "generation.bad_action",
+      "model": "local-deterministic-protocol-stub",
+      "images": 23,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    },
+    {
+      "kind": "generation.bad_action",
+      "model": "local-deterministic-protocol-stub",
+      "images": 23,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    },
+    {
+      "kind": "generation.unreported_bad_action",
+      "model": "local-deterministic-protocol-stub",
+      "images": 23,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    },
+    {
+      "kind": "generation.unreported_bad_action",
+      "model": "local-deterministic-protocol-stub",
+      "images": 23,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    },
+    {
+      "kind": "generation.bad_json",
+      "model": "local-deterministic-protocol-stub",
+      "images": 23,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    },
+    {
+      "kind": "generation.drop_sample",
+      "model": "local-deterministic-protocol-stub",
+      "images": 23,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    },
+    {
+      "kind": "generation.valid",
+      "model": "local-deterministic-protocol-stub",
+      "images": 23,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    },
+    {
+      "kind": "generation.valid",
+      "model": "local-deterministic-protocol-stub",
+      "images": 23,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    },
+    {
+      "kind": "generation.valid",
+      "model": "local-deterministic-protocol-stub",
+      "images": 23,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    },
+    {
+      "kind": "probe.model",
+      "model": "changed-local-protocol-stub",
+      "images": 0,
+      "sample_ids": []
+    },
+    {
+      "kind": "probe.images_and_tools",
+      "model": "changed-local-protocol-stub",
+      "images": 1,
+      "sample_ids": []
+    },
+    {
+      "kind": "probe.images_and_tools",
+      "model": "changed-local-protocol-stub",
+      "images": 1,
+      "sample_ids": []
+    },
+    {
+      "kind": "probe.images_and_tools",
+      "model": "changed-local-protocol-stub",
+      "images": 2,
+      "sample_ids": []
+    },
+    {
+      "kind": "generation.valid",
+      "model": "changed-local-protocol-stub",
+      "images": 23,
+      "sample_ids": [
+        "sample-a",
+        "sample-b",
+        "sample-c"
+      ]
+    }
+  ],
+  "deferred": [
+    "real Android/CDP recording and coordinate alignment",
+    "actual game input and lifecycle",
+    "real model image understanding, generation quality and cost",
+    "live-target runtime Trace image capture",
+    "browser/UI acceptance (separate supported browser session)"
+  ],
+  "real_image_verification": {
+    "source_resolution": [
+      1920,
+      1080
+    ],
+    "all_full_images_jpeg_sampling": "4:4:4",
+    "lossless_detail_count": 6,
+    "lossless_detail_bytes": 340519,
+    "detail_pixels_equal_original_crop": true,
+    "jpegli_same_8_frame_bytes": 2211969,
+    "previous_pillow_jpeg90_same_8_frame_bytes": 2777117,
+    "reduction_percent_vs_previous_jpeg90": 20.35,
+    "original_png_20_frame_bytes": 24327734,
+    "selected_full_frames": 8,
+    "transferred_images": 14,
+    "transferred_image_bytes": 2552488,
+    "transition_images_covered_by_next_stable_before_and_end": true
+  },
+  "deployed_server_sha256": "3f63b183d64e2ba6ab0ca31246ca845945809e56caf9712d4dfe4d2887d0b86b",
+  "ui_test_counts": {
+    "gamer_yaml_automation": 25,
+    "gamer_ai_budget_format": 9
+  },
+  "model_image_unit_tests": 4,
+  "real_model_acceptance": {
+    "candidate_id": "5599bbde-fd3c-4006-87f0-72c618ac8b08",
+    "name": "邮件领取_1080p_AI.yaml",
+    "state": "saved",
+    "attempts": 2,
+    "known_tokens": 45533,
+    "unknown_usage": true,
+    "active_seconds": 528.1983435,
+    "source_resolution": [
+      1920,
+      1080
+    ],
+    "model_input": {
+      "codec": "jpegli",
+      "detail_frames": 6,
+      "full_frames": 8,
+      "image_bytes": 2552488,
+      "max_seconds": 317,
+      "preserves_source_resolution": true,
+      "request_bytes": 3443660
+    },
+    "report": {
+      "candidate_sha256": "a1f6413a4717e56286c3ee19a505f972487035b9af58031689a4b0d2c2da1578",
+      "diagnostics": [],
+      "samples": [
+        {
+          "consumed_actions": 6,
+          "content_sha256": "afd9a604fab10cd0f25b2787ef9c2e9c33e3dab8016fa92b1d560776b1cf1f15",
+          "diagnostics": [],
+          "events": [
+            {
+              "ev": "run_start"
+            },
+            {
+              "desc": "观察视觉目标",
+              "ev": "step_start",
+              "path": "run[0]",
+              "source_id": "open_phone_menu"
+            },
+            {
+              "data": {
+                "args": {
+                  "interval": "250ms",
+                  "region": [
+                    0.0,
+                    0.03425925925925926,
+                    0.052083333333333336,
+                    0.0962962962962963
+                  ],
+                  "required": true,
+                  "template": "mail_ai1080_open_menu.png",
+                  "threshold": 0.9,
+                  "timeout": "10s"
+                },
+                "function": "observe",
+                "path": "run[0]"
+              },
+              "ev": "detail",
+              "name": "arguments"
+            },
+            {
+              "ev": "replay_vision",
+              "found": true,
+              "image_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-0",
+              "region": [
+                0,
+                37,
+                100,
+                104
+              ],
+              "template": "mail_ai1080_open_menu.png",
+              "template_sha256": "9c35aaab6f8794a51c7f3d58693b04f3d137178b2bc8ee9fbf0817c2670d8c97",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 349386
+            },
+            {
+              "data": {
+                "as": "open_menu",
+                "function": "observe",
+                "value": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 0,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 0,
+                    "x": 0.025,
+                    "y": 0.0824074074074074
+                  },
+                  "height": 96,
+                  "region": {
+                    "height": 0.0962962962962963,
+                    "width": 0.052083333333333336,
+                    "x": 0.0,
+                    "y": 0.03425925925925926
+                  },
+                  "score": 0.9996031522750854,
+                  "width": 96,
+                  "x": 0,
+                  "y": 41
+                }
+              },
+              "ev": "detail",
+              "name": "result"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[0]",
+              "source_id": "open_phone_menu"
+            },
+            {
+              "desc": "如果 $open_menu",
+              "ev": "step_start",
+              "path": "run[0]",
+              "source_id": "open_phone_menu"
+            },
+            {
+              "data": {
+                "condition": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 0,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 0,
+                    "x": 0.025,
+                    "y": 0.0824074074074074
+                  },
+                  "height": 96,
+                  "region": {
+                    "height": 0.0962962962962963,
+                    "width": 0.052083333333333336,
+                    "x": 0.0,
+                    "y": 0.03425925925925926
+                  },
+                  "score": 0.9996031522750854,
+                  "width": 96,
+                  "x": 0,
+                  "y": 41
+                },
+                "kind": "if",
+                "path": "run[0]",
+                "selected": "then"
+              },
+              "ev": "detail",
+              "name": "branch"
+            },
+            {
+              "desc": "点击",
+              "ev": "step_start",
+              "path": "run[0].then[0]",
+              "source_id": "run[0].then[0]"
+            },
+            {
+              "data": {
+                "args": {
+                  "position": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 0,
+                    "center": {
+                      "_frame": {
+                        "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                        "revision": 0,
+                        "target": "offline-replay"
+                      },
+                      "_observed_at_ms": 0,
+                      "x": 0.025,
+                      "y": 0.0824074074074074
+                    },
+                    "height": 96,
+                    "region": {
+                      "height": 0.0962962962962963,
+                      "width": 0.052083333333333336,
+                      "x": 0.0,
+                      "y": 0.03425925925925926
+                    },
+                    "score": 0.9996031522750854,
+                    "width": 96,
+                    "x": 0,
+                    "y": 41
+                  }
+                },
+                "function": "tap",
+                "path": "run[0].then[0]"
+              },
+              "ev": "detail",
+              "name": "arguments"
+            },
+            {
+              "ev": "replay_action_alignment",
+              "event_id": "evt-000000001",
+              "evidence_timeline_us": 649386,
+              "proof": {
+                "kind": "matched_template",
+                "observed_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-0",
+                "recorded_before_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-82",
+                "template": "mail_ai1080_open_menu.png"
+              },
+              "recorded_timeline_us": 1986912,
+              "script_timeline_us": 649386,
+              "time_shift_us": 1337526
+            },
+            {
+              "data": {
+                "as": null,
+                "function": "tap",
+                "value": null
+              },
+              "ev": "detail",
+              "name": "result"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[0].then[0]",
+              "source_id": "run[0].then[0]"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[0]",
+              "source_id": "open_phone_menu"
+            },
+            {
+              "desc": "观察视觉目标",
+              "ev": "step_start",
+              "path": "run[1]",
+              "source_id": "enter_mail"
+            },
+            {
+              "data": {
+                "args": {
+                  "interval": "250ms",
+                  "region": [
+                    0.9364583333333332,
+                    0.2611111111111111,
+                    0.06145833333333333,
+                    0.10925925925925926
+                  ],
+                  "required": true,
+                  "template": "mail_ai1080_open_mail.png",
+                  "threshold": 0.9,
+                  "timeout": "10s"
+                },
+                "function": "observe",
+                "path": "run[1]"
+              },
+              "ev": "detail",
+              "name": "arguments"
+            },
+            {
+              "ev": "replay_vision",
+              "found": false,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:93",
+              "region": [
+                1798,
+                282,
+                118,
+                118
+              ],
+              "template": "mail_ai1080_open_mail.png",
+              "template_sha256": "4761ab0b58cf401c61933587987401391d3f9860c1815ca5082b6ddcf064aa66",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 2278982
+            },
+            {
+              "ev": "replay_vision",
+              "found": false,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:99",
+              "region": [
+                1798,
+                282,
+                118,
+                118
+              ],
+              "template": "mail_ai1080_open_mail.png",
+              "template_sha256": "4761ab0b58cf401c61933587987401391d3f9860c1815ca5082b6ddcf064aa66",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 2578184
+            },
+            {
+              "ev": "replay_vision",
+              "found": false,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:108",
+              "region": [
+                1798,
+                282,
+                118,
+                118
+              ],
+              "template": "mail_ai1080_open_mail.png",
+              "template_sha256": "4761ab0b58cf401c61933587987401391d3f9860c1815ca5082b6ddcf064aa66",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 2837675
+            },
+            {
+              "ev": "replay_vision",
+              "found": true,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:120",
+              "region": [
+                1798,
+                282,
+                118,
+                118
+              ],
+              "template": "mail_ai1080_open_mail.png",
+              "template_sha256": "4761ab0b58cf401c61933587987401391d3f9860c1815ca5082b6ddcf064aa66",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 3079069
+            },
+            {
+              "data": {
+                "as": "open_mail",
+                "function": "observe",
+                "value": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 1350,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 1350,
+                    "x": 0.9671875,
+                    "y": 0.31574074074074077
+                  },
+                  "height": 110,
+                  "region": {
+                    "height": 0.10925925925925926,
+                    "width": 0.06145833333333333,
+                    "x": 0.9364583333333332,
+                    "y": 0.2611111111111111
+                  },
+                  "score": 0.9943082928657532,
+                  "width": 110,
+                  "x": 1802,
+                  "y": 286
+                }
+              },
+              "ev": "detail",
+              "name": "result"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[1]",
+              "source_id": "enter_mail"
+            },
+            {
+              "desc": "如果 $open_mail",
+              "ev": "step_start",
+              "path": "run[1]",
+              "source_id": "enter_mail"
+            },
+            {
+              "data": {
+                "condition": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 1350,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 1350,
+                    "x": 0.9671875,
+                    "y": 0.31574074074074077
+                  },
+                  "height": 110,
+                  "region": {
+                    "height": 0.10925925925925926,
+                    "width": 0.06145833333333333,
+                    "x": 0.9364583333333332,
+                    "y": 0.2611111111111111
+                  },
+                  "score": 0.9943082928657532,
+                  "width": 110,
+                  "x": 1802,
+                  "y": 286
+                },
+                "kind": "if",
+                "path": "run[1]",
+                "selected": "then"
+              },
+              "ev": "detail",
+              "name": "branch"
+            },
+            {
+              "desc": "点击",
+              "ev": "step_start",
+              "path": "run[1].then[0]",
+              "source_id": "run[1].then[0]"
+            },
+            {
+              "data": {
+                "args": {
+                  "position": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 1350,
+                    "center": {
+                      "_frame": {
+                        "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                        "revision": 0,
+                        "target": "offline-replay"
+                      },
+                      "_observed_at_ms": 1350,
+                      "x": 0.9671875,
+                      "y": 0.31574074074074077
+                    },
+                    "height": 110,
+                    "region": {
+                      "height": 0.10925925925925926,
+                      "width": 0.06145833333333333,
+                      "x": 0.9364583333333332,
+                      "y": 0.2611111111111111
+                    },
+                    "score": 0.9943082928657532,
+                    "width": 110,
+                    "x": 1802,
+                    "y": 286
+                  }
+                },
+                "function": "tap",
+                "path": "run[1].then[0]"
+              },
+              "ev": "detail",
+              "name": "arguments"
+            },
+            {
+              "ev": "replay_action_alignment",
+              "event_id": "evt-000000002",
+              "evidence_timeline_us": 3395807,
+              "proof": {
+                "kind": "matched_template",
+                "observed_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:120",
+                "recorded_before_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-214",
+                "template": "mail_ai1080_open_mail.png"
+              },
+              "recorded_timeline_us": 4966095,
+              "script_timeline_us": 1999386,
+              "time_shift_us": 2966709
+            },
+            {
+              "data": {
+                "as": null,
+                "function": "tap",
+                "value": null
+              },
+              "ev": "detail",
+              "name": "result"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[1].then[0]",
+              "source_id": "run[1].then[0]"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[1]",
+              "source_id": "enter_mail"
+            },
+            {
+              "desc": "观察视觉目标",
+              "ev": "step_start",
+              "path": "run[2]",
+              "source_id": "claim_all_rewards"
+            },
+            {
+              "data": {
+                "args": {
+                  "interval": "250ms",
+                  "region": [
+                    0.22135416666666663,
+                    0.8703703703703703,
+                    0.13958333333333334,
+                    0.07777777777777778
+                  ],
+                  "required": true,
+                  "template": "mail_ai1080_claim_all.png",
+                  "threshold": 0.9,
+                  "timeout": "10s"
+                },
+                "function": "observe",
+                "path": "run[2]"
+              },
+              "ev": "detail",
+              "name": "arguments"
+            },
+            {
+              "ev": "replay_vision",
+              "found": false,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:231",
+              "region": [
+                425,
+                940,
+                268,
+                84
+              ],
+              "template": "mail_ai1080_claim_all.png",
+              "template_sha256": "ff64ae3ddbe3009e83687f57fa22cfbe6294e9893945b101903338179a28bd1e",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 5318468
+            },
+            {
+              "ev": "replay_vision",
+              "found": false,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:244",
+              "region": [
+                425,
+                940,
+                268,
+                84
+              ],
+              "template": "mail_ai1080_claim_all.png",
+              "template_sha256": "ff64ae3ddbe3009e83687f57fa22cfbe6294e9893945b101903338179a28bd1e",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 5580352
+            },
+            {
+              "ev": "replay_vision",
+              "found": false,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:256",
+              "region": [
+                425,
+                940,
+                268,
+                84
+              ],
+              "template": "mail_ai1080_claim_all.png",
+              "template_sha256": "ff64ae3ddbe3009e83687f57fa22cfbe6294e9893945b101903338179a28bd1e",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 5819336
+            },
+            {
+              "ev": "replay_vision",
+              "found": true,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:269",
+              "region": [
+                425,
+                940,
+                268,
+                84
+              ],
+              "template": "mail_ai1080_claim_all.png",
+              "template_sha256": "ff64ae3ddbe3009e83687f57fa22cfbe6294e9893945b101903338179a28bd1e",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 6079842
+            },
+            {
+              "data": {
+                "as": "claim_all",
+                "function": "observe",
+                "value": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 2700,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 2700,
+                    "x": 0.2911458333333333,
+                    "y": 0.9092592592592592
+                  },
+                  "height": 76,
+                  "region": {
+                    "height": 0.07777777777777778,
+                    "width": 0.13958333333333334,
+                    "x": 0.22135416666666663,
+                    "y": 0.8703703703703703
+                  },
+                  "score": 0.9982941746711732,
+                  "width": 260,
+                  "x": 429,
+                  "y": 944
+                }
+              },
+              "ev": "detail",
+              "name": "result"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[2]",
+              "source_id": "claim_all_rewards"
+            },
+            {
+              "desc": "如果 $claim_all",
+              "ev": "step_start",
+              "path": "run[2]",
+              "source_id": "claim_all_rewards"
+            },
+            {
+              "data": {
+                "condition": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 2700,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 2700,
+                    "x": 0.2911458333333333,
+                    "y": 0.9092592592592592
+                  },
+                  "height": 76,
+                  "region": {
+                    "height": 0.07777777777777778,
+                    "width": 0.13958333333333334,
+                    "x": 0.22135416666666663,
+                    "y": 0.8703703703703703
+                  },
+                  "score": 0.9982941746711732,
+                  "width": 260,
+                  "x": 429,
+                  "y": 944
+                },
+                "kind": "if",
+                "path": "run[2]",
+                "selected": "then"
+              },
+              "ev": "detail",
+              "name": "branch"
+            },
+            {
+              "desc": "点击",
+              "ev": "step_start",
+              "path": "run[2].then[0]",
+              "source_id": "run[2].then[0]"
+            },
+            {
+              "data": {
+                "args": {
+                  "position": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 2700,
+                    "center": {
+                      "_frame": {
+                        "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                        "revision": 0,
+                        "target": "offline-replay"
+                      },
+                      "_observed_at_ms": 2700,
+                      "x": 0.2911458333333333,
+                      "y": 0.9092592592592592
+                    },
+                    "height": 76,
+                    "region": {
+                      "height": 0.07777777777777778,
+                      "width": 0.13958333333333334,
+                      "x": 0.22135416666666663,
+                      "y": 0.8703703703703703
+                    },
+                    "score": 0.9982941746711732,
+                    "width": 260,
+                    "x": 429,
+                    "y": 944
+                  }
+                },
+                "function": "tap",
+                "path": "run[2].then[0]"
+              },
+              "ev": "detail",
+              "name": "arguments"
+            },
+            {
+              "ev": "replay_action_alignment",
+              "event_id": "evt-000000003",
+              "evidence_timeline_us": 6385948,
+              "proof": {
+                "kind": "matched_template",
+                "observed_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:269",
+                "recorded_before_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-323",
+                "template": "mail_ai1080_claim_all.png"
+              },
+              "recorded_timeline_us": 7176111,
+              "script_timeline_us": 3349386,
+              "time_shift_us": 3826725
+            },
+            {
+              "data": {
+                "as": null,
+                "function": "tap",
+                "value": null
+              },
+              "ev": "detail",
+              "name": "result"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[2].then[0]",
+              "source_id": "run[2].then[0]"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[2]",
+              "source_id": "claim_all_rewards"
+            },
+            {
+              "desc": "观察视觉目标",
+              "ev": "step_start",
+              "path": "run[3]",
+              "source_id": "dismiss_reward_popup"
+            },
+            {
+              "data": {
+                "args": {
+                  "interval": "250ms",
+                  "region": [
+                    0.43645833333333334,
+                    0.7453703703703703,
+                    0.12916666666666668,
+                    0.09074074074074076
+                  ],
+                  "required": true,
+                  "template": "mail_ai1080_dismiss_reward.png",
+                  "threshold": 0.9,
+                  "timeout": "10s"
+                },
+                "function": "observe",
+                "path": "run[3]"
+              },
+              "ev": "detail",
+              "name": "arguments"
+            },
+            {
+              "ev": "replay_vision",
+              "found": false,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:342",
+              "region": [
+                838,
+                805,
+                248,
+                98
+              ],
+              "template": "mail_ai1080_dismiss_reward.png",
+              "template_sha256": "f96d2a330b7a222cc924c1006b6eca7b52a95bc6d62e384d5ae3ccdd754fbc43",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 7539607
+            },
+            {
+              "ev": "replay_vision",
+              "found": false,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:354",
+              "region": [
+                838,
+                805,
+                248,
+                98
+              ],
+              "template": "mail_ai1080_dismiss_reward.png",
+              "template_sha256": "f96d2a330b7a222cc924c1006b6eca7b52a95bc6d62e384d5ae3ccdd754fbc43",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 7779391
+            },
+            {
+              "ev": "replay_vision",
+              "found": false,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:367",
+              "region": [
+                838,
+                805,
+                248,
+                98
+              ],
+              "template": "mail_ai1080_dismiss_reward.png",
+              "template_sha256": "f96d2a330b7a222cc924c1006b6eca7b52a95bc6d62e384d5ae3ccdd754fbc43",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 8040567
+            },
+            {
+              "ev": "replay_vision",
+              "found": false,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:379",
+              "region": [
+                838,
+                805,
+                248,
+                98
+              ],
+              "template": "mail_ai1080_dismiss_reward.png",
+              "template_sha256": "f96d2a330b7a222cc924c1006b6eca7b52a95bc6d62e384d5ae3ccdd754fbc43",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 8278568
+            },
+            {
+              "ev": "replay_vision",
+              "found": true,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:392",
+              "region": [
+                838,
+                805,
+                248,
+                98
+              ],
+              "template": "mail_ai1080_dismiss_reward.png",
+              "template_sha256": "f96d2a330b7a222cc924c1006b6eca7b52a95bc6d62e384d5ae3ccdd754fbc43",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 8539419
+            },
+            {
+              "data": {
+                "as": "dismiss_reward",
+                "function": "observe",
+                "value": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 4300,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 4300,
+                    "x": 0.5010416666666667,
+                    "y": 0.7907407407407407
+                  },
+                  "height": 90,
+                  "region": {
+                    "height": 0.09074074074074076,
+                    "width": 0.12916666666666668,
+                    "x": 0.43645833333333334,
+                    "y": 0.7453703703703703
+                  },
+                  "score": 0.9501733779907228,
+                  "width": 240,
+                  "x": 842,
+                  "y": 809
+                }
+              },
+              "ev": "detail",
+              "name": "result"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[3]",
+              "source_id": "dismiss_reward_popup"
+            },
+            {
+              "desc": "如果 $dismiss_reward",
+              "ev": "step_start",
+              "path": "run[3]",
+              "source_id": "dismiss_reward_popup"
+            },
+            {
+              "data": {
+                "condition": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 4300,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 4300,
+                    "x": 0.5010416666666667,
+                    "y": 0.7907407407407407
+                  },
+                  "height": 90,
+                  "region": {
+                    "height": 0.09074074074074076,
+                    "width": 0.12916666666666668,
+                    "x": 0.43645833333333334,
+                    "y": 0.7453703703703703
+                  },
+                  "score": 0.9501733779907228,
+                  "width": 240,
+                  "x": 842,
+                  "y": 809
+                },
+                "kind": "if",
+                "path": "run[3]",
+                "selected": "then"
+              },
+              "ev": "detail",
+              "name": "branch"
+            },
+            {
+              "desc": "点击",
+              "ev": "step_start",
+              "path": "run[3].then[0]",
+              "source_id": "run[3].then[0]"
+            },
+            {
+              "data": {
+                "args": {
+                  "position": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 4300,
+                    "center": {
+                      "_frame": {
+                        "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                        "revision": 0,
+                        "target": "offline-replay"
+                      },
+                      "_observed_at_ms": 4300,
+                      "x": 0.5010416666666667,
+                      "y": 0.7907407407407407
+                    },
+                    "height": 90,
+                    "region": {
+                      "height": 0.09074074074074076,
+                      "width": 0.12916666666666668,
+                      "x": 0.43645833333333334,
+                      "y": 0.7453703703703703
+                    },
+                    "score": 0.9501733779907228,
+                    "width": 240,
+                    "x": 842,
+                    "y": 809
+                  }
+                },
+                "function": "tap",
+                "path": "run[3].then[0]"
+              },
+              "ev": "detail",
+              "name": "arguments"
+            },
+            {
+              "ev": "replay_action_alignment",
+              "event_id": "evt-000000004",
+              "evidence_timeline_us": 8845802,
+              "proof": {
+                "kind": "matched_template",
+                "observed_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:392",
+                "recorded_before_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-447",
+                "template": "mail_ai1080_dismiss_reward.png"
+              },
+              "recorded_timeline_us": 9655983,
+              "script_timeline_us": 4949386,
+              "time_shift_us": 4706597
+            },
+            {
+              "data": {
+                "as": null,
+                "function": "tap",
+                "value": null
+              },
+              "ev": "detail",
+              "name": "result"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[3].then[0]",
+              "source_id": "run[3].then[0]"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[3]",
+              "source_id": "dismiss_reward_popup"
+            },
+            {
+              "desc": "观察视觉目标",
+              "ev": "step_start",
+              "path": "run[4]",
+              "source_id": "close_mail_screen"
+            },
+            {
+              "data": {
+                "args": {
+                  "interval": "250ms",
+                  "region": [
+                    0.9328125,
+                    0.0,
+                    0.05416666666666667,
+                    0.0925925925925926
+                  ],
+                  "required": true,
+                  "template": "mail_ai1080_close_mail.png",
+                  "threshold": 0.9,
+                  "timeout": "10s"
+                },
+                "function": "observe",
+                "path": "run[4]"
+              },
+              "ev": "detail",
+              "name": "arguments"
+            },
+            {
+              "ev": "replay_vision",
+              "found": true,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:466",
+              "region": [
+                1791,
+                0,
+                104,
+                100
+              ],
+              "template": "mail_ai1080_close_mail.png",
+              "template_sha256": "e7f8cb595d74c6a73aa272f5c0d677da3a62405da03f4c9974aa1e7e83c5bf27",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 10019653
+            },
+            {
+              "data": {
+                "as": "close_mail",
+                "function": "observe",
+                "value": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 4900,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 4900,
+                    "x": 0.9598958333333332,
+                    "y": 0.044444444444444446
+                  },
+                  "height": 96,
+                  "region": {
+                    "height": 0.0925925925925926,
+                    "width": 0.05416666666666667,
+                    "x": 0.9328125,
+                    "y": 0.0
+                  },
+                  "score": 0.9955695271492004,
+                  "width": 96,
+                  "x": 1795,
+                  "y": 0
+                }
+              },
+              "ev": "detail",
+              "name": "result"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[4]",
+              "source_id": "close_mail_screen"
+            },
+            {
+              "desc": "如果 $close_mail",
+              "ev": "step_start",
+              "path": "run[4]",
+              "source_id": "close_mail_screen"
+            },
+            {
+              "data": {
+                "condition": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 4900,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 4900,
+                    "x": 0.9598958333333332,
+                    "y": 0.044444444444444446
+                  },
+                  "height": 96,
+                  "region": {
+                    "height": 0.0925925925925926,
+                    "width": 0.05416666666666667,
+                    "x": 0.9328125,
+                    "y": 0.0
+                  },
+                  "score": 0.9955695271492004,
+                  "width": 96,
+                  "x": 1795,
+                  "y": 0
+                },
+                "kind": "if",
+                "path": "run[4]",
+                "selected": "then"
+              },
+              "ev": "detail",
+              "name": "branch"
+            },
+            {
+              "desc": "点击",
+              "ev": "step_start",
+              "path": "run[4].then[0]",
+              "source_id": "run[4].then[0]"
+            },
+            {
+              "data": {
+                "args": {
+                  "position": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 4900,
+                    "center": {
+                      "_frame": {
+                        "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                        "revision": 0,
+                        "target": "offline-replay"
+                      },
+                      "_observed_at_ms": 4900,
+                      "x": 0.9598958333333332,
+                      "y": 0.044444444444444446
+                    },
+                    "height": 96,
+                    "region": {
+                      "height": 0.0925925925925926,
+                      "width": 0.05416666666666667,
+                      "x": 0.9328125,
+                      "y": 0.0
+                    },
+                    "score": 0.9955695271492004,
+                    "width": 96,
+                    "x": 1795,
+                    "y": 0
+                  }
+                },
+                "function": "tap",
+                "path": "run[4].then[0]"
+              },
+              "ev": "detail",
+              "name": "arguments"
+            },
+            {
+              "ev": "replay_action_alignment",
+              "event_id": "evt-000000005",
+              "evidence_timeline_us": 10325788,
+              "proof": {
+                "kind": "matched_template",
+                "observed_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:466",
+                "recorded_before_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-544",
+                "template": "mail_ai1080_close_mail.png"
+              },
+              "recorded_timeline_us": 11596669,
+              "script_timeline_us": 5549386,
+              "time_shift_us": 6047283
+            },
+            {
+              "data": {
+                "as": null,
+                "function": "tap",
+                "value": null
+              },
+              "ev": "detail",
+              "name": "result"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[4].then[0]",
+              "source_id": "run[4].then[0]"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[4]",
+              "source_id": "close_mail_screen"
+            },
+            {
+              "desc": "观察视觉目标",
+              "ev": "step_start",
+              "path": "run[5]",
+              "source_id": "close_phone_menu"
+            },
+            {
+              "data": {
+                "args": {
+                  "interval": "250ms",
+                  "region": [
+                    0.9369791666666668,
+                    0.005555555555555556,
+                    0.05416666666666667,
+                    0.0962962962962963
+                  ],
+                  "required": true,
+                  "template": "mail_ai1080_close_menu.png",
+                  "threshold": 0.9,
+                  "timeout": "10s"
+                },
+                "function": "observe",
+                "path": "run[5]"
+              },
+              "ev": "detail",
+              "name": "arguments"
+            },
+            {
+              "ev": "replay_vision",
+              "found": false,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:564",
+              "region": [
+                1799,
+                6,
+                104,
+                104
+              ],
+              "template": "mail_ai1080_close_menu.png",
+              "template_sha256": "98b9590e82cc91022e751797d61582f8896a154b06c7a844f50b49f7853034d3",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 11979574
+            },
+            {
+              "ev": "replay_vision",
+              "found": false,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:575",
+              "region": [
+                1799,
+                6,
+                104,
+                104
+              ],
+              "template": "mail_ai1080_close_menu.png",
+              "template_sha256": "98b9590e82cc91022e751797d61582f8896a154b06c7a844f50b49f7853034d3",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 12218317
+            },
+            {
+              "ev": "replay_vision",
+              "found": true,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:588",
+              "region": [
+                1799,
+                6,
+                104,
+                104
+              ],
+              "template": "mail_ai1080_close_menu.png",
+              "template_sha256": "98b9590e82cc91022e751797d61582f8896a154b06c7a844f50b49f7853034d3",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 12479053
+            },
+            {
+              "data": {
+                "as": "close_menu",
+                "function": "observe",
+                "value": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 6000,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 6000,
+                    "x": 0.9640625,
+                    "y": 0.053703703703703705
+                  },
+                  "height": 96,
+                  "region": {
+                    "height": 0.0962962962962963,
+                    "width": 0.05416666666666667,
+                    "x": 0.9369791666666668,
+                    "y": 0.005555555555555556
+                  },
+                  "score": 0.9901731610298156,
+                  "width": 96,
+                  "x": 1803,
+                  "y": 10
+                }
+              },
+              "ev": "detail",
+              "name": "result"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[5]",
+              "source_id": "close_phone_menu"
+            },
+            {
+              "desc": "如果 $close_menu",
+              "ev": "step_start",
+              "path": "run[5]",
+              "source_id": "close_phone_menu"
+            },
+            {
+              "data": {
+                "condition": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 6000,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 6000,
+                    "x": 0.9640625,
+                    "y": 0.053703703703703705
+                  },
+                  "height": 96,
+                  "region": {
+                    "height": 0.0962962962962963,
+                    "width": 0.05416666666666667,
+                    "x": 0.9369791666666668,
+                    "y": 0.005555555555555556
+                  },
+                  "score": 0.9901731610298156,
+                  "width": 96,
+                  "x": 1803,
+                  "y": 10
+                },
+                "kind": "if",
+                "path": "run[5]",
+                "selected": "then"
+              },
+              "ev": "detail",
+              "name": "branch"
+            },
+            {
+              "desc": "点击",
+              "ev": "step_start",
+              "path": "run[5].then[0]",
+              "source_id": "run[5].then[0]"
+            },
+            {
+              "data": {
+                "args": {
+                  "position": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 6000,
+                    "center": {
+                      "_frame": {
+                        "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                        "revision": 0,
+                        "target": "offline-replay"
+                      },
+                      "_observed_at_ms": 6000,
+                      "x": 0.9640625,
+                      "y": 0.053703703703703705
+                    },
+                    "height": 96,
+                    "region": {
+                      "height": 0.0962962962962963,
+                      "width": 0.05416666666666667,
+                      "x": 0.9369791666666668,
+                      "y": 0.005555555555555556
+                    },
+                    "score": 0.9901731610298156,
+                    "width": 96,
+                    "x": 1803,
+                    "y": 10
+                  }
+                },
+                "function": "tap",
+                "path": "run[5].then[0]"
+              },
+              "ev": "detail",
+              "name": "arguments"
+            },
+            {
+              "ev": "replay_action_alignment",
+              "event_id": "evt-000000006",
+              "evidence_timeline_us": 12786023,
+              "proof": {
+                "kind": "matched_template",
+                "observed_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:588",
+                "recorded_before_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-616",
+                "template": "mail_ai1080_close_menu.png"
+              },
+              "recorded_timeline_us": 13046226,
+              "script_timeline_us": 6649386,
+              "time_shift_us": 6396840
+            },
+            {
+              "data": {
+                "as": null,
+                "function": "tap",
+                "value": null
+              },
+              "ev": "detail",
+              "name": "result"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[5].then[0]",
+              "source_id": "run[5].then[0]"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[5]",
+              "source_id": "close_phone_menu"
+            },
+            {
+              "desc": "验证完成画面",
+              "ev": "step_start",
+              "path": "run[6]",
+              "source_id": "run[6]"
+            },
+            {
+              "data": {
+                "args": {
+                  "interval": "250ms",
+                  "region": [
+                    0.025520833333333333,
+                    0.003703703703703704,
+                    0.103125,
+                    0.06296296296296296
+                  ],
+                  "required": true,
+                  "template": "mail_ai1080_main_screen.png",
+                  "threshold": 0.9,
+                  "timeout": "10s"
+                },
+                "function": "finish",
+                "path": "run[6]"
+              },
+              "ev": "detail",
+              "name": "arguments"
+            },
+            {
+              "ev": "replay_vision",
+              "found": false,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:634",
+              "region": [
+                49,
+                4,
+                198,
+                68
+              ],
+              "template": "mail_ai1080_main_screen.png",
+              "template_sha256": "87cbd7d779f1d4942d18cdc565d3e6887600f0a5d1f80e78f37c74be1b49d194",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 13417513
+            },
+            {
+              "ev": "replay_vision",
+              "found": false,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:646",
+              "region": [
+                49,
+                4,
+                198,
+                68
+              ],
+              "template": "mail_ai1080_main_screen.png",
+              "template_sha256": "87cbd7d779f1d4942d18cdc565d3e6887600f0a5d1f80e78f37c74be1b49d194",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 13658265
+            },
+            {
+              "ev": "replay_vision",
+              "found": true,
+              "image_frame_id": "clip:4cd0592c51174a60a8f837bf8eea8c81:659",
+              "region": [
+                49,
+                4,
+                198,
+                68
+              ],
+              "template": "mail_ai1080_main_screen.png",
+              "template_sha256": "87cbd7d779f1d4942d18cdc565d3e6887600f0a5d1f80e78f37c74be1b49d194",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 13919995
+            },
+            {
+              "ev": "replay_vision",
+              "found": true,
+              "image_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-702",
+              "region": [
+                49,
+                4,
+                198,
+                68
+              ],
+              "template": "mail_ai1080_main_screen.png",
+              "template_sha256": "87cbd7d779f1d4942d18cdc565d3e6887600f0a5d1f80e78f37c74be1b49d194",
+              "threshold": 0.8999999761581421,
+              "timeline_us": 14779944
+            },
+            {
+              "ev": "sample_end_postcondition",
+              "image_frame_id": "4cd0592c51174a60a8f837bf8eea8c81-702",
+              "ok": true
+            },
+            {
+              "data": {
+                "as": "main_screen",
+                "function": "finish",
+                "value": {
+                  "_frame": {
+                    "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                    "revision": 0,
+                    "target": "offline-replay"
+                  },
+                  "_observed_at_ms": 7100,
+                  "center": {
+                    "_frame": {
+                      "epoch": "dbac781ed8dd4d4c895311417a8c9995",
+                      "revision": 0,
+                      "target": "offline-replay"
+                    },
+                    "_observed_at_ms": 7100,
+                    "x": 0.075,
+                    "y": 0.03518518518518519
+                  },
+                  "height": 60,
+                  "region": {
+                    "height": 0.06296296296296296,
+                    "width": 0.103125,
+                    "x": 0.025520833333333333,
+                    "y": 0.003703703703703704
+                  },
+                  "score": 0.962527632713318,
+                  "width": 190,
+                  "x": 49,
+                  "y": 8
+                }
+              },
+              "ev": "detail",
+              "name": "result"
+            },
+            {
+              "ev": "step_end",
+              "ok": true,
+              "path": "run[6]",
+              "source_id": "run[6]"
+            },
+            {
+              "ev": "run_end",
+              "ok": true
+            }
+          ],
+          "sample_id": "dbac781ed8dd4d4c895311417a8c9995",
+          "status": "passed"
+        }
+      ],
+      "status": "passed"
+    },
+    "templates": [
+      {
+        "name": "mail_ai1080_open_menu.png",
+        "rect": [
+          0,
+          41,
+          96,
+          96
+        ],
+        "sha256": "9c35aaab6f8794a51c7f3d58693b04f3d137178b2bc8ee9fbf0817c2670d8c97",
+        "original_pixel_crop_verified": true
+      },
+      {
+        "name": "mail_ai1080_open_mail.png",
+        "rect": [
+          1802,
+          286,
+          110,
+          110
+        ],
+        "sha256": "4761ab0b58cf401c61933587987401391d3f9860c1815ca5082b6ddcf064aa66",
+        "original_pixel_crop_verified": true
+      },
+      {
+        "name": "mail_ai1080_claim_all.png",
+        "rect": [
+          429,
+          944,
+          260,
+          76
+        ],
+        "sha256": "ff64ae3ddbe3009e83687f57fa22cfbe6294e9893945b101903338179a28bd1e",
+        "original_pixel_crop_verified": true
+      },
+      {
+        "name": "mail_ai1080_dismiss_reward.png",
+        "rect": [
+          842,
+          809,
+          240,
+          90
+        ],
+        "sha256": "f96d2a330b7a222cc924c1006b6eca7b52a95bc6d62e384d5ae3ccdd754fbc43",
+        "original_pixel_crop_verified": true
+      },
+      {
+        "name": "mail_ai1080_close_mail.png",
+        "rect": [
+          1795,
+          0,
+          96,
+          96
+        ],
+        "sha256": "e7f8cb595d74c6a73aa272f5c0d677da3a62405da03f4c9974aa1e7e83c5bf27",
+        "original_pixel_crop_verified": true
+      },
+      {
+        "name": "mail_ai1080_close_menu.png",
+        "rect": [
+          1803,
+          10,
+          96,
+          96
+        ],
+        "sha256": "98b9590e82cc91022e751797d61582f8896a154b06c7a844f50b49f7853034d3",
+        "original_pixel_crop_verified": true
+      },
+      {
+        "name": "mail_ai1080_main_screen.png",
+        "rect": [
+          53,
+          8,
+          190,
+          60
+        ],
+        "sha256": "87cbd7d779f1d4942d18cdc565d3e6887600f0a5d1f80e78f37c74be1b49d194",
+        "original_pixel_crop_verified": true
+      }
+    ],
+    "script_matches_validated_candidate": true,
+    "live_game_input_executed": false,
+    "completion_method": "real model proposal; production source module applied general original-resolution region normalization; all-source offline revalidation and formal save",
+    "fully_automatic_model_attempts_passed": false,
+    "model_interface_timeouts_observed": true
+  },
+  "real_model_initial_errors": [
+    {
+      "candidate_id": "3708e0a7-8dbf-44a9-ae01-316dcf13360b",
+      "error": "supplier HTTP 500"
+    },
+    {
+      "candidate_id": "b93377ae-6772-4160-a91c-d1375e803c95",
+      "error": "90-second supplier timeout"
+    },
+    {
+      "candidate_id": "2eb9a772-fdbd-4961-a620-f42b90652618",
+      "error": "240-second supplier timeout"
+    }
+  ]
+}

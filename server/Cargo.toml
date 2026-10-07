@@ -37,6 +37,8 @@ webrtc = "0.13"
 
 # 图像处理（模板匹配）
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Local model-input encoding; Google Jpegli is linked into the host.
+jpegli = "=0.1.0"
 rayon = "1"
 
 # 定时任务
@@ -89,3 +91,7 @@ tower = { version = "0.4", features = ["util"] }
 
 [target.'cfg(windows)'.dependencies]
 gamer-updater = { path = "../updater" }
+
+# Native SIMD codec must be optimized in development builds too.
+[profile.dev.package.jpegli-sys]
+opt-level = 2

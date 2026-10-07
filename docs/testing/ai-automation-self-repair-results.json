@@ -1,0 +1,168 @@
+{
+  "verified_at": "2026-10-06T18:32:34.594559+00:00",
+  "package_id": "hsr",
+  "script": "邮件领取.yaml",
+  "plugin_version": "0.2.2",
+  "deployment": {
+    "plugin_archive_sha256": "9f3dd8268526efe1eae2b40e45625d692fbe03c2f4f8fc258f556f9763288a30",
+    "ui_sha256": "b0c00e75d1332ff393b924d77d94b5c2186858f80c34c756d5f0a27a6089fe47",
+    "backend_sha256": "e30e8581b7c3cc2b1df8bde9f5465a5b0117fcc3ca607298a6c89e96f6aeb5ec"
+  },
+  "workflow": "User-selected failed run -> immutable original source and original template versions -> replay original -> gamer-ai model proposal -> automatic application to private candidate -> deterministic replay of all fixed samples -> atomic validated save",
+  "original_failure": {
+    "run_id": "ab2b300e-35d8-45bc-8f27-4036ceab1a1d",
+    "source_sha256": "0a542d6e50056aaa98a96adfb5b17ebd311d34af5ba048e0d6a956907bc2973e",
+    "failure": {
+      "error": "WASM runtime 错误: YAML guest 返回错误: kind=failed; message=VISUAL_TIMEOUT: 必需视觉目标 mailflow_open_mail.png 在 10000ms 内未出现 [source:run[1]]",
+      "state": "failed"
+    },
+    "minimum_threshold": 0.9,
+    "baseline_report": {
+      "status": "failed",
+      "candidate_sha256": "5d956aea3d8747229cf64f7a7631cd8415169422cd00a37c63bc426f1d44aeb7",
+      "diagnostics": [],
+      "samples": [
+        {
+          "sample_id": "dbac781ed8dd4d4c895311417a8c9995",
+          "content_sha256": null,
+          "status": "passed",
+          "consumed_actions": 6,
+          "diagnostics": []
+        },
+        {
+          "sample_id": "cc4323d4a1f841389840ea343e248ee5",
+          "content_sha256": null,
+          "status": "failed",
+          "consumed_actions": 1,
+          "diagnostics": [
+            {
+              "code": "replay.execution",
+              "event_id": "evt-000000002",
+              "frame_id": "a3814db64a174debbc58da4ae32c68a1-525",
+              "message": "kind=failed; message=VISUAL_TIMEOUT: 必需视觉目标 mailflow_open_mail.png 在 10000ms 内未出现 [source:run[1]]",
+              "path": "run[1]"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "model_run": {
+    "candidate_id": "a27331a1-506f-457b-9299-835476e84272",
+    "state": "saved",
+    "revision": 2,
+    "model": "glm-5.3-flash",
+    "protocol": "responses",
+    "candidate_reasoning_effort": "low",
+    "model_version": "5f5a5096-56b0-4b77-bfd9-508df668f110",
+    "attempts": 1,
+    "known_tokens": 67502,
+    "unknown_usage": false,
+    "active_seconds": 273.8954871,
+    "limits": {
+      "max_attempts": 40,
+      "max_failures": 3,
+      "max_seconds": 600,
+      "max_tokens": 0
+    },
+    "model_input": {
+      "codec": "jpegli",
+      "detail_frames": 10,
+      "full_frames": 14,
+      "image_bytes": 4662013,
+      "max_seconds": 494,
+      "preserves_source_resolution": true,
+      "request_bytes": 6290488
+    },
+    "operator_edited_yaml_or_crops": false,
+    "later_hand_fixed_templates_available_to_model_or_replay": false,
+    "explanation": "基线在无可领取奖励样本失败：该样本手机菜单右侧邮箱图标没有红色感叹号，原 mailflow_open_mail.png 模板（含红点）在 0.9 阈值下无法命中，导致 run[1] 视觉超时。修复：保留原有全部模板与 0.9 阈值不变，仅在无可领取样本的 detail 视图 view_18（accepted 点击点附近）裁剪无红点邮箱图标新模板 repair_a27331a1_open_mail_nobadge.png，模板中心与录制点击点误差在 8 原始像素内。流程改为：打开手机菜单为必需步骤；两条进入邮箱分支均为 optional（有奖励分支含领取与关闭奖励提示；无奖励分支直接进入邮箱），二者互斥命中其一；关闭邮件、关闭手机菜单和最终 finish main_screen 保持必需，与两个演示一致。奖励弹窗与领取按钮仅在有奖励演示中出现，故收在该 optional 分支内，未降低任何操作校验标准。"
+  },
+  "final_validation": {
+    "status": "passed",
+    "candidate_sha256": "f1586595a8c60a9e307d32b0cab2158ae5263d8a45f2fb0ef19e28fba13ec22b",
+    "diagnostics": [],
+    "samples": [
+      {
+        "sample_id": "dbac781ed8dd4d4c895311417a8c9995",
+        "content_sha256": "afd9a604fab10cd0f25b2787ef9c2e9c33e3dab8016fa92b1d560776b1cf1f15",
+        "status": "passed",
+        "consumed_actions": 6,
+        "diagnostics": []
+      },
+      {
+        "sample_id": "cc4323d4a1f841389840ea343e248ee5",
+        "content_sha256": "20dfa314c908db2f6080798712f563a0094d21524c929eb756ffa38211cb35a2",
+        "status": "passed",
+        "consumed_actions": 4,
+        "diagnostics": []
+      }
+    ]
+  },
+  "saved_resource": {
+    "version": "e5afcdda83fa",
+    "sha256": "e5afcdda83fa5a2e1409916f094e53a5a0844c39055da22a8cd196dd85b031c8",
+    "previous_formal_version": "b3769268f9f9",
+    "source_identical_to_model_candidate": true
+  },
+  "ai_template_pixel_checks": [
+    {
+      "name": "repair_a27331a1_open_mail_nobadge.png",
+      "sample_id": "cc4323d4a1f841389840ea343e248ee5",
+      "frame_id": "a3814db64a174debbc58da4ae32c68a1-525",
+      "rect": [
+        1824,
+        292,
+        64,
+        96
+      ],
+      "source_resolution": [
+        1920,
+        1080
+      ],
+      "pixel_identical": true,
+      "template_sha256": "7a2add43997b4aa94d283106102216cf7b358660b927c531cc1c645f78617767"
+    }
+  ],
+  "failed_default_thinking_attempt": {
+    "candidate_id": "1b70764f-4553-4074-9bed-49fd4bd92f06",
+    "state": "failed",
+    "reason": "generation_time_budget",
+    "attempts": 2,
+    "active_seconds": 602.7253087,
+    "known_tokens": 0,
+    "unknown_usage": true,
+    "not_counted_as_success": true
+  },
+  "verification": {
+    "yaml_ui_tests": {
+      "files": 31,
+      "tests": 316,
+      "passed": true
+    },
+    "targeted_yaml_ui_tests": {
+      "tests": 26,
+      "passed": true
+    },
+    "generation_host_tests": {
+      "tests": 17,
+      "passed": true
+    },
+    "candidate_reasoning_profile_test": {
+      "tests": 1,
+      "passed": true
+    },
+    "sdk_consistency": true,
+    "plugin_archive_self_check": true,
+    "served_ui_hash_verified": true,
+    "device_run_during_repair": {
+      "active": false
+    }
+  },
+  "limitations": [
+    "This run used the real provider and two real immutable recordings with the production interpreter/matcher; it did not control a live device.",
+    "No new real-device trial of the AI-generated source was performed in this run. Prior manual source live success is separately documented, not attributed to this source.",
+    "No-reward evidence shows 8 read mails with no claimable rewards; literally empty mailbox and unrelated dialogs remain uncovered.",
+    "Provider timeouts can recur; unknown usage from the failed default-thinking job is retained."
+  ]
+}

@@ -35,6 +35,8 @@ server/data.before-plugin-ids-*/
 server/data.plugin-convert-*/
 # 本机导入视频、录制及会话历史，不随仓库分发
 server/data/media/
+# Runtime Trace screenshot evidence belongs to local run history.
+server/data/runtime-traces/
 # 本机云游戏浏览器配置含登录状态、Cookie 与浏览历史。
 server/data/browser-profiles/
 

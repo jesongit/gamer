@@ -59,10 +59,10 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install media test dependencies (ffmpeg / ffprobe)
+      - name: Install native and media test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y ffmpeg
+          sudo apt-get install --no-install-recommends -y cmake ffmpeg
           ffmpeg -version
           ffprobe -version
 

@@ -23,6 +23,7 @@
   .\gamer.ps1 stop               # 仅停止当前仓库的后端 + 前端
   .\gamer.ps1 restart            # 重启前后端
   .\gamer.ps1 rebuild            # 重新编译前后端（cargo build + vite build）并重启
+  .\gamer.ps1 clean              # 按 20 GiB 阈值维护 Debug 构建缓存，运行中暂缓
   .\gamer.ps1 status             # 查看前后端运行状态、最近日志
   .\gamer.ps1 test_adb           # USB/adb 链路体检（选择性暂停 / 空闲稳定性 / push 突发流量）
   .\gamer.ps1 test_adb -IdleSeconds 60   # 空闲观察延长到 60 秒
@@ -30,7 +31,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('start', 'stop', 'restart', 'rebuild', 'status', 'test_adb', 'help')]
+    [ValidateSet('start', 'stop', 'restart', 'rebuild', 'clean', 'status', 'test_adb', 'help')]
     [string]$Command = 'status',
 
     # 后端端口，0 = 自动从 server/config.toml 读取（默认 8443）
@@ -448,6 +449,7 @@ function Invoke-NativeChecked {
 
 function Build-Backend {
     $exe = Get-BinaryPath
+    & (Join-Path $Root 'tools/maintain-build-cache.ps1') -Apply
     Invoke-NativeChecked -Desc "后端: 构建 $exe ..." -Cmd {
         Push-Location $ServerDir
         try {
@@ -802,6 +804,9 @@ $Both = -not $BackendOnly -and -not $FrontendOnly
 Write-Host ("== gamer.ps1：Gamer 前后端管理（后端端口 {0} / 前端端口 {1}）==" -f $Port, $FrontendPort)
 
 switch ($Command) {
+    'clean' {
+        & (Join-Path $Root 'tools/maintain-build-cache.ps1') -Apply
+    }
     'start' {
         if ($Both -or $BackendOnly) { Start-Backend }
         if ($Both -or $FrontendOnly) { Start-Frontend }

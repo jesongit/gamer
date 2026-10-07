@@ -71,6 +71,13 @@ pnpm --dir web install --frozen-lockfile
 
 默认开发模式下，如果尚未配置密码，首次在本机打开页面会进入管理员密码设置。账号为 `admin`，密码由你设置，成功后自动登录；配置文件只保存 Argon2id 哈希。首次设置仅接受服务端回环来源，请先在运行服务的电脑上完成。
 
+本地开发/测试构建默认关闭增量缓存，调试信息只保留文件名与行号回溯。通过 `gamer.ps1` 构建前，会检查服务端和更新器的 Debug 缓存：单个目录超过 20 GiB 且没有编译器或该目录的程序运行时，清理可重建的缓存子目录，再开始构建。清理后这次构建会花更长时间；源码、运行数据、Release 产物和目录根部的程序保留。手工 `cargo build/test` 使用同一精简构建设置，缓存维护入口如下：
+
+```powershell
+.\gamer.ps1 clean                                    # 按 20 GiB 阈值维护缓存
+pwsh -NoProfile -File .\tools\maintain-build-cache.ps1 # 只查看，不删除
+```
+
 开发或自动化环境也可在启动前设置 `GAMER_ADMIN_PASSWORD`。它在开发模式下优先于配置密码，只在进程内转换为哈希，不写回文件。项目没有预设密码；生产模式使用 `[auth].password_hash`，不接受该明文环境变量。
 
 ### 使用 Windows 完整包
@@ -158,7 +165,7 @@ AI 工作流为：视频导出素材 → 自动化选择一个或多个素材 �
 
 运行记录可保存原尺寸无损图片，`trace: false` 只关闭自动图片，普通日志与异常留证继续。图片默认保留约 24 小时并受容量限制；AI 助手可以按用户选定的运行分析问题、提出候选修改，应用与保存都需要用户操作。详见 [Runtime Trace](docs/reference/RUNTIME_TRACE.md)、[开发计划](docs/plans/gamer_ai_automation_development_plan.md) 和 [实施合同](docs/plans/gamer_ai_automation_contracts.md)。
 
-入门操作见 [YAML 自动化教程](docs/guides/yaml-tutorial.md)，完整语法与函数说明见 [YAML 参考](docs/reference/YAML.md)。
+按界面操作的生成、验证和保存流程见 [AI 自动化使用教程](docs/guides/ai-automation-tutorial.md)，包含邮件领取实例。语法入门见 [YAML 自动化教程](docs/guides/yaml-tutorial.md)，完整说明见 [YAML 参考](docs/reference/YAML.md)。
 
 ### 数据存放与导出
 

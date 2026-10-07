@@ -168,10 +168,10 @@ class Stub:
                     n = int(self.headers['Content-Length'])
                     assert 0 < n < 8 * 1024 * 1024
                     request = json.loads(self.rfile.read(n))
-                    assert request.get('stream') is False, 'harness expects nonstreaming API'
+                    assert isinstance(request.get('stream'), bool), 'stream flag required'
                     all_strings = list(strings(request.get('input', [])))
                     prompt = '\n'.join(s for s in all_strings if not s.startswith('data:'))
-                    images = [s for s in all_strings if s.startswith('data:image/png;base64,')]
+                    images = [s for s in all_strings if s.startswith(('data:image/png;base64,', 'data:image/jpeg;base64,'))]
                     calls = []
                     selected_ids = []
                     match = re.search(r'READY_[a-f0-9]+', prompt)
@@ -204,22 +204,38 @@ class Stub:
                         selected_ids = [sample['id'] for sample in contexts[0]['samples']]
                         selected_id = selected_ids[0]
                         crops = [{**crop, 'sample_id': selected_id} for crop in CROPS]
+                        views = contexts[0]['image_selection']['selected']
+                        for crop in crops:
+                            view = next((v for v in views if v['kind'] == 'full' and v['sample_id'] == selected_id and v['frame_id'] == crop['frame_id']), None)
+                            if view:
+                                x, y, w, h = crop['rect']
+                                crop['rect'] = [x / view['image_width'], y / view['image_height'], w / view['image_width'], h / view['image_height']]
+                                crop['view_id'] = view['view_id']
+                                del crop['sample_id'], crop['frame_id']
+                        assert any(s.startswith('data:image/jpeg;base64,') for s in images), 'full model views must use JPEG'
                         proposal = dict(yaml=YAML, templates=crops, explanation='Deterministic local protocol stub, not a real model')
-                        if owner.mode == 'bad_action':
+                        if owner.mode in ('bad_action', 'unreported_bad_action'):
                             proposal['yaml'] = YAML.replace('tap: claim', 'tap: [0.9, 0.9]')
                         elif owner.mode == 'drop_sample':
                             proposal['samples'] = ['sample-a', 'sample-c']
-                        text = json.dumps(proposal)
+                        text = 'not a JSON candidate' if owner.mode == 'bad_json' else '```json\n' + json.dumps(proposal) + '\n```'
                     owner.requests.append(dict(kind=kind, model=request.get('model'), images=len(images), sample_ids=selected_ids))
                     output = calls or [dict(type='message', role='assistant', content=[dict(type='output_text', text=text)])]
                     response = dict(status='completed', output=output, usage=dict(input_tokens=12, output_tokens=4, total_tokens=16))
-                    body = encoded(response)
+                    if owner.mode == 'unreported_bad_action':
+                        del response['usage']
+                    if request['stream']:
+                        response['id'] = 'local-generation-response'
+                        events = [dict(type='response.created', response=dict(id=response['id'], status='in_progress', output=[])), dict(type='response.output_text.delta', delta=text), dict(type='response.completed', response=response)]
+                        body = b''.join(b'data: ' + encoded(event) + b'\n\n' for event in events) + b'data: [DONE]\n\n'
+                    else:
+                        body = encoded(response)
                     self.send_response(200)
-                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Type', 'text/event-stream' if request['stream'] else 'application/json')
                     self.send_header('Content-Length', str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
-                except (BrokenPipeError, ConnectionResetError):
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                     pass  # Expected when cancellation closes a held request.
                 except Exception as exc:
                     owner.requests.append(dict(kind='stub_error', error=str(exc)))
@@ -338,6 +354,7 @@ class Harness:
         # Isolate the running executable too, so subsequent cargo builds are safe.
         binary = self.work/self.args.server.name
         shutil.copy2(self.args.server, binary)
+        self.isolated_binary = binary
         self.binary_sha256 = sha(binary.read_bytes())
         self.binary_mtime_ns = binary.stat().st_mtime_ns
         self.log = (self.work/'server.log').open('wb')
@@ -672,6 +689,10 @@ class Harness:
         result = self.wait(self.create('generated', yaml='', templates=[], ai=True))
         assert result['state'] == 'passed' and result['attempts'] == 1, result
         assert result['known_tokens'] == 16 and not result['unknown_usage'], result
+        defaults = self.http.call('generation.readiness')['model']['default_limits']
+        assert result['limits'] == dict(max_attempts=defaults['max_turns'], max_failures=defaults['max_failures'],
+                                      max_seconds=defaults['max_seconds'], max_tokens=defaults['max_tokens']), result
+        assert result['active_seconds'] > 0, result
         self.generated_candidate = result
         clip_status = 'explicitly skipped'
         if not self.args.skip_clip_replay:
@@ -690,6 +711,13 @@ class Harness:
                            limits=dict(max_attempts=3, max_seconds=30, max_tokens=2048)))
         assert budget['state'] == 'failed' and 'generation_token_budget' in (budget['reason'] or ''), budget
         assert budget['known_tokens'] == 0 and len(self.stub.requests) == before_budget_check, budget
+        self.stub.mode = 'unreported_bad_action'
+        unreported = self.wait(self.create('unlimited-unknown-usage', yaml='', templates=[], ai=True,
+                              limits=dict(max_attempts=2, max_seconds=30, max_tokens=0)))
+        assert unreported['attempts'] == 2 and unreported['unknown_usage'] and unreported['known_tokens'] == 0, unreported
+        self.stub.mode = 'bad_json'
+        invalid = self.wait(self.create('known-usage-invalid-json', yaml='', templates=[], ai=True))
+        assert invalid['state'] == 'failed' and invalid['known_tokens'] == 16 and not invalid['unknown_usage'], invalid
         self.stub.mode = 'drop_sample'
         immutable = self.wait(self.create('reject-sample-deletion', yaml='', templates=[], ai=True))
         assert immutable['state'] == 'failed' and immutable['report'] is None, immutable
@@ -697,7 +725,7 @@ class Harness:
         self.stub.mode = 'valid'
         self.generated_candidate = result
         return dict(generation=result['state'], clip_generation=clip_status, retry_attempts=failed['attempts'],
-                    bounded_reason=failed['reason'], token_budget_stopped_before_request=True, attempted_sample_deletion_rejected=True)
+                    bounded_reason=failed['reason'], token_budget_stopped_before_request=True, attempted_sample_deletion_rejected=True, invalid_json_preserves_known_usage=True, unlimited_keeps_unknown_usage_and_allows_correction=True)
 
     def held_out(self):
         """Separate synthetic D; no model request and no production schema change."""
@@ -745,7 +773,7 @@ class Harness:
 
     def cancellation(self):
         self.stub.hold()
-        candidate = self.create('cancel-held', yaml='', templates=[], ai=True)
+        candidate = self.create('cancel-held', yaml='', templates=[], ai=True, limits=dict(max_attempts=40, max_seconds=600, max_tokens=100000))
         assert self.stub.started.wait(5), 'generation never reached local provider'
         cancelled = self.ccall('cancel', candidate)['candidate']
         assert cancelled['state'] == 'cancelled'
@@ -826,6 +854,12 @@ class Harness:
             self.log.close()
             path = self.work/'server.log'
             path.write_text(self.redact(path.read_text(encoding='utf-8', errors='replace')), encoding='utf-8')
+        binary = getattr(self, 'isolated_binary', None)
+        if binary and (not self.process or self.process.poll() is not None):
+            expected = self.work / self.args.server.name
+            if binary != expected or binary.resolve() == self.args.server.resolve():
+                raise RuntimeError('refusing to remove a non-isolated executable')
+            binary.unlink(missing_ok=True)
 
 
 def main():

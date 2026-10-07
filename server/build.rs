@@ -16,6 +16,7 @@ use std::path::Path;
 use std::process::Command;
 
 fn main() {
+    portable_gnu_cxx_runtime();
     // 显式声明重跑条件后，cargo 不再按"包内任意文件变化"默认重跑本脚本：
     // 只跟踪下方输入，避免开发期无谓的全量重编译。
     println!("cargo:rerun-if-env-changed=GAMER_BUILD_INFO_SKIP");
@@ -59,6 +60,44 @@ fn main() {
     if let Some(target) = target {
         println!("cargo:rustc-env=GAMER_BUILD_TARGET={target}");
     }
+}
+
+/// Jpegli links a C++ archive. Prefer the compiler's static runtime on Windows
+/// GNU, so the portable host does not require a separately installed C++ DLL.
+fn portable_gnu_cxx_runtime() {
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if !target.ends_with("windows-gnu") {
+        return;
+    }
+    let target_key = format!("CXX_{}", target.replace('-', "_"));
+    println!("cargo:rerun-if-env-changed=CXX");
+    println!("cargo:rerun-if-env-changed={target_key}");
+    let compiler = std::env::var(&target_key)
+        .or_else(|_| std::env::var("CXX"))
+        .unwrap_or_else(|_| {
+            if std::env::var("HOST")
+                .unwrap_or_default()
+                .contains("windows")
+            {
+                "g++".into()
+            } else {
+                "x86_64-w64-mingw32-g++".into()
+            }
+        });
+    let output = Command::new(compiler)
+        .arg("-print-file-name=libstdc++.a")
+        .output()
+        .expect("C++ compiler required for local image encoder");
+    assert!(output.status.success(), "cannot locate static C++ runtime");
+    let source = String::from_utf8(output.stdout).expect("C++ runtime path is not UTF-8");
+    let source = Path::new(source.trim());
+    assert!(source.is_file(), "static C++ runtime archive missing");
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("static-cxx");
+    std::fs::create_dir_all(&out).unwrap();
+    // A native search directory containing only the static archive also makes
+    // dependencies' plain -lstdc++ select it before an import library.
+    std::fs::copy(source, out.join("libstdc++.a")).unwrap();
+    println!("cargo:rustc-link-search=native={}", out.display());
 }
 
 /// 逃生开关解析：非空且不属于 0/false/off（大小写不敏感）即视为开启

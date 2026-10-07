@@ -54,7 +54,8 @@ directory stops it early. The access file is removed on shutdown and is not
 included in the report. Never share that file as an artifact. This option does
 not launch a browser or change what the HTTP tests claim.
 
-The executable is copied into the isolated directory before launch, so a later
+The executable is copied into the isolated directory before launch and removed
+after the isolated process has exited; its SHA-256 remains in the report. A later
 build can replace the original binary without disrupting browser review. Use
 `--build-label` to record which source/build snapshot the caller supplied.
 
@@ -145,3 +146,11 @@ lifecycle, real-model behavior/cost, and live-target Trace image capture remain
 unverified by this runner. Host/router Rust tests cover synthetic Trace storage,
 authentication, expiration and image behavior separately. Supported-browser UI
 acceptance is a separate pass; this tool never starts Chromium from a shell.
+
+## 本地 Jpegli 构建
+
+宿主新增 BSD 许可的 `jpegli` 和 `jpegli-sys`，Google 原生编码器静态链接进后端。构建环境需要 CMake 和 C++ 编译器，运行端无需压缩网站或压缩工具。Windows GNU 构建使用 `CMAKE_GENERATOR=MinGW Makefiles`；Windows MSVC 可使用开发者编译环境中的单配置 Ninja 生成器。`jpegli-sys` 在开发档也使用优化构建，防止未优化的 Windows GNU SIMD 路径崩溃。
+
+模型输入保留整图分辨率，附加录制点击周围 320 像素的无损局部图。原图、正式 PNG 模板与回放来源保持不变。素材前检、图片准备、模型请求和回放共用任务时限，图片在同一修正任务中只准备一次。HTTP 验收包含 JPEG 输入、视图坐标转换和无效 JSON 输出的已知用量保留；合成供应商测试不代表真实模型识别通过。
+
+累计 Token 默认不限制（0），有限预算与未知用量保护仍可显式使用。完整多图模型请求使用现有 SSE 适配器，原始源码裁图不受请求编码影响。图像与本机集成结果见 [Jpegli 验收记录](ai-automation-jpegli-results.json)。
