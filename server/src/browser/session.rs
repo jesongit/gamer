@@ -21,6 +21,19 @@ use tokio::{
 
 pub(crate) use crate::capabilities::FrameStamp;
 
+fn decrement_if_positive(counter: &std::sync::atomic::AtomicUsize) -> bool {
+    let mut current = counter.load(Ordering::SeqCst);
+    loop {
+        let Some(next) = current.checked_sub(1) else {
+            return false;
+        };
+        match counter.compare_exchange_weak(current, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("画面或目标已变化，请重新取帧后操作")]
 struct RetiredCapture {
@@ -753,11 +766,7 @@ impl CdpSession {
         }
     }
     pub(crate) fn release_media_output_count(&self) {
-        let _ = self
-            .output_consumers
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                count.checked_sub(1)
-            });
+        decrement_if_positive(&self.output_consumers);
     }
     pub(crate) async fn reconcile_media_output(&self) {
         let _stream = self.stream_gate.lock().await;
@@ -967,13 +976,7 @@ impl CdpSession {
             )
             .await?;
         #[cfg(test)]
-        if self
-            .capture_revision_changes
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                count.checked_sub(1)
-            })
-            .is_ok()
-        {
+        if decrement_if_positive(&self.capture_revision_changes) {
             self.transport.revision.fetch_add(1, Ordering::SeqCst);
         }
         self.validate_capture_stamp(&stamp)?;
