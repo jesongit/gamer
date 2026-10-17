@@ -1,26 +1,74 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-10-13T14:00:01Z",
+  "generated_at": "2026-10-17T04:36:00Z",
   "host_api": "1.0.0",
   "provenance": {
-    "plugin_commit": "74c690c7b8380b91d70a5277485a40f7c4312dfb",
-    "sdk_host_commit": "8e0dc6a7dfa65a4817441045877a44a61528deb7"
+    "plugin_commit": "ad5b280d613a8d604b8baa16e3d2d98d81f32427",
+    "sdk_host_commit": "419efba899b0af0a99b55e974e914bb287728af1",
+    "sdk_snapshot_kind": "commit"
   },
   "plugins": [
     {
+      "id": "gamer-keymap",
+      "version": "0.1.6",
+      "name": "键盘映射",
+      "description": "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键",
+      "publisher": "gamer.dev",
+      "download_url": "/plugins/gamer-keymap-0.1.6.gplugin",
+      "sha256": "e3808cac3dfe719b3de5845cbc251014088eaf7d585a28aa29bc2714eea9fd6e",
+      "size": 133701,
+      "permissions": [
+        "ui.host",
+        "input.tap",
+        "input.swipe",
+        "input.key",
+        "touch",
+        "resource.read",
+        "resource.write"
+      ],
+      "host_api": {
+        "input": "^1.2",
+        "resource": "^1.0",
+        "touch": "^1.0",
+        "ui": "^1.1"
+      },
+      "ui": {
+        "contributions": [
+          {
+            "component": "console.keymaps",
+            "entry": "ui/plugin.js",
+            "icon": "⌨",
+            "location": "console.right",
+            "order": 30,
+            "panel_id": "keymaps",
+            "preferred_width": 360,
+            "requires_device": true,
+            "runtime": "core",
+            "title": "键盘映射"
+          }
+        ]
+      },
+      "execution": {
+        "kind": "wasm",
+        "host_version": ">=0.3.0"
+      }
+    },
+    {
       "id": "gamer-live",
-      "version": "0.2.7",
+      "version": "0.2.15",
       "name": "直播助手",
       "description": "设备直播与文件夹视频自动直播，弹幕排队执行脚本并自动切换画面；支持直播姬与手动 RTMP 输出",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-live-0.2.7.gplugin",
-      "sha256": "26f6069a313e0e0a61dc84246da2aa9d015e6d04559e5901a6f0e480ad1bfb2e",
-      "size": 26849,
+      "download_url": "/plugins/gamer-live-0.2.15.gplugin",
+      "sha256": "4fe2bc07508a1b0268968d45159e7e05dc26a413b08e181b06607cde70dc0c92",
+      "size": 37631,
       "permissions": [
         "ui.host",
         "media.stream",
+        "media.read",
         "live.connect",
         "resource.read",
+        "resource.write",
         "run.submit",
         "run.control"
       ],
@@ -51,106 +99,14 @@
       }
     },
     {
-      "id": "gamer-ai",
-      "version": "0.4.12",
-      "name": "AI 助手",
-      "description": "Agent 对话、攻略记忆、设备游玩与自动化生成和事后诊断",
-      "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-ai-0.4.12.gplugin",
-      "sha256": "a7297ba22a08bebf1fde64630cbd1b1acfe3b9c469e01af80caf49754eb858bf",
-      "size": 113592,
-      "permissions": [
-        "ui.host",
-        "ai.connect",
-        "resource.read",
-        "device.read",
-        "device.app",
-        "input.tap",
-        "input.swipe",
-        "input.key",
-        "input.text",
-        "touch",
-        "runtime.sleep",
-        "log.write"
-      ],
-      "host_api": {
-        "device": "^1.0",
-        "input": "^1.0",
-        "log": "^1.0",
-        "resource": "^1.0",
-        "runtime": "^1.0",
-        "touch": "^1.0",
-        "ui": "^1.0"
-      },
-      "ui": {
-        "contributions": [
-          {
-            "component": "AiWorkspace",
-            "entry": "ui/plugin.js",
-            "location": "console.right",
-            "order": 60,
-            "panel_id": "ai",
-            "requires_device": false,
-            "runtime": "core",
-            "title": "AI 助手"
-          }
-        ]
-      },
-      "execution": {
-        "kind": "builtin",
-        "host_version": ">=0.3.0"
-      }
-    },
-    {
-      "id": "gamer-keymap",
-      "version": "0.1.5",
-      "name": "键盘映射",
-      "description": "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键",
-      "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-keymap-0.1.5.gplugin",
-      "sha256": "80541849e1be1a33fe1a877bf74edbd87299ff3d3a15acc0fc49709b0a813439",
-      "size": 131933,
-      "permissions": [
-        "ui.host",
-        "input.tap",
-        "input.swipe",
-        "input.key",
-        "touch"
-      ],
-      "host_api": {
-        "input": "^1.2",
-        "touch": "^1.0",
-        "ui": "^1.1"
-      },
-      "ui": {
-        "contributions": [
-          {
-            "component": "console.keymaps",
-            "entry": "ui/plugin.js",
-            "icon": "⌨",
-            "location": "console.right",
-            "order": 30,
-            "panel_id": "keymaps",
-            "preferred_width": 360,
-            "requires_device": true,
-            "runtime": "core",
-            "title": "键盘映射"
-          }
-        ]
-      },
-      "execution": {
-        "kind": "wasm"
-      }
-    },
-    {
       "id": "gamer-notify",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "name": "通知助手",
       "description": "全局通知通道、任务结果通知与自动化通知",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-notify-0.1.0.gplugin",
-      "sha256": "09c3e3046d3be32a8893f09549b425d86399598b4966eeb7dca9019ce4bbdc19",
-      "size": 5994,
+      "download_url": "/plugins/gamer-notify-0.1.1.gplugin",
+      "sha256": "e8b2ffba708dd8d77b41852dd5f32848571da1651722c3faf6ada79f9d72c3ef",
+      "size": 5993,
       "permissions": [
         "ui.host",
         "notify.send"
@@ -180,18 +136,24 @@
     },
     {
       "id": "gamer-ocr",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "name": "文字识别",
       "description": "按需本地 OCR，为自动化提供文字、置信度和位置",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-ocr-0.1.0.gplugin",
-      "sha256": "26504243f01f44419e6f3cee061500be065f540c2d7b876603a172119631dcc4",
-      "size": 761,
+      "download_url": "/plugins/gamer-ocr-0.1.1.gplugin",
+      "sha256": "591df026449d40b93924195f959becf35d7efdc9064abec3e96c3c2f27dbee7a",
+      "size": 1995,
       "permissions": [
         "ui.host",
-        "vision.ocr"
+        "vision.ocr",
+        "device.read",
+        "resource.read",
+        "media.read"
       ],
       "host_api": {
+        "device": "^1.0",
+        "media": "^1.0",
+        "resource": "^1.0",
         "runtime": "^1.0",
         "ui": "^1.1",
         "vision": "^1.0"
@@ -252,7 +214,7 @@
       "description": "使用本机 GitHub CLI 将配置包发布到自己的公开仓库",
       "publisher": "gamer.dev",
       "download_url": "/plugins/gamer-package-publisher-0.1.0.gplugin",
-      "sha256": "9fb1175e9e46f2be73cd17c41c19394e7cf7cb574fe89c64718bf3a1da238516",
+      "sha256": "de16d36c1b99c1253992b6d4412b70ce19a9f9dec0d878dc75020c850eb613a9",
       "size": 5120,
       "permissions": [
         "ui.host",
@@ -283,13 +245,13 @@
     },
     {
       "id": "gamer-video",
-      "version": "0.2.4",
+      "version": "0.2.6",
       "name": "视频工作台",
       "description": "视频工作台：媒体素材库、设备录制与可携带演示素材",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-video-0.2.4.gplugin",
-      "sha256": "98f086a789d30105ab6822941a835800ac3e81c2f5947c7458fe7913c54711a6",
-      "size": 30201,
+      "download_url": "/plugins/gamer-video-0.2.6.gplugin",
+      "sha256": "039accbfd91f47b8045565bff387ee500acfdc860368a0e1ab3da7561ed61ab0",
+      "size": 34031,
       "permissions": [
         "ui.host",
         "media.read",
@@ -324,16 +286,15 @@
     },
     {
       "id": "gamer-yaml",
-      "version": "0.3.17",
+      "version": "0.3.22",
       "name": "自动化",
       "description": "自动化：按用户步骤编写脚本、脚本版本管理、素材与运行验证",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-yaml-0.3.17.gplugin",
-      "sha256": "673874491f142bbb4725b71187272750d522eb43c8be86f7942f6bf457b1d115",
-      "size": 442206,
+      "download_url": "/plugins/gamer-yaml-0.3.22.gplugin",
+      "sha256": "4346f280d16a308c9ed57fae509b642438c61830fa91fc507d38a101e0404fb4",
+      "size": 439133,
       "permissions": [
         "ui.host",
-        "ai.connect",
         "device.read",
         "device.app",
         "input.tap",
