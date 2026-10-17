@@ -1,6 +1,6 @@
 # Gamer
 
-Gamer 是一个通过浏览器操作 Android 设备的游戏自动化工具。它将实时投屏、鼠标键盘控制、图像模板匹配、YAML 自动化和定时任务放在同一个工作台中，支持从演示素材生成并验证自动化。
+Gamer 是通过浏览器操作 Android 与浏览器游戏目标的自动化工具。它将实时画面、鼠标键盘控制、图像模板匹配、YAML 自动化和定时任务放在同一个工作台中，并通过统一 MCP 向用户自己的外部 Agent 提供受限能力。
 
 设备统一通过 ADB 接入，画面由 scrcpy 采集，经 WebRTC 传输到浏览器。服务端使用 Rust，前端使用 Vue 3；自动化、按键映射和视频工作台分别由插件提供。
 
@@ -9,13 +9,14 @@ Gamer 是一个通过浏览器操作 Android 设备的游戏自动化工具。�
 ## 可以做什么
 
 - **查看与控制设备**：实时投屏、触控、按键、文本输入、应用启停和截图；连接多个设备并切换操作目标。
-- **多画面独立运行**：默认 4 格，可切换 9 格，同时监看 Android 与浏览器目标；逐目标记住配置包、脚本和参数，批量启动或停止当前可见格。关闭预览或移出网格不停止后台脚本。见 [多画面使用指南](docs/guides/multiview.md)。
+- **多画面独立运行**：设备区切换单屏、4 格或 9 格，同时监看 Android 与浏览器目标；逐目标记住配置包、脚本和参数，按模式提供单路或批量运行操作。关闭预览或移出网格不停止后台脚本。见 [多画面使用指南](docs/guides/multiview.md)。
 - **使用独立虚拟屏**：在支持的 Android 设备上指定分辨率与 DPI，例如 1920×1080；也可以镜像设备主屏。
-- **编写自动化**：以 YAML v2 原文和 AI 生成为主，使用命名视觉目标、等待、可选分支、函数与明确完成条件；离线素材验证不需要设备。
+- **编写自动化**：手动编辑 YAML 原文，或让自己的 Agent 通过 MCP 保存工作稿；保留命名视觉目标、等待、分支、函数、素材检查与全部版本，人工测试后发布。
+- **识别动态文字**：可选文字识别插件提供本地 OCR，读取文字、置信度和位置，供自动化判断或点击。见 [OCR 使用指南](docs/guides/ocr.md)。
 - **安排任务**：设置执行入口、运行参数、设备与调度时间。任务在服务端执行，关闭浏览器后仍可继续。
 - **制作演示素材**：录制设备画面与完整操作，确认 START/END 和目标，生成可携带 `.gamersample` 素材包；保留逐帧查看、标记与模板提取。
 - **复用配置与能力**：通过配置包组织和分发脚本、模板、映射与视频项目，通过插件扩展编辑和执行能力。
-- **AI 自动游玩**：安装 AI 助手插件，配置支持图片与工具调用的模型 API，给出目标后自动观察并操作；暂停完成后可以人工接手，也可让本机外部 AI 通过 MCP 使用画面与操作工具。见 [AI 助手说明](plugins/gamer-ai/README.md)。
+- **连接自己的 Agent**：在设置中签发限定范围的 MCP 令牌，使用本机 `/api/mcp` 读取画面、脚本和运行证据，调用已启用插件明确开放的工具。直接控制需要用户先开始会话；Gamer 不配置模型或代替 Agent 决策。见 [MCP 接入指南](docs/guides/external-agent-mcp.md)。
 
 - **发布与获取配置**：在配置包页添加公开 GitHub 仓库，下载并导入配置；作者使用配置包发布插件，通过服务电脑上的 gh 登录创建草稿并确认公开。见 [配置包发布指南](docs/guides/package-publishing.md)。
 
@@ -141,10 +142,9 @@ Gamer 使用 **ADB 地址**识别设备。USB 真机、无线设备和模拟器�
 
 应用选择和配置选择独立：一个配置包可以声明适用于多个应用，配置包 ID 也不必与 Android 包名相同。包内数据按插件隔离，未安装插件的数据仍会保留。
 
-开发中的 0.3.0 使用明确标记 `version: 2` 的新 YAML，旧语法需手动升级，不维护双引擎。以下示例使用已经制作好的三个模板：
+开发中的 0.3.0 使用唯一无版本字段的新 YAML，旧语法与兼容层已删除。以下示例使用已经制作好的三个模板：
 
 ```yaml
-version: 2
 targets:
   reward: {template: reward.png}
   confirm: {template: confirm.png}
@@ -160,13 +160,13 @@ run:
   - finish: done
 ```
 
-等待只观察，点击显式执行，最后验证完成画面。函数库继续使用 `automations/_function*.yaml`（默认 `_function.yaml`），也声明版本 2。只有需要调用模型时才依赖 AI 助手；保存后的脚本独立运行。
+等待只观察，点击显式执行，最后验证完成画面。函数库继续使用 `automations/_function*.yaml`（默认 `_function.yaml`），也使用无版本语法。脚本独立运行，不依赖模型或 Agent 在线。
 
-AI 工作流为：视频导出素材 → 自动化选择一个或多个素材 → 生成脚本和真实裁切模板 → 全素材验证与有限修正 → 审查保存。验证只证明已选择证据与参数下的路径，不代替真实游戏效果验收。
+创作流程为：视频制作独立素材 → 人工或外部 Agent 编写工作稿、裁切模板 → 检查语法与素材 → 明确试跑所选版本 → 用户审查并发布。素材验证不执行分支或设备输入，不代替真实游戏效果验收。
 
-运行记录可保存原尺寸无损图片，`trace: false` 只关闭自动图片，普通日志与异常留证继续。图片默认保留约 24 小时并受容量限制；AI 助手可以按用户选定的运行分析问题、提出候选修改，应用与保存都需要用户操作。详见 [Runtime Trace](docs/reference/RUNTIME_TRACE.md)、[开发计划](docs/plans/gamer_ai_automation_development_plan.md) 和 [实施合同](docs/plans/gamer_ai_automation_contracts.md)。
+运行记录可保存原尺寸无损图片，`trace: false` 只关闭自动图片，普通日志与异常留证继续。图片默认保留约 24 小时并受容量限制；外部 Agent 可按授权的 run_id 读取证据并修改工作稿，正式发布由用户确认。详见 [Runtime Trace](docs/reference/RUNTIME_TRACE.md) 和 [外部 Agent 改造计划](docs/plans/gamer_external_agent_mcp_refactor_plan.md)。
 
-按界面操作的生成、验证和保存流程见 [AI 自动化使用教程](docs/guides/ai-automation-tutorial.md)，包含邮件领取实例。语法入门见 [YAML 自动化教程](docs/guides/yaml-tutorial.md)，完整说明见 [YAML 参考](docs/reference/YAML.md)。
+创作与保存流程见 [工作稿使用教程](docs/guides/ai-automation-tutorial.md)。语法入门见 [YAML 自动化教程](docs/guides/yaml-tutorial.md)，完整说明见 [YAML 参考](docs/reference/YAML.md)，接入见 [MCP 指南](docs/guides/external-agent-mcp.md)。
 
 ### 数据存放与导出
 

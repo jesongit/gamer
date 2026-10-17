@@ -65,8 +65,8 @@ videoHeight 复制播放器已解码像素，后端只解码一次 PNG 后复用
 | 端点 | 形态 | 响应 |
 | --- | --- | --- |
 | `POST /api/recording/start` | `{"device_id":"..."}` | 202 `RecordingSessionMeta`；设备已有活动会话 409 |
-| `POST /api/recording/:id/stop` | - | 200 终态 session（幂等，重复调用返回同一终态） |
-| `POST /api/recording/:id/cancel` | - | 200 终态（已落盘部分保留为 interrupted 素材） |
+| `POST /api/recording/:id/stop` | - | 202 `finalizing`，后台保存；重复调用不重复转码，完成后返回 200 终态 |
+| `POST /api/recording/:id/cancel` | - | 202 `finalizing`，后台保留已落盘片段；完成后返回 200 终态 |
 | `GET /api/recording/:id` | - | `RecordingSessionMeta`；404 `{"error":"recording_not_found"}` |
 | `GET /api/recording/active?device_id=` | - | 200 session 或 404 |
 | `GET /api/recording/:id/events` | - | `{"schema_version":1,"events":[InputEventRecord]}`（时间轴升序） |
@@ -166,3 +166,7 @@ data/media/<media-id>/
 `api/mod.rs`/`main.rs`/`api/common.rs` 已定稿不再动；集成阶段：全量 cargo test +
 vitest、guard/boundary 测试同步、跨模块编译修复、AGENTS.md/PITFALLS 更新、
 ADR（媒体/录制 Core 机制边界）。
+
+## 2026-10-09 用户确认的范围收敛
+
+项目层、标记/校准制作入口与配置包绑定删除；仅保留视频、录制历史和对应素材包。素材包保存于 plugin-data/gamer-video/samples，公开 sample 动作不接收 package_id，导入导出使用同一校验器；素材只保存截图和操作，制作后不依赖原视频。原项目资源不作为运行入口，不自动删除已有数据。脚本、模板与模型生成全部由自动化插件负责。

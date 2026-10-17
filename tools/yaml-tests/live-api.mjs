@@ -72,7 +72,7 @@ try {
         assert.ok(list.some(entry => entry.id === created.id && entry.package === pkg && entry.name === file && entry.content === reopened.content), JSON.stringify(list))
       }
       const descriptor = await api.getEntrypointParams('gamer-yaml', kind === 'script' ? created.id : `${pkg}#echo_value`)
-      assert.equal(descriptor.format, 'yaml-params-v1')
+      assert.equal(descriptor.format, 'yaml-params')
       if (file === 'flow.yaml') assert.equal(descriptor.schema.length, 11)
     })
   }

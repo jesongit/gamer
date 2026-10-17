@@ -35,7 +35,65 @@
         "type": "string"
       },
       {
+        "default": null,
+        "desc": "稳定错误码",
+        "name": "code",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "default": null,
+        "desc": "失败阶段",
+        "name": "stage",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "default": null,
+        "desc": "预期状态",
+        "name": "expected",
+        "required": false,
+        "type": "any"
+      },
+      {
+        "default": null,
+        "desc": "实际状态",
+        "name": "actual",
+        "required": false,
+        "type": "any"
+      },
+      {
+        "default": false,
+        "desc": "是否可通过环境恢复重试",
+        "name": "retryable",
+        "required": false,
+        "type": "boolean"
+      },
+      {
         "default": "明确失败",
+        "desc": "可视化显示名称",
+        "name": "name",
+        "required": false,
+        "type": "string"
+      }
+    ],
+    "returns": "null",
+    "source": "plugin"
+  },
+  {
+    "description": "浏览器移到指定位置而不点击，复用输入屏障与截图校验；Android 不支持",
+    "name": "hover",
+    "optional_extension": null,
+    "params": [
+      {
+        "default": null,
+        "desc": "坐标或匹配结果",
+        "name": "position",
+        "required": true,
+        "type": "point"
+      },
+      {
+        "default": "鼠标悬浮",
         "desc": "可视化显示名称",
         "name": "name",
         "required": false,
@@ -96,6 +154,36 @@
       },
       {
         "default": "滑动",
+        "desc": "可视化显示名称",
+        "name": "name",
+        "required": false,
+        "type": "string"
+      }
+    ],
+    "returns": "null",
+    "source": "plugin"
+  },
+  {
+    "description": "在新鲜匹配位置按住后释放；位置不移动，用于录制中的长按控件",
+    "name": "press",
+    "optional_extension": null,
+    "params": [
+      {
+        "default": null,
+        "desc": "匹配结果或相对坐标",
+        "name": "position",
+        "required": true,
+        "type": "point"
+      },
+      {
+        "default": "800ms",
+        "desc": "按住时长 200ms..3s",
+        "name": "duration",
+        "required": false,
+        "type": "duration"
+      },
+      {
+        "default": "长按",
         "desc": "可视化显示名称",
         "name": "name",
         "required": false,
@@ -195,6 +283,22 @@
       },
       {
         "default": "停止应用",
+        "desc": "可视化显示名称",
+        "name": "name",
+        "required": false,
+        "type": "string"
+      }
+    ],
+    "returns": "null",
+    "source": "plugin"
+  },
+  {
+    "description": "浏览器刷新当前绑定网页，Android 冷启动当前配置 App；清理按住状态并使旧截图失效，随后仍须等待并识别入口画面",
+    "name": "reset_input",
+    "optional_extension": null,
+    "params": [
+      {
+        "default": "重置输入入口",
         "desc": "可视化显示名称",
         "name": "name",
         "required": false,
@@ -317,6 +421,13 @@
         "type": "number"
       },
       {
+        "default": null,
+        "desc": "所有模板共用的搜索区域 [x, y, w, h]（相对坐标）；缺省沿用各模板文件名区域",
+        "name": "region",
+        "required": false,
+        "type": "list"
+      },
+      {
         "default": "查找首个模板",
         "desc": "可视化显示名称",
         "name": "name",
@@ -338,6 +449,13 @@
         "name": "template",
         "required": true,
         "type": "template"
+      },
+      {
+        "default": false,
+        "desc": "持续等待直到命中或取消；忽略 timeout，设备和模板错误仍立即失败",
+        "name": "forever",
+        "required": false,
+        "type": "boolean"
       },
       {
         "default": [],
@@ -678,7 +796,7 @@
     "source": "plugin"
   },
   {
-    "description": "提交通知后继续运行；通知插件不可用时跳过并返回原因",
+    "description": "即时发送或登记当前脚本/函数结束时的通知；通知插件不可用时跳过并返回原因",
     "name": "notify",
     "optional_extension": "gamer-notify",
     "params": [
@@ -704,6 +822,20 @@
         "type": "string"
       },
       {
+        "default": "immediate",
+        "desc": "immediate 立即发送；success/failure 在当前脚本或函数结束时发送",
+        "name": "when",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "default": true,
+        "desc": "是否发送此通知；关闭的结果通知仍覆盖全局默认规则",
+        "name": "enabled",
+        "required": false,
+        "type": "boolean"
+      },
+      {
         "default": "发送通知",
         "desc": "可视化显示名称",
         "name": "name",
@@ -712,6 +844,270 @@
       }
     ],
     "returns": "object",
+    "source": "plugin"
+  },
+  {
+    "description": "切换已启动直播助手的画面来源，保持输出地址和参数；省略设备时使用当前脚本目标，支持 Android 和浏览器",
+    "name": "switch_live_device",
+    "optional_extension": "gamer-live",
+    "params": [
+      {
+        "default": "",
+        "desc": "目标设备 ID；留空使用当前脚本运行目标",
+        "name": "device_id",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "default": "10s",
+        "desc": "等待新设备画面并切换的上限",
+        "name": "timeout",
+        "required": false,
+        "type": "duration"
+      },
+      {
+        "default": "切换直播输出设备",
+        "desc": "可视化显示名称",
+        "name": "name",
+        "required": false,
+        "type": "string"
+      }
+    ],
+    "returns": "object",
+    "source": "plugin"
+  },
+  {
+    "description": "登录就绪后等待当前队列任务触发者确认或取消；返回 status 为 confirmed、cancelled 或 timeout，停止时中断",
+    "name": "wait_live_confirmation",
+    "optional_extension": "gamer-live",
+    "params": [
+      {
+        "default": "5m",
+        "desc": "确认等待上限，1ms..5m，向上取整到秒；不能延长队列规则冻结的期限",
+        "name": "timeout",
+        "required": false,
+        "type": "duration"
+      },
+      {
+        "default": "等待直播观众确认",
+        "desc": "可视化显示名称",
+        "name": "name",
+        "required": false,
+        "type": "string"
+      }
+    ],
+    "returns": "object",
+    "source": "plugin"
+  },
+  {
+    "description": "按需识别原始截图文字；返回文字、置信度、行和单词；OCR 插件不可用时明确失败",
+    "name": "ocr",
+    "optional_extension": "gamer-ocr",
+    "params": [
+      {
+        "default": null,
+        "desc": "原始截图区域 [x,y,w,h]（0..1 相对坐标）",
+        "name": "region",
+        "required": false,
+        "type": "list"
+      },
+      {
+        "default": "chi_sim+eng",
+        "desc": "已安装的 Tesseract 语言，例如 chi_sim+eng / eng",
+        "name": "language",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "default": "block",
+        "desc": "版面模式：line / block / sparse",
+        "name": "mode",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "default": null,
+        "desc": "可选字符白名单，例如 0123456789:",
+        "name": "whitelist",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "default": 2,
+        "desc": "识别前放大倍数 1..3；结果坐标始终对应原图",
+        "name": "scale",
+        "required": false,
+        "type": "integer"
+      },
+      {
+        "default": "10s",
+        "desc": "本地识别时间上限，最多 15s；超时明确失败",
+        "name": "timeout",
+        "required": false,
+        "type": "duration"
+      },
+      {
+        "default": "识别文字",
+        "desc": "可视化显示名称",
+        "name": "name",
+        "required": false,
+        "type": "string"
+      }
+    ],
+    "returns": "object",
+    "source": "plugin"
+  },
+  {
+    "description": "从 OCR 文字按顺序提取非负整数；没有数字明确失败，不把识别失败当成零",
+    "name": "number",
+    "optional_extension": null,
+    "params": [
+      {
+        "default": null,
+        "desc": "小区域 OCR 的 text",
+        "name": "text",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "default": 0,
+        "desc": "从零开始的数字序号，例如 60/300 的体力为 0",
+        "name": "index",
+        "required": false,
+        "type": "integer"
+      },
+      {
+        "default": "tokens",
+        "desc": "tokens 按顺序提取；fraction 严格要求完整整数/整数，index 0 为分子、1 为分母，缺项或零分母明确失败",
+        "name": "format",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "default": "提取整数",
+        "desc": "可视化显示名称",
+        "name": "name",
+        "required": false,
+        "type": "string"
+      }
+    ],
+    "returns": "integer",
+    "source": "plugin"
+  },
+  {
+    "description": "纯数值运算：add/sub/mul/div/floor_div/min/max；可计算剩余体力可刷次数，不引入表达式语法",
+    "name": "calculate",
+    "optional_extension": null,
+    "params": [
+      {
+        "default": null,
+        "desc": "运算名",
+        "name": "op",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "default": null,
+        "desc": "左值",
+        "name": "a",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "default": null,
+        "desc": "右值",
+        "name": "b",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "default": "数值计算",
+        "desc": "可视化显示名称",
+        "name": "name",
+        "required": false,
+        "type": "string"
+      }
+    ],
+    "returns": "number",
+    "source": "plugin"
+  },
+  {
+    "description": "单次识别并查找文字；未找到返回 null，命中可直接传给 tap；等待可使用 repeat",
+    "name": "find_text",
+    "optional_extension": "gamer-ocr",
+    "params": [
+      {
+        "default": null,
+        "desc": "要查找的文字",
+        "name": "text",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "default": "contains",
+        "desc": "contains 包含 / exact 完全匹配；按阅读顺序返回首个行或词",
+        "name": "match",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "default": 0.5,
+        "desc": "最低置信度 0..1",
+        "name": "min_confidence",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "default": null,
+        "desc": "原始截图区域 [x,y,w,h]（0..1 相对坐标）",
+        "name": "region",
+        "required": false,
+        "type": "list"
+      },
+      {
+        "default": "chi_sim+eng",
+        "desc": "已安装的 Tesseract 语言，例如 chi_sim+eng / eng",
+        "name": "language",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "default": "block",
+        "desc": "版面模式：line / block / sparse",
+        "name": "mode",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "default": null,
+        "desc": "可选字符白名单，例如 0123456789:",
+        "name": "whitelist",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "default": 2,
+        "desc": "识别前放大倍数 1..3；结果坐标始终对应原图",
+        "name": "scale",
+        "required": false,
+        "type": "integer"
+      },
+      {
+        "default": "10s",
+        "desc": "本地识别时间上限，最多 15s；超时明确失败",
+        "name": "timeout",
+        "required": false,
+        "type": "duration"
+      },
+      {
+        "default": "查找文字",
+        "desc": "可视化显示名称",
+        "name": "name",
+        "required": false,
+        "type": "string"
+      }
+    ],
+    "returns": "match?",
     "source": "plugin"
   },
   {
@@ -821,6 +1217,71 @@
       },
       {
         "default": "验证完成画面",
+        "desc": "可视化显示名称",
+        "name": "name",
+        "required": false,
+        "type": "string"
+      }
+    ],
+    "returns": "match?",
+    "source": "plugin"
+  },
+  {
+    "description": "实际观察到模板后记录完成项；只读，未观察到模板明确失败，不要求统一结束标记",
+    "name": "checkpoint",
+    "optional_extension": null,
+    "params": [
+      {
+        "default": null,
+        "desc": "模板",
+        "name": "template",
+        "required": true,
+        "type": "template"
+      },
+      {
+        "default": 0.8,
+        "desc": "匹配阈值 0..1",
+        "name": "threshold",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "default": null,
+        "desc": "相对区域 [x,y,w,h]",
+        "name": "region",
+        "required": false,
+        "type": "list"
+      },
+      {
+        "default": "10s",
+        "desc": "最长等待时间",
+        "name": "timeout",
+        "required": false,
+        "type": "duration"
+      },
+      {
+        "default": "250ms",
+        "desc": "轮询间隔",
+        "name": "interval",
+        "required": false,
+        "type": "duration"
+      },
+      {
+        "default": true,
+        "desc": "未命中是否失败",
+        "name": "required",
+        "required": false,
+        "type": "boolean"
+      },
+      {
+        "default": null,
+        "desc": "稳定完成项 ID",
+        "name": "id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "default": "验证任务完成项",
         "desc": "可视化显示名称",
         "name": "name",
         "required": false,

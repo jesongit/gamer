@@ -1,13 +1,17 @@
 # Isolated engine test fixture; complete visual tasks must declare finish.
-version: 2
 name: YAML 全部 20 个内置函数验收（仅限测试设备）
 run:
+  - number: {text: "60 / 300", index: 0, format: fraction}
+    as: stamina_number
+  - calculate: {op: floor_div, a: $stamina_number, b: 10}
+    as: stamina_batches
   - launch: {}
   - tap: [0.25, 0.75]
   - swipe:
       from: [0.1, 0.9]
       to: [0.9, 0.1]
       duration: 1ms
+  - press: {position: [0.11, 0.07], duration: 800ms}
   - key: HOME
   - input_text: yaml-acceptance
   - sleep: 0ms
@@ -48,9 +52,12 @@ run:
       title: 通知测试
       content: 原生函数验收
   - stop_app: {}
+  - reset_input: {}
   - return:
       center: $first.center
       appeared: $appeared.center
       clicked: $clicked.center
       gone: $gone
       comparisons: [$equal, $unequal, $greater, $greater_equal, $less, $less_equal]
+      stamina: $stamina_number
+      batches: $stamina_batches

@@ -1,0 +1,17 @@
+[package]
+name = "gamer-daily-no-target-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+yaml-interp = { path = "../../../plugins/gamer-yaml/interpreter" }
+
+[build-dependencies]
+serde_json = "1"
+sha2 = "0.10"

@@ -70,6 +70,76 @@ function New-ZipFromDirectory {
     }
 }
 
+function Remove-RetiredAiStageArtifacts {
+    param([Parameter(Mandatory = $true)][string]$StageRoot)
+    $stageRootPath = [IO.Path]::GetFullPath($StageRoot).TrimEnd([char[]]'\/')
+    $stageBoundary = $stageRootPath + [IO.Path]::DirectorySeparatorChar
+    $stageItem = Get-Item -LiteralPath $stageRootPath -Force
+    if (-not $stageItem.PSIsContainer -or ($stageItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw '发行 stage 必须是普通目录'
+    }
+    # Check the entire private stage before deleting anything. Do not follow a
+    # copied junction/symlink that could redirect cleanup outside this stage.
+    $pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $archives = New-Object 'System.Collections.Generic.List[string]'
+    $pending.Push($stageRootPath)
+    while ($pending.Count -gt 0) {
+        foreach ($item in (Get-ChildItem -LiteralPath $pending.Pop() -Force)) {
+            $path = [IO.Path]::GetFullPath($item.FullName)
+            if (-not $path.StartsWith($stageBoundary, [StringComparison]::OrdinalIgnoreCase)) {
+                throw '发行清理目标超出 stage'
+            }
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw '发行 stage 含重解析点，拒绝清理'
+            }
+            if ($item.PSIsContainer) { $pending.Push($path) }
+            elseif ($item.Extension -eq '.gplugin') { $archives.Add($path) }
+        }
+    }
+    $retiredUi = [IO.Path]::GetFullPath((Join-Path $stageRootPath 'web-dist/plugin-ui/gamer-ai'))
+    $retiredUis = @($retiredUi)
+    $registryPath = [IO.Path]::GetFullPath((Join-Path $stageRootPath 'web-dist/registry.json'))
+    foreach ($path in @($retiredUi, $registryPath) + @($archives)) {
+        if (-not $path.StartsWith($stageBoundary, [StringComparison]::OrdinalIgnoreCase)) {
+            throw '发行清理目标超出 stage'
+        }
+    }
+    $retiredNames = @()
+    $currentNames = @()
+    if (Test-Path -LiteralPath $registryPath) {
+        $registry = [IO.File]::ReadAllText($registryPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+        $retiredPlugins = @($registry.plugins | Where-Object {
+            $_.id -eq 'gamer-ai' -or ($_.PSObject.Properties['execution'] -and $_.execution.PSObject.Properties['builtin_id'] -and $_.execution.builtin_id -eq 'gamer-ai') -or ($_.PSObject.Properties['permissions'] -and @($_.permissions | Where-Object { $_ -is [string] -and $_.Trim() -eq 'ai.connect' }).Count -gt 0)
+        })
+        $publishedPlugins = @($registry.plugins | Where-Object { $_ -notin $retiredPlugins })
+        $retiredNames = @($retiredPlugins | ForEach-Object { "$($_.id)-$($_.version).gplugin" })
+        $currentIds = @($publishedPlugins | ForEach-Object { $_.id })
+        foreach ($plugin in $retiredPlugins) {
+            if ($plugin.id -ne 'gamer-ai' -and $plugin.id -in $currentIds) { continue }
+            if ($plugin.id -notmatch '^[a-z0-9][a-z0-9._-]*$') { throw '退休插件 UI 目录作用域非法' }
+            $uiPath = [IO.Path]::GetFullPath((Join-Path $stageRootPath "web-dist/plugin-ui/$($plugin.id)"))
+            if (-not $uiPath.StartsWith($stageBoundary, [StringComparison]::OrdinalIgnoreCase)) { throw '退休插件 UI 超出 stage' }
+            $retiredUis += $uiPath
+        }
+        $currentNames = @($publishedPlugins | ForEach-Object { "$($_.id)-$($_.version).gplugin" })
+        if (@($retiredNames | Where-Object { $_ -in $currentNames }).Count -gt 0) { throw '发行 registry 的归档名称归属冲突' }
+        foreach ($archive in $archives) {
+            $name = [IO.Path]::GetFileName($archive)
+            if ($name -notin $currentNames -and $name -notin $retiredNames) { throw '发行归档缺少 registry 权威归属，拒绝猜测插件名称' }
+        }
+        if ($publishedPlugins.Count -ne @($registry.plugins).Count) {
+            $registry.plugins = $publishedPlugins
+            [IO.File]::WriteAllText($registryPath, ($registry | ConvertTo-Json -Depth 30) + "`n", [Text.UTF8Encoding]::new($false))
+        }
+    } elseif ($archives.Count -gt 0) { throw '发行归档缺少 registry，拒绝猜测插件名称' }
+    foreach ($path in $archives) {
+        if ([IO.Path]::GetFileName($path) -in $retiredNames) { Remove-Item -LiteralPath $path -Force }
+    }
+    foreach ($path in @($retiredUis | Sort-Object -Unique)) {
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+    }
+}
+
 # ---------- 版本（权威源 server/Cargo.toml [package].version）----------
 $cargoToml = Join-Path $serverDir 'Cargo.toml'
 $productVersion = $null
@@ -140,6 +210,9 @@ Copy-Item -LiteralPath $serverExe -Destination (Join-Path $stage 'gamer-server.e
 # 必须复制整个 web-dist 目录；对 "web-dist\\*" 使用 PowerShell wildcard 会把
 # 子目录层级压平，导致浏览器请求 /assets/* 时得到 404（REL-003）。
 Copy-Item -LiteralPath $webDist -Destination $stage -Recurse -Force
+# Retired assets may remain in the developer's public/web-dist snapshots.
+# Filter only this private release copy, even if an old registry still lists AI.
+Remove-RetiredAiStageArtifacts -StageRoot $stage
 # 开发目录可能保留旧 .gplugin；发行只收注册表当前列出的版本。
 $registryPath = Join-Path $stage 'web-dist/registry.json'
 if (Test-Path -LiteralPath $registryPath) {
