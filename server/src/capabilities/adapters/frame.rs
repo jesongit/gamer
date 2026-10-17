@@ -1,13 +1,122 @@
 use std::collections::{HashMap, VecDeque};
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use image::ImageEncoder;
 
 use crate::device::DeviceManager;
 
 use super::super::{
     CapabilityError, CapabilityResult, DeviceHandle, FrameHandle, FrameService, FrameSize,
+    SearchRegion,
 };
+
+// Match the existing decoded-image boundary. These also cover synthetic frames,
+// which can enter the frame table without passing through the PNG decoder.
+const MAX_FRAME_DIMENSION: u32 = 16_384;
+const MAX_FRAME_PIXELS: u64 = 32_000_000;
+const MAX_FRAME_PNG_BYTES: usize = 32 * 1024 * 1024;
+
+fn checked_image_region(
+    size: (u32, u32),
+    region: Option<SearchRegion>,
+) -> CapabilityResult<SearchRegion> {
+    let (width, height) = size;
+    if width == 0
+        || height == 0
+        || width > MAX_FRAME_DIMENSION
+        || height > MAX_FRAME_DIMENSION
+        || u64::from(width) * u64::from(height) > MAX_FRAME_PIXELS
+    {
+        return Err(CapabilityError::InvalidRequest(
+            "frame image exceeds the dimension or pixel budget".into(),
+        ));
+    }
+    let region = region.unwrap_or(SearchRegion::new(0, 0, width, height));
+    if region.width == 0
+        || region.height == 0
+        || !region
+            .x
+            .checked_add(region.width)
+            .is_some_and(|end| end <= width)
+        || !region
+            .y
+            .checked_add(region.height)
+            .is_some_and(|end| end <= height)
+    {
+        return Err(CapabilityError::InvalidRequest(
+            "frame image region must be nonempty and entirely inside the frame".into(),
+        ));
+    }
+    Ok(region)
+}
+
+#[derive(Default)]
+struct BoundedPngBytes {
+    bytes: Vec<u8>,
+    exceeded: bool,
+}
+
+impl Write for BoundedPngBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > MAX_FRAME_PNG_BYTES.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "encoded frame exceeds the 32 MiB PNG budget",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Shared by live and recorded frame adapters. The caller submits this CPU work
+/// to `matcher::compute`; it only encodes the supplied decoded image.
+pub(crate) fn encode_frame_png(
+    frame: &crate::matcher::DecodedFrame,
+    region: Option<SearchRegion>,
+) -> CapabilityResult<Vec<u8>> {
+    let region = checked_image_region(frame.dimensions(), region)?;
+    let original = frame.image();
+    // Full-frame encoding borrows the shared RGB storage. Only a non-contiguous
+    // ROI needs a temporary pixel buffer, dropped immediately after encoding.
+    let cropped;
+    let pixels = if region.x == 0 && region.width == original.width() {
+        let row_bytes = region.width as usize * 3;
+        let first = region.y as usize * row_bytes;
+        &original.as_raw()[first..first + region.height as usize * row_bytes]
+    } else {
+        cropped =
+            image::imageops::crop_imm(original, region.x, region.y, region.width, region.height)
+                .to_image();
+        cropped.as_raw().as_slice()
+    };
+    let mut output = BoundedPngBytes::default();
+    let result = image::codecs::png::PngEncoder::new_with_quality(
+        &mut output,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::Adaptive,
+    )
+    .write_image(
+        pixels,
+        region.width,
+        region.height,
+        image::ExtendedColorType::Rgb8,
+    );
+    if output.exceeded {
+        return Err(CapabilityError::InvalidRequest(
+            "encoded frame exceeds the 32 MiB PNG budget".into(),
+        ));
+    }
+    result.map_err(|error| CapabilityError::Failed(format!("PNG encoding failed: {error}")))?;
+    Ok(output.bytes)
+}
 
 /// Short-lived decoded frame table. Handles make cross-layer ownership explicit
 /// while the decoded pixels remain shared and backend-private.
@@ -101,6 +210,16 @@ impl FrameStore {
             .get(&handle)
             .cloned()
             .ok_or_else(|| CapabilityError::NotFound("frame handle".into()))
+    }
+
+    pub(crate) fn release(&self, handle: FrameHandle) {
+        if let Ok(mut state) = self.state.lock() {
+            state.frames.remove(&handle);
+            state.stamps.remove(&handle);
+            state.times.remove(&handle);
+            state.matches.remove(&handle);
+            state.order.retain(|stored| *stored != handle);
+        }
     }
 }
 
@@ -335,5 +454,209 @@ impl FrameService for FrameAdapter {
         let frame = self.store.get(frame)?;
         let (width, height) = frame.dimensions();
         Ok(FrameSize::new(width, height))
+    }
+
+    async fn image_png(
+        &self,
+        frame: FrameHandle,
+        region: Option<SearchRegion>,
+    ) -> CapabilityResult<Vec<u8>> {
+        let frame = self.store.get(frame)?;
+        crate::matcher::compute::run(move || encode_frame_png(&frame, region))
+            .await
+            .map_err(|error| CapabilityError::Failed(error.to_string()))?
+    }
+
+    fn release(&self, frame: FrameHandle) {
+        self.store.release(frame);
+    }
+}
+
+#[cfg(test)]
+mod image_png_tests {
+    use image::{Rgb, RgbImage};
+
+    use super::*;
+
+    fn adapter() -> (tempfile::TempDir, FrameAdapter) {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let db = Arc::new(crate::store::Store::open(&cfg).unwrap());
+        let devices = Arc::new(DeviceManager::new(db, cfg));
+        let adapter = FrameAdapter::new(devices, Arc::new(FrameStore::new()));
+        (dir, adapter)
+    }
+
+    fn pixels() -> RgbImage {
+        RgbImage::from_fn(4, 3, |x, y| Rgb([x as u8 * 23, y as u8 * 57, 201]))
+    }
+
+    #[tokio::test]
+    async fn exports_exact_handle_pixels_and_preserves_its_identity() {
+        let (_dir, adapter) = adapter();
+        let original = pixels();
+        let stamp = crate::capabilities::FrameStamp {
+            target: "bound-target".into(),
+            epoch: "capture-epoch".into(),
+            revision: 7,
+        };
+        let handle = adapter
+            .store
+            .insert_stamped(
+                crate::matcher::DecodedFrame::from_rgb(original.clone()),
+                Some(stamp.clone()),
+                "2026-10-07T00:00:00Z".into(),
+                "synthetic",
+            )
+            .unwrap();
+        // Another frame is now newest. Export must still use the requested one.
+        adapter
+            .store
+            .insert(crate::matcher::DecodedFrame::from_rgb(
+                RgbImage::from_pixel(1, 1, Rgb([255, 0, 0])),
+            ))
+            .unwrap();
+
+        let png = adapter.image_png(handle, None).await.unwrap();
+        let exported = image::load_from_memory(&png).unwrap().to_rgb8();
+        assert_eq!(exported, original);
+        assert_eq!(adapter.stamp(handle).await.unwrap(), Some(stamp));
+        assert_eq!(adapter.size(handle).await.unwrap(), FrameSize::new(4, 3));
+    }
+
+    #[test]
+    fn crops_exact_pixels_including_bottom_and_right_edges() {
+        let original = pixels();
+        let frame = crate::matcher::DecodedFrame::from_rgb(original.clone());
+        for region in [
+            SearchRegion::new(1, 1, 3, 2),
+            SearchRegion::new(0, 1, 4, 2),
+            SearchRegion::new(3, 2, 1, 1),
+        ] {
+            let png = encode_frame_png(&frame, Some(region)).unwrap();
+            let exported = image::load_from_memory(&png).unwrap().to_rgb8();
+            let expected = image::imageops::crop_imm(
+                &original,
+                region.x,
+                region.y,
+                region.width,
+                region.height,
+            )
+            .to_image();
+            assert_eq!(exported, expected);
+        }
+        assert_eq!(frame.dimensions(), (4, 3));
+        assert_eq!(frame.pixel(3, 2), Some(original.get_pixel(3, 2).0));
+    }
+
+    #[test]
+    fn rejects_empty_overflowing_and_outside_regions_without_clamping() {
+        let frame = crate::matcher::DecodedFrame::from_rgb(pixels());
+        for region in [
+            SearchRegion::new(0, 0, 0, 1),
+            SearchRegion::new(0, 0, 1, 0),
+            SearchRegion::new(4, 0, 1, 1),
+            SearchRegion::new(0, 3, 1, 1),
+            SearchRegion::new(2, 1, 3, 2),
+            SearchRegion::new(u32::MAX, 0, 2, 1),
+            SearchRegion::new(0, u32::MAX, 1, 2),
+        ] {
+            assert!(matches!(
+                encode_frame_png(&frame, Some(region)),
+                Err(CapabilityError::InvalidRequest(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_evicted_frame_handles_instead_of_capturing_a_replacement() {
+        let (_dir, adapter) = adapter();
+        let first = adapter
+            .store
+            .insert(crate::matcher::DecodedFrame::from_rgb(pixels()))
+            .unwrap();
+        for _ in 0..MAX_STORED_FRAMES {
+            adapter
+                .store
+                .insert(crate::matcher::DecodedFrame::from_rgb(pixels()))
+                .unwrap();
+        }
+        assert!(matches!(
+            adapter.image_png(first, None).await,
+            Err(CapabilityError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn release_invalidates_only_its_handle_and_clears_retained_metadata() {
+        let (_dir, adapter) = adapter();
+        let stamp = crate::capabilities::FrameStamp {
+            target: "retained-target".into(),
+            epoch: "retained-epoch".into(),
+            revision: 8,
+        };
+        let first = adapter
+            .store
+            .insert_stamped(
+                crate::matcher::DecodedFrame::from_rgb(pixels()),
+                Some(stamp.clone()),
+                "2026-10-07T00:00:00Z".into(),
+                "synthetic",
+            )
+            .unwrap();
+        adapter.store.record_match(
+            first,
+            serde_json::json!({"found":false}),
+            Some(vec![1, 2, 3]),
+        );
+        let retained = adapter
+            .store
+            .insert_stamped(
+                crate::matcher::DecodedFrame::from_rgb(pixels()),
+                Some(stamp.clone()),
+                "2026-10-07T00:00:00Z".into(),
+                "synthetic",
+            )
+            .unwrap();
+        // An already-submitted trace may retain its Arc after the handle is gone.
+        let evidence_pixels = adapter.store.get(first).unwrap();
+        adapter.release(first);
+        adapter.release(first);
+        assert!(matches!(
+            adapter.image_png(first, None).await,
+            Err(CapabilityError::NotFound(_))
+        ));
+        assert_eq!(evidence_pixels.dimensions(), (4, 3));
+        assert_eq!(adapter.stamp(retained).await.unwrap(), Some(stamp));
+        let png = adapter.image_png(retained, None).await.unwrap();
+        assert_eq!(image::load_from_memory(&png).unwrap().to_rgb8(), pixels());
+        let state = adapter.store.state.lock().unwrap();
+        assert!(!state.frames.contains_key(&first));
+        assert!(!state.stamps.contains_key(&first));
+        assert!(!state.times.contains_key(&first));
+        assert!(!state.matches.contains_key(&first));
+        assert!(!state.order.contains(&first));
+        assert_eq!(state.frames.len(), 1);
+    }
+
+    #[test]
+    fn enforces_decoded_pixel_and_encoded_byte_budgets() {
+        for size in [(0, 5), (5, 0), (16_385, 1), (1, 16_385), (8_000, 4_001)] {
+            assert!(matches!(
+                checked_image_region(size, Some(SearchRegion::new(0, 0, 1, 1))),
+                Err(CapabilityError::InvalidRequest(_))
+            ));
+        }
+        assert!(checked_image_region((8_000, 4_000), None).is_ok());
+        let mut output = BoundedPngBytes {
+            bytes: vec![0; MAX_FRAME_PNG_BYTES],
+            exceeded: false,
+        };
+        assert!(output.write_all(&[1]).is_err());
+        assert!(output.exceeded);
+        assert_eq!(output.bytes.len(), MAX_FRAME_PNG_BYTES);
     }
 }

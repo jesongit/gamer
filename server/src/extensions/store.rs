@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -71,12 +72,14 @@ struct PersistedState {
 #[derive(Clone, Debug)]
 pub(crate) struct ExtensionStore {
     data_root: PathBuf,
+    manifests: Arc<Mutex<BTreeMap<PathBuf, (Vec<u8>, ExtensionManifest)>>>,
 }
 
 impl ExtensionStore {
     pub(crate) fn new(data_root: impl AsRef<Path>) -> Self {
         Self {
             data_root: data_root.as_ref().to_path_buf(),
+            manifests: Default::default(),
         }
     }
 
@@ -113,7 +116,29 @@ impl ExtensionStore {
                 }
                 // 读端容忍：存量安装可能是 v1 manifest（旧服务端安装），快照
                 // 路径不因 manifest_version 升级而拒绝列出（安装/更新才强校验 v2）。
-                let manifest = parse_manifest_installed(&fs::read(manifest_path)?)?;
+                let bytes = fs::read(&manifest_path)?;
+                // Installed history is immutable, but re-read the bytes so an
+                // external edit/corruption is still validated immediately. Only
+                // TOML parsing is cached; lifecycle/permissions never use stale
+                // state or a timestamp-only cache.
+                let cached = self
+                    .manifests
+                    .lock()
+                    .unwrap()
+                    .get(&manifest_path)
+                    .filter(|(previous, _)| previous == &bytes)
+                    .map(|(_, manifest)| manifest.clone());
+                let manifest = match cached {
+                    Some(manifest) => manifest,
+                    None => {
+                        let manifest = parse_manifest_installed(&bytes)?;
+                        self.manifests
+                            .lock()
+                            .unwrap()
+                            .insert(manifest_path, (bytes, manifest.clone()));
+                        manifest
+                    }
+                };
                 if manifest.id() != &id || manifest.version() != &version {
                     return Err(ExtensionError::InvalidManifest(format!(
                         "目录与 manifest 不一致: {id}@{version}"
@@ -148,9 +173,55 @@ impl ExtensionStore {
         id: &ExtensionId,
         version: &ExtensionVersion,
     ) -> ExtensionResult<Option<InstalledExtension>> {
-        Ok(self.list_installed()?.into_iter().find(|extension| {
-            extension.manifest.id() == id && extension.manifest.version() == version
-        }))
+        let id_root = self.extensions_root().join(id.as_str());
+        let root = id_root.join(version.as_str());
+        for directory in [&id_root, &root] {
+            match fs::symlink_metadata(directory) {
+                Ok(metadata) if metadata.file_type().is_dir() => {}
+                Ok(_) => return Err(ExtensionError::InvalidPath(directory.display().to_string())),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let path = root.join(MANIFEST_FILE_NAME);
+        if !is_regular_file(&path)? {
+            return Err(ExtensionError::InvalidManifest(format!(
+                "缺少 manifest.toml: {id}@{version}"
+            )));
+        }
+        let bytes = fs::read(&path)?;
+        let cached = self
+            .manifests
+            .lock()
+            .unwrap()
+            .get(&path)
+            .filter(|(previous, _)| previous == &bytes)
+            .map(|(_, manifest)| manifest.clone());
+        let manifest = match cached {
+            Some(manifest) => manifest,
+            None => {
+                let manifest = parse_manifest_installed(&bytes)?;
+                self.manifests
+                    .lock()
+                    .unwrap()
+                    .insert(path, (bytes, manifest.clone()));
+                manifest
+            }
+        };
+        if manifest.id() != id || manifest.version() != version {
+            return Err(ExtensionError::InvalidManifest(format!(
+                "目录与 manifest 不一致: {id}@{version}"
+            )));
+        }
+        if let Some(entry) = manifest.entry() {
+            if !is_regular_file(&root.join(entry.as_str()))? {
+                return Err(ExtensionError::InvalidArchive(format!(
+                    "WASM entry 不存在: {id}@{version}/{}",
+                    entry
+                )));
+            }
+        }
+        Ok(Some(InstalledExtension { manifest, root }))
     }
 
     /// Install a validated archive into `<id>/<version>`. Existing version
@@ -222,6 +293,10 @@ impl ExtensionStore {
             return Ok(false);
         }
         fs::remove_dir_all(&version_root)?;
+        self.manifests
+            .lock()
+            .unwrap()
+            .remove(&version_root.join(MANIFEST_FILE_NAME));
         let package_root = version_root.parent().expect("version directory has parent");
         let _ = fs::remove_dir(package_root);
         sync_directory(&self.extensions_root())?;
@@ -318,5 +393,77 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
     {
         let _ = path;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod discovery_cache_tests {
+    use super::*;
+
+    #[test]
+    fn exact_version_lookup_does_not_scan_history_and_still_validates_active_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("extensions/com.example.cached/1.0.0");
+        fs::create_dir_all(&root).unwrap();
+        let manifest = b"manifest_version = 2\nid = \"com.example.cached\"\nversion = \"1.0.0\"\nname = \"Before\"\nentry = \"plugin.wasm\"\n";
+        fs::write(root.join(MANIFEST_FILE_NAME), manifest).unwrap();
+        fs::write(root.join("plugin.wasm"), b"guest").unwrap();
+        let historical = temp.path().join("extensions/com.example.cached/0.1.0");
+        fs::create_dir_all(&historical).unwrap();
+        fs::write(historical.join(MANIFEST_FILE_NAME), b"invalid history").unwrap();
+        let store = ExtensionStore::new(temp.path());
+        let id = ExtensionId::parse("com.example.cached").unwrap();
+        let version = ExtensionVersion::parse("1.0.0").unwrap();
+        assert!(store.list_installed().is_err());
+        assert_eq!(
+            store
+                .installed(&id, &version)
+                .unwrap()
+                .unwrap()
+                .manifest()
+                .name(),
+            "Before"
+        );
+        fs::write(root.join(MANIFEST_FILE_NAME), b"invalid active manifest").unwrap();
+        assert!(store.installed(&id, &version).is_err());
+        fs::write(root.join(MANIFEST_FILE_NAME), manifest).unwrap();
+        fs::remove_file(root.join("plugin.wasm")).unwrap();
+        assert!(store.installed(&id, &version).is_err());
+    }
+
+    #[test]
+    fn cached_manifest_still_validates_changed_bytes_and_missing_guest() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("extensions/com.example.cached/1.0.0");
+        fs::create_dir_all(&root).unwrap();
+        let manifest = b"manifest_version = 2\nid = \"com.example.cached\"\nversion = \"1.0.0\"\nname = \"Before\"\nentry = \"plugin.wasm\"\n";
+        fs::write(root.join(MANIFEST_FILE_NAME), manifest).unwrap();
+        fs::write(root.join("plugin.wasm"), b"guest").unwrap();
+        let store = ExtensionStore::new(temp.path());
+        assert_eq!(
+            store.list_installed().unwrap()[0].manifest().name(),
+            "Before"
+        );
+        assert_eq!(
+            store.clone().list_installed().unwrap()[0].manifest().name(),
+            "Before"
+        );
+
+        // Equal-length edits must not reuse a cached permission/manifest view.
+        let changed = String::from_utf8(manifest.to_vec())
+            .unwrap()
+            .replace("Before", "After!");
+        fs::write(root.join(MANIFEST_FILE_NAME), changed).unwrap();
+        assert_eq!(
+            store.list_installed().unwrap()[0].manifest().name(),
+            "After!"
+        );
+        fs::write(root.join(MANIFEST_FILE_NAME), b"invalid TOML = [").unwrap();
+        assert!(store.list_installed().is_err());
+        fs::write(root.join(MANIFEST_FILE_NAME), manifest).unwrap();
+        fs::remove_file(root.join("plugin.wasm")).unwrap();
+        assert!(store.list_installed().is_err());
+        fs::write(root.join("plugin.wasm"), b"guest").unwrap();
+        assert_eq!(store.list_installed().unwrap().len(), 1);
     }
 }

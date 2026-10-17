@@ -52,6 +52,11 @@ pub(crate) trait WasmRuntime: Send + Sync {
     }
 
     fn is_available(&self) -> bool;
+    /// Scoped external calls use a fresh guest instance and bounded execution.
+    /// Other runtimes must opt in after implementing those guarantees.
+    fn supports_scoped_external(&self) -> bool {
+        false
+    }
 }
 
 /// Runtime used by the default server build. It never compiles, instantiates,
@@ -123,6 +128,7 @@ mod wasmtime_runtime {
         cancelled: Arc<AtomicBool>,
         runtime: Arc<dyn RuntimeService>,
         app_context: Option<crate::core::AppContext>,
+        io_runtime: Option<tokio::runtime::Handle>,
         next_handle: u64,
         devices: HashMap<u64, DeviceHandle>,
         frames: HashMap<u64, FrameHandle>,
@@ -147,6 +153,7 @@ mod wasmtime_runtime {
                 cancelled,
                 runtime,
                 app_context,
+                io_runtime: tokio::runtime::Handle::try_current().ok(),
                 next_handle: 1,
                 devices: HashMap::new(),
                 frames: HashMap::new(),
@@ -197,15 +204,21 @@ mod wasmtime_runtime {
         }
 
         fn require_device(&self, handle: u64) -> Result<DeviceHandle, WitError> {
-            self.devices.get(&handle).cloned().ok_or_else(|| {
+            self.host.check_external().map_err(Self::extension_error)?;
+            let device = self.devices.get(&handle).cloned().ok_or_else(|| {
                 Self::error(
                     WitErrorKind::InvalidRequest,
                     format!("未知 device-handle: {handle}"),
                 )
-            })
+            })?;
+            self.host
+                .authorize_device_id(device.id().as_str())
+                .map_err(Self::extension_error)?;
+            Ok(device)
         }
 
         fn require_frame(&self, handle: u64) -> Result<FrameHandle, WitError> {
+            self.host.check_external().map_err(Self::extension_error)?;
             self.frames.get(&handle).copied().ok_or_else(|| {
                 Self::error(
                     WitErrorKind::InvalidRequest,
@@ -215,6 +228,7 @@ mod wasmtime_runtime {
         }
 
         fn require_resource(&self, handle: u64) -> Result<ResourceHandle, WitError> {
+            self.host.check_external().map_err(Self::extension_error)?;
             self.resources.get(&handle).copied().ok_or_else(|| {
                 Self::error(
                     WitErrorKind::InvalidRequest,
@@ -224,6 +238,7 @@ mod wasmtime_runtime {
         }
 
         fn require_touch(&self, handle: u64) -> Result<TouchHandle, WitError> {
+            self.host.check_external().map_err(Self::extension_error)?;
             self.touches.get(&handle).copied().ok_or_else(|| {
                 Self::error(
                     WitErrorKind::InvalidRequest,
@@ -233,6 +248,7 @@ mod wasmtime_runtime {
         }
 
         fn require_run(&self, handle: u64) -> Result<RunHandle, WitError> {
+            self.host.check_external().map_err(Self::extension_error)?;
             self.runs.get(&handle).copied().ok_or_else(|| {
                 Self::error(
                     WitErrorKind::InvalidRequest,
@@ -244,346 +260,418 @@ mod wasmtime_runtime {
 
     impl wit::gamer::host::types::Host for HostState {}
 
+    /// Called only from the instance's blocking OS thread. Capability I/O
+    /// remains on the server runtime; no Wasmtime fiber or per-call runtime
+    /// is entered or torn down around guest execution.
+    fn block_on_host<T>(
+        runtime: Option<tokio::runtime::Handle>,
+        future: impl Future<Output = Result<T, WitError>>,
+    ) -> Result<T, WitError> {
+        let runtime = runtime.ok_or_else(|| {
+            HostState::error(WitErrorKind::Unavailable, "Host I/O runtime is unavailable")
+        })?;
+        runtime.block_on(future)
+    }
+
     impl device::Host for HostState {
-        async fn resolve(&mut self, id: String) -> Result<u64, WitError> {
-            self.authorize(Permission::DeviceRead)?;
-            let service = self.host.registry().device().ok_or_else(|| {
-                Self::error(WitErrorKind::Unavailable, "device capability 未注册")
-            })?;
-            let handle = service
-                .resolve(&DeviceId::new(id.trim()))
-                .await
-                .map_err(Self::capability_error)?;
-            let token = self.issue();
-            self.devices.insert(token, handle);
-            Ok(token)
+        fn resolve(&mut self, id: String) -> Result<u64, WitError> {
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                self.authorize(Permission::DeviceRead)?;
+                self.host
+                    .authorize_device_id(id.trim())
+                    .map_err(Self::extension_error)?;
+                let service = self.host.registry().device().ok_or_else(|| {
+                    Self::error(WitErrorKind::Unavailable, "device capability 未注册")
+                })?;
+                let handle = service
+                    .resolve(&DeviceId::new(id.trim()))
+                    .await
+                    .map_err(Self::capability_error)?;
+                let token = self.issue();
+                self.devices.insert(token, handle);
+                Ok(token)
+            })
         }
 
-        async fn start_app(&mut self, device: u64, app: String) -> Result<(), WitError> {
-            self.authorize(Permission::DeviceApp)?;
-            let device = self.require_device(device)?;
-            let service = self.host.registry().device().ok_or_else(|| {
-                Self::error(WitErrorKind::Unavailable, "device capability 未注册")
-            })?;
-            service
-                .start_app(&device, &AppId::new(app))
-                .await
-                .map_err(Self::capability_error)
+        fn start_app(&mut self, device: u64, app: String) -> Result<(), WitError> {
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                self.authorize(Permission::DeviceApp)?;
+                let device = self.require_device(device)?;
+                let service = self.host.registry().device().ok_or_else(|| {
+                    Self::error(WitErrorKind::Unavailable, "device capability 未注册")
+                })?;
+                service
+                    .start_app(&device, &AppId::new(app))
+                    .await
+                    .map_err(Self::capability_error)
+            })
         }
 
-        async fn stop_app(&mut self, device: u64, app: String) -> Result<(), WitError> {
-            self.authorize(Permission::DeviceApp)?;
-            let device = self.require_device(device)?;
-            let service = self.host.registry().device().ok_or_else(|| {
-                Self::error(WitErrorKind::Unavailable, "device capability 未注册")
-            })?;
-            service
-                .stop_app(&device, &AppId::new(app))
-                .await
-                .map_err(Self::capability_error)
+        fn stop_app(&mut self, device: u64, app: String) -> Result<(), WitError> {
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                self.authorize(Permission::DeviceApp)?;
+                let device = self.require_device(device)?;
+                let service = self.host.registry().device().ok_or_else(|| {
+                    Self::error(WitErrorKind::Unavailable, "device capability 未注册")
+                })?;
+                service
+                    .stop_app(&device, &AppId::new(app))
+                    .await
+                    .map_err(Self::capability_error)
+            })
         }
     }
 
     impl vision::Host for HostState {
-        async fn match_template(
+        fn match_template(
             &mut self,
             frame: u64,
             template: u64,
         ) -> Result<vision::MatchOutcome, WitError> {
-            self.authorize(Permission::VisionMatch)?;
-            let frame = self.require_frame(frame)?;
-            let template = self.require_resource(template)?;
-            let service = self.host.registry().vision().ok_or_else(|| {
-                Self::error(WitErrorKind::Unavailable, "vision capability 未注册")
-            })?;
-            let outcome = service
-                .match_template(frame, TemplateQuery::new(template, MatchOptions::default()))
-                .await
-                .map_err(Self::capability_error)?;
-            Ok(match outcome {
-                CoreMatchOutcome::Found(found) => vision::MatchOutcome::Found(vision::MatchBox {
-                    x: found.x,
-                    y: found.y,
-                    width: found.width,
-                    height: found.height,
-                    score: found.score,
-                }),
-                CoreMatchOutcome::NotFound => vision::MatchOutcome::NotFound,
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                self.authorize(Permission::VisionMatch)?;
+                let frame = self.require_frame(frame)?;
+                let template = self.require_resource(template)?;
+                let service = self.host.registry().vision().ok_or_else(|| {
+                    Self::error(WitErrorKind::Unavailable, "vision capability 未注册")
+                })?;
+                let outcome = service
+                    .match_template(frame, TemplateQuery::new(template, MatchOptions::default()))
+                    .await
+                    .map_err(Self::capability_error)?;
+                Ok(match outcome {
+                    CoreMatchOutcome::Found(found) => {
+                        vision::MatchOutcome::Found(vision::MatchBox {
+                            x: found.x,
+                            y: found.y,
+                            width: found.width,
+                            height: found.height,
+                            score: found.score,
+                        })
+                    }
+                    CoreMatchOutcome::NotFound => vision::MatchOutcome::NotFound,
+                })
             })
         }
 
-        async fn capture(&mut self, device: u64) -> Result<u64, WitError> {
-            self.authorize(Permission::VisionMatch)?;
-            let device = self.require_device(device)?;
-            let service =
-                self.host.registry().frame().ok_or_else(|| {
+        fn capture(&mut self, device: u64) -> Result<u64, WitError> {
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                self.authorize(Permission::VisionMatch)?;
+                let device = self.require_device(device)?;
+                let service = self.host.registry().frame().ok_or_else(|| {
                     Self::error(WitErrorKind::Unavailable, "frame capability 未注册")
                 })?;
-            let frame = service
-                .capture(&device)
-                .await
-                .map_err(Self::capability_error)?;
-            let token = self.issue();
-            self.frames.insert(token, frame);
-            Ok(token)
+                let frame = service
+                    .capture(&device)
+                    .await
+                    .map_err(Self::capability_error)?;
+                let token = self.issue();
+                self.frames.insert(token, frame);
+                Ok(token)
+            })
         }
 
-        async fn sample_color(
+        fn sample_color(
             &mut self,
             frame: u64,
             point: vision::Point,
         ) -> Result<(u8, u8, u8), WitError> {
-            self.authorize(Permission::VisionColor)?;
-            let frame = self.require_frame(frame)?;
-            let service = self.host.registry().vision().ok_or_else(|| {
-                Self::error(WitErrorKind::Unavailable, "vision capability 未注册")
-            })?;
-            let ColorSample { red, green, blue } = service
-                .sample_color(frame, FramePoint::new(point.x, point.y))
-                .await
-                .map_err(Self::capability_error)?;
-            Ok((red, green, blue))
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                self.authorize(Permission::VisionColor)?;
+                let frame = self.require_frame(frame)?;
+                let service = self.host.registry().vision().ok_or_else(|| {
+                    Self::error(WitErrorKind::Unavailable, "vision capability 未注册")
+                })?;
+                let ColorSample { red, green, blue } = service
+                    .sample_color(frame, FramePoint::new(point.x, point.y))
+                    .await
+                    .map_err(Self::capability_error)?;
+                Ok((red, green, blue))
+            })
         }
     }
 
     impl input::Host for HostState {
-        async fn tap(&mut self, device: u64, point: input::Point) -> Result<(), WitError> {
-            self.authorize(Permission::InputTap)?;
-            let device = self.require_device(device)?;
-            let service =
-                self.host.registry().input().ok_or_else(|| {
+        fn tap(&mut self, device: u64, point: input::Point) -> Result<(), WitError> {
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                self.authorize(Permission::InputTap)?;
+                let device = self.require_device(device)?;
+                let service = self.host.registry().input().ok_or_else(|| {
                     Self::error(WitErrorKind::Unavailable, "input capability 未注册")
                 })?;
-            service
-                .tap(&device, TouchPoint::new(point.x, point.y, 1.0))
-                .await
-                .map_err(Self::capability_error)
+                service
+                    .tap(&device, TouchPoint::new(point.x, point.y, 1.0))
+                    .await
+                    .map_err(Self::capability_error)
+            })
         }
 
-        async fn swipe(
+        fn swipe(
             &mut self,
             device: u64,
             start: input::Point,
             end: input::Point,
             duration_ms: u64,
         ) -> Result<(), WitError> {
-            self.authorize(Permission::InputSwipe)?;
-            let device = self.require_device(device)?;
-            let service =
-                self.host.registry().input().ok_or_else(|| {
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                self.authorize(Permission::InputSwipe)?;
+                let device = self.require_device(device)?;
+                let service = self.host.registry().input().ok_or_else(|| {
                     Self::error(WitErrorKind::Unavailable, "input capability 未注册")
                 })?;
-            service
-                .swipe(
-                    &device,
-                    SwipeGesture::new(
-                        TouchPoint::new(start.x, start.y, 1.0),
-                        TouchPoint::new(end.x, end.y, 1.0),
-                        Duration::from_millis(duration_ms.min(60_000)),
-                    ),
-                )
-                .await
-                .map_err(Self::capability_error)
+                service
+                    .swipe(
+                        &device,
+                        SwipeGesture::new(
+                            TouchPoint::new(start.x, start.y, 1.0),
+                            TouchPoint::new(end.x, end.y, 1.0),
+                            Duration::from_millis(duration_ms.min(60_000)),
+                        ),
+                    )
+                    .await
+                    .map_err(Self::capability_error)
+            })
         }
 
-        async fn key(&mut self, device: u64, code: u32, action: String) -> Result<(), WitError> {
-            self.authorize(Permission::InputKey)?;
-            let action = match action.trim().to_ascii_lowercase().as_str() {
-                "down" => KeyAction::Down,
-                "up" => KeyAction::Up,
-                "press" => KeyAction::Press,
-                other => {
-                    return Err(Self::error(
-                        WitErrorKind::InvalidRequest,
-                        format!("未知 key action: {other}"),
-                    ));
-                }
-            };
-            let device = self.require_device(device)?;
-            let service =
-                self.host.registry().input().ok_or_else(|| {
+        fn key(&mut self, device: u64, code: u32, action: String) -> Result<(), WitError> {
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                self.authorize(Permission::InputKey)?;
+                let action = match action.trim().to_ascii_lowercase().as_str() {
+                    "down" => KeyAction::Down,
+                    "up" => KeyAction::Up,
+                    "press" => KeyAction::Press,
+                    other => {
+                        return Err(Self::error(
+                            WitErrorKind::InvalidRequest,
+                            format!("未知 key action: {other}"),
+                        ));
+                    }
+                };
+                let device = self.require_device(device)?;
+                let service = self.host.registry().input().ok_or_else(|| {
                     Self::error(WitErrorKind::Unavailable, "input capability 未注册")
                 })?;
-            service
-                .key(&device, KeyInput::new(KeyCode::new(code), action))
-                .await
-                .map_err(Self::capability_error)
+                service
+                    .key(&device, KeyInput::new(KeyCode::new(code), action))
+                    .await
+                    .map_err(Self::capability_error)
+            })
         }
 
-        async fn text(&mut self, device: u64, value: String) -> Result<(), WitError> {
-            self.authorize(Permission::InputText)?;
-            let device = self.require_device(device)?;
-            let service =
-                self.host.registry().input().ok_or_else(|| {
+        fn text(&mut self, device: u64, value: String) -> Result<(), WitError> {
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                self.authorize(Permission::InputText)?;
+                let device = self.require_device(device)?;
+                let service = self.host.registry().input().ok_or_else(|| {
                     Self::error(WitErrorKind::Unavailable, "input capability 未注册")
                 })?;
-            service
-                .text(&device, TextInput::new(value))
-                .await
-                .map_err(Self::capability_error)
+                service
+                    .text(&device, TextInput::new(value))
+                    .await
+                    .map_err(Self::capability_error)
+            })
         }
     }
 
     impl touch::Host for HostState {
-        async fn begin(&mut self, device: u64, point: touch::Point) -> Result<u64, WitError> {
-            self.authorize(Permission::Touch)?;
-            let device = self.require_device(device)?;
-            let service =
-                self.host.registry().touch().ok_or_else(|| {
+        fn begin(&mut self, device: u64, point: touch::Point) -> Result<u64, WitError> {
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                self.authorize(Permission::Touch)?;
+                let device = self.require_device(device)?;
+                let service = self.host.registry().touch().ok_or_else(|| {
                     Self::error(WitErrorKind::Unavailable, "touch capability 未注册")
                 })?;
-            let touch = service
-                .begin(&device, TouchPoint::new(point.x, point.y, point.pressure))
-                .await
-                .map_err(Self::capability_error)?;
-            let token = self.issue();
-            self.touches.insert(token, touch);
-            Ok(token)
+                let touch = service
+                    .begin(&device, TouchPoint::new(point.x, point.y, point.pressure))
+                    .await
+                    .map_err(Self::capability_error)?;
+                let token = self.issue();
+                self.touches.insert(token, touch);
+                Ok(token)
+            })
         }
 
-        async fn move_(&mut self, touch: u64, point: touch::Point) -> Result<(), WitError> {
-            self.authorize(Permission::Touch)?;
-            let touch = self.require_touch(touch)?;
-            let service =
-                self.host.registry().touch().ok_or_else(|| {
+        fn move_(&mut self, touch: u64, point: touch::Point) -> Result<(), WitError> {
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                self.authorize(Permission::Touch)?;
+                let touch = self.require_touch(touch)?;
+                let service = self.host.registry().touch().ok_or_else(|| {
                     Self::error(WitErrorKind::Unavailable, "touch capability 未注册")
                 })?;
-            service
-                .move_touch(&touch, TouchPoint::new(point.x, point.y, point.pressure))
-                .await
-                .map_err(Self::capability_error)
+                service
+                    .move_touch(&touch, TouchPoint::new(point.x, point.y, point.pressure))
+                    .await
+                    .map_err(Self::capability_error)
+            })
         }
 
-        async fn end(&mut self, touch: u64) -> Result<(), WitError> {
-            self.authorize(Permission::Touch)?;
-            let touch_handle = self.require_touch(touch)?;
-            let service =
-                self.host.registry().touch().ok_or_else(|| {
+        fn end(&mut self, touch: u64) -> Result<(), WitError> {
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                self.authorize(Permission::Touch)?;
+                let touch_handle = self.require_touch(touch)?;
+                let service = self.host.registry().touch().ok_or_else(|| {
                     Self::error(WitErrorKind::Unavailable, "touch capability 未注册")
                 })?;
-            service
-                .end(&touch_handle)
-                .await
-                .map_err(Self::capability_error)?;
-            self.touches.remove(&touch);
-            Ok(())
+                service
+                    .end(&touch_handle)
+                    .await
+                    .map_err(Self::capability_error)?;
+                self.touches.remove(&touch);
+                Ok(())
+            })
         }
     }
 
     impl resources::Host for HostState {
-        async fn resolve(&mut self, namespace: String, name: String) -> Result<u64, WitError> {
-            self.authorize(Permission::ResourceRead)?;
-            let service = self.host.registry().resource().ok_or_else(|| {
-                Self::error(WitErrorKind::Unavailable, "resource capability 未注册")
-            })?;
-            // 插件数据隔离（plan §14）：plugin 维度由宿主注入调用方自身扩展 id，
-            // guest 无法寻址其他插件的 `plugins/<plugin>/` 前缀。
-            let resource = service
-                .resolve(
-                    &ResourceId::new(namespace, self.extension_id.as_str(), name).map_err(|e| {
-                        Self::error(
-                            wit::gamer::host::types::HostErrorKind::InvalidRequest,
-                            e.to_string(),
-                        )
-                    })?,
-                )
-                .await
-                .map_err(Self::capability_error)?;
-            let token = self.issue();
-            self.resources.insert(token, resource);
-            Ok(token)
+        fn resolve(&mut self, namespace: String, name: String) -> Result<u64, WitError> {
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                self.authorize(Permission::ResourceRead)?;
+                self.host
+                    .authorize_package_id(&namespace)
+                    .map_err(Self::extension_error)?;
+                let service = self.host.registry().resource().ok_or_else(|| {
+                    Self::error(WitErrorKind::Unavailable, "resource capability 未注册")
+                })?;
+                // 插件数据隔离（plan §14）：plugin 维度由宿主注入调用方自身扩展 id，
+                // guest 无法寻址其他插件的 `plugins/<plugin>/` 前缀。
+                let resource = service
+                    .resolve(
+                        &ResourceId::new(namespace, self.extension_id.as_str(), name).map_err(
+                            |e| {
+                                Self::error(
+                                    wit::gamer::host::types::HostErrorKind::InvalidRequest,
+                                    e.to_string(),
+                                )
+                            },
+                        )?,
+                    )
+                    .await
+                    .map_err(Self::capability_error)?;
+                let token = self.issue();
+                self.resources.insert(token, resource);
+                Ok(token)
+            })
         }
 
-        async fn open(&mut self, handle: u64) -> Result<u64, WitError> {
-            self.authorize(Permission::ResourceRead)?;
-            let handle = self.require_resource(handle)?;
-            let service = self.host.registry().resource().ok_or_else(|| {
-                Self::error(WitErrorKind::Unavailable, "resource capability 未注册")
-            })?;
-            let lease = service.open(handle).await.map_err(Self::capability_error)?;
-            Ok(lease.byte_len().unwrap_or(0))
+        fn open(&mut self, handle: u64) -> Result<u64, WitError> {
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                self.authorize(Permission::ResourceRead)?;
+                let handle = self.require_resource(handle)?;
+                let service = self.host.registry().resource().ok_or_else(|| {
+                    Self::error(WitErrorKind::Unavailable, "resource capability 未注册")
+                })?;
+                let lease = service.open(handle).await.map_err(Self::capability_error)?;
+                Ok(lease.byte_len().unwrap_or(0))
+            })
         }
     }
 
     impl run::Host for HostState {
-        async fn submit(&mut self, device: u64, entry: u64) -> Result<u64, WitError> {
-            self.authorize(Permission::RunSubmit)?;
-            let device = self.require_device(device)?;
-            let entry = self.require_resource(entry)?;
-            let service =
-                self.host.registry().run().ok_or_else(|| {
+        fn submit(&mut self, device: u64, entry: u64) -> Result<u64, WitError> {
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                self.authorize(Permission::RunSubmit)?;
+                let device = self.require_device(device)?;
+                let entry = self.require_resource(entry)?;
+                let service = self.host.registry().run().ok_or_else(|| {
                     Self::error(WitErrorKind::Unavailable, "run capability 未注册")
                 })?;
-            let run = service
-                .submit(RunRequest::new(device, entry))
-                .await
-                .map_err(Self::capability_error)?;
-            let token = self.issue();
-            self.runs.insert(token, run);
-            Ok(token)
+                let run = service
+                    .submit(RunRequest::new(device, entry))
+                    .await
+                    .map_err(Self::capability_error)?;
+                let token = self.issue();
+                self.runs.insert(token, run);
+                Ok(token)
+            })
         }
 
-        async fn cancel(&mut self, run: u64) -> Result<(), WitError> {
-            self.authorize(Permission::RunControl)?;
-            let run_handle = self.require_run(run)?;
-            let service =
-                self.host.registry().run().ok_or_else(|| {
+        fn cancel(&mut self, run: u64) -> Result<(), WitError> {
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                self.authorize(Permission::RunControl)?;
+                let run_handle = self.require_run(run)?;
+                let service = self.host.registry().run().ok_or_else(|| {
                     Self::error(WitErrorKind::Unavailable, "run capability 未注册")
                 })?;
-            service
-                .cancel(run_handle)
-                .await
-                .map_err(Self::capability_error)
+                service
+                    .cancel(run_handle)
+                    .await
+                    .map_err(Self::capability_error)
+            })
         }
 
-        async fn status(&mut self, run: u64) -> Result<String, WitError> {
-            self.authorize(Permission::RunControl)?;
-            let run_handle = self.require_run(run)?;
-            let service =
-                self.host.registry().run().ok_or_else(|| {
+        fn status(&mut self, run: u64) -> Result<String, WitError> {
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                self.authorize(Permission::RunControl)?;
+                let run_handle = self.require_run(run)?;
+                let service = self.host.registry().run().ok_or_else(|| {
                     Self::error(WitErrorKind::Unavailable, "run capability 未注册")
                 })?;
-            let status = service
-                .status(run_handle)
-                .await
-                .map_err(Self::capability_error)?;
-            Ok(match status {
-                RunStatus::Queued => "queued",
-                RunStatus::Running => "running",
-                RunStatus::Succeeded => "succeeded",
-                RunStatus::Failed => "failed",
-                RunStatus::Cancelled => "cancelled",
-            }
-            .to_string())
+                let status = service
+                    .status(run_handle)
+                    .await
+                    .map_err(Self::capability_error)?;
+                Ok(match status {
+                    RunStatus::Queued => "queued",
+                    RunStatus::Running => "running",
+                    RunStatus::Succeeded => "succeeded",
+                    RunStatus::Failed => "failed",
+                    RunStatus::Cancelled => "cancelled",
+                }
+                .to_string())
+            })
         }
     }
 
     impl runtime::Host for HostState {
-        async fn sleep(&mut self, milliseconds: u64) -> Result<(), WitError> {
-            let runtime = self.runtime.clone();
-            self.authorize(Permission::RuntimeSleep)?;
-            if self.cancelled.load(Ordering::Relaxed) || runtime.cancelled() {
-                return Err(Self::error(WitErrorKind::Cancelled, "插件运行已取消"));
-            }
-            runtime
-                .sleep(Duration::from_millis(milliseconds.min(3_600_000)))
-                .await
-                .map_err(Self::capability_error)?;
-            if self.cancelled.load(Ordering::Relaxed) || runtime.cancelled() {
-                Err(Self::error(WitErrorKind::Cancelled, "插件运行已取消"))
-            } else {
-                Ok(())
-            }
+        fn sleep(&mut self, milliseconds: u64) -> Result<(), WitError> {
+            let executor = self.io_runtime.clone();
+            block_on_host(executor, async {
+                let runtime = self.runtime.clone();
+                self.authorize(Permission::RuntimeSleep)?;
+                if self.cancelled.load(Ordering::Relaxed) || runtime.cancelled() {
+                    return Err(Self::error(WitErrorKind::Cancelled, "插件运行已取消"));
+                }
+                let sleep = runtime.sleep(Duration::from_millis(milliseconds.min(3_600_000)));
+                let host = self.host.clone();
+                let cancelled = self.cancelled.clone();
+                tokio::select! {
+                    result=sleep=>result.map_err(Self::capability_error)?,
+                    _=async move {while !cancelled.load(Ordering::Acquire) && host.check_external().is_ok(){tokio::time::sleep(Duration::from_millis(50)).await;}}=>return Err(Self::error(WitErrorKind::Cancelled,"Guest call stopped, expired or was revoked")),
+                }
+                if self.cancelled.load(Ordering::Relaxed) || runtime.cancelled() {
+                    Err(Self::error(WitErrorKind::Cancelled, "插件运行已取消"))
+                } else {
+                    Ok(())
+                }
+            })
         }
 
-        async fn cancelled(&mut self) -> bool {
+        fn cancelled(&mut self) -> bool {
             let cancelled = self.cancelled.clone();
-            cancelled.load(Ordering::Relaxed)
+            cancelled.load(Ordering::Relaxed) || self.host.check_external().is_err()
         }
     }
 
     impl log::Host for HostState {
-        async fn write(
+        fn write(
             &mut self,
             level: String,
             message: String,
@@ -620,7 +708,14 @@ mod wasmtime_runtime {
     }
 
     impl context::Host for HostState {
-        async fn get(&mut self) -> context::AppContext {
+        fn get(&mut self) -> context::AppContext {
+            if let Some(external) = self.host.external_context() {
+                return context::AppContext {
+                    device_id: external.device_id.clone(),
+                    android_package: None,
+                    content_package: external.package_id.clone(),
+                };
+            }
             let app_context = self.app_context.clone();
             context::AppContext {
                 device_id: app_context
@@ -645,11 +740,9 @@ mod wasmtime_runtime {
     #[derive(Debug)]
     struct RunningInstance {
         commands: mpsc::Sender<RuntimeCommand>,
-        /// 专用 OS 线程句柄。wasmtime fiber 的 Tokio Enter guard 与宿主
-        /// runtime 的上下文存在跨线程收尾竞态（Windows GNU 实测），因此
-        /// instantiate/entry/call 全部收敛在该线程自己的 current-thread
-        /// runtime 上；Stop 之后由服务线程 join 回收。
-        task: std::thread::JoinHandle<()>,
+        /// The synchronous Component, Store and host handles remain on this
+        /// thread until actual cleanup finishes. Its result is never ignored.
+        task: std::thread::JoinHandle<ExtensionResult<()>>,
         cancelled: Arc<AtomicBool>,
         completed: Arc<AtomicBool>,
     }
@@ -664,6 +757,16 @@ mod wasmtime_runtime {
             reply: oneshot::Sender<ExtensionResult<String>>,
         },
         Stop(oneshot::Sender<()>),
+    }
+
+    fn join_instance_thread(
+        task: std::thread::JoinHandle<ExtensionResult<()>>,
+    ) -> ExtensionResult<()> {
+        task.join().map_err(|_| {
+            ExtensionError::Runtime(
+                "WASM instance thread panicked during execution or cleanup".into(),
+            )
+        })?
     }
 
     #[derive(Debug)]
@@ -699,11 +802,11 @@ mod wasmtime_runtime {
 
         fn engine(&self) -> &Engine {
             self.engine.get_or_init(|| {
-                // wasmtime 48：async 由 cargo feature `async`（已启用）保证，
-                // `Config::async_support` 已废弃为 no-op，无需（也不应）调用。
-                // async import 在实例化时把 store 置 async_required（不可逆），
-                // 因此所有 guest 入口都必须走 async 变体（见 wit.rs 注释）。
-                let config = wasmtime::Config::new();
+                // The WIT bridge uses synchronous Component calls. Capability
+                // futures are driven separately on the captured host runtime.
+                let mut config = wasmtime::Config::new();
+                config.consume_fuel(true);
+                config.epoch_interruption(true);
                 Engine::new(&config).expect("Wasmtime engine config is valid")
             })
         }
@@ -744,102 +847,96 @@ mod wasmtime_runtime {
             let completed_for_task = completed.clone();
             let (commands_tx, mut commands_rx) = mpsc::channel::<RuntimeCommand>(16);
             let (ready_tx, ready_rx) = oneshot::channel();
-            // 实例生命周期收敛到专用 OS 线程 + 专用 current-thread runtime：
-            // wasmtime fiber 的 Tokio Enter guard 在跨线程/跨 runtime 收尾时会
-            // 触发上下文断言（Windows GNU 实测），同生共死是唯一稳妥形态。
-            let thread_id = request.id.clone();
+            // The complete Store and guest lifetime belongs to one ordinary
+            // blocking OS thread. Host I/O alone enters the captured Tokio
+            // Handle; synchronous Component calls never create a fiber.
             let task = std::thread::Builder::new()
-                .name(format!("wasm-ext-{}", thread_id))
-                .spawn(move || {
-                    let runtime = match tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    {
-                        Ok(runtime) => runtime,
-                        Err(error) => {
-                            let _ = ready_tx.send(Err(format!(
-                                "插件 runtime 初始化失败: {error}"
-                            )));
-                            return;
-                        }
-                    };
-                    // wasmtime async fiber 的 Enter guard 在线程/runtime 收尾
-                    // 阶段有跨上下文断言（Windows GNU 已知问题，见
-                    // docs/PITFALLS.md）：实例线程私有资源，捕获隔离即可，
-                    // store/instance 会随 unwind 正常清理。catch_unwind 覆盖
-                    // block_on 全程（entry/call/命令循环 + runtime drop）——
-                    // fiber 内 panic 只损失当前实例（线程退出，调用方经
-                    // channel 关闭得到 RuntimeUnavailable），绝不带崩进程。
-                    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        runtime.block_on(async move {
-                            let mut store = Store::new(&engine, state);
-                            let instance = match Bindings::instantiate_async(
-                                &mut store,
-                                &component,
-                                &linker,
-                            )
-                            .await
-                            {
-                                Ok(instance) => {
-                                    let _ = ready_tx.send(Ok(()));
-                                    instance
-                                }
-                                Err(error) => {
-                                    let _ = ready_tx.send(Err(error.to_string()));
-                                    return;
-                                }
-                            };
-                            // async import 链接后 store 恒为 async_required，
-                            // 入口必须是 async 变体（同步 call_run 会 trap
-                            // "store configuration requires that *_async
-                            // functions are used instead"——2026-09 缺陷）。
-                            match instance.gamer_host_extension().call_run(&mut store).await {
-                                Ok(()) => tracing::debug!("WASM extension entrypoint returned"),
-                                Err(error) => {
-                                    // entry trap 只损失本实例：实例继续留在
-                                    // 命令循环上（call 会再报同一 trap），
-                                    // 进程与生命周期状态机不受影响。
-                                    tracing::error!(error = %error, "WASM extension entrypoint trapped")
-                                }
-                            }
-                            completed_for_task.store(true, Ordering::Release);
-                            while let Some(command) = commands_rx.recv().await {
-                                match command {
-                                    RuntimeCommand::Call {
-                                        action,
-                                        values_json,
-                                        reply,
-                                    } => {
-                                        let result = instance
-                                            .gamer_host_extension()
-                                            .call_call(&mut store, &action, &values_json)
-                                            .await
-                                            .map_err(|error| {
-                                                ExtensionError::Runtime(format!(
-                                                    "插件 call trap: {error}"
-                                                ))
-                                            })
-                                            .and_then(|inner| {
-                                                inner.map_err(|error| {
-                                                    ExtensionError::Runtime(format!(
-                                                        "插件 call 失败: {error}"
-                                                    ))
-                                                })
-                                            });
-                                        let _ = reply.send(result);
-                                    }
-                                    RuntimeCommand::Stop(reply) => {
-                                        let _ = reply.send(());
-                                        break;
-                                    }
-                                }
+                .name(format!("wasm-ext-{}", request.id))
+                .spawn(move || -> ExtensionResult<()> {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let host_runtime = state.io_runtime.clone();
+                        let _runtime_context = host_runtime.as_ref().map(|runtime| runtime.enter());
+                        let mut store = Store::new(&engine, state);
+                        store.set_epoch_deadline(1);
+                        store.epoch_deadline_callback(|store| {
+                            if store.data().cancelled.load(Ordering::Acquire) {
+                                Err(wasmtime::format_err!("WASM instance stopped"))
+                            } else {
+                                Ok(wasmtime::UpdateDeadline::Continue(1))
                             }
                         });
-                    }));
-                    if let Err(payload) = run {
-                        tracing::debug!(plugin = %thread_id, "wasm instance 线程收尾 panic 已隔离（fiber guard 已知问题）");
-                        drop(payload);
-                    }
+                        let fuel = if store.data().host.external_context().is_some() {
+                            20_000_000
+                        } else {
+                            u64::MAX
+                        };
+                        if let Err(error) = store.set_fuel(fuel) {
+                            let _ = ready_tx.send(Err(error.to_string()));
+                            return Err(ExtensionError::Runtime(error.to_string()));
+                        }
+                        let instance = match Bindings::instantiate(&mut store, &component, &linker)
+                        {
+                            Ok(instance) => {
+                                let _ = ready_tx.send(Ok(()));
+                                instance
+                            }
+                            Err(error) => {
+                                let _ = ready_tx.send(Err(error.to_string()));
+                                return Err(ExtensionError::Runtime(format!(
+                                    "组件实例化失败: {error}"
+                                )));
+                            }
+                        };
+                        let entry = instance.gamer_host_extension().call_run(&mut store);
+                        completed_for_task.store(true, Ordering::Release);
+                        if let Err(error) = entry {
+                            if store.data().cancelled.load(Ordering::Acquire) {
+                                return Ok(());
+                            }
+                            return Err(ExtensionError::Runtime(format!(
+                                "插件 entry trap: {error}"
+                            )));
+                        }
+                        while let Some(command) = commands_rx.blocking_recv() {
+                            match command {
+                                RuntimeCommand::Call {
+                                    action,
+                                    values_json,
+                                    reply,
+                                } => {
+                                    let result = instance
+                                        .gamer_host_extension()
+                                        .call_call(&mut store, &action, &values_json)
+                                        .map_err(|error| {
+                                            ExtensionError::Runtime(format!(
+                                                "插件 call trap: {error}"
+                                            ))
+                                        })
+                                        .and_then(|result| {
+                                            result.map_err(|error| {
+                                                ExtensionError::Runtime(format!(
+                                                    "插件 call 失败: {error}"
+                                                ))
+                                            })
+                                        });
+                                    let _ = reply.send(result);
+                                }
+                                RuntimeCommand::Stop(reply) => {
+                                    let _ = reply.send(());
+                                    break;
+                                }
+                            }
+                        }
+                        // stop joins this thread before reporting success, so
+                        // Store/host handles have actually finished dropping.
+                        drop(store);
+                        Ok(())
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(ExtensionError::Runtime(
+                            "WASM instance panicked during execution or cleanup".into(),
+                        ))
+                    })
                 })
                 .map_err(|error| ExtensionError::Runtime(format!("插件线程启动失败: {error}")))?;
 
@@ -859,20 +956,13 @@ mod wasmtime_runtime {
                     Ok(handle)
                 }
                 Ok(Err(error)) => {
-                    // 实例化失败 + 线程 join 给出 panic 载荷：只在日志收敛，
-                    // 不 resume_unwind——把实例线程的 panic 再抛到调用方线程
-                    // 对恢复无益且可能形成 double-panic abort（trap 收敛
-                    // 防护：单实例失败绝不带崩进程）。
-                    if let Err(join_error) = task.join() {
-                        tracing::error!(
-                            extension = %request.id,
-                            "wasm instance 线程在实例化失败后 panic（已隔离）"
-                        );
-                        drop(join_error);
-                    }
+                    join_instance_thread(task)?;
                     Err(ExtensionError::Runtime(format!("组件实例化失败: {error}")))
                 }
-                Err(_) => Err(ExtensionError::Runtime("组件启动任务意外退出".to_string())),
+                Err(_) => {
+                    join_instance_thread(task)?;
+                    Err(ExtensionError::Runtime("组件启动任务意外退出".to_string()))
+                }
             }
         }
 
@@ -884,28 +974,23 @@ mod wasmtime_runtime {
                 .remove(&instance)
                 .ok_or(ExtensionError::RuntimeUnavailable("WASM 实例不存在"))?;
 
-            // Once the entrypoint returned, the instance thread is parked on
-            // its command channel: end it gracefully so Wasmtime unwinds
-            // normally (aborting an async component fiber is not safe on all
-            // Tokio schedulers, notably the Windows GNU target).
-            if running.completed.load(Ordering::Acquire) {
-                let (ack_tx, ack_rx) = oneshot::channel();
-                if running
-                    .commands
-                    .send(RuntimeCommand::Stop(ack_tx))
-                    .await
-                    .is_ok()
-                {
-                    let _ = ack_rx.await;
-                }
-                let _ = running.task.join();
-                return Ok(());
+            // Interrupt this store's CPU loop as well as cooperative imports.
+            // Other stores observe the epoch but continue unless their own
+            // cancellation flag is set. Never detach a still executing guest.
+            running.cancelled.store(true, Ordering::Release);
+            self.engine().increment_epoch();
+            let (ack_tx, ack_rx) = oneshot::channel();
+            if running
+                .commands
+                .send(RuntimeCommand::Stop(ack_tx))
+                .await
+                .is_ok()
+            {
+                let _ = ack_rx.await;
             }
-
-            // entry 仍在运行：置取消位后分离线程（长驻 entry 可能永不返回，
-            // 不能 join 阻塞调用方；host 的 runtime.cancelled 会尽快收口）。
-            running.cancelled.store(true, Ordering::Relaxed);
-            Ok(())
+            tokio::task::spawn_blocking(move || join_instance_thread(running.task))
+                .await
+                .map_err(|_| ExtensionError::Runtime("WASM cleanup join task failed".into()))?
         }
 
         async fn call(
@@ -936,6 +1021,117 @@ mod wasmtime_runtime {
 
         fn is_available(&self) -> bool {
             true
+        }
+        fn supports_scoped_external(&self) -> bool {
+            true
+        }
+    }
+
+    #[cfg(test)]
+    mod external_grant_tests {
+        use super::*;
+        use crate::extensions::{parse_manifest, HostApiCatalog, PermissionSet};
+        use crate::mcp::{
+            AllowedObjects, CreateTokenRequest, CredentialStore, InvocationContext, ReceiptStore,
+            ToolEffect,
+        };
+
+        #[test]
+        fn actual_worker_cleanup_errors_are_never_reported_as_success() {
+            let task = std::thread::spawn(|| {
+                Err(ExtensionError::Runtime("synthetic cleanup failure".into()))
+            });
+            assert!(join_instance_thread(task).is_err());
+        }
+
+        #[test]
+        fn fresh_handle_tables_and_existing_handles_recheck_active_grants() {
+            let directory = tempfile::tempdir().unwrap();
+            let credentials = Arc::new(CredentialStore::open(directory.path()).unwrap());
+            let receipts = Arc::new(ReceiptStore::open(directory.path()).unwrap());
+            let token = credentials
+                .create(CreateTokenRequest {
+                    label: "fixture".into(),
+                    scopes: ["fixture.read".into()].into_iter().collect(),
+                    allowed: AllowedObjects {
+                        devices: ["device-a".into(), "device-b".into()].into_iter().collect(),
+                        packages: ["package-a".into(), "package-b".into()]
+                            .into_iter()
+                            .collect(),
+                        ..Default::default()
+                    },
+                    expires_in_seconds: 60,
+                })
+                .unwrap();
+            let mut context = InvocationContext::new(
+                credentials.authenticate(&token.token).unwrap(),
+                "fixture.read".into(),
+                None,
+                credentials.clone(),
+                receipts,
+            );
+            context.device_id = Some("device-a".into());
+            context.package_id = Some("package-a".into());
+            let manifest = parse_manifest(b"manifest_version=2\nid='com.example.grant'\nname='Grant'\nversion='1.0.0'\nentry='plugin.wasm'\npermissions=['device.read','resource.read','resource.write','input.tap','run.submit']\n").unwrap();
+            let host = HostApi::for_manifest(
+                crate::capabilities::CapabilityRegistry::default(),
+                HostApiCatalog::default(),
+                &manifest,
+            )
+            .unwrap()
+            .for_external(
+                context,
+                PermissionSet::parse([
+                    "device.read",
+                    "resource.read",
+                    "resource.write",
+                    "input.tap",
+                    "run.submit",
+                ])
+                .unwrap(),
+                ToolEffect::Read,
+            );
+            assert!(host.authorize(Permission::ResourceRead).is_ok());
+            assert!(
+                host.authorize(Permission::ResourceWrite).is_err(),
+                "Read effect cannot write even if both manifest permission sets allow it"
+            );
+            assert!(
+                host.authorize_device_id("device-b").is_err(),
+                "Invocation selector further narrows the token allowlist"
+            );
+            assert!(host.authorize_package_id("package-b").is_err());
+            let mut old = HostState::new(
+                host.clone(),
+                manifest.id().clone(),
+                Arc::new(AtomicBool::new(false)),
+                None,
+            );
+            old.devices
+                .insert(1, DeviceHandle::new(DeviceId::new("device-a")));
+            old.frames.insert(2, FrameHandle::new());
+            old.resources.insert(3, ResourceHandle::new());
+            old.touches.insert(4, TouchHandle::new());
+            old.runs.insert(5, RunHandle::new());
+            assert!(old.require_device(1).is_ok());
+            assert!(old.require_resource(3).is_ok());
+            let fresh = HostState::new(
+                host,
+                manifest.id().clone(),
+                Arc::new(AtomicBool::new(false)),
+                None,
+            );
+            assert!(fresh.require_device(1).is_err());
+            assert!(fresh.require_frame(2).is_err());
+            assert!(fresh.require_resource(3).is_err());
+            assert!(fresh.require_touch(4).is_err());
+            assert!(fresh.require_run(5).is_err());
+            credentials.revoke(&token.metadata.token_id).unwrap();
+            assert!(old.require_device(1).is_err());
+            assert!(old.require_frame(2).is_err());
+            assert!(old.require_resource(3).is_err());
+            assert!(old.require_touch(4).is_err());
+            assert!(old.require_run(5).is_err());
         }
     }
 }
@@ -1010,6 +1206,7 @@ id = "com.example.entry"
 version = "1.0.0"
 name = "Entry test"
 entry = "plugin.wasm"
+permissions = ["runtime.sleep"]
 "#,
         )
         .unwrap();
@@ -1070,6 +1267,30 @@ entry = "plugin.wasm"
         ));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn stop_interrupts_cpu_only_entry_and_waits_for_actual_thread_exit() {
+        let runtime = LazyWasmtimeRuntime::new();
+        let component = ENTRY_COMPONENT.replace(
+            "(func (export \"run\"))",
+            "(func (export \"run\") (loop $again (br $again)))",
+        );
+        let handle = runtime
+            .start(WasmStartRequest {
+                id: ExtensionId::parse("com.example.entry").unwrap(),
+                version: ExtensionVersion::parse("1.0.0").unwrap(),
+                wasm: wat::parse_str(component).unwrap(),
+                host: test_host(),
+                app_context: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), runtime.stop(handle))
+            .await
+            .expect("A CPU-only guest must not outlive stop")
+            .unwrap();
+        assert!(runtime.call(handle, "refresh", "{}").await.is_err());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn generated_host_binding_denies_unlisted_capability() {
         use super::wasmtime_runtime::HostState;
@@ -1081,7 +1302,10 @@ entry = "plugin.wasm"
             Arc::new(AtomicBool::new(false)),
             None,
         );
-        let error = state.resolve("device-1".to_string()).await.unwrap_err();
+        let error = tokio::task::spawn_blocking(move || state.resolve("device-1".to_string()))
+            .await
+            .unwrap()
+            .unwrap_err();
         assert_eq!(
             error.kind,
             crate::extensions::wit::gamer::host::types::HostErrorKind::Denied
@@ -1101,7 +1325,7 @@ entry = "plugin.wasm"
             Arc::new(AtomicBool::new(false)),
             Some(app_context),
         );
-        let context = state.get().await;
+        let context = state.get();
         assert_eq!(context.device_id.as_deref(), Some("device-1"));
         assert_eq!(context.android_package.as_deref(), Some("com.example.game"));
         assert_eq!(context.content_package.as_deref(), Some("com.example.game"));
@@ -1174,13 +1398,76 @@ entry = "plugin.wasm"
             .clone()
     }
 
-    /// 回归（2026-09 缺陷）：带 host import 的真实 guest 全链不 trap。缺陷
-    /// 形态是 wit.rs 只对 imports 声明 async——链接期 store 被置
-    /// async_required 后同步 call_run 即 trap，随后实例线程 fiber 收尾
-    /// panic → 进程 abort（零 import 的 WAT/call-guest fixture 不触发链接期
-    /// 标记，故漏检）。验收：start 成功、entry 完成、call 经 host import
-    /// （context.get）往返 AppContext、stop 干净收尾——任一环节失败或线程
-    /// abort 都会让本测试（及进程）垮掉。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn external_guest_observes_current_token_context_and_fresh_memory() {
+        use crate::extensions::PermissionSet;
+        use crate::mcp::{
+            AllowedObjects, CreateTokenRequest, CredentialStore, InvocationContext, ReceiptStore,
+            ToolEffect,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let credentials = Arc::new(CredentialStore::open(directory.path()).unwrap());
+        let receipts = Arc::new(ReceiptStore::open(directory.path()).unwrap());
+        let runtime = LazyWasmtimeRuntime::new();
+        let component = import_guest_component();
+        for suffix in ["a", "b"] {
+            let device = format!("device-{suffix}");
+            let package = format!("package-{suffix}");
+            let token = credentials
+                .create(CreateTokenRequest {
+                    label: suffix.into(),
+                    scopes: ["fixture.read".into()].into_iter().collect(),
+                    allowed: AllowedObjects {
+                        devices: [device.clone()].into_iter().collect(),
+                        packages: [package.clone()].into_iter().collect(),
+                        ..Default::default()
+                    },
+                    expires_in_seconds: 60,
+                })
+                .unwrap();
+            let mut context = InvocationContext::new(
+                credentials.authenticate(&token.token).unwrap(),
+                "fixture.read".into(),
+                None,
+                credentials.clone(),
+                receipts.clone(),
+            );
+            context.device_id = Some(device.clone());
+            context.package_id = Some(package.clone());
+            let handle = runtime
+                .start(WasmStartRequest {
+                    id: ExtensionId::parse("com.example.import").unwrap(),
+                    version: ExtensionVersion::parse("1.0.0").unwrap(),
+                    wasm: component.clone(),
+                    host: test_host().for_external(
+                        context,
+                        PermissionSet::parse(["runtime.sleep"]).unwrap(),
+                        ToolEffect::Read,
+                    ),
+                    // An external call must never inherit this UI startup context.
+                    app_context: Some(
+                        crate::core::AppContext::for_test("device-decoy", "com.example.decoy")
+                            .unwrap(),
+                    ),
+                })
+                .await
+                .unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(&runtime.call(handle, "sleep", "{}").await.unwrap()).unwrap();
+            assert_eq!(value["context"]["device_id"], device);
+            assert_eq!(value["context"]["content_package"], package);
+            assert!(value["context"]["android_package"].is_null());
+            assert_eq!(
+                value["invocation_counter"], 1,
+                "Guest globals must not persist across external tokens"
+            );
+            runtime.stop(handle).await.unwrap();
+        }
+    }
+
+    /// Real imported guest coverage: start, context/log import, a capability
+    /// future through the host runtime bridge, and actual joined cleanup.
+    /// A caught worker panic is an error from stop and fails this test.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn guest_with_host_imports_starts_calls_and_stops_without_trap() {
         use WasmRuntime as _;
@@ -1191,7 +1478,7 @@ id = "com.example.import"
 version = "1.0.0"
 name = "Import test"
 entry = "plugin.wasm"
-permissions = ["log.write"]
+permissions = ["log.write", "runtime.sleep"]
 "#,
         )
         .unwrap();
@@ -1212,19 +1499,23 @@ permissions = ["log.write"]
                 ),
             })
             .await
-            .expect("带 import 的插件必须能 start（async 入口修复回归）");
+            .expect("带 import 的插件必须能 start");
 
         while !runtime.entry_completed(handle).await {
             tokio::task::yield_now().await;
         }
 
         // call 经 guest 的 host import（context.get）回读 AppContext：证明
-        // async import 链接后在 fiber 入口内真实往返，而非仅链接通过。
+        // The real guest import round trip also exercises the blocking I/O
+        // bridge without creating Wasmtime async fibers.
         let result = runtime.call(handle, "ping", "{}").await.unwrap();
         let json: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(json["action"], "ping");
         assert_eq!(json["context"]["device_id"], "device-import");
         assert_eq!(json["context"]["android_package"], "com.example.game");
+        let slept: serde_json::Value =
+            serde_json::from_str(&runtime.call(handle, "sleep", "{}").await.unwrap()).unwrap();
+        assert_eq!(slept["action"], "sleep");
 
         runtime.stop(handle).await.unwrap();
         assert!(matches!(

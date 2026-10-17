@@ -189,6 +189,17 @@ impl ControlRegistry {
             manual_allowed: matches!(state.phase, ControlPhase::Idle | ControlPhase::Paused),
         }
     }
+    /// Atomically seal an idle transport before a new owner can claim it.
+    /// The callback is synchronous and must not await or re-enter this registry.
+    /// No owner, phase, ticket, or generation is changed by maintenance.
+    pub(crate) fn when_idle<R>(&self, id: &str, callback: impl FnOnce() -> R) -> Option<R> {
+        let target = self.target(id);
+        let state = target.state.lock().unwrap();
+        if state.phase != ControlPhase::Idle || state.owner.is_some() {
+            return None;
+        }
+        Some(callback())
+    }
     pub fn manual_lease(&self, id: &str) -> ManualLease {
         let target = self.target(id);
         let generation = target.state.lock().unwrap().manual_generation;

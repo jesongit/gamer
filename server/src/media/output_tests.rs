@@ -1,32 +1,193 @@
 use super::*;
 use crate::media::stream_mux;
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    response::IntoResponse,
-};
+use axum::http::StatusCode;
 use std::{process::Command, time::Duration};
 use tokio::io::AsyncWriteExt;
 
 #[tokio::test]
-async fn source_only_serves_token_and_segments_including_epoch_microseconds() {
+async fn local_files_only_serve_playlists_and_numeric_segments_with_uncached_mime_types() {
     let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("index.m3u8"),
+        b"#EXTM3U\n1758000000000000.ts",
+    )
+    .unwrap();
     std::fs::write(temp.path().join("1758000000000000.ts"), b"segment").unwrap();
-    let files = SourceFiles {
-        root: temp.path().into(),
-        token: "secret".into(),
-    };
-    for (token, name, expected) in [
-        ("secret", "1758000000000000.ts", 200),
-        ("wrong", "1758000000000000.ts", 404),
-        ("secret", "../config.toml", 404),
-        ("secret", "config.toml", 404),
+    std::fs::write(temp.path().join("0.ts"), b"zero").unwrap();
+    std::fs::write(
+        temp.path().join("12345678901234567890.ts"),
+        b"twenty digits",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("123456789012345678901.ts"),
+        b"too many digits",
+    )
+    .unwrap();
+    let output = handle_fixture(temp.path());
+    for (name, mime, body) in [
+        (
+            "index.m3u8",
+            "application/vnd.apple.mpegurl",
+            b"#EXTM3U\n1758000000000000.ts".as_slice(),
+        ),
+        ("1758000000000000.ts", "video/mp2t", b"segment".as_slice()),
+        ("0.ts", "video/mp2t", b"zero".as_slice()),
+        (
+            "12345678901234567890.ts",
+            "video/mp2t",
+            b"twenty digits".as_slice(),
+        ),
     ] {
-        let response = source_file(State(files.clone()), Path((token.into(), name.into())))
-            .await
-            .into_response();
-        assert_eq!(response.status(), StatusCode::from_u16(expected).unwrap());
+        let response = output.local_file(name).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], mime);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap()
+                .as_ref(),
+            body
+        );
     }
+    for name in [
+        "",
+        "../config.toml",
+        "config.toml",
+        "../index.m3u8",
+        "../0.ts",
+        "a/0.ts",
+        "a\\0.ts",
+        "%2e%2e/0.ts",
+        "1.ts?token=secret",
+        ".ts",
+        "-1.ts",
+        "+1.ts",
+        "1.0.ts",
+        "123456789012345678901.ts",
+        "INDEX.M3U8",
+        "0001.TS",
+        "1.ts.tmp",
+        "99.ts",
+    ] {
+        assert_eq!(
+            output.local_file(name).await.status(),
+            StatusCode::NOT_FOUND,
+            "{name}"
+        );
+    }
+    output.stop().await;
+}
+
+pub(super) const FIXED_LOCAL_URL: &str = "http://127.0.0.1:8443/local-media/index.m3u8";
+
+pub(super) fn fixture_devices(root: &std::path::Path) -> Arc<DeviceManager> {
+    let cfg = crate::config::Config {
+        data_dir: root.join("fixture-data"),
+        adb_path: "unavailable-test-adb".into(),
+        ..Default::default()
+    };
+    let store = Arc::new(crate::store::Store::open(&cfg).unwrap());
+    Arc::new(DeviceManager::new(store, cfg))
+}
+
+fn handle_fixture(root: &std::path::Path) -> OutputHandle {
+    let (stop, mut stopped) = watch::channel(false);
+    let task = tokio::spawn(async move {
+        let _ = stopped.changed().await;
+    });
+    let (switches, _) = mpsc::channel(4);
+    OutputHandle {
+        status: Arc::new(Mutex::new(OutputStatus {
+            mode: "local".into(),
+            state: "streaming".into(),
+            source_url: Some(FIXED_LOCAL_URL.into()),
+            ..Default::default()
+        })),
+        stop,
+        task,
+        devices: fixture_devices(root),
+        switches,
+        switch_gate: AsyncMutex::new(()),
+        playlist: None,
+        hls_root: root.into(),
+    }
+}
+
+pub(super) async fn local_bytes(output: &OutputHandle, name: &str) -> Vec<u8> {
+    let response = output.local_file(name).await;
+    assert_eq!(response.status(), StatusCode::OK, "{name}");
+    axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+        .await
+        .unwrap()
+        .to_vec()
+}
+
+#[tokio::test]
+async fn local_files_are_retryable_while_preparing_or_stopped_and_never_serve_rtmp() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = handle_fixture(temp.path());
+    let preparing = output.local_file("index.m3u8").await;
+    assert_eq!(preparing.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(preparing.headers()[header::RETRY_AFTER], "1");
+    assert_eq!(preparing.headers()[header::CACHE_CONTROL], "no-store");
+    std::fs::write(temp.path().join("index.m3u8"), b"#EXTM3U").unwrap();
+    assert_eq!(
+        output.local_file("index.m3u8").await.status(),
+        StatusCode::OK
+    );
+    output.status.lock().mode = "rtmp".into();
+    assert_eq!(
+        output.local_file("index.m3u8").await.status(),
+        StatusCode::NOT_FOUND
+    );
+    output.status.lock().mode = "local".into();
+    output.status.lock().state = "stopped".into();
+    assert_eq!(
+        output.local_file("index.m3u8").await.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        output.local_file("../index.m3u8").await.status(),
+        StatusCode::NOT_FOUND
+    );
+    output.status.lock().state = "streaming".into();
+    output.stop.send(true).unwrap();
+    assert_eq!(
+        output.local_file("index.m3u8").await.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    output.stop().await;
+
+    let output = handle_fixture(temp.path());
+    output.task.abort();
+    while !output.finished() {
+        tokio::task::yield_now().await;
+    }
+    assert!(temp.path().join("index.m3u8").exists());
+    assert_eq!(
+        output.local_file("index.m3u8").await.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "finished workers must not expose retained files"
+    );
+    output.stop().await;
+}
+
+#[tokio::test]
+async fn local_output_requires_host_url_before_preparing_a_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let devices = fixture_devices(temp.path());
+    let req: OutputRequest =
+        serde_json::from_value(serde_json::json!({"device_id":"fixture"})).unwrap();
+    for supplied in [None, Some("".into()), Some("  ".into())] {
+        let error = start(devices.clone(), req.clone(), supplied)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("宿主提供访问地址"), "{error}");
+    }
+    assert!(!devices.cfg.data_dir.join("media-output").exists());
 }
 
 fn ffmpeg(args: &[&str], path: &std::path::Path) {

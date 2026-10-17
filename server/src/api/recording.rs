@@ -14,12 +14,14 @@ use axum::{Json, Router};
 use serde_json::json;
 
 use super::{ApiError, AppState};
-use crate::recording::{service, FailureKind, RecordingFailure, RecordingId, RecordingStartReq};
+use crate::recording::{
+    service, FailureKind, RecordingFailure, RecordingId, RecordingStartReq, RecordingState,
+};
 
 /// 录制路由组（挂进受保护组）。
 /// 合同端点：
 /// - `POST /api/recording/start`（{device_id} → 202 session）
-/// - `POST /api/recording/:id/stop | /cancel`（→ session 终态；幂等）
+/// - `POST /api/recording/:id/stop | /cancel`（→ 202 保存中 / 200 终态；幂等）
 /// - `GET  /api/recording/:id`（状态）
 /// - `GET  /api/recording/active?device_id=`（设备活动会话或 404）
 /// - `GET  /api/recording/:id/events`（{schema_version, events:[...]}）
@@ -78,26 +80,26 @@ async fn api_start(State(st): State<AppState>, Json(req): Json<RecordingStartReq
     }
 }
 
-/// `POST /api/recording/:id/stop`：200 终态 session（幂等）。
+/// `POST /api/recording/:id/stop`：202 保存中；已结束时 200 终态（幂等）。
 async fn api_stop(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    let service = service(&st.cfg);
-    match tokio::task::spawn_blocking(move || service.stop(&RecordingId(id)))
-        .await
-        .unwrap_or_else(|e| Err(e.into()))
-    {
-        Ok(meta) => Json(meta).into_response(),
-        Err(err) => map_failure(err),
-    }
+    finish_response(service(&st.cfg).request_finish(&RecordingId(id), false))
 }
 
-/// `POST /api/recording/:id/cancel`：200 终态（已落盘部分保留为素材）。
+/// `POST /api/recording/:id/cancel`：202 保存中；已结束时 200 终态（保留已落盘片段）。
 async fn api_cancel(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    let service = service(&st.cfg);
-    match tokio::task::spawn_blocking(move || service.cancel(&RecordingId(id)))
-        .await
-        .unwrap_or_else(|e| Err(e.into()))
-    {
-        Ok(meta) => Json(meta).into_response(),
+    finish_response(service(&st.cfg).request_finish(&RecordingId(id), true))
+}
+
+fn finish_response(result: anyhow::Result<crate::recording::RecordingSessionMeta>) -> Response {
+    match result {
+        Ok(meta) => {
+            let status = if meta.state == RecordingState::Finalizing {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::OK
+            };
+            (status, Json(meta)).into_response()
+        }
         Err(err) => map_failure(err),
     }
 }

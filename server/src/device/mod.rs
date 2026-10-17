@@ -342,6 +342,25 @@ impl DeviceManager {
         // 脚本运行"持续时长，超 idle_power_secs 后虚拟屏拆会话/镜像关屏
         let dm = self.clone();
         tokio::spawn(dm.idle_power_loop());
+        // Browser reclamation is separately opt-in and does not inherit the
+        // Android power policy. A weak reference lets shutdown release it.
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let Some(dm) = weak.upgrade() else { break };
+                dm.browsers
+                    .reclaim_idle(std::time::Instant::now(), |id| {
+                        dm.has_active_consumers(id)
+                            || crate::recording::service(&dm.cfg)
+                                .active_for_device(id)
+                                .is_some()
+                    })
+                    .await;
+            }
+        });
         Ok(())
     }
 

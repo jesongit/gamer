@@ -59,6 +59,7 @@ pub(super) async fn api_extension_management(State(st): State<AppState>) -> Resp
                     .map(|(domain, requirement)| (domain.to_string(), requirement.to_string()))
                     .collect::<std::collections::BTreeMap<_, _>>(),
                 "permissions": snapshot.manifest().permissions().names(),
+                "retired_permissions": snapshot.manifest().retired_permissions(),
                 "execution": snapshot.manifest().execution(),
                 "ui": snapshot.manifest().ui().iter().map(ui_json).collect::<Vec<_>>(),
                 "source": "local",
@@ -230,7 +231,8 @@ fn extension_error(error: ExtensionError) -> Response {
             ApiError::conflict(error.to_string())
         }
         ExtensionError::PermissionConfirmationRequired(_)
-        | ExtensionError::HostFeatureUnavailable(_) => ApiError::conflict(error.to_string()),
+        | ExtensionError::HostFeatureUnavailable(_)
+        | ExtensionError::RetiredPermissions { .. } => ApiError::conflict(error.to_string()),
         ExtensionError::ArchiveSha256Mismatch { .. } => ApiError::bad_request(error.to_string()),
         ExtensionError::RuntimeUnavailable(_) => ApiError::service_unavailable(error.to_string()),
         ExtensionError::Io(_)

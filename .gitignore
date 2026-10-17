@@ -12,6 +12,8 @@ server/tests/call-guest/target/
 server/guests/*/target/
 # 本机配置（真实路径/密码，不入库）；分发以 server/config.example.toml 为准
 server/config.toml
+# Optional local OCR runtime and trained data (rebuilt by the OCR dependency fetcher).
+server/deps/tesseract/
 # 按天轮转的日志产物（gamer-server.log.YYYY-MM-DD；裸 *.log 规则盖不住带日期后缀的名）
 server/gamer-server.log.*
 # GB_LOG 误设裸词（无目录成分）时轮转文件落在 server/ 根，名如 1.2026-08-30
@@ -20,6 +22,7 @@ server/*.20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]
 # = package.toml + shared/ + plugins/<plugin>/，数据一级作用域 = Package ID）整体
 # 属本机数据；.gamerpkg 归档经 POST /api/packages/import 导入（plan §7-§11）。
 # 个人资产如需随仓库保留，可在此追加显式例外（!server/data/packages/<id>/...）
+server/data/
 server/data/gamer.db
 server/data/auth-sessions.json
 server/data/_backups/
@@ -81,6 +84,8 @@ server/web-dist/
 
 # ===== 本地任务笔记 =====
 prompt.md
+.impeccable/
+web/.impeccable/
 
 # ===== 阶段备份（重构/发布前的只读数据快照，如 backups/stage0-data、baseline-backups/）=====
 backups/
@@ -106,3 +111,6 @@ tools/plugin-signing/*.key
 tools/plugin-packer/target/
 
 updater/target/
+
+# Local live idle videos
+/live-videos/*.mp4

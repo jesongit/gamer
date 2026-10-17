@@ -9,6 +9,61 @@ pub(super) struct BrowserRecording {
     ffmpeg: String,
     frames: Vec<u64>,
 }
+
+// Several grids can stop at once. One bounded encoder protects the live preview.
+static ENCODER: Mutex<()> = Mutex::new(());
+const ENCODE_TIMEOUT: Duration = Duration::from_secs(300);
+const STREAM_RESTART_DELAY: Duration = Duration::from_millis(500);
+
+struct EncoderChild(std::process::Child);
+impl Drop for EncoderChild {
+    fn drop(&mut self) {
+        if !matches!(self.0.try_wait(), Ok(Some(_))) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RecordingSizeChanged {
+    expected: (u32, u32),
+    actual: (u32, u32),
+}
+impl std::fmt::Display for RecordingSizeChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "画面尺寸从 {}×{} 变为 {}×{}，录制已结束，请重新开始录制",
+            self.expected.0, self.expected.1, self.actual.0, self.actual.1
+        )
+    }
+}
+impl std::error::Error for RecordingSizeChanged {}
+
+fn validate_recording_boundary(
+    session: &crate::browser::CdpSession,
+    identity: &crate::browser::FrameStamp,
+    dimensions: (u32, u32),
+) -> anyhow::Result<()> {
+    anyhow::ensure!(session.is_alive(), "浏览器目标已断开");
+    let current = session.stamp();
+    // A recording belongs to a bound page and connection, rather than one
+    // document revision. Navigation still retires every old input/frame stamp.
+    anyhow::ensure!(
+        current.target == identity.target && current.epoch == identity.epoch,
+        "浏览器目标绑定已变化，录制已结束"
+    );
+    let actual = session.size();
+    if actual != dimensions {
+        return Err(RecordingSizeChanged {
+            expected: dimensions,
+            actual,
+        }
+        .into());
+    }
+    Ok(())
+}
 impl BrowserRecording {
     pub(super) fn new(ffmpeg: String) -> Self {
         Self {
@@ -26,8 +81,13 @@ pub(super) fn spawn(shared: Arc<SessionShared>, session: Arc<crate::browser::Cdp
             session.stop_recording().await;
         }
         if let Err(error) = result {
+            let reason = if error.downcast_ref::<RecordingSizeChanged>().is_some() {
+                SegmentReason::CodecChange
+            } else {
+                SegmentReason::Disconnect
+            };
             let _ = tokio::task::spawn_blocking(move || {
-                shared.end_interrupted(SegmentReason::Disconnect, Some(error.to_string()));
+                shared.end_interrupted(reason, Some(error.to_string()));
             })
             .await;
         }
@@ -39,9 +99,19 @@ async fn collect(
     session: &crate::browser::CdpSession,
     subscribed: &mut bool,
 ) -> anyhow::Result<()> {
+    if shared.stopping.load(Ordering::Acquire) {
+        return Ok(());
+    }
     let mut frames = session.start_recording().await?;
     *subscribed = true;
     let identity = session.stamp();
+    let dimensions = {
+        let st = shared.state.lock();
+        (st.width, st.height)
+    };
+    let mut revision = identity.clone();
+    let mut restart_pending = false;
+    let mut next_restart = tokio::time::Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(33));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last = None;
@@ -53,15 +123,68 @@ async fn collect(
         if shared.stopping.load(Ordering::Acquire) {
             return Ok(());
         }
-        session.validate(&identity)?;
+        validate_recording_boundary(session, &identity, dimensions)?;
+        if session.stamp() != revision {
+            revision = session.stamp();
+            if !restart_pending {
+                next_restart = tokio::time::Instant::now();
+            }
+            restart_pending = true;
+        }
+        if restart_pending {
+            if tokio::time::Instant::now() < next_restart {
+                continue;
+            }
+            let stopped = shared.stop_notify.notified();
+            tokio::pin!(stopped);
+            stopped.as_mut().enable();
+            if shared.stopping.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            let refreshed = tokio::select! {
+                _ = stopped => return Ok(()),
+                result = session.refresh_recording() => result,
+            };
+            match refreshed {
+                Ok(receiver) => {
+                    frames = receiver;
+                    restart_pending = false;
+                }
+                Err(error) => {
+                    validate_recording_boundary(session, &identity, dimensions)?;
+                    // CDP can temporarily refuse screencast commands while a
+                    // new document loads, even without another revision event.
+                    tracing::debug!(%error, target = %session.id, "页面切换期间录制流暂未就绪，延迟重试");
+                    next_restart = tokio::time::Instant::now() + STREAM_RESTART_DELAY;
+                    continue;
+                }
+            }
+            last = None;
+        }
         let frame = frames.borrow_and_update().clone();
         let Some(frame) = frame else { continue };
         let timestamp = frame.metadata["timestamp"].as_f64();
         if timestamp == last {
             continue;
         }
-        let stamp = session.preview_stamp(&frame).await?;
-        anyhow::ensure!(stamp == identity, "页面或坐标映射已变化，录制已结束");
+        let stamp = match session.preview_stamp(&frame).await {
+            Ok(stamp) => stamp,
+            Err(error) => {
+                validate_recording_boundary(session, &identity, dimensions)?;
+                if frame.revision != session.stamp().revision
+                    || session.validate_stream_frame(&frame).is_err()
+                {
+                    // Another consumer can restart the producer while this
+                    // frame is being decoded. Never adopt its retired pixels.
+                    continue;
+                }
+                return Err(error);
+            }
+        };
+        validate_recording_boundary(session, &identity, dimensions)?;
+        if session.validate(&stamp).is_err() {
+            continue;
+        }
         let bytes = base64::engine::general_purpose::STANDARD.decode(&frame.data)?;
         let writer = shared.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -112,6 +235,20 @@ pub(super) fn finish(
         return Ok(None);
     };
     let end_us = end_us.max(start_us + 1);
+    let deadline = Instant::now() + ENCODE_TIMEOUT;
+    let _encoder = loop {
+        anyhow::ensure!(
+            !shared.encoding_cancelled.load(Ordering::Acquire),
+            "服务停止，录像原始帧保留"
+        );
+        if let Some(guard) = ENCODER.try_lock_for(Duration::from_millis(100)) {
+            break guard;
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "等待视频保存超时，原始帧保留在录制目录"
+        );
+    };
     let mut manifest = String::from("ffconcat version 1.0\n");
     for (i, &time) in recording.frames.iter().enumerate() {
         let next = recording.frames.get(i + 1).copied().unwrap_or(end_us);
@@ -138,6 +275,8 @@ pub(super) fn finish(
             "-y",
             "-safe",
             "0",
+            "-threads",
+            "4",
             "-f",
             "concat",
             "-i",
@@ -151,6 +290,10 @@ pub(super) fn finish(
             "fps=30/1",
             "-preset",
             "veryfast",
+            "-threads",
+            "4",
+            "-filter_threads",
+            "1",
             "-crf",
             "20",
             "-vf",
@@ -181,12 +324,16 @@ pub(super) fn finish(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
+        // Hidden window + lower CPU scheduling priority keeps live input responsive.
+        command.creation_flags(0x08000000 | 0x00004000);
     }
-    let mut child = command.spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(300);
+    let mut child = EncoderChild(command.spawn()?);
     loop {
-        if let Some(status) = child.try_wait()? {
+        anyhow::ensure!(
+            !shared.encoding_cancelled.load(Ordering::Acquire),
+            "服务停止，录像原始帧保留"
+        );
+        if let Some(status) = child.0.try_wait()? {
             anyhow::ensure!(
                 status.success(),
                 "FFmpeg 编码失败，详情见录制目录 encoder.log"
@@ -194,8 +341,6 @@ pub(super) fn finish(
             break;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
             anyhow::bail!("FFmpeg 编码超时，原始帧保留在录制目录");
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -206,6 +351,10 @@ pub(super) fn finish(
     let mut hasher = Sha256::new();
     let mut buffer = [0; 64 * 1024];
     loop {
+        anyhow::ensure!(
+            !shared.encoding_cancelled.load(Ordering::Acquire),
+            "服务停止，录像原始帧保留"
+        );
         let n = file.read(&mut buffer)?;
         if n == 0 {
             break;
@@ -247,8 +396,104 @@ pub(super) fn finish(
 }
 
 #[cfg(test)]
+#[path = "browser_navigation_tests.rs"]
+mod navigation_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    fn failing_browser(shared: &Arc<SessionShared>) {
+        shared.state.lock().browser = Some(BrowserRecording {
+            ffmpeg: shared
+                .dir
+                .join("no-such-ffmpeg.exe")
+                .to_string_lossy()
+                .into_owned(),
+            frames: vec![0],
+        });
+        std::fs::write(
+            shared.dir.join("recording/frame-000000000.jpg"),
+            b"retained evidence",
+        )
+        .unwrap();
+    }
+
+    async fn terminal(service: &RecordingService, id: &RecordingId) -> RecordingSessionMeta {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let meta = service.status(id).unwrap();
+                if meta.state != RecordingState::Finalizing {
+                    return meta;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("encoding worker must finish")
+    }
+
+    #[tokio::test]
+    async fn accepted_stop_freezes_time_keeps_exclusivity_and_reports_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let shared = crate::recording::tests::test_session(root.path(), "browser-stop");
+        failing_browser(&shared);
+        let service = RecordingService {
+            inner: shared.inner.clone(),
+        };
+        {
+            let _busy_encoder = ENCODER.lock();
+            let meta = service.request_finish(&shared.id, false).unwrap();
+            assert_eq!(meta.state, RecordingState::Finalizing);
+            let stopped_us = shared.state.lock().elapsed_us();
+            std::thread::sleep(Duration::from_millis(40));
+            assert_eq!(shared.state.lock().elapsed_us(), stopped_us);
+            assert_eq!(service.active_count(), 1);
+            assert_eq!(
+                service.active_for_device("browser-stop").unwrap().state,
+                RecordingState::Finalizing
+            );
+            assert_eq!(service.request_finish(&shared.id, true).unwrap(), meta);
+            assert!(service
+                .delete_history(&shared.id)
+                .unwrap_err()
+                .to_string()
+                .contains("recording_active"));
+            shared.end_interrupted(SegmentReason::Disconnect, Some("late disconnect".into()));
+            assert_eq!(
+                shared.meta_snapshot(),
+                meta,
+                "disconnect cannot steal an accepted stop"
+            );
+        }
+        let meta = terminal(&service, &shared.id).await;
+        assert_eq!(meta.state, RecordingState::Failed);
+        assert!(meta.error.unwrap().contains("浏览器录像封装失败"));
+        assert_eq!(service.active_count(), 0);
+        assert!(shared.dir.join("recording/frame-000000000.jpg").exists());
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_pending_encoder_and_preserves_frame_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let shared = crate::recording::tests::test_session(root.path(), "browser-drain");
+        failing_browser(&shared);
+        let service = RecordingService {
+            inner: shared.inner.clone(),
+        };
+        // An owned worker queued at shutdown must not launch another encoder.
+        shared.encoding_cancelled.store(true, Ordering::Release);
+        let meta = service.request_finish(&shared.id, false).unwrap();
+        assert_eq!(meta.state, RecordingState::Finalizing);
+        service.shutdown().await;
+        assert_eq!(service.active_count(), 0);
+        assert_eq!(
+            service.status(&shared.id).unwrap().state,
+            RecordingState::Interrupted
+        );
+        assert!(service.inner.shutting_down.load(Ordering::Acquire));
+        assert!(shared.dir.join("recording/frame-000000000.jpg").exists());
+    }
 
     #[test]
     #[ignore = "requires GAMER_TEST_FFMPEG; local VFR encode regression"]
@@ -279,6 +524,14 @@ mod tests {
         let meta = shared.finalize_stop();
         assert_eq!(meta.state, RecordingState::Completed, "{:?}", meta.error);
         assert_eq!(shared.finalize_stop(), meta);
+        let file_bytes = std::fs::read(shared.dir.join("original.mp4")).unwrap();
+        let metadata: MediaMetadata =
+            serde_json::from_slice(&std::fs::read(shared.dir.join("metadata.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            metadata.sha256,
+            format!("{:x}", Sha256::digest(&file_bytes))
+        );
         let segment = &meta.segments[0];
         let ffprobe = Path::new(&ffmpeg).with_file_name(if cfg!(windows) {
             "ffprobe.exe"

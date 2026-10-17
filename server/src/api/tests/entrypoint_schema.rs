@@ -4,7 +4,7 @@ use super::*;
 //
 // - GET /api/runners/:runner_id/entrypoint?entrypoint=<资源id>：V1 params
 //   schema（`schema` = 参数声明数组：name/type/required/default/desc；前端
-//   不为取参数而解析 YAML）；旧 v3 源（version 字段）→ yaml.version.unsupported。
+//   不为取参数而解析 YAML）；旧 v3 源（version 字段）→ yaml.top.unknown。
 // - POST /api/runs：手动运行参数绑定（缺必填/未知键/类型不符前置 400）；
 //   旧 v3 存量源提交即版本迁移错误（无 fallback）。
 
@@ -133,7 +133,7 @@ async fn entrypoint_schema_endpoint_serves_v2_and_rejects_legacy_sources() {
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
     // 显式带 version 的旧 v3 源直写分区（保存边界已拒收，见 write_partition_file 注）：
-    // describe 必须报 yaml.version.unsupported（V1 无 version 字段，无 fallback）
+    // describe 必须报 yaml.top.unknown（V1 无 version 字段，无 fallback）
     write_partition_file(
         &t,
         "automations",
@@ -145,7 +145,7 @@ async fn entrypoint_schema_endpoint_serves_v2_and_rejects_legacy_sources() {
         &sid,
         "automations",
         "v1daily",
-        "version: 2\nparams:\n  msg:\n    type: string\n    default: \"默认\"\n    desc: 消息\n  wait:\n    type: duration\n    default: 2s\n  count:\n    type: integer\n    default: 3\nrun:\n  - log: $msg\n",
+        "params:\n  msg:\n    type: string\n    default: \"默认\"\n    desc: 消息\n  wait:\n    type: duration\n    default: 2s\n  count:\n    type: integer\n    default: 3\nrun:\n  - log: $msg\n",
     )
     .await;
     save_resource(
@@ -153,7 +153,7 @@ async fn entrypoint_schema_endpoint_serves_v2_and_rejects_legacy_sources() {
         &sid,
         "automations",
         "v1req",
-        "version: 2\nparams:\n  secret:\n    type: string\n    required: true\nrun:\n  - log: $secret\n",
+        "params:\n  secret:\n    type: string\n    required: true\nrun:\n  - log: $secret\n",
     )
     .await;
     // V1 函数库直写分区（Phase 1：函数库存 automations/ 内的 _function*.yaml）
@@ -161,10 +161,10 @@ async fn entrypoint_schema_endpoint_serves_v2_and_rejects_legacy_sources() {
         &t,
         "automations",
         "_function.yaml",
-        "version: 2\nfunctions:\n  greet:\n    params:\n      who:\n        type: string\n        default: \"玩家\"\n      times:\n        type: integer\n        default: 2\n    run:\n      - log: $who\n",
+        "functions:\n  greet:\n    params:\n      who:\n        type: string\n        default: \"玩家\"\n      times:\n        type: integer\n        default: 2\n    run:\n      - log: $who\n",
     );
 
-    // 旧 v3 源 → 版本迁移 invalid（yaml.version.unsupported，无 fallback）
+    // 旧 v3 源 → 版本迁移 invalid（yaml.top.unknown，无 fallback）
     let (status, v3) = describe_entrypoint(&t, &sid, "com.test.app/v3daily.yaml").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{v3}");
     assert_eq!(v3["error"], "invalid_script");
@@ -173,7 +173,7 @@ async fn entrypoint_schema_endpoint_serves_v2_and_rejects_legacy_sources() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|d| d["code"] == "yaml.version.unsupported"),
+            .any(|d| d["code"] == "yaml.top.unknown"),
         "旧 v3 源必须报版本迁移诊断: {v3}"
     );
 
@@ -181,7 +181,7 @@ async fn entrypoint_schema_endpoint_serves_v2_and_rejects_legacy_sources() {
     let (status, v1) = describe_entrypoint(&t, &sid, "com.test.app/v1daily.yaml").await;
     assert_eq!(status, StatusCode::OK, "{v1}");
     assert_eq!(v1["kind"], "script");
-    assert_eq!(v1["format"], "yaml-params-v1");
+    assert_eq!(v1["format"], "yaml-params");
     let schema = v1["schema"].as_array().unwrap();
     assert_eq!(schema.len(), 3);
     assert_eq!(schema[0]["name"], "msg");
@@ -215,7 +215,7 @@ async fn entrypoint_schema_endpoint_serves_v2_and_rejects_legacy_sources() {
         &t,
         "automations",
         "broken.yaml",
-        "version: 2\nrun:\n  - if: $x\n",
+        "run:\n  - if: $x\n",
     );
     let (status, broken) = describe_entrypoint(&t, &sid, "com.test.app/broken.yaml").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{broken}");
@@ -252,7 +252,7 @@ async fn v2_manual_runs_flow_through_param_binding() {
         &sid,
         "automations",
         "v1opt",
-        "version: 2\nparams:\n  msg:\n    type: string\n    default: \"默认\"\n  fast:\n    type: boolean\n    default: false\n  wait:\n    type: duration\n    default: 2s\n  count:\n    type: integer\n    default: 3\nrun:\n  - log: $msg\n",
+        "params:\n  msg:\n    type: string\n    default: \"默认\"\n  fast:\n    type: boolean\n    default: false\n  wait:\n    type: duration\n    default: 2s\n  count:\n    type: integer\n    default: 3\nrun:\n  - log: $msg\n",
     )
     .await;
     save_resource(
@@ -260,7 +260,7 @@ async fn v2_manual_runs_flow_through_param_binding() {
         &sid,
         "automations",
         "v1req",
-        "version: 2\nparams:\n  secret:\n    type: string\n    required: true\nrun:\n  - log: $secret\n",
+        "params:\n  secret:\n    type: string\n    required: true\nrun:\n  - log: $secret\n",
     )
     .await;
     // V1 函数库直写分区（函数运行参数从目标函数声明解析）
@@ -268,7 +268,7 @@ async fn v2_manual_runs_flow_through_param_binding() {
         &t,
         "automations",
         "_function.yaml",
-        "version: 2\nfunctions:\n  greet:\n    params:\n      who:\n        type: string\n        default: \"玩家\"\n      times:\n        type: integer\n        default: 2\n    run:\n      - log: $who\n",
+        "functions:\n  greet:\n    params:\n      who:\n        type: string\n        default: \"玩家\"\n      times:\n        type: integer\n        default: 2\n    run:\n      - log: $who\n",
     );
 
     // 无参运行：202 + resolved_args 为默认值合并视图
@@ -409,7 +409,7 @@ async fn v2_manual_runs_flow_through_param_binding() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|d| d["code"] == "yaml.version.unsupported"),
+            .any(|d| d["code"] == "yaml.top.unknown"),
         "旧 v3 脚本手动运行必须报版本迁移诊断: {j}"
     );
 

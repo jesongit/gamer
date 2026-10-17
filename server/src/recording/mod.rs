@@ -315,6 +315,8 @@ struct SessionState {
     meta: RecordingSessionMeta,
     /// 会话单调时钟起点（事件 timeline_us 与分段起点的时域）。
     origin: Instant,
+    /// Freeze the recording clock when stop is accepted; encoding time is not video time.
+    stopped_us: Option<u64>,
     width: u32,
     height: u32,
     /// 素材展示名基名（分段按 -partN 追加）。
@@ -337,7 +339,8 @@ struct SessionState {
 
 impl SessionState {
     fn elapsed_us(&self) -> u64 {
-        self.origin.elapsed().as_micros() as u64
+        self.stopped_us
+            .unwrap_or_else(|| self.origin.elapsed().as_micros() as u64)
     }
 
     fn next_op(&mut self) -> String {
@@ -392,6 +395,7 @@ pub(crate) struct SessionShared {
     dir: PathBuf,
     stop_notify: tokio::sync::Notify,
     stopping: AtomicBool,
+    encoding_cancelled: AtomicBool,
     state: Mutex<SessionState>,
 }
 
@@ -627,6 +631,9 @@ impl SessionShared {
         ) {
             return st.meta.clone();
         }
+        if st.stopped_us.is_none() {
+            st.stopped_us = Some(st.elapsed_us());
+        }
         let partial_touches = std::mem::take(&mut st.touch);
         for (_, gesture) in partial_touches {
             let duration = st.elapsed_us().saturating_sub(gesture.down_us);
@@ -687,6 +694,9 @@ impl SessionShared {
         let (recording, width, height, name, end_us) = {
             let mut st = self.state.lock();
             let recording = st.browser.take()?;
+            if st.stopped_us.is_none() {
+                st.stopped_us = Some(st.elapsed_us());
+            }
             st.meta.state = RecordingState::Finalizing;
             self.stopping.store(true, Ordering::Release);
             self.stop_notify.notify_waiters();
@@ -708,6 +718,10 @@ impl SessionShared {
                 }
                 (target, error)
             }
+            Err(_) if self.encoding_cancelled.load(Ordering::Acquire) => (
+                RecordingState::Interrupted,
+                Some("服务停止导致保存中断，原始帧保留在录制目录".into()),
+            ),
             Err(e) => (
                 RecordingState::Failed,
                 Some(format!("浏览器录像封装失败: {e}")),
@@ -716,6 +730,9 @@ impl SessionShared {
         Some(self.finalize_with(&mut st, target, reason, error))
     }
     fn finalize_stop(&self) -> RecordingSessionMeta {
+        if self.stopping.load(Ordering::Acquire) {
+            return self.meta_snapshot();
+        }
         if let Some(meta) =
             self.finalize_browser(RecordingState::Completed, SegmentReason::Normal, None)
         {
@@ -734,6 +751,9 @@ impl SessionShared {
     }
 
     fn finalize_cancel(&self) -> RecordingSessionMeta {
+        if self.stopping.load(Ordering::Acquire) {
+            return self.meta_snapshot();
+        }
         if let Some(meta) =
             self.finalize_browser(RecordingState::Cancelled, SegmentReason::Normal, None)
         {
@@ -752,6 +772,9 @@ impl SessionShared {
     }
 
     fn end_interrupted(&self, reason: SegmentReason, error: Option<String>) {
+        if self.stopping.load(Ordering::Acquire) {
+            return;
+        }
         if self
             .finalize_browser(RecordingState::Interrupted, reason, error.clone())
             .is_some()
@@ -1089,6 +1112,7 @@ struct Inner {
     data_root: PathBuf,
     sessions: Mutex<HashMap<String, Arc<SessionShared>>>,
     active_by_device: Mutex<HashMap<String, String>>,
+    shutting_down: AtomicBool,
 }
 
 impl Inner {
@@ -1120,6 +1144,7 @@ impl RecordingService {
                 data_root,
                 sessions: Mutex::new(HashMap::new()),
                 active_by_device: Mutex::new(HashMap::new()),
+                shutting_down: AtomicBool::new(false),
             }),
         })
     }
@@ -1137,6 +1162,9 @@ impl RecordingService {
         devices: &Arc<DeviceManager>,
         req: &RecordingStartReq,
     ) -> anyhow::Result<RecordingSessionMeta> {
+        if self.inner.shutting_down.load(Ordering::Acquire) {
+            return failure(FailureKind::Busy, "服务正在停止，无法开始录制");
+        }
         let _reservation = crate::update::barrier::reservation().map_err(anyhow::Error::msg)?;
         let Ok(_connection) = devices.connection_gate.try_read() else {
             return failure(FailureKind::Busy, "正在强制重连设备，请稍后开始录制");
@@ -1167,6 +1195,10 @@ impl RecordingService {
             return failure(FailureKind::DeviceOffline, "设备未连接，无法开始录制");
         }
         let mut active = self.inner.active_by_device.lock();
+        // Shutdown takes this same admission lock before snapshotting sessions.
+        if self.inner.shutting_down.load(Ordering::Acquire) {
+            return failure(FailureKind::Busy, "服务正在停止，无法开始录制");
+        }
         if active.contains_key(device_id) {
             return failure(FailureKind::Busy, "该设备已有进行中的录制会话");
         }
@@ -1198,9 +1230,11 @@ impl RecordingService {
             dir: dir.clone(),
             stop_notify: tokio::sync::Notify::new(),
             stopping: AtomicBool::new(false),
+            encoding_cancelled: AtomicBool::new(false),
             state: Mutex::new(SessionState {
                 meta,
                 origin: Instant::now(),
+                stopped_us: None,
                 width,
                 height,
                 asset_base_name,
@@ -1306,6 +1340,90 @@ impl RecordingService {
             .get(id)
             .ok_or_else(|| RecordingFailure::new(FailureKind::NotFound, "recording_not_found"))?;
         Ok(shared.finalize_cancel())
+    }
+
+    /// REST stop is an accepted operation, not a long-lived HTTP encoding job.
+    /// State and the clock are frozen under one lock before launching the worker.
+    pub fn request_finish(
+        &self,
+        id: &RecordingId,
+        cancelled: bool,
+    ) -> anyhow::Result<RecordingSessionMeta> {
+        let shared = self
+            .inner
+            .get(id)
+            .ok_or_else(|| RecordingFailure::new(FailureKind::NotFound, "recording_not_found"))?;
+        let meta = {
+            let mut st = shared.state.lock();
+            if st.meta.state != RecordingState::Recording {
+                return Ok(st.meta.clone());
+            }
+            st.stopped_us = Some(st.elapsed_us());
+            st.meta.state = RecordingState::Finalizing;
+            shared.stopping.store(true, Ordering::Release);
+            shared.stop_notify.notify_waiters();
+            shared.persist(&st);
+            st.meta.clone()
+        };
+        let target = if cancelled {
+            RecordingState::Cancelled
+        } else {
+            RecordingState::Completed
+        };
+        tokio::spawn(async move {
+            let worker = shared.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let (target, error) = if worker.encoding_cancelled.load(Ordering::Acquire) {
+                    (
+                        RecordingState::Interrupted,
+                        Some("服务停止导致录制中断，已写入的画面保留".into()),
+                    )
+                } else {
+                    (target, None)
+                };
+                if worker
+                    .finalize_browser(target, SegmentReason::Normal, error.clone())
+                    .is_none()
+                {
+                    let mut st = worker.state.lock();
+                    worker.finalize_with(&mut st, target, SegmentReason::Normal, error);
+                }
+            })
+            .await;
+            if let Err(error) = result {
+                let mut st = shared.state.lock();
+                shared.finalize_with(
+                    &mut st,
+                    RecordingState::Failed,
+                    SegmentReason::Normal,
+                    Some(format!("录制收尾失败，已写入的画面保留: {error}")),
+                );
+            }
+        });
+        Ok(meta)
+    }
+
+    /// Cancel owned encoders before devices are torn down. Partial frames stay on disk.
+    pub async fn shutdown(&self) {
+        {
+            let _admission = self.inner.active_by_device.lock();
+            self.inner.shutting_down.store(true, Ordering::Release);
+        }
+        let sessions: Vec<_> = self.inner.sessions.lock().values().cloned().collect();
+        for shared in &sessions {
+            shared.encoding_cancelled.store(true, Ordering::Release);
+            if shared.meta_snapshot().state == RecordingState::Recording {
+                let _ = self.request_finish(&shared.id, true);
+            }
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while self.active_count() > 0 {
+            if tokio::time::Instant::now() >= deadline {
+                warn!("recording shutdown timed out; unfinished frame evidence remains on disk");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
     }
 
     pub fn status(&self, id: &RecordingId) -> anyhow::Result<RecordingSessionMeta> {
@@ -1963,6 +2081,7 @@ mod tests {
             data_root: root.to_path_buf(),
             sessions: Mutex::new(HashMap::new()),
             active_by_device: Mutex::new(HashMap::new()),
+            shutting_down: AtomicBool::new(false),
         });
         let id = RecordingId(uuid::Uuid::new_v4().simple().to_string());
         let primary = MediaId(uuid::Uuid::new_v4().simple().to_string());
@@ -1975,6 +2094,7 @@ mod tests {
             dir: dir.clone(),
             stop_notify: tokio::sync::Notify::new(),
             stopping: AtomicBool::new(false),
+            encoding_cancelled: AtomicBool::new(false),
             state: Mutex::new(SessionState {
                 meta: RecordingSessionMeta {
                     id,
@@ -1988,6 +2108,7 @@ mod tests {
                     error: None,
                 },
                 origin: Instant::now(),
+                stopped_us: None,
                 width: 1920,
                 height: 1080,
                 asset_base_name: "recording-test".to_string(),
@@ -2442,6 +2563,7 @@ mod tests {
             data_root: root.clone(),
             sessions: Mutex::new(HashMap::new()),
             active_by_device: Mutex::new(HashMap::new()),
+            shutting_down: AtomicBool::new(false),
         });
         // device 未登记任何会话：lookup 返回 None
         assert!(inner.lookup_active("dev-none").is_none());

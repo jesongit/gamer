@@ -901,91 +901,14 @@ pub(super) async fn api_import_package(
                 let _ = std::fs::remove_dir_all(&staging);
             })
             .map_err(archive_error)?;
-        // 3) 媒体恢复（失败 → 函数内部回滚新建素材 + 调用方清 staging，
-        //    导入整体拒绝）
-        // Serializes replacement with plugin transactions and activity acquisition.
-        let _package_barrier = store.snapshot_barrier();
-        if overwrite || !store.package_dir(&manifest.id).map_err(store_error)?.exists() {
-            if let Err(error) = store.prepare_replacement(&manifest.id, &staging) {
-                let _ = std::fs::remove_dir_all(&staging);
-                return Err(ApiError::conflict(error.to_string()));
-            }
-        }
-        let media = crate::media::service(&cfg);
-        let (media_summary, created_media) = match import_package_media(&media, &staging, &manifest.id)
-        {
-            Ok(result) => result,
-            Err(error) => {
-                let _ = std::fs::remove_dir_all(&staging);
-                return Err(ApiError::bad_request(format!("媒体素材恢复失败: {error}")));
-            }
-        };
-        // 4) 目标存在性 → 409 / 原子替换
-        let final_dir = match store.package_dir(&manifest.id) {
-            Ok(dir) => dir,
-            Err(error) => {
-                rollback_created_media(&media, &created_media, &manifest.id);
-                let _ = std::fs::remove_dir_all(&staging);
-                return Err(ApiError::bad_request(error.to_string()));
-            }
-        };
-        if final_dir.exists() {
-            if !overwrite {
-                rollback_created_media(&media, &created_media, &manifest.id);
-                let _ = std::fs::remove_dir_all(&staging);
-                // 结构化 409：附已存包 manifest 摘要（覆盖确认提示由前端组装）
-                let existing = store
-                    .try_manifest(&manifest.id)
-                    .ok()
-                    .flatten()
-                    .map(|m| manifest_json(&m))
-                    .unwrap_or_else(|| json!({ "id": manifest.id }));
-                return Ok(ImportOutcome::Conflict(json!({
-                    "error": "package_exists",
-                    "message": format!(
-                        "配置已存在: {}。继续导入将覆盖该配置当前数据（含直接修改或新增的内容），确认后带 ?overwrite=true 重试",
-                        manifest.id
-                    ),
-                    "existing": existing,
-                })));
-            }
-            // 原子替换：旧目录先移出，再换入 staging，最后删旧目录
-            let trash = store
-                .staging_root()
-                .join(uuid::Uuid::new_v4().simple().to_string());
-            if let Err(error) = std::fs::rename(&final_dir, &trash) {
-                rollback_created_media(&media, &created_media, &manifest.id);
-                let _ = std::fs::remove_dir_all(&staging);
-                return Err(ApiError::internal(format!("配置替换失败: {error}")));
-            }
-            if let Err(error) = std::fs::rename(&staging, &final_dir) {
-                let _ = std::fs::rename(&trash, &final_dir);
-                rollback_created_media(&media, &created_media, &manifest.id);
-                let _ = std::fs::remove_dir_all(&staging);
-                return Err(ApiError::internal(format!("配置替换失败: {error}")));
-            }
-            let _ = std::fs::remove_dir_all(&trash);
-        } else if let Err(error) = std::fs::rename(&staging, &final_dir) {
-            rollback_created_media(&media, &created_media, &manifest.id);
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(ApiError::internal(format!("配置安装失败: {error}")));
-        }
-        // 5) 发布包内预设（plugins/*/presets/*.yaml，幂等）；失败即整体失败
-        //    （避免半套预设静默生效），回滚本次新建素材。
-        if let Err(error) = publish_package_presets(&store, st.db.clone(), &manifest.id) {
-            rollback_created_media(&media, &created_media, &manifest.id);
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(internal(error));
-        }
-        let stored = store.manifest(&manifest.id).map_err(not_found_or_internal)?;
-        let mut manifest = manifest_json(&stored);
-        if let Some(obj) = manifest.as_object_mut() {
-            obj.insert("media".into(), media_summary);
-        }
-        Ok(ImportOutcome::Done {
-            overwritten: overwrite,
-            manifest,
-        })
+        commit_package_import(
+            &store,
+            st.db.clone(),
+            &cfg,
+            &staging,
+            &manifest.id,
+            overwrite,
+        )
     })
     .await;
     match staged {
@@ -1003,6 +926,182 @@ pub(super) async fn api_import_package(
         Ok(ImportOutcome::Conflict(body)) => (StatusCode::CONFLICT, Json(body)).into_response(),
         Err(e) => e.into_response(),
     }
+}
+
+/// The Package barrier serializes replacement with resource transactions;
+/// the media barrier keeps ordinary ref edits out of snapshot/rollback.
+fn commit_package_import(
+    store: &PackageStore,
+    db: crate::store::Db,
+    cfg: &crate::config::Config,
+    staging: &std::path::Path,
+    pkg: &str,
+    overwrite: bool,
+) -> Result<ImportOutcome, ApiError> {
+    let _package_barrier = store.snapshot_barrier();
+    let final_dir = store.package_dir(pkg).map_err(store_error)?;
+    if final_dir.exists() && !overwrite {
+        let existing = store
+            .try_manifest(pkg)
+            .ok()
+            .flatten()
+            .map(|manifest| manifest_json(&manifest))
+            .unwrap_or_else(|| json!({"id":pkg}));
+        let _ = std::fs::remove_dir_all(staging);
+        return Ok(ImportOutcome::Conflict(json!({
+            "error":"package_exists",
+            "message":format!("配置已存在: {pkg}。继续导入将覆盖该配置当前数据（含直接修改或新增的内容），确认后带 ?overwrite=true 重试"),
+            "existing":existing,
+        })));
+    }
+    if let Err(error) = store.prepare_replacement(pkg, staging) {
+        let _ = std::fs::remove_dir_all(staging);
+        return Err(ApiError::conflict(error.to_string()));
+    }
+    // Parse every preset before any published Package/media state changes.
+    let presets = match read_package_presets(staging) {
+        Ok(presets) => presets,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(staging);
+            return Err(ApiError::bad_request(format!("包内预设无效: {error}")));
+        }
+    };
+    let media = crate::media::service(cfg);
+    let _media_barrier = media.package_import_barrier();
+    let snapshot_dir = store
+        .staging_root()
+        .join(format!("media-rollback-{}", uuid::Uuid::new_v4().simple()));
+    let snapshot = match snapshot_import_media(&media, &snapshot_dir) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(staging);
+            let _ = std::fs::remove_dir_all(&snapshot_dir);
+            return Err(internal(error));
+        }
+    };
+    let trash = store
+        .staging_root()
+        .join(uuid::Uuid::new_v4().simple().to_string());
+    let mut moved_old = false;
+    let mut installed_new = false;
+    let imported = (|| -> Result<Value, ApiError> {
+        let (summary, _) = import_package_media(&media, staging, pkg)
+            .map_err(|error| ApiError::bad_request(format!("媒体素材恢复失败: {error}")))?;
+        if final_dir.exists() {
+            std::fs::rename(&final_dir, &trash)
+                .map_err(|error| ApiError::internal(format!("配置替换失败: {error}")))?;
+            moved_old = true;
+        }
+        std::fs::rename(staging, &final_dir)
+            .map_err(|error| ApiError::internal(format!("配置安装失败: {error}")))?;
+        installed_new = true;
+        let stored = store.manifest(pkg).map_err(not_found_or_internal)?;
+        let mut manifest = manifest_json(&stored);
+        manifest
+            .as_object_mut()
+            .expect("manifest is an object")
+            .insert("media".into(), summary);
+        // Last fallible commit: all preset upserts share one SQLite transaction.
+        // A failed second upsert also rolls back the first one.
+        db.publish_package_presets_atomic(pkg, &presets)
+            .map_err(internal)?;
+        Ok(manifest)
+    })();
+    match imported {
+        Ok(manifest) => {
+            // Old bytes stay recoverable until Package, refs and presets commit.
+            if moved_old {
+                if let Err(error) = std::fs::remove_dir_all(&trash) {
+                    tracing::warn!(package=pkg, %error, "Committed import kept old Package staging copy");
+                }
+            }
+            let _ = std::fs::remove_dir_all(&snapshot_dir);
+            Ok(ImportOutcome::Done {
+                overwritten: overwrite,
+                manifest,
+            })
+        }
+        Err(error) => {
+            let restored_package = (|| -> anyhow::Result<()> {
+                if installed_new {
+                    std::fs::rename(&final_dir, staging)?;
+                }
+                if moved_old {
+                    std::fs::rename(&trash, &final_dir)?;
+                }
+                Ok(())
+            })();
+            if let Err(rollback) = restored_package {
+                // Keep both Package copies, new media and original metadata
+                // snapshots when an IO failure prevents a complete rollback.
+                return Err(ApiError::internal(format!(
+                    "{}；配置回滚失败: {rollback}；恢复副本保留于 {} 与 {}",
+                    error.message(),
+                    trash.display(),
+                    snapshot_dir.display()
+                )));
+            }
+            if let Err(rollback) = rollback_import_media(&media, &snapshot) {
+                return Err(ApiError::internal(format!(
+                    "{}；媒体回滚失败: {rollback}；原元数据副本保留于 {}",
+                    error.message(),
+                    snapshot_dir.display()
+                )));
+            }
+            let _ = std::fs::remove_dir_all(staging);
+            let _ = std::fs::remove_dir_all(&snapshot_dir);
+            Err(error)
+        }
+    }
+}
+
+struct ImportMediaSnapshot {
+    original_ids: std::collections::BTreeSet<String>,
+    metadata_files: Vec<(crate::media::MediaId, std::path::PathBuf)>,
+}
+
+fn snapshot_import_media(
+    media: &crate::media::MediaService,
+    backup: &std::path::Path,
+) -> anyhow::Result<ImportMediaSnapshot> {
+    std::fs::create_dir(backup)?;
+    let mut snapshot = ImportMediaSnapshot {
+        original_ids: Default::default(),
+        metadata_files: Vec::new(),
+    };
+    for meta in media.list()? {
+        media.get(&meta.id)?; // Validate the logical ID before constructing a path.
+        anyhow::ensure!(
+            snapshot.original_ids.insert(meta.id.0.clone()),
+            "duplicate media id"
+        );
+        let original = media.data_root().join(&meta.id.0).join("metadata.json");
+        let destination = backup.join(format!("{}.json", meta.id.0));
+        // Preserve the original bytes, including fields this host does not know.
+        crate::core::fs::atomic_write(&destination, &std::fs::read(original)?)?;
+        snapshot.metadata_files.push((meta.id, destination));
+    }
+    Ok(snapshot)
+}
+
+fn rollback_import_media(
+    media: &crate::media::MediaService,
+    snapshot: &ImportMediaSnapshot,
+) -> anyhow::Result<()> {
+    for (id, backup) in &snapshot.metadata_files {
+        let original = media.data_root().join(&id.0).join("metadata.json");
+        let bytes = std::fs::read(backup)?;
+        if std::fs::read(&original).ok().as_deref() != Some(bytes.as_slice()) {
+            crate::core::fs::atomic_write(&original, &bytes)?;
+        }
+    }
+    for meta in media.list()? {
+        if !snapshot.original_ids.contains(&meta.id.0) {
+            media.set_refs(&meta.id, &[])?;
+            media.delete(&meta.id)?;
+        }
+    }
+    Ok(())
 }
 
 /// 媒体导入摘要（响应 `media` 字段）。
@@ -1035,6 +1134,7 @@ fn import_package_media(
 ) -> anyhow::Result<(Value, Vec<crate::media::MediaId>)> {
     let index_path = staging.join("media").join("index.json");
     if !index_path.is_file() {
+        media.release_package(package_id)?;
         return Ok((
             media_summary_json(&MediaImportSummary::default()),
             Vec::new(),
@@ -1046,7 +1146,7 @@ fn import_package_media(
     let restore = (|| -> anyhow::Result<MediaImportSummary> {
         // 覆盖导入语义：包数据整体替换，旧引用先全量解除，再按新索引重新
         // 登记（全新安装时为幂等 no-op）。
-        let _ = media.release_package(package_id);
+        media.release_package(package_id)?;
 
         let mut summary = MediaImportSummary {
             total: index.entries.len(),
@@ -1232,47 +1332,57 @@ pub(super) fn publish_package_presets(
     db: crate::store::Db,
     pkg: &str,
 ) -> anyhow::Result<usize> {
-    let dir = store.package_dir(pkg)?.join("plugins");
+    let presets = read_package_presets(&store.package_dir(pkg)?)?;
+    db.publish_package_presets_atomic(pkg, &presets)
+}
+
+fn read_package_presets(
+    package_dir: &std::path::Path,
+) -> anyhow::Result<Vec<crate::timer_core::PackagePreset>> {
+    let dir = package_dir.join("plugins");
     let mut presets = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(&dir) {
-        for entry in rd.flatten() {
-            let plugin = entry.file_name().to_string_lossy().to_string();
-            if !is_valid_scope_id(&plugin) || !entry.path().is_dir() {
-                continue;
-            }
-            let presets_dir = entry.path().join("presets");
-            let Ok(files) = std::fs::read_dir(&presets_dir) else {
-                continue; // 该插件无 presets 目录 = 零预设
-            };
-            let mut paths: Vec<std::path::PathBuf> = files
-                .flatten()
-                .map(|f| f.path())
-                .filter(|p| {
-                    p.is_file()
-                        && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
-                            let lower = n.to_ascii_lowercase();
-                            !n.starts_with('.')
-                                && (lower.ends_with(".yaml") || lower.ends_with(".yml"))
-                        })
-                })
-                .collect();
-            paths.sort();
-            for path in paths {
-                let source = format!(
-                    "{plugin}/presets/{}",
-                    path.file_name().and_then(|n| n.to_str()).unwrap_or("?")
-                );
-                let bytes = std::fs::read(&path)?;
-                presets.push(parse_package_preset(&bytes, &source)?);
+    match std::fs::read_dir(&dir) {
+        Ok(rd) => {
+            for entry in rd {
+                let entry = entry?;
+                let plugin = entry.file_name().to_string_lossy().to_string();
+                if !is_valid_scope_id(&plugin) || !entry.path().is_dir() {
+                    continue;
+                }
+                let presets_dir = entry.path().join("presets");
+                let files = match std::fs::read_dir(&presets_dir) {
+                    Ok(files) => files,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                let mut paths: Vec<std::path::PathBuf> = files
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .map(|f| f.path())
+                    .filter(|p| {
+                        p.is_file()
+                            && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                                let lower = n.to_ascii_lowercase();
+                                !n.starts_with('.')
+                                    && (lower.ends_with(".yaml") || lower.ends_with(".yml"))
+                            })
+                    })
+                    .collect();
+                paths.sort();
+                for path in paths {
+                    let source = format!(
+                        "{plugin}/presets/{}",
+                        path.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+                    );
+                    let bytes = std::fs::read(&path)?;
+                    presets.push(parse_package_preset(&bytes, &source)?);
+                }
             }
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
-    if presets.is_empty() {
-        return Ok(0);
-    }
-    // 阻塞上下文内的 async 收口（publish 只写 task_presets 行，不经调度循环）
-    let timer = crate::timer_core::TimerCore::new(db);
-    tokio::runtime::Handle::current().block_on(timer.publish_package_presets(pkg, &presets))
+    Ok(presets)
 }
 
 // ---------- 错误辅助 ----------

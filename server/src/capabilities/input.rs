@@ -89,6 +89,17 @@ impl SwipeGesture {
 /// Keyboard and text input boundary.
 #[async_trait]
 pub trait InputService: Send + Sync {
+    /// Move a browser pointer without pressing a button, retaining frame/control gates.
+    async fn hover_from_frame(
+        &self,
+        _device: &DeviceHandle,
+        _point: TouchPoint,
+        _stamp: Option<&super::FrameStamp>,
+    ) -> CapabilityResult<()> {
+        Err(super::CapabilityError::Unavailable(
+            "当前目标不支持鼠标悬浮",
+        ))
+    }
     async fn tap_from_frame(
         &self,
         device: &DeviceHandle,

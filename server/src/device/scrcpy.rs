@@ -834,6 +834,16 @@ impl ScrcpySession {
         self.app_pidof(&pkg).await.is_some()
     }
 
+    /// 重置应用入口，保留 scrcpy 会话和当前运行租约。旧画面即使同尺寸也失效。
+    pub async fn restart_app(self: &Arc<Self>, package: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(super::adb::is_safe_pkg(package), "restart_app 需要合法包名");
+        let controls = self.controls.read().clone();
+        let _admission = controls.admit(&self.device.id).await?;
+        self.release_inputs().await?;
+        self.input_space.lock().revision += 1;
+        self.start_app(&format!("+{package}")).await
+    }
+
     /// 停止应用（`am force-stop`；与 capability 层 stop_app 同语义）：仅接受
     /// 无前缀的安全包名（`+`/`?` 启动前缀无停止语义，显式拒绝）
     pub async fn stop_app(self: &Arc<Self>, name: &str) -> anyhow::Result<()> {
@@ -1217,6 +1227,76 @@ mod tests {
             .await
             .unwrap();
         assert!(manager.controls.status(&id).owner.is_none());
+    }
+
+    #[tokio::test]
+    async fn reset_input_cold_starts_app_without_replacing_session_or_control_owner() {
+        let (manager, session, _dir) = online_test_manager(ScreenMode::Mirror);
+        let mut reader = attach_test_control(&session).await;
+        let id = session.device.id.clone();
+        let old = session.coordinate_space().1;
+        let lease = manager.controls.claim(&id, "reset-test").await.unwrap();
+        assert!(session.restart_app("com.example.game").await.is_err());
+        assert_eq!(session.coordinate_space().1, old);
+        manager
+            .controls
+            .execute(&lease, session.inject_keycode(0, 4, 0, 0))
+            .await
+            .unwrap();
+        let mut key = [0u8; 14];
+        reader.read_exact(&mut key).await.unwrap();
+        manager
+            .controls
+            .execute(&lease, session.restart_app("com.example.game"))
+            .await
+            .unwrap();
+        reader.read_exact(&mut key).await.unwrap();
+        assert_eq!(key[1], 1, "reset releases the held key first");
+        let mut header = [0u8; 2];
+        reader.read_exact(&mut header).await.unwrap();
+        assert_eq!(header[0], 16);
+        let mut package = vec![0u8; header[1] as usize];
+        reader.read_exact(&mut package).await.unwrap();
+        assert_eq!(package, b"+com.example.game");
+        assert!(session.validate_frame(&old).is_err());
+        assert!(session.held_inputs.lock().await.keys.is_empty());
+        assert!(session.connected.load(Ordering::Acquire));
+        assert!(Arc::ptr_eq(&manager.session(&id).unwrap(), &session));
+        assert_eq!(
+            manager.controls.status(&id).owner.as_deref(),
+            Some("reset-test")
+        );
+        manager
+            .controls
+            .release(&lease, manager.release_control_inputs(&id))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reset_input_android_adapter_finishes_without_outer_admission() {
+        use crate::capabilities::{AppId, DeviceHandle, DeviceId, DeviceService};
+        let (manager, session, _dir) = online_test_manager(ScreenMode::Mirror);
+        let mut reader = attach_test_control(&session).await;
+        let old = session.coordinate_space().1;
+        let handle = DeviceHandle::new(DeviceId::new(session.device.id.clone()))
+            .with_expected_frame(old.clone());
+        let adapter = crate::capabilities::adapters::DeviceAdapter::new(manager.clone());
+        let app = AppId::new("com.example.game");
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            adapter.reset_input(&handle, Some(&app)),
+        )
+        .await
+        .expect("adapter must propagate admission to nested scrcpy control")
+        .unwrap();
+        let mut header = [0u8; 2];
+        reader.read_exact(&mut header).await.unwrap();
+        assert_eq!(header[0], 16);
+        let mut package = vec![0u8; header[1] as usize];
+        reader.read_exact(&mut package).await.unwrap();
+        assert_eq!(package, b"+com.example.game");
+        assert!(session.validate_frame(&old).is_err());
     }
 
     #[tokio::test]

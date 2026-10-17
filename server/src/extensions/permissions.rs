@@ -14,12 +14,15 @@ pub(crate) enum Permission {
     DeviceApp,
     VisionMatch,
     VisionColor,
+    /// Read text from an immutable image through the optional local OCR provider.
+    VisionOcr,
     InputTap,
     InputSwipe,
     InputKey,
     InputText,
     Touch,
     ResourceRead,
+    ResourceWrite,
     /// Explicit user-authorized package export and GitHub release publishing.
     PackagePublish,
     RunSubmit,
@@ -29,8 +32,6 @@ pub(crate) enum Permission {
     MediaStream,
     LiveConnect,
     NotifySend,
-    /// A managed model connection; does not grant arbitrary network access.
-    AiConnect,
     MediaRead,
     MediaImport,
     MediaRecord,
@@ -48,12 +49,14 @@ impl Permission {
             "device.app" => Ok(Self::DeviceApp),
             "vision.match" => Ok(Self::VisionMatch),
             "vision.color" => Ok(Self::VisionColor),
+            "vision.ocr" => Ok(Self::VisionOcr),
             "input.tap" => Ok(Self::InputTap),
             "input.swipe" => Ok(Self::InputSwipe),
             "input.key" => Ok(Self::InputKey),
             "input.text" => Ok(Self::InputText),
             "touch" => Ok(Self::Touch),
             "resource.read" => Ok(Self::ResourceRead),
+            "resource.write" => Ok(Self::ResourceWrite),
             "package.publish" => Ok(Self::PackagePublish),
             "run.submit" => Ok(Self::RunSubmit),
             "run.control" => Ok(Self::RunControl),
@@ -62,7 +65,7 @@ impl Permission {
             "media.stream" => Ok(Self::MediaStream),
             "live.connect" => Ok(Self::LiveConnect),
             "notify.send" => Ok(Self::NotifySend),
-            "ai.connect" => Ok(Self::AiConnect),
+            "ai.connect" => Err(PermissionError::Retired(value.to_owned())),
             "media.read" => Ok(Self::MediaRead),
             "media.import" => Ok(Self::MediaImport),
             "media.record" => Ok(Self::MediaRecord),
@@ -93,12 +96,14 @@ impl Permission {
             Self::DeviceApp => "device.app",
             Self::VisionMatch => "vision.match",
             Self::VisionColor => "vision.color",
+            Self::VisionOcr => "vision.ocr",
             Self::InputTap => "input.tap",
             Self::InputSwipe => "input.swipe",
             Self::InputKey => "input.key",
             Self::InputText => "input.text",
             Self::Touch => "touch",
             Self::ResourceRead => "resource.read",
+            Self::ResourceWrite => "resource.write",
             Self::PackagePublish => "package.publish",
             Self::RunSubmit => "run.submit",
             Self::RunControl => "run.control",
@@ -107,7 +112,6 @@ impl Permission {
             Self::MediaStream => "media.stream",
             Self::LiveConnect => "live.connect",
             Self::NotifySend => "notify.send",
-            Self::AiConnect => "ai.connect",
             Self::MediaRead => "media.read",
             Self::MediaImport => "media.import",
             Self::MediaRecord => "media.record",
@@ -120,16 +124,16 @@ impl Permission {
     pub(crate) fn domain(self) -> HostApiDomain {
         match self {
             Self::DeviceRead | Self::DeviceApp => HostApiDomain::Device,
-            Self::VisionMatch | Self::VisionColor => HostApiDomain::Vision,
+            Self::VisionMatch | Self::VisionColor | Self::VisionOcr => HostApiDomain::Vision,
             Self::InputTap | Self::InputSwipe | Self::InputKey | Self::InputText => {
                 HostApiDomain::Input
             }
             Self::Touch => HostApiDomain::Touch,
-            Self::ResourceRead | Self::PackagePublish => HostApiDomain::Resource,
-            Self::RunSubmit | Self::RunControl => HostApiDomain::Run,
-            Self::RuntimeSleep | Self::LiveConnect | Self::NotifySend | Self::AiConnect => {
-                HostApiDomain::Runtime
+            Self::ResourceRead | Self::ResourceWrite | Self::PackagePublish => {
+                HostApiDomain::Resource
             }
+            Self::RunSubmit | Self::RunControl => HostApiDomain::Run,
+            Self::RuntimeSleep | Self::LiveConnect | Self::NotifySend => HostApiDomain::Runtime,
             Self::LogWrite => HostApiDomain::Log,
             Self::MediaStream
             | Self::MediaRead
@@ -147,14 +151,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn managed_ai_connection_is_explicit_and_does_not_open_network_permissions() {
-        let permission = Permission::parse("ai.connect").unwrap();
-        assert_eq!(permission, Permission::AiConnect);
-        assert_eq!(permission.as_str(), "ai.connect");
-        assert_eq!(permission.domain(), HostApiDomain::Runtime);
-        let set = PermissionSet::parse(["device.read", "ai.connect"]).unwrap();
-        assert!(set.allows(Permission::AiConnect));
-        assert!(!set.allows(Permission::InputTap));
+    fn retired_model_connection_never_enters_effective_permission_sets() {
+        assert!(matches!(
+            Permission::parse("ai.connect"),
+            Err(PermissionError::Retired(_))
+        ));
+        assert!(PermissionSet::parse(["device.read", "ai.connect"]).is_err());
         assert!(matches!(
             Permission::parse("ai.anything"),
             Err(PermissionError::Unknown(_))
@@ -164,6 +166,12 @@ mod tests {
             Err(PermissionError::Forbidden(_))
         ));
     }
+}
+
+/// Only the immutable installed-manifest reader may retain these declarations
+/// as metadata. They can never be constructed as executable permissions.
+pub(super) fn is_retired_permission(value: &str) -> bool {
+    value.trim() == "ai.connect"
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

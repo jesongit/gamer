@@ -21,7 +21,46 @@ use tokio::{
 
 pub(crate) use crate::capabilities::FrameStamp;
 
+#[derive(Debug, thiserror::Error)]
+#[error("画面或目标已变化，请重新取帧后操作")]
+struct RetiredCapture {
+    stamp: FrameStamp,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PreviewMode {
+    #[default]
+    Single,
+    Grid4,
+    Grid9,
+}
+impl PreviewMode {
+    fn parse(mode: &str) -> anyhow::Result<Self> {
+        match mode {
+            "single" => Ok(Self::Single),
+            "grid4" => Ok(Self::Grid4),
+            "grid9" => Ok(Self::Grid9),
+            _ => anyhow::bail!("未知预览模式"),
+        }
+    }
+    fn limits(self) -> (u32, u32, u8, u32, u32) {
+        match self {
+            Self::Single => (1920, 1080, 80, 1, 30),
+            Self::Grid4 => (960, 540, 60, 3, 10),
+            Self::Grid9 => (640, 360, 55, 5, 6),
+        }
+    }
+    fn interval(self) -> Duration {
+        Duration::from_nanos(1_000_000_000 / self.limits().4 as u64)
+    }
+    fn screencast_params(self) -> Value {
+        let (width, height, quality, every_nth, _) = self.limits();
+        json!({"format":"jpeg","quality":quality,"maxWidth":width,"maxHeight":height,"everyNthFrame":every_nth})
+    }
+}
+
 pub struct CdpSession {
+    pointer_guard: Arc<super::pointer_lock::PointerLockGuard>,
     pub id: String,
     pub target_id: String,
     epoch: String,
@@ -40,11 +79,20 @@ pub struct CdpSession {
     stream_gate: Mutex<()>,
     preview_active: AtomicBool,
     recording_active: AtomicBool,
+    output_consumers: std::sync::atomic::AtomicUsize,
+    preview_mode: parking_lot::RwLock<PreviewMode>,
     held_contact: Mutex<Option<(u64, FrameStamp)>>,
     size: parking_lot::RwLock<(u32, u32)>,
     viewport: parking_lot::RwLock<(f64, f64)>,
+    #[cfg(test)]
+    capture_revision_changes: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    capture_attempts: std::sync::atomic::AtomicUsize,
 }
 impl CdpSession {
+    pub fn validate_preview_mode(mode: &str) -> anyhow::Result<()> {
+        PreviewMode::parse(mode).map(|_| ())
+    }
     #[cfg(test)]
     pub async fn launch(
         target: &BrowserTarget,
@@ -80,11 +128,15 @@ impl CdpSession {
         command
             .args([
                 "--headless=new",
+                // CDP previews carry images only. Never play target audio on the host.
+                "--mute-audio",
                 "--remote-debugging-port=0",
                 "--remote-debugging-address=127.0.0.1",
                 "--no-first-run",
                 "--no-default-browser-check",
                 "--disable-background-mode",
+                "--disable-extensions",
+                "--disable-component-extensions-with-background-pages",
                 "--disable-background-timer-throttling",
                 "--disable-renderer-backgrounding",
             ])
@@ -136,11 +188,31 @@ impl CdpSession {
         let socket = info["webSocketDebuggerUrl"]
             .as_str()
             .ok_or_else(|| anyhow!("浏览器未提供页面连接"))?;
+        let socket_url = reqwest::Url::parse(socket)?;
+        let endpoint = format!(
+            "http://127.0.0.1:{}",
+            socket_url.port().ok_or_else(|| anyhow!("缺少调试端口"))?
+        );
+        let browser = client
+            .get(format!("{endpoint}/json/version"))
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        let pointer_guard = super::pointer_lock::PointerLockGuard::install(
+            browser["webSocketDebuggerUrl"]
+                .as_str()
+                .ok_or_else(|| anyhow!("缺少浏览器调试连接"))?,
+            info["id"].as_str().unwrap_or_default(),
+        )
+        .await?;
         let transport = Transport::connect(socket).await?;
         transport.call("Page.enable", json!({})).await?;
         transport.call("Runtime.enable", json!({})).await?;
+        Self::deny_desktop_pointer_lock(&transport).await?;
         transport.call("Emulation.setDeviceMetricsOverride", json!({"width":target.width,"height":target.height,"deviceScaleFactor":1,"mobile":false})).await?;
         let session = Arc::new(Self {
+            pointer_guard,
             id: target.id.clone(),
             target_id: info["id"].as_str().unwrap_or_default().into(),
             epoch: uuid::Uuid::new_v4().to_string(),
@@ -165,9 +237,15 @@ impl CdpSession {
             stream_gate: Mutex::new(()),
             preview_active: AtomicBool::new(false),
             recording_active: AtomicBool::new(false),
+            output_consumers: std::sync::atomic::AtomicUsize::new(0),
+            preview_mode: parking_lot::RwLock::new(PreviewMode::Single),
             held_contact: Mutex::new(None),
             size: parking_lot::RwLock::new((target.width, target.height)),
             viewport: parking_lot::RwLock::new((target.width as f64, target.height as f64)),
+            #[cfg(test)]
+            capture_revision_changes: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            capture_attempts: std::sync::atomic::AtomicUsize::new(0),
         });
         let nav = session
             .transport
@@ -181,7 +259,7 @@ impl CdpSession {
         Ok(session)
     }
     #[cfg(test)]
-    pub(super) async fn evaluate_for_test(&self, expression: &str) -> Value {
+    pub(crate) async fn evaluate_for_test(&self, expression: &str) -> Value {
         self.transport
             .call(
                 "Runtime.evaluate",
@@ -190,6 +268,28 @@ impl CdpSession {
             .await
             .unwrap()["result"]["value"]
             .clone()
+    }
+    async fn deny_desktop_pointer_lock(transport: &Transport) -> anyhow::Result<()> {
+        // Remote pointer coordinates belong to this page. A hidden target must
+        // never acquire the server's physical desktop cursor. Deny natively so
+        // navigation, subframes and popup documents share the same boundary.
+        transport
+            .call(
+                "Browser.setPermission",
+                json!({
+                    "permission":{"name":"pointer-lock"},"setting":"denied"
+                }),
+            )
+            .await
+            .map_err(|error| anyhow!("无法隔离后台网页的鼠标锁定，请更新浏览器: {error}"))?;
+        // Also relinquish a lock held by an already loaded document when rebinding.
+        transport
+            .call(
+                "Runtime.evaluate",
+                json!({"expression":"document.exitPointerLock()"}),
+            )
+            .await?;
+        Ok(())
     }
     pub async fn pages(&self) -> anyhow::Result<Vec<Value>> {
         ensure!(self.is_alive(), "浏览器已断开");
@@ -224,6 +324,7 @@ impl CdpSession {
         .await?;
         transport.call("Page.enable", json!({})).await?;
         transport.call("Runtime.enable", json!({})).await?;
+        Self::deny_desktop_pointer_lock(&transport).await?;
         let (width, height) = self.size();
         transport
             .call(
@@ -233,9 +334,11 @@ impl CdpSession {
             .await?;
         self.closed.store(true, Ordering::SeqCst);
         self.transport.revision.fetch_add(1, Ordering::SeqCst);
+        self.transport.cancel_reload_dialogs();
         drop(_gate);
         self.release_inputs().await;
         Ok(Arc::new(Self {
+            pointer_guard: self.pointer_guard.clone(),
             id: self.id.clone(),
             target_id: target_id.into(),
             epoch: uuid::Uuid::new_v4().to_string(),
@@ -254,17 +357,26 @@ impl CdpSession {
             stream_gate: Mutex::new(()),
             preview_active: AtomicBool::new(false),
             recording_active: AtomicBool::new(false),
+            output_consumers: std::sync::atomic::AtomicUsize::new(0),
+            preview_mode: parking_lot::RwLock::new(*self.preview_mode.read()),
             held_contact: Mutex::new(None),
             size: parking_lot::RwLock::new((width, height)),
             viewport: parking_lot::RwLock::new((width as f64, height as f64)),
+            #[cfg(test)]
+            capture_revision_changes: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            capture_attempts: std::sync::atomic::AtomicUsize::new(0),
         }))
     }
     pub(super) fn invalidate(&self) {
         self.closed.store(true, Ordering::SeqCst);
         self.transport.revision.fetch_add(1, Ordering::SeqCst);
+        self.transport.cancel_reload_dialogs();
     }
     pub fn is_alive(&self) -> bool {
-        !self.closed.load(Ordering::SeqCst) && self.transport.alive.load(Ordering::SeqCst)
+        !self.closed.load(Ordering::SeqCst)
+            && self.transport.alive.load(Ordering::SeqCst)
+            && self.pointer_guard.is_alive()
     }
     pub fn stamp(&self) -> FrameStamp {
         FrameStamp {
@@ -290,6 +402,13 @@ impl CdpSession {
         ensure!(*stamp == self.stamp(), "画面或目标已变化，请重新取帧后操作");
         Ok(())
     }
+    /// Preparation uses the same navigation-safe, read-only capture boundary.
+    /// Inputs always retain strict validation against their original frame.
+    pub(crate) async fn capture_for_prepare(&self) -> anyhow::Result<()> {
+        self.capture_with_timeout(Duration::from_secs(10))
+            .await
+            .map(|_| ())
+    }
     async fn ready(&self) -> anyhow::Result<()> {
         ensure!(self.is_alive(), "浏览器目标已断开");
         let state = self
@@ -308,68 +427,357 @@ impl CdpSession {
         );
         Ok(())
     }
+    /// The captured surface includes non-overlay scrollbars. LayoutMetrics'
+    /// clientWidth/clientHeight exclude them and cannot describe that bitmap.
+    /// Keep full CSS viewport dimensions separate from image pixel dimensions.
+    async fn full_viewport(&self) -> anyhow::Result<(f64, f64, f64, f64)> {
+        let value = self.transport.call("Runtime.evaluate", json!({
+            "expression":"({width:window.innerWidth,height:window.innerHeight,pageX:window.scrollX,pageY:window.scrollY,scale:window.visualViewport?.scale??1})",
+            "returnByValue":true,
+        })).await?;
+        let viewport = &value["result"]["value"];
+        let w = viewport["width"]
+            .as_f64()
+            .ok_or_else(|| anyhow!("页面宽度无效"))?;
+        let h = viewport["height"]
+            .as_f64()
+            .ok_or_else(|| anyhow!("页面高度无效"))?;
+        let x = viewport["pageX"]
+            .as_f64()
+            .ok_or_else(|| anyhow!("页面横向偏移无效"))?;
+        let y = viewport["pageY"]
+            .as_f64()
+            .ok_or_else(|| anyhow!("页面纵向偏移无效"))?;
+        ensure!(
+            w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0 && x.is_finite() && y.is_finite(),
+            "页面尺寸无效"
+        );
+        ensure!(
+            viewport["scale"].as_f64() == Some(1.0),
+            "预览坐标映射无效，请恢复页面缩放后重新连接"
+        );
+        Ok((w, h, x, y))
+    }
     pub async fn start_preview(
         &self,
     ) -> anyhow::Result<tokio::sync::watch::Receiver<Option<Arc<ScreencastFrame>>>> {
         let _stream = self.stream_gate.lock().await;
-        let frames = self.start_stream().await?;
-        self.preview_active.store(true, Ordering::SeqCst);
-        Ok(frames)
+        self.start_preview_locked().await
     }
-    async fn start_stream(
+    pub async fn start_preview_with_mode(
+        &self,
+        mode: &str,
+    ) -> anyhow::Result<tokio::sync::watch::Receiver<Option<Arc<ScreencastFrame>>>> {
+        let mode = PreviewMode::parse(mode)?;
+        let _stream = self.stream_gate.lock().await;
+        *self.preview_mode.write() = mode;
+        self.start_preview_locked().await
+    }
+    async fn start_preview_locked(
         &self,
     ) -> anyhow::Result<tokio::sync::watch::Receiver<Option<Arc<ScreencastFrame>>>> {
         ensure!(self.is_alive(), "浏览器目标已断开");
-        // Restart also requests a fresh image of a static page after navigation.
+        self.preview_active.store(true, Ordering::SeqCst);
+        let result = if self.is_full_resolution_active() {
+            let current = self
+                .transport
+                .frames
+                .borrow()
+                .as_ref()
+                .is_some_and(|frame| {
+                    frame.revision == self.transport.revision.load(Ordering::SeqCst)
+                        && frame.generation
+                            == self.transport.stream_generation.load(Ordering::SeqCst)
+                });
+            if current {
+                let mut frames = self.transport.frames.subscribe();
+                frames.mark_changed();
+                Ok(frames)
+            } else {
+                // A static recorder may still cache pixels from before a
+                // viewport change. Restart its original-resolution producer;
+                // subscribing again cannot turn old pixels into a new frame.
+                self.start_stream(true).await
+            }
+        } else {
+            self.start_stream(false).await
+        };
+        if result.is_err() {
+            self.preview_active.store(false, Ordering::SeqCst);
+        }
+        result
+    }
+    pub async fn configure_preview(&self, mode: &str) -> anyhow::Result<()> {
+        let mode = PreviewMode::parse(mode)?;
+        let _stream = self.stream_gate.lock().await;
+        ensure!(self.is_alive(), "浏览器目标已断开");
+        let changed = *self.preview_mode.read() != mode;
+        *self.preview_mode.write() = mode;
+        if changed && self.is_preview_active() && !self.is_full_resolution_active() {
+            self.start_stream(false).await?;
+        }
+        Ok(())
+    }
+    pub fn preview_interval(&self) -> Duration {
+        self.preview_mode.read().interval()
+    }
+    pub fn is_preview_active(&self) -> bool {
+        self.preview_active.load(Ordering::SeqCst)
+    }
+    pub fn is_recording_active(&self) -> bool {
+        self.recording_active.load(Ordering::SeqCst)
+    }
+    fn is_full_resolution_active(&self) -> bool {
+        self.is_recording_active() || self.output_consumers.load(Ordering::SeqCst) > 0
+    }
+    pub(super) fn has_stream_consumers(&self) -> bool {
+        self.is_preview_active() || self.is_full_resolution_active()
+    }
+    pub fn can_idle(&self) -> bool {
+        self.runs.load(Ordering::SeqCst) == 0
+            && !self.has_stream_consumers()
+            && self.viewer.try_lock().is_ok()
+            && self.stream_gate.try_lock().is_ok()
+            && self.gate.try_lock().is_ok()
+    }
+    async fn start_stream(
+        &self,
+        recording: bool,
+    ) -> anyhow::Result<tokio::sync::watch::Receiver<Option<Arc<ScreencastFrame>>>> {
+        ensure!(self.is_alive(), "浏览器目标已断开");
+        // Restart requests a fresh image of static pages as well. Keep the
+        // Emulation viewport untouched: preview resolution is not input size.
+        // A website popup may have foregrounded a different tab. Restore only
+        // this session's explicit binding; new tabs still require user selection.
+        self.transport.call("Page.bringToFront", json!({})).await?;
+        self.transport.reset_stream(false);
         self.transport
             .call("Page.stopScreencast", json!({}))
             .await?;
-        self.transport.frames.send_replace(None);
-        let frames = self.transport.frames.subscribe();
-        self.transport
-            .call(
-                "Page.startScreencast",
-                json!({"format":"jpeg","quality":80,"everyNthFrame":1}),
-            )
-            .await?;
+        self.transport.reset_stream(true);
+        let mut frames = self.transport.frames.subscribe();
+        let params = if recording {
+            // Recording always owns the original viewport and original JPEG
+            // quality. Its subscription can never inherit a grid thumbnail.
+            json!({"format":"jpeg","quality":80,"everyNthFrame":1})
+        } else {
+            self.preview_mode.read().screencast_params()
+        };
+        if let Err(error) = self.transport.call("Page.startScreencast", params).await {
+            self.transport.reset_stream(false);
+            return Err(error);
+        }
+        // Chrome counts the first static compositor image toward everyNthFrame,
+        // so a grid stream can discard its only image. Bootstrap once from the
+        // precise screenshot path; subsequent updates still come from CDP.
+        let fresh = tokio::time::timeout(Duration::from_millis(350), async {
+            loop {
+                if frames.borrow().is_some() {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                frames.changed().await?;
+            }
+        })
+        .await;
+        if !matches!(fresh, Ok(Ok(()))) {
+            // A refresh can still be loading or change documents while the
+            // bootstrap PNG is captured. The producer and bound CDP session
+            // remain valid: await its next frame instead of closing the viewer.
+            let before = self.stamp();
+            if self.ready().await.is_err() && self.is_alive() {
+                frames.mark_changed();
+                return Ok(frames);
+            }
+            if let Err(error) = self.bootstrap_static_frame(recording).await {
+                if self.is_alive() && before != self.stamp() {
+                    frames.mark_changed();
+                    return Ok(frames);
+                }
+                self.stop_stream().await;
+                return Err(error);
+            }
+        }
+        // The bootstrap wait calls changed(), which marks the first native
+        // image as seen. A returned static stream must still deliver that image
+        // to consumers that check has_changed() before borrowing it.
+        frames.mark_changed();
         Ok(frames)
+    }
+    async fn bootstrap_static_frame(&self, recording: bool) -> anyhow::Result<()> {
+        let generation = self.transport.stream_generation.load(Ordering::SeqCst);
+        let metrics = self
+            .transport
+            .call("Page.getLayoutMetrics", json!({}))
+            .await?;
+        ensure!(
+            metrics["cssVisualViewport"]["scale"].as_f64() == Some(1.0),
+            "预览坐标映射无效，请恢复页面缩放后重新连接"
+        );
+        let (png, stamp) = self.capture().await?;
+        let mode = *self.preview_mode.read();
+        let (width, height) = self.size();
+        let (max_width, max_height, quality, _, _) = mode.limits();
+        let data = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+            let mut image = image::load_from_memory(&png)?;
+            if !recording && (image.width() > max_width || image.height() > max_height) {
+                image = image.thumbnail(max_width, max_height);
+            }
+            let mut jpeg = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(
+                &mut jpeg,
+                if recording { 80 } else { quality },
+            )
+            .encode_image(&image)?;
+            Ok(base64::engine::general_purpose::STANDARD.encode(jpeg))
+        })
+        .await??;
+        self.validate(&stamp)?;
+        ensure!(
+            generation == self.transport.stream_generation.load(Ordering::SeqCst),
+            "预览模式已变化，请等待新画面"
+        );
+        // Do not overwrite a newer native frame that arrived during encoding.
+        let bootstrap = Arc::new(ScreencastFrame {
+            data,
+            metadata: json!({"deviceWidth":width,"deviceHeight":height,"pageScaleFactor":1.0,"offsetTop":0.0,"timestamp":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64()}),
+            revision: stamp.revision,
+            generation,
+        });
+        self.transport.frames.send_if_modified(move |latest| {
+            if latest.is_some() {
+                false
+            } else {
+                *latest = Some(bootstrap);
+                true
+            }
+        });
+        Ok(())
     }
     pub async fn start_recording(
         &self,
     ) -> anyhow::Result<tokio::sync::watch::Receiver<Option<Arc<ScreencastFrame>>>> {
         let _stream = self.stream_gate.lock().await;
-        ensure!(
-            !self.recording_active.load(Ordering::SeqCst),
-            "目标正在录制"
-        );
-        let frames = if self.preview_active.load(Ordering::SeqCst) {
-            self.transport.frames.subscribe()
-        } else {
-            self.start_stream().await?
-        };
+        ensure!(self.is_alive(), "浏览器目标已断开");
+        ensure!(!self.is_recording_active(), "目标正在录制");
         self.recording_active.store(true, Ordering::SeqCst);
-        Ok(frames)
+        let result = self.start_stream(true).await;
+        if result.is_err() {
+            self.recording_active.store(false, Ordering::SeqCst);
+        }
+        result
     }
     pub async fn stop_recording(&self) {
         let _stream = self.stream_gate.lock().await;
         self.recording_active.store(false, Ordering::SeqCst);
-        if !self.preview_active.load(Ordering::SeqCst) {
+        if self.is_full_resolution_active() {
+            return;
+        }
+        if self.is_preview_active() {
+            if self.start_stream(false).await.is_err() {
+                self.stop_stream().await;
+            }
+        } else {
             self.stop_stream().await;
         }
+    }
+    pub(crate) async fn refresh_recording(
+        &self,
+    ) -> anyhow::Result<tokio::sync::watch::Receiver<Option<Arc<ScreencastFrame>>>> {
+        let _stream = self.stream_gate.lock().await;
+        ensure!(self.is_recording_active(), "浏览器录制已结束");
+        self.full_stream_subscription().await
     }
     pub async fn stop_preview(&self) {
         let _stream = self.stream_gate.lock().await;
         self.preview_active.store(false, Ordering::SeqCst);
-        if !self.recording_active.load(Ordering::SeqCst) {
+        if !self.is_full_resolution_active() {
+            self.stop_stream().await;
+        }
+    }
+    pub(crate) async fn start_media_output(
+        &self,
+    ) -> anyhow::Result<tokio::sync::watch::Receiver<Option<Arc<ScreencastFrame>>>> {
+        let _stream = self.stream_gate.lock().await;
+        ensure!(self.is_alive(), "浏览器目标已断开");
+        let already_full = self.is_full_resolution_active();
+        self.output_consumers.fetch_add(1, Ordering::SeqCst);
+        let result = if already_full {
+            self.full_stream_subscription().await
+        } else {
+            self.start_stream(true).await
+        };
+        if result.is_err() {
+            self.output_consumers.fetch_sub(1, Ordering::SeqCst);
+        }
+        result
+    }
+    pub(crate) async fn refresh_media_output(
+        &self,
+    ) -> anyhow::Result<tokio::sync::watch::Receiver<Option<Arc<ScreencastFrame>>>> {
+        let _stream = self.stream_gate.lock().await;
+        ensure!(
+            self.output_consumers.load(Ordering::SeqCst) > 0,
+            "浏览器输出已结束"
+        );
+        loop {
+            match self.full_stream_subscription().await {
+                Err(error) if self.is_alive() && inactive_page_during_navigation(&error) => {
+                    // A reload briefly retires Chrome's active document while
+                    // this explicitly bound target and CDP socket stay alive.
+                    // Keep the media lease and the encoder's last frame; retry
+                    // this same producer without accepting any stale input.
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                result => return result,
+            }
+        }
+    }
+    async fn full_stream_subscription(
+        &self,
+    ) -> anyhow::Result<tokio::sync::watch::Receiver<Option<Arc<ScreencastFrame>>>> {
+        let current = self
+            .transport
+            .frames
+            .borrow()
+            .as_ref()
+            .is_some_and(|frame| {
+                frame.revision == self.transport.revision.load(Ordering::SeqCst)
+                    && frame.generation == self.transport.stream_generation.load(Ordering::SeqCst)
+            });
+        if current {
+            let mut frames = self.transport.frames.subscribe();
+            frames.mark_changed();
+            Ok(frames)
+        } else {
+            self.start_stream(true).await
+        }
+    }
+    pub(crate) fn release_media_output_count(&self) {
+        let _ = self
+            .output_consumers
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                count.checked_sub(1)
+            });
+    }
+    pub(crate) async fn reconcile_media_output(&self) {
+        let _stream = self.stream_gate.lock().await;
+        if self.is_full_resolution_active() {
+            return;
+        }
+        if self.is_preview_active() {
+            if self.start_stream(false).await.is_err() {
+                self.stop_stream().await;
+            }
+        } else {
             self.stop_stream().await;
         }
     }
     async fn stop_stream(&self) {
+        self.transport.reset_stream(false);
         let _ = self.transport.call("Page.stopScreencast", json!({})).await;
-        self.transport.frames.send_replace(None);
     }
     pub async fn preview_stamp(&self, frame: &ScreencastFrame) -> anyhow::Result<FrameStamp> {
-        let _gate = self.gate.lock().await;
+        self.validate_stream_frame(frame)?;
         let stamp = FrameStamp {
             revision: frame.revision,
             ..self.stamp()
@@ -389,16 +797,31 @@ impl CdpSession {
         let size = image::ImageReader::new(std::io::Cursor::new(bytes))
             .with_guessed_format()?
             .into_dimensions()?;
-        // No preview downscaling: manual and automation coordinates share the
-        // same full-resolution viewport. Never silently reinterpret a crop.
+        let coordinates = (w.round() as u32, h.round() as u32);
+        // CDP maxWidth/maxHeight scale the whole image. Metadata still describes
+        // the original viewport; never adopt thumbnail dimensions as coordinates.
         ensure!(
-            size == (w.round() as u32, h.round() as u32),
-            "预览尺寸与页面不一致，请重新连接"
+            valid_preview_dimensions(size, coordinates),
+            "预览比例与页面不一致，请重新连接"
         );
-        let changed = *self.viewport.read() != (w, h) || self.size() != size;
         self.validate(&stamp)?;
-        *self.viewport.write() = (w, h);
-        *self.size.write() = size;
+        self.validate_stream_frame(frame)?;
+        // Stable pixels are a read-only observation. Do not wait behind CDP
+        // input round trips merely to present the same coordinate space.
+        // Input still acquires the gate and revalidates its original stamp.
+        if self.size() == coordinates {
+            return Ok(stamp);
+        }
+        // A coordinate mutation still shares the input/capture barrier. Recheck
+        // after waiting: no old frame may be relabelled with a new revision.
+        let _gate = self.gate.lock().await;
+        self.validate(&stamp)?;
+        self.validate_stream_frame(frame)?;
+        let changed = self.size() != coordinates;
+        // Screencast metadata describes image dimensions, while viewport stores
+        // CSS input dimensions established by the same full-surface capture.
+        // A pixel-size change still retires this frame and bootstraps a new one.
+        *self.size.write() = coordinates;
         if changed {
             self.transport
                 .revision
@@ -409,15 +832,119 @@ impl CdpSession {
                     Ordering::SeqCst,
                 )
                 .map_err(|_| anyhow!("页面已变化，请等待新画面"))?;
-            return Ok(FrameStamp {
-                revision: stamp.revision + 1,
-                ..stamp
-            });
+            // The coordinate mapping has changed, so this cached frame keeps
+            // its original revision and cannot be relabelled for input. The
+            // viewer observes the revision change and restarts the producer
+            // before presenting a newly captured image.
+            anyhow::bail!("画面尺寸已变化，请等待新画面");
         }
         Ok(stamp)
     }
+    pub(crate) fn validate_stream_frame(&self, frame: &ScreencastFrame) -> anyhow::Result<()> {
+        ensure!(
+            frame.generation == self.transport.stream_generation.load(Ordering::SeqCst),
+            "预览模式已变化，请等待新画面"
+        );
+        Ok(())
+    }
+    pub async fn preview_image(
+        &self,
+        frame: &ScreencastFrame,
+    ) -> anyhow::Result<(String, (u32, u32), FrameStamp)> {
+        let stamp = self.preview_stamp(frame).await?;
+        let mode = *self.preview_mode.read();
+        let (max_width, max_height, quality, _, _) = mode.limits();
+        let bytes = base64::engine::general_purpose::STANDARD.decode(&frame.data)?;
+        let size = image::ImageReader::new(std::io::Cursor::new(&bytes))
+            .with_guessed_format()?
+            .into_dimensions()?;
+        let (data, size) = if size.0 > max_width || size.1 > max_height {
+            // A recorder needs the unscaled producer. Only its viewer copy is
+            // resized; the shared frame and recording bytes remain untouched.
+            tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                let image = image::load_from_memory(&bytes)?.thumbnail(max_width, max_height);
+                let size = (image.width(), image.height());
+                let mut jpeg = Vec::new();
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, quality)
+                    .encode_image(&image)?;
+                Ok((base64::engine::general_purpose::STANDARD.encode(jpeg), size))
+            })
+            .await??
+        } else {
+            (frame.data.clone(), size)
+        };
+        self.validate(&stamp)?;
+        self.validate_stream_frame(frame)?;
+        ensure!(
+            *self.preview_mode.read() == mode,
+            "预览模式已变化，请等待新画面"
+        );
+        Ok((data, size, stamp))
+    }
+    /// Retire an interrupted screenshot rather than returning bytes labelled
+    /// with a newer revision. Only this read-only operation may retry.
     pub async fn capture(&self) -> anyhow::Result<(Vec<u8>, FrameStamp)> {
+        self.capture_with_timeout(Duration::from_secs(20)).await
+    }
+    async fn capture_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> anyhow::Result<(Vec<u8>, FrameStamp)> {
+        tokio::time::timeout(timeout, async {
+            loop {
+                ensure!(self.is_alive(), "浏览器目标已断开");
+                match self.capture_once().await {
+                    Ok(frame) => return Ok(frame),
+                    Err(error) if self.can_retry_retired_capture(&error) => {
+                        tracing::debug!(%error, target = %self.id, "截图期间页面变化，丢弃过期截图并重新取帧");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        })
+        .await
+        .map_err(|_| anyhow!("等待稳定页面截图超时，请检查页面是否持续跳转"))?
+    }
+    fn can_retry_retired_capture(&self, error: &anyhow::Error) -> bool {
+        let Some(retired) = error.downcast_ref::<RetiredCapture>() else {
+            return false;
+        };
+        let current = self.stamp();
+        self.is_alive()
+            && current.target == retired.stamp.target
+            && current.epoch == retired.stamp.epoch
+            && current.revision != retired.stamp.revision
+    }
+    fn validate_capture_stamp(&self, stamp: &FrameStamp) -> anyhow::Result<()> {
+        ensure!(self.is_alive(), "浏览器目标已断开");
+        if *stamp != self.stamp() {
+            return Err(RetiredCapture {
+                stamp: stamp.clone(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+    #[cfg(test)]
+    pub(crate) fn invalidate_next_captures_for_test(&self, count: usize) {
+        self.capture_revision_changes.store(count, Ordering::SeqCst);
+    }
+    #[cfg(test)]
+    pub(crate) fn capture_attempts_for_test(&self) -> usize {
+        self.capture_attempts.load(Ordering::SeqCst)
+    }
+    #[cfg(test)]
+    pub(crate) async fn capture_with_timeout_for_test(
+        &self,
+        timeout: Duration,
+    ) -> anyhow::Result<(Vec<u8>, FrameStamp)> {
+        self.capture_with_timeout(timeout).await
+    }
+    async fn capture_once(&self) -> anyhow::Result<(Vec<u8>, FrameStamp)> {
         let _gate = self.gate.lock().await;
+        #[cfg(test)]
+        self.capture_attempts.fetch_add(1, Ordering::SeqCst);
         tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 if self.ready().await.is_ok() {
@@ -431,33 +958,32 @@ impl CdpSession {
         .await
         .map_err(|_| anyhow!("等待页面就绪超时"))??;
         let stamp = self.stamp();
-        let metrics = self
-            .transport
-            .call("Page.getLayoutMetrics", json!({}))
-            .await?;
-        let viewport = &metrics["cssVisualViewport"];
-        let w = viewport["clientWidth"]
-            .as_f64()
-            .unwrap_or(self.size().0 as f64);
-        let h = viewport["clientHeight"]
-            .as_f64()
-            .unwrap_or(self.size().1 as f64);
-        ensure!(w > 0.0 && h > 0.0, "页面尺寸无效");
+        let (w, h, x, y) = self.full_viewport().await?;
         let value = self
             .transport
             .call(
                 "Page.captureScreenshot",
-                json!({"format":"png","captureBeyondViewport":false,"clip":{"x":viewport["pageX"].as_f64().unwrap_or(0.0),"y":viewport["pageY"].as_f64().unwrap_or(0.0),"width":w,"height":h,"scale":1}}),
+                json!({"format":"png","captureBeyondViewport":false,"clip":{"x":x,"y":y,"width":w,"height":h,"scale":1}}),
             )
             .await?;
-        self.validate(&stamp)?;
+        #[cfg(test)]
+        if self
+            .capture_revision_changes
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                count.checked_sub(1)
+            })
+            .is_ok()
+        {
+            self.transport.revision.fetch_add(1, Ordering::SeqCst);
+        }
+        self.validate_capture_stamp(&stamp)?;
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(value["data"].as_str().ok_or_else(|| anyhow!("截图为空"))?)?;
         ensure!(bytes.len() <= 24 * 1024 * 1024, "截图超过大小上限");
         let size = image::ImageReader::new(std::io::Cursor::new(&bytes))
             .with_guessed_format()?
             .into_dimensions()?;
-        self.validate(&stamp)?;
+        self.validate_capture_stamp(&stamp)?;
         let changed = *self.viewport.read() != (w, h) || self.size() != size;
         *self.viewport.write() = (w, h);
         *self.size.write() = size;
@@ -471,12 +997,33 @@ impl CdpSession {
                     Ordering::SeqCst,
                     Ordering::SeqCst,
                 )
-                .map_err(|_| anyhow!("页面已变化，请重新取帧"))?;
+                .map_err(|_| RetiredCapture {
+                    stamp: stamp.clone(),
+                })?;
             stamp.revision += 1;
         }
-        self.validate(&stamp)?;
+        self.validate_capture_stamp(&stamp)?;
         Ok((bytes, stamp))
     }
+    /// Reload only this explicitly bound CDP page. Keep the control lease and
+    /// retire old coordinates before navigation, even if the viewport is unchanged.
+    pub async fn reload(&self, expected: Option<&FrameStamp>) -> anyhow::Result<()> {
+        let _admission = self.controls.admit(&self.id).await?;
+        let _gate = self.gate.lock().await;
+        ensure!(self.is_alive(), "浏览器目标已断开");
+        if let Some(expected) = expected {
+            self.validate(expected)?;
+        }
+        self.release_locked().await;
+        let revision = self.transport.revision.fetch_add(1, Ordering::SeqCst) + 1;
+        self.transport.reload_checked(revision).await?;
+        // Reload acknowledgement completes this action. Loading and visual
+        // readiness belong to subsequent wait/observation steps. The transport
+        // keeps this explicit reload's beforeunload permission until its main
+        // navigation commits (or its bounded scope fails), including late dialogs.
+        Ok(())
+    }
+
     pub async fn input(&self, value: &Value, expected: Option<&FrameStamp>) -> anyhow::Result<()> {
         let _admission = self.controls.admit(&self.id).await?;
         let _gate = self.gate.lock().await;
@@ -545,14 +1092,8 @@ impl CdpSession {
                 let y = value["y"].as_f64().ok_or_else(|| anyhow!("缺少坐标 y"))?;
                 let (width, height) = self.size();
                 let (vw, vh) = *self.viewport.read();
-                let metrics = self
-                    .transport
-                    .call("Page.getLayoutMetrics", json!({}))
-                    .await?;
-                let current = &metrics["cssVisualViewport"];
-                if current["clientWidth"].as_f64() != Some(vw)
-                    || current["clientHeight"].as_f64() != Some(vh)
-                {
+                let (current_width, current_height, _, _) = self.full_viewport().await?;
+                if current_width != vw || current_height != vh {
                     self.transport.revision.fetch_add(1, Ordering::SeqCst);
                     anyhow::bail!("坐标映射已变化，请重新取帧");
                 }
@@ -745,6 +1286,13 @@ impl CdpSession {
         self.release_locked().await;
     }
     async fn release_locked(&self) {
+        let _ = self
+            .transport
+            .call(
+                "Runtime.evaluate",
+                json!({"expression":"document.exitPointerLock()"}),
+            )
+            .await;
         self.held_contact.lock().await.take();
         let keys: Vec<_> = self.keys.lock().await.drain().map(|(_, key)| key).collect();
         for name in keys {
@@ -782,6 +1330,8 @@ impl CdpSession {
     pub async fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
         self.transport.revision.fetch_add(1, Ordering::SeqCst);
+        self.transport.cancel_reload_dialogs();
+        self.transport.reset_stream(false);
         let _ = tokio::time::timeout(Duration::from_secs(2), self.release_inputs()).await;
         let _ = tokio::time::timeout(
             Duration::from_secs(2),
@@ -796,7 +1346,87 @@ impl CdpSession {
             let _ = child.kill().await;
         }
     }
+    /// Caller holds the viewer mutex and BrowserManager admission gate. Do not
+    /// wait for a capture: activity observed now must restart the idle timeout.
+    pub(super) async fn try_idle_close(&self) -> bool {
+        let Ok(_stream) = self.stream_gate.try_lock() else {
+            return false;
+        };
+        let Ok(gate) = self.gate.try_lock() else {
+            return false;
+        };
+        if !self.is_alive() || self.has_stream_consumers() || self.runs.load(Ordering::SeqCst) != 0
+        {
+            return false;
+        }
+        if self
+            .controls
+            .when_idle(&self.id, || self.closed.store(true, Ordering::SeqCst))
+            .is_none()
+        {
+            return false;
+        }
+        drop(gate);
+        self.close().await;
+        true
+    }
 }
+
+fn inactive_page_during_navigation(error: &anyhow::Error) -> bool {
+    serde_json::from_str::<Value>(&error.to_string()).is_ok_and(|error| {
+        error["code"].as_i64() == Some(-32000)
+            && error["message"].as_str() == Some("Not attached to an active page")
+    })
+}
+
+#[cfg(test)]
+mod media_refresh_error_tests {
+    use super::*;
+
+    #[test]
+    fn only_inactive_bound_document_is_a_retryable_media_refresh_error() {
+        assert!(inactive_page_during_navigation(&anyhow::Error::msg(
+            r#"{"code":-32000,"message":"Not attached to an active page"}"#
+        )));
+        for message in [
+            r#"{"code":-32000,"message":"Target closed"}"#,
+            r#"{"code":-32601,"message":"Not attached to an active page"}"#,
+            "browser target disconnected",
+            "预览坐标映射无效，请恢复页面缩放后重新连接",
+            "CDP operation timed out: Page.startScreencast",
+        ] {
+            assert!(
+                !inactive_page_during_navigation(&anyhow!(message.to_owned())),
+                "{message}"
+            );
+        }
+    }
+}
+
+fn valid_preview_dimensions(preview: (u32, u32), coordinates: (u32, u32)) -> bool {
+    preview.0 > 0
+        && preview.1 > 0
+        && preview.0 <= coordinates.0
+        && preview.1 <= coordinates.1
+        && (preview.0 as i64 * coordinates.1 as i64 - preview.1 as i64 * coordinates.0 as i64).abs()
+            <= coordinates.0.max(coordinates.1) as i64
+}
+
+#[cfg(test)]
+#[path = "preview_tests.rs"]
+mod preview_tests;
+
+#[cfg(test)]
+#[path = "small_preview_tests.rs"]
+mod small_preview_tests;
+
+#[cfg(test)]
+#[path = "input_bounds_tests.rs"]
+mod input_bounds_tests;
+
+#[cfg(test)]
+#[path = "pointer_lock_tests.rs"]
+mod pointer_lock_tests;
 
 fn browser_profile_argument(path: &std::path::Path) -> String {
     let value = path.to_string_lossy();

@@ -43,6 +43,17 @@ impl ResourceLease {
 /// `packages/<package>/plugins/<plugin>/` 前缀内。
 #[async_trait]
 pub trait ResourceService: Send + Sync {
+    /// Trusted host-side immutable resource bytes, scoped like an ordinary
+    /// resource. Used for private candidate execution without publishing files.
+    async fn freeze_bytes(
+        &self,
+        _id: &ResourceId,
+        _bytes: Vec<u8>,
+    ) -> CapabilityResult<ResourceHandle> {
+        Err(super::CapabilityError::Unavailable(
+            "资源宿主不支持私有冻结内容",
+        ))
+    }
     /// Release a frozen lease after its owning run; ordinary resource handles are unaffected.
     fn release_frozen(&self, _resource: ResourceHandle) {}
     /// Immutable content lease, so an in-flight run never reads a half-updated resource.

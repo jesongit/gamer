@@ -15,5 +15,5 @@ pub use events::{EventSink, NullEventSink, RuntimeEvent, RuntimeEventKind};
 )]
 pub use models::{
     AndroidPackageId, AndroidPackageName, AppContext, AppPackageId, ContentPackageId, DeviceId,
-    ModelError, ResourceId, RunContext, RunId, RunPayload, RunRequest,
+    ExecutionPolicy, ModelError, ResourceId, RunContext, RunId, RunPayload, RunRequest,
 };

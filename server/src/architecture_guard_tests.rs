@@ -30,7 +30,7 @@
 //!   与 `real_keymap_guest_consumes_user_profile_yaml`（真实 fixture guest），
 //!   此处不重复造轮子。
 //! - §14.7 v3-Only Guard（P12.9）：全仓生产源码（含 extensions/）禁现
-//!   `script_v2` / `load_v2` / `CompatibleYaml` 标识符——YAML v2 已删除，
+//!   `script_v2` / `load_v2` / `CompatibleYaml` 标识符——YAML 已删除，
 //!   防止 parser/runtime/兼容分支以任何形式回流（计划 §16.1 先导）。
 
 use std::io::Write as _;
@@ -221,6 +221,7 @@ const BOUNDARY_ALLOWS: &[Allow] = &[
 /// legacy 表 SQL 字符串。**schema v1 日志列名，更名属数据迁移另案**；除此之外
 /// 新增的任何 `script_id` 出现都会被本测试拦下复核。
 const SCRIPT_ID_ALLOWS: &[Allow] = &[
+    Allow { file: "mcp_core_tests.rs", snippet: "script_id: \"default/test.yaml\".into()", reason: "MCP history pagination test constructs RunRecord compatibility display field only" },
     Allow { file: "store/journal.rs", snippet: "script_id: \"p/example\".into()", reason: "journal test constructs RunRecord compatibility display field" },
     Allow { file: "store/journal.rs", snippet: "INSERT INTO logs(time,device_id,script_id,level,msg)", reason: "v4 migration test verifies historical log rows are preserved" },
     // —— run_manager.rs：RunRecord 兼容展示字段 + busy/日志映射 + 测试 ——
@@ -362,6 +363,11 @@ const SCRIPT_ID_ALLOWS: &[Allow] = &[
         reason: "cfg(test)：Trace HTTP 夹具构造现有 RunRecord 展示字段，不解释脚本语义",
     },
     Allow {
+        file: "api/tests/runs.rs",
+        snippet: "script_id: \"p/daily\".into()",
+        reason: "cfg(test)：任务历史 HTTP 夹具填充现有 RunRecord 展示字段，不解释脚本语义",
+    },
+    Allow {
         file: "capabilities/adapters/run.rs",
         snippet: "record.run_id, record.script_id",
         reason: "capability run.submit 冲突消息映射（busy 展示字段透传）",
@@ -470,6 +476,16 @@ const DEPENDENCY_ALLOWS: &[Allow] = &[
         snippet: "extensions::gamer_yaml::generation::GenerationService::new",
         reason: "组合根：装配扩展所有的离线候选服务；Core 不解释生成或脚本逻辑",
     },
+    Allow {
+        file: "main.rs",
+        snippet: "extensions::gamer_yaml::YAML_EXTENSION_ID",
+        reason: "组合根：用扩展自有 ID 装配显式 MCP 语义 handler",
+    },
+    Allow {
+        file: "main.rs",
+        snippet: "extensions::gamer_yaml::external_tools::YamlTools::new",
+        reason: "组合根：仅注册扩展自有工具适配；Core 不解释 YAML 或工作稿语义",
+    },
     // —— 生产：组合根（main.rs 的 RuntimeServices::start）是唯一装配点 ——
     Allow {
         file: "main.rs",
@@ -572,7 +588,7 @@ fn architecture_guard_dependency_direction_core_never_paths_into_extension_inter
 // §14.7 v3-Only Guard（P12.9 / 计划 §16.1 先导）
 // ===========================================================================
 
-/// YAML v2 删除后的防回归禁符：生产源码任何位置（含 extensions/ 内容目录）
+/// YAML 删除后的防回归禁符：生产源码任何位置（含 extensions/ 内容目录）
 /// 不得再出现 v2 parser / 兼容装载器的标识符。历史档案（ADR / 计划 /
 /// PITFALLS / docs）不在源码扫描范围；本守卫文件自身豁免（禁符清单即定义处）。
 const V3_ONLY_BANNED: &[&str] = &["script_v2", "load_v2", "CompatibleYaml"];
@@ -622,7 +638,7 @@ fn architecture_guard_v3_only_bans_v2_identifiers_in_all_sources() {
             for token in V3_ONLY_BANNED {
                 if line.contains(token) {
                     violations.push(format!(
-                        "{}:{}: YAML v2 标识符 {:?} 回流（v2 已删除，ADR-YAML-01；如属历史注释请改写，禁止以代码/路径/类型形态出现）
+                        "{}:{}: YAML 标识符 {:?} 回流（v2 已删除，ADR-YAML-01；如属历史注释请改写，禁止以代码/路径/类型形态出现）
     {}",
                         file.display(),
                         no + 1,
@@ -921,6 +937,7 @@ fn gamer_yaml_archive() -> Vec<u8> {
         writer
             .write_all(crate::extensions::gamer_yaml::YAML_EXTENSION_MANIFEST_TOML.as_bytes())
             .unwrap();
+        crate::extensions::gamer_yaml::external_schemas::append_schemas(&mut writer);
         writer.start_file("plugin.wasm", options).unwrap();
         writer.write_all(b"\0asm\x01\0\0\0").unwrap();
         writer.start_file("ui/plugin.js", options).unwrap();
@@ -1501,7 +1518,7 @@ async fn architecture_guard_isolation_yaml_task_survives_extension_absence_and_r
 
     // 保存脚本资源（Package API；gamer-yaml 扩展钩子已注册 = V1 校验生效，
     // 内容为 V1 直接通过）后派发进入执行层：202 + run 记录（不再 424）。
-    let script = "version: 2\nrun:
+    let script = "run:
   - log: guard isolation
 ";
     let (status, created) = post_json(

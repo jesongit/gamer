@@ -223,6 +223,18 @@ fn select_release(releases: &Value, beta: bool) -> Result<&Value, String> {
         .ok_or_else(|| "当前通道尚无公开的官方插件列表".into())
 }
 
+pub(crate) fn retired_catalog_entry(raw: &Value) -> bool {
+    raw["id"] == "gamer-ai"
+        || raw["execution"]["builtin_id"] == "gamer-ai"
+        || raw["permissions"].as_array().is_some_and(|permissions| {
+            permissions.iter().any(|permission| {
+                permission
+                    .as_str()
+                    .is_some_and(super::permissions::is_retired_permission)
+            })
+        })
+}
+
 fn parse_entries(
     doc: &Value,
     release: Option<&Value>,
@@ -238,6 +250,11 @@ fn parse_entries(
     for raw in plugins {
         let id = raw["id"].as_str().ok_or("插件缺少 id")?;
         super::ExtensionId::parse(id).map_err(|e| e.to_string())?;
+        // Old bundled/remote catalogs remain immutable; retired executable
+        // features must not reappear as install candidates from those catalogs.
+        if retired_catalog_entry(raw) {
+            continue;
+        }
         let version_text = raw["version"].as_str().ok_or("插件缺少版本")?;
         let version = Version::parse(version_text).map_err(|e| e.to_string())?;
         if !beta && !version.pre.is_empty() {
@@ -326,6 +343,43 @@ fn verify_archive(bytes: &[u8], size: u64, hash: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn retired_ai_is_filtered_from_old_catalogs_without_rewriting_them() {
+        let document = json!({"schema_version":2,"plugins":[{"id":"gamer-ai"}]});
+        let original = document.clone();
+        assert!(parse_entries(&document, None, Path::new("unused"), true)
+            .unwrap()
+            .is_empty());
+        assert_eq!(document, original);
+    }
+
+    #[test]
+    fn retired_permissions_and_builtin_are_filtered_without_hiding_other_wasm_plugins() {
+        for metadata in [
+            json!({"permissions":["resource.read", " ai.connect "]}),
+            json!({"execution":{"kind":"builtin","builtin_id":"gamer-ai"}}),
+        ] {
+            let mut doc = document("1.0.0");
+            for (key, value) in metadata.as_object().unwrap() {
+                doc["plugins"][0][key] = value.clone();
+            }
+            let original = doc.clone();
+            assert!(parse_entries(&doc, None, Path::new("unused"), true)
+                .unwrap()
+                .is_empty());
+            assert_eq!(doc, original);
+        }
+        let mut doc = document("1.0.0");
+        doc["plugins"][0]["id"] = "gamer-ai-1helper".into();
+        doc["plugins"][0]["download_url"] = "/plugins/gamer-ai-1helper-1.0.0.gplugin".into();
+        assert_eq!(
+            parse_entries(&doc, None, Path::new("unused"), true)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 
     fn document(version: &str) -> Value {
         json!({"schema_version":2,"plugins":[{

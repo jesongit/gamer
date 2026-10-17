@@ -353,12 +353,74 @@ function Reset-AdbServer {
     }
 }
 
+function Get-BackendBrowserSnapshot($Backends) {
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -in @('chrome.exe', 'msedge.exe') })
+    foreach ($root in @($all | Where-Object {
+        $_.ParentProcessId -in @($Backends.Id) -and $_.CommandLine -match '--headless' -and
+        $_.CommandLine -match '--user-data-dir=' -and $_.CommandLine -notmatch '--type='
+    })) {
+        $parent = @($Backends | Where-Object { $_.Id -eq $root.ParentProcessId })[0]
+        if ($root.CreationDate -lt $parent.StartTime) { continue }
+        $family = @($root)
+        do {
+            $ids = @($family.ProcessId)
+            $next = @($all | Where-Object { $_.ParentProcessId -in $ids -and $_.ProcessId -notin $ids -and $_.CreationDate -ge $root.CreationDate })
+            $family += $next
+        } while ($next.Count -gt 0)
+        [pscustomobject]@{ Root = $root; Family = $family }
+    }
+}
+
+function Close-BackendBrowsers($Snapshots) {
+    foreach ($snapshot in @($Snapshots)) {
+        $root = $snapshot.Root
+        $current = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $root.ProcessId) -ErrorAction SilentlyContinue
+        if ($current -and $current.CreationDate -eq $root.CreationDate -and $current.CommandLine -eq $root.CommandLine) {
+            # Graceful CDP close flushes the existing profile. Only inspect ports
+            # owned by the exact browser captured from this backend's children.
+            foreach ($endpoint in @(Get-NetTCPConnection -OwningProcess $root.ProcessId -State Listen -ErrorAction SilentlyContinue |
+                Where-Object { $_.LocalAddress -eq '127.0.0.1' })) {
+                $socket = $null; $deadline = $null
+                try {
+                    $info = Invoke-RestMethod -Uri ("http://127.0.0.1:{0}/json/version" -f $endpoint.LocalPort) -TimeoutSec 2 -ErrorAction Stop
+                    $uri = [uri]$info.webSocketDebuggerUrl
+                    if ($uri.Scheme -ne 'ws' -or $uri.Host -ne '127.0.0.1' -or $uri.Port -ne $endpoint.LocalPort -or $uri.AbsolutePath -notlike '/devtools/browser/*') { continue }
+                    $socket = New-Object System.Net.WebSockets.ClientWebSocket
+                    $socket.Options.Proxy = $null
+                    $deadline = New-Object System.Threading.CancellationTokenSource(3000)
+                    $null = $socket.ConnectAsync($uri, $deadline.Token).GetAwaiter().GetResult()
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes('{"id":1,"method":"Browser.close","params":{}}')
+                    $segment = New-Object 'System.ArraySegment[byte]' -ArgumentList @(,$bytes)
+                    $null = $socket.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $deadline.Token).GetAwaiter().GetResult()
+                    $process = Get-Process -Id $root.ProcessId -ErrorAction SilentlyContinue
+                    if ($process) { $null = $process.WaitForExit(5000) }
+                    break
+                } catch {} finally {
+                    if ($socket) { $socket.Dispose() }
+                    if ($deadline) { $deadline.Dispose() }
+                }
+            }
+        }
+        # A forced backend exit can leave browser children behind. PID plus
+        # creation time prevents cleanup from reaching a newly reused process.
+        foreach ($owned in @($snapshot.Family | Sort-Object CreationDate -Descending)) {
+            $remaining = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $owned.ProcessId) -ErrorAction SilentlyContinue
+            if ($remaining -and $remaining.CreationDate -eq $owned.CreationDate -and $remaining.CommandLine -eq $owned.CommandLine) {
+                Write-Host ("后端: 清理所属浏览器进程 PID {0}" -f $owned.ProcessId)
+                Stop-Process -Id $owned.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
 function Stop-Backend {
     $procs = @(Get-BackendProcs)
     if ($procs.Count -eq 0) {
         Write-Host "后端: 当前仓库没有运行中的 gamer-server 进程" -ForegroundColor Yellow
         return $false
     }
+    $browsers = @(Get-BackendBrowserSnapshot $procs)
     # 优雅停机：先调 /api/shutdown 让服务端拆 scrcpy 会话/清 adb reverse 隧道再退出
     # （硬杀会留孤儿 adb 子进程，曾致 adb 短暂楔死后续连接，见 AGENTS.md 已知坑）。
     # 阶段 2 起该接口要求回环 + X-Admin-Token 头——令牌由 Start-Backend 注入 server
@@ -388,6 +450,7 @@ function Stop-Backend {
         Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Milliseconds 500
+    if (@(Get-BackendProcs).Count -eq 0) { Close-BackendBrowsers $browsers }
     if (Test-PortListening $Port) {
         Write-Host "后端: 端口 $Port 仍被占用（可能为其他程序）：" -ForegroundColor Red
         Get-PortOwner $Port | ForEach-Object { Write-Host $_ }

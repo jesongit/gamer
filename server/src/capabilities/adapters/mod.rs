@@ -15,7 +15,7 @@ mod touch;
 mod vision;
 
 pub(crate) use device::DeviceAdapter;
-pub(crate) use frame::{FrameAdapter, FrameStore};
+pub(crate) use frame::{encode_frame_png, FrameAdapter, FrameStore};
 pub(crate) use input::InputAdapter;
 pub(crate) use log::LogAdapter;
 pub(crate) use resource::ResourceAdapter;

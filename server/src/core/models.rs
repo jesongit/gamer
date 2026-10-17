@@ -265,6 +265,55 @@ impl Default for RunPayload {
     }
 }
 
+/// A frozen delegation accepted by the host. It contains no bearer secret and
+/// does not expire with the initiating HTTP request or credential. Runners
+/// must explicitly support it and enforce its effect restrictions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionPolicy {
+    token_id: String,
+    allowed_plugins: std::collections::BTreeSet<String>,
+    scopes: std::collections::BTreeSet<String>,
+}
+impl ExecutionPolicy {
+    pub(crate) const TASK_KEY: &str = "gamer.core.external_execution";
+    pub(crate) fn external(
+        token_id: String,
+        allowed_plugins: std::collections::BTreeSet<String>,
+        scopes: std::collections::BTreeSet<String>,
+    ) -> Self {
+        Self {
+            token_id,
+            allowed_plugins,
+            scopes,
+        }
+    }
+    pub(crate) fn is_external(&self) -> bool {
+        true
+    }
+    pub(crate) fn allows_plugin(&self, id: &str) -> bool {
+        self.allowed_plugins.contains(id) || self.allowed_plugins.contains("*")
+    }
+    pub(crate) fn has_scope(&self, scope: &str) -> bool {
+        self.scopes.contains(scope)
+    }
+    pub(crate) fn from_task_extensions(value: &serde_json::Value) -> anyhow::Result<Option<Self>> {
+        value
+            .get(Self::TASK_KEY)
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(Into::into)
+    }
+    pub(crate) fn store_in_task(&self, value: &mut serde_json::Value) -> anyhow::Result<()> {
+        value
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("Task extensions must be an object"))?
+            .insert(Self::TASK_KEY.into(), serde_json::to_value(self)?);
+        Ok(())
+    }
+}
+
 /// Generic request accepted by any runner implementation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RunRequest {
@@ -273,6 +322,9 @@ pub struct RunRequest {
     pub runner_id: String,
     pub entrypoint: String,
     pub payload: RunPayload,
+    /// Trusted in-process admission only. JSON cannot construct this field.
+    #[serde(skip)]
+    pub execution_policy: Option<ExecutionPolicy>,
 }
 
 impl<'de> Deserialize<'de> for RunRequest {
@@ -315,6 +367,7 @@ impl RunRequest {
             runner_id: runner_id.into(),
             entrypoint: entrypoint.into(),
             payload,
+            execution_policy: None,
         };
         request.validate()?;
         Ok(request)
@@ -339,6 +392,11 @@ impl RunRequest {
         }
         validate_request_field("runner_id", &self.runner_id)?;
         validate_request_field("entrypoint", &self.entrypoint)
+    }
+
+    pub(crate) fn with_execution_policy(mut self, policy: ExecutionPolicy) -> Self {
+        self.execution_policy = Some(policy);
+        self
     }
 }
 
@@ -592,6 +650,44 @@ mod tests {
         json["device_id"] = serde_json::json!("device-2");
 
         assert!(serde_json::from_value::<RunRequest>(json).is_err());
+    }
+
+    #[test]
+    fn execution_policy_cannot_be_supplied_or_leaked_by_run_request_json() {
+        let policy = ExecutionPolicy::external(
+            "delegating-token".into(),
+            ["gamer-yaml".into()].into(),
+            ["run.submit".into()].into(),
+        );
+        let request = RunRequest::for_app(app(), "gamer-yaml", "daily", RunPayload::default())
+            .unwrap()
+            .with_execution_policy(policy.clone());
+        let mut wire = serde_json::to_value(&request).unwrap();
+        assert!(wire.get("execution_policy").is_none());
+        wire["execution_policy"] = serde_json::to_value(policy).unwrap();
+        let untrusted: RunRequest = serde_json::from_value(wire).unwrap();
+        assert!(untrusted.execution_policy.is_none());
+    }
+
+    #[test]
+    fn frozen_task_delegation_preserves_other_metadata_and_rejects_malformed_authority() {
+        let policy = ExecutionPolicy::external(
+            "delegating-token".into(),
+            ["gamer-yaml".into()].into(),
+            ["run.submit".into()].into(),
+        );
+        let mut metadata = serde_json::json!({"unknown":{"revision":87}});
+        policy.store_in_task(&mut metadata).unwrap();
+        assert_eq!(metadata["unknown"]["revision"], 87);
+        let restored = ExecutionPolicy::from_task_extensions(&metadata)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored, policy);
+        assert!(restored.allows_plugin("gamer-yaml"));
+        assert!(!restored.allows_plugin("gamer-notify"));
+        assert!(!restored.has_scope("notify.send"));
+        metadata[ExecutionPolicy::TASK_KEY]["extra_grant"] = true.into();
+        assert!(ExecutionPolicy::from_task_extensions(&metadata).is_err());
     }
 
     #[test]

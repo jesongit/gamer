@@ -7,6 +7,7 @@ fn trace_run(id: &str, device: &str, finished: bool) -> RunRecord {
         device_id: device.into(),
         runner_id: "gamer-yaml".into(),
         entrypoint: "p/main.yaml".into(),
+        content_package: Some("p".into()),
         script_id: "p/main.yaml".into(),
         source: RunSource::Manual,
         task_id: None,

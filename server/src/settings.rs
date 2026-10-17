@@ -43,6 +43,8 @@ impl From<&crate::config::AuthConfig> for LoginSettings {
 #[serde(deny_unknown_fields)]
 pub struct SystemSettings {
     pub idle_power_secs: u64,
+    #[serde(default)]
+    pub browser_idle_secs: u64,
     pub log_retain_days: u32,
     pub compute_max_concurrency: u32,
     pub auth: LoginSettings,
@@ -52,6 +54,7 @@ impl SystemSettings {
     pub fn from_config(cfg: &Config) -> Self {
         Self {
             idle_power_secs: cfg.idle_power_secs,
+            browser_idle_secs: cfg.browser_idle_secs,
             log_retain_days: cfg.log_retain_days,
             compute_max_concurrency: cfg.compute_max_concurrency,
             auth: (&cfg.auth).into(),
@@ -61,6 +64,9 @@ impl SystemSettings {
     pub fn validate(&self) -> Result<(), String> {
         if self.idle_power_secs > 604800 {
             return Err("空闲省电时间须在 0～604800 秒之间".into());
+        }
+        if self.browser_idle_secs > 604800 {
+            return Err("浏览器空闲回收时间须在 0～604800 秒之间".into());
         }
         if self.log_retain_days > 36500 {
             return Err("日志保留天数须在 0～36500 之间".into());
@@ -167,6 +173,7 @@ impl Config {
             .map_err(|e| SaveError::Io(e.into()))?;
         for (key, number) in [
             ("idle_power_secs", values.idle_power_secs),
+            ("browser_idle_secs", values.browser_idle_secs),
             ("log_retain_days", values.log_retain_days as u64),
             (
                 "compute_max_concurrency",
@@ -218,12 +225,14 @@ mod tests {
         let before = cfg.settings_view().unwrap();
         let mut updated = before.saved.clone();
         updated.idle_power_secs = 90;
+        updated.browser_idle_secs = 120;
         updated.log_retain_days = 0;
         updated.compute_max_concurrency = 2;
         let result = cfg
             .save_settings(updated.clone(), &before.revision)
             .unwrap();
         assert_eq!(consumer.current_settings().idle_power_secs, 90);
+        assert_eq!(consumer.current_settings().browser_idle_secs, 120);
         assert_eq!(consumer.current_settings().log_retain_days, 0);
         assert_eq!(result.active.compute_max_concurrency, 0);
         assert!(result.restart_required);
@@ -247,6 +256,7 @@ mod tests {
         ));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), disk);
         assert_eq!(consumer.current_settings().idle_power_secs, 90);
+        assert_eq!(consumer.current_settings().browser_idle_secs, 120);
         // Failed persistence must not publish new live settings.
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
@@ -255,5 +265,24 @@ mod tests {
             Err(SaveError::Io(_))
         ));
         assert_eq!(consumer.current_settings().idle_power_secs, 90);
+        assert_eq!(consumer.current_settings().browser_idle_secs, 120);
+    }
+
+    #[test]
+    fn browser_reclamation_is_disabled_by_default_and_validates_before_save() {
+        let defaults = SystemSettings::from_config(&Config::default());
+        assert_eq!(defaults.browser_idle_secs, 0);
+        let old = serde_json::to_value(&defaults).unwrap();
+        let mut missing = old.clone();
+        missing.as_object_mut().unwrap().remove("browser_idle_secs");
+        assert_eq!(
+            serde_json::from_value::<SystemSettings>(missing)
+                .unwrap()
+                .browser_idle_secs,
+            0
+        );
+        let mut invalid = defaults;
+        invalid.browser_idle_secs = 604801;
+        assert!(invalid.validate().unwrap_err().contains("浏览器空闲回收"));
     }
 }

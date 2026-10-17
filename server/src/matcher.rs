@@ -68,11 +68,6 @@ impl DecodedFrame {
         }
     }
 
-    /// Content identity independent of PNG compression/metadata.
-    pub fn pixel_sha256(&self) -> String {
-        format!("{:x}", Sha256::digest(self.rgb.as_raw()))
-    }
-
     pub fn dimensions(&self) -> (u32, u32) {
         self.rgb.dimensions()
     }

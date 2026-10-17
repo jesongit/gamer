@@ -1,11 +1,18 @@
 //! Browser I/O only. Websites, login, queues and game workflows belong to YAML.
+mod pointer_lock;
 mod session;
 mod transport;
 use crate::{config::Config, store::Db};
 use serde::{Deserialize, Serialize};
 pub(crate) use session::{CdpSession, FrameStamp};
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::Mutex;
+pub(crate) use transport::ScreencastFrame;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,7 +55,9 @@ pub struct BrowserManager {
     pub db: Db,
     cfg: Config,
     sessions: parking_lot::RwLock<HashMap<String, Arc<CdpSession>>>,
-    gate: Mutex<()>,
+    gates: parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    shutting_down: std::sync::atomic::AtomicBool,
+    idle: parking_lot::Mutex<HashMap<String, IdleTimer>>,
     pub events: tokio::sync::broadcast::Sender<crate::core::RuntimeEvent>,
     pub controls: Arc<crate::core::control::ControlRegistry>,
 }
@@ -62,7 +71,9 @@ impl BrowserManager {
             db,
             cfg,
             sessions: Default::default(),
-            gate: Mutex::new(()),
+            gates: Default::default(),
+            shutting_down: std::sync::atomic::AtomicBool::new(false),
+            idle: Default::default(),
             events: tokio::sync::broadcast::channel(256).0,
             controls,
         }
@@ -81,8 +92,18 @@ impl BrowserManager {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("浏览器尚未连接"))
     }
+    fn lifecycle_gate(&self, id: &str) -> Arc<Mutex<()>> {
+        self.gates.lock().entry(id.into()).or_default().clone()
+    }
     pub async fn prepare(&self, id: &str) -> anyhow::Result<Arc<CdpSession>> {
-        let _gate = self.gate.lock().await;
+        let gate = self.lifecycle_gate(id);
+        let _gate = gate.lock().await;
+        anyhow::ensure!(
+            !self.shutting_down.load(std::sync::atomic::Ordering::SeqCst),
+            "服务正在关闭"
+        );
+        // Explicitly reconnecting is activity, even if Chrome is still alive.
+        self.idle.lock().remove(id);
         if let Ok(session) = self.session(id) {
             if session.is_alive() {
                 return Ok(session);
@@ -109,17 +130,37 @@ impl BrowserManager {
         Ok(session)
     }
     async fn close_inner(&self, id: &str) {
+        self.idle.lock().remove(id);
         let session = self.sessions.write().remove(id);
         if let Some(session) = session {
             session.close().await;
         }
+    }
+    pub(crate) async fn output_stream(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<(
+        Arc<CdpSession>,
+        tokio::sync::watch::Receiver<Option<Arc<transport::ScreencastFrame>>>,
+    )> {
+        let gate = self.lifecycle_gate(id);
+        let _gate = gate.lock().await;
+        anyhow::ensure!(
+            !self.shutting_down.load(std::sync::atomic::Ordering::SeqCst),
+            "服务正在关闭"
+        );
+        let session = self.session(id)?;
+        let frames = session.start_media_output().await?;
+        self.idle.lock().remove(id);
+        Ok((session, frames))
     }
     pub async fn close(
         &self,
         id: &str,
         runs: &crate::run_manager::RunManager,
     ) -> anyhow::Result<()> {
-        let _gate = self.gate.lock().await;
+        let gate = self.lifecycle_gate(id);
+        let _gate = gate.lock().await;
         anyhow::ensure!(runs.active_for_device(id).is_none(), "目标正在执行任务");
         if let Ok(s) = self.session(id) {
             anyhow::ensure!(
@@ -135,19 +176,28 @@ impl BrowserManager {
         target: BrowserTarget,
         runs: &crate::run_manager::RunManager,
     ) -> anyhow::Result<()> {
-        let _gate = self.gate.lock().await;
-        anyhow::ensure!(
-            runs.active_for_device(&target.id).is_none(),
-            "目标正在执行任务"
-        );
-        anyhow::ensure!(
-            self.session(&target.id).is_err(),
-            "请先关闭浏览器再修改配置"
-        );
-        if let Ok(old) = self.get(&target.id) {
+        let gate = self.lifecycle_gate(&target.id);
+        let _gate = gate.lock().await;
+        let old = self.get(&target.id).ok();
+        if let Some(old) = &old {
             anyhow::ensure!(
                 old.profile_id == target.profile_id,
                 "已有目标的账号资料 ID 不可变更，请新增目标"
+            );
+        }
+        // A display-name change does not touch the bound page, its viewport,
+        // or its input lease. Only connection settings require a closed target.
+        let metadata_only = old.as_ref().is_some_and(|old| {
+            old.url == target.url && old.width == target.width && old.height == target.height
+        });
+        if !metadata_only {
+            anyhow::ensure!(
+                runs.active_for_device(&target.id).is_none(),
+                "目标正在执行任务"
+            );
+            anyhow::ensure!(
+                self.session(&target.id).is_err(),
+                "请先关闭浏览器再修改网址或画面尺寸"
             );
         }
         self.db.save_browser_target(target)
@@ -157,7 +207,8 @@ impl BrowserManager {
         id: &str,
         runs: &crate::run_manager::RunManager,
     ) -> anyhow::Result<()> {
-        let _gate = self.gate.lock().await;
+        let gate = self.lifecycle_gate(id);
+        let _gate = gate.lock().await;
         anyhow::ensure!(runs.active_for_device(id).is_none(), "目标正在执行任务");
         anyhow::ensure!(self.session(id).is_err(), "请先关闭浏览器再删除目标");
         self.db.delete_browser_target(id)
@@ -168,19 +219,126 @@ impl BrowserManager {
         page: &str,
         runs: &crate::run_manager::RunManager,
     ) -> anyhow::Result<()> {
-        let _gate = self.gate.lock().await;
+        let gate = self.lifecycle_gate(id);
+        let _gate = gate.lock().await;
         anyhow::ensure!(runs.active_for_device(id).is_none(), "目标正在执行任务");
         let old = self.session(id)?;
         let new = old.rebind(page).await?;
         self.sessions.write().insert(id.into(), new);
+        self.idle.lock().remove(id);
         Ok(())
     }
+
+    /// Acquire under the same lifecycle gate as prepare/rebind/reclamation.
+    /// A caller racing process shutdown must retry preparation, rather than
+    /// receiving a lease for an already closing browser.
+    pub(crate) fn acquire(&self, id: &str) -> anyhow::Result<BrowserRunLease> {
+        let gate = self.lifecycle_gate(id);
+        let _gate = gate
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("浏览器连接正在变化，请重新连接后重试"))?;
+        anyhow::ensure!(
+            !self.shutting_down.load(std::sync::atomic::Ordering::SeqCst),
+            "服务正在关闭"
+        );
+        let session = self.session(id)?;
+        anyhow::ensure!(session.is_alive(), "目标已断开");
+        session
+            .runs
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.idle.lock().remove(id);
+        Ok(BrowserRunLease::new(session))
+    }
+
+    /// Only explicit policy enables this. Missing previews never imply that a
+    /// web page has no business activity (for example, a cloud-game queue).
+    pub(crate) async fn reclaim_idle(
+        &self,
+        now: Instant,
+        external_consumer: impl Fn(&str) -> bool,
+    ) {
+        let timeout = self.cfg.current_settings().browser_idle_secs;
+        if timeout == 0 {
+            self.idle.lock().clear();
+            return;
+        }
+        let sessions: Vec<_> = self
+            .sessions
+            .read()
+            .iter()
+            .map(|(id, session)| (id.clone(), session.clone()))
+            .collect();
+        for (id, session) in sessions {
+            // Each target has its own lifecycle gate: batch preparation of a
+            // different target cannot make this target's run acquire fail.
+            let gate = self.lifecycle_gate(&id);
+            let Ok(_gate) = gate.try_lock() else { continue };
+            let timeout = self.cfg.current_settings().browser_idle_secs;
+            if timeout == 0 {
+                self.idle.lock().clear();
+                return;
+            }
+            if !self
+                .session(&id)
+                .is_ok_and(|current| Arc::ptr_eq(&current, &session))
+            {
+                continue;
+            }
+            let busy = external_consumer(&id)
+                || self.controls.status(&id).owner.is_some()
+                || !session.can_idle();
+            let ready = self.idle.lock().entry(id.clone()).or_default().ready(
+                now,
+                Duration::from_secs(timeout),
+                busy,
+            );
+            if !ready {
+                continue;
+            }
+            // Reserve the viewer before checking stream ownership again.
+            // A WebSocket upgrade that already owns it is an active consumer.
+            let Ok(_viewer) = session.viewer.clone().try_lock_owned() else {
+                self.idle.lock().remove(&id);
+                continue;
+            };
+            if external_consumer(&id) || !session.try_idle_close().await {
+                self.idle.lock().remove(&id);
+                continue;
+            }
+            self.sessions.write().remove(&id);
+            self.idle.lock().remove(&id);
+            tracing::info!(target_id = %id, idle_secs = timeout,
+                "idle browser closed; persistent profile retained");
+        }
+    }
     pub async fn shutdown(&self) {
-        let _gate = self.gate.lock().await;
-        let ids: Vec<_> = self.sessions.read().keys().cloned().collect();
+        self.shutting_down
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // Include launches that already own their gate but have not inserted
+        // their session. New prepare/acquire reject the shutdown marker.
+        let ids: Vec<_> = self.gates.lock().keys().cloned().collect();
         for id in ids {
+            let gate = self.lifecycle_gate(&id);
+            let _gate = gate.lock().await;
             self.close_inner(&id).await;
         }
+    }
+}
+
+/// Start conservatively at the first observation after consumers disappear.
+/// This can postpone reclamation by one tick, but never shortens the grace.
+#[derive(Default)]
+struct IdleTimer {
+    since: Option<Instant>,
+}
+impl IdleTimer {
+    fn ready(&mut self, now: Instant, timeout: Duration, busy: bool) -> bool {
+        if busy || timeout.is_zero() {
+            self.since = None;
+            return false;
+        }
+        let since = *self.since.get_or_insert(now);
+        now.saturating_duration_since(since) >= timeout
     }
 }
 
@@ -298,5 +456,9 @@ impl Drop for BrowserRunLease {
     }
 }
 
+#[cfg(test)]
+mod idle_tests;
+#[cfg(test)]
+mod refresh_cleanup_tests;
 #[cfg(test)]
 mod tests;

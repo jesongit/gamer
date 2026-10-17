@@ -426,7 +426,7 @@ mod update_flow_tests {
             &t,
             &sid,
             "forever.yaml",
-            "version: 2\nrun:\n  - log: loop\n",
+            "run:\n  - log: loop\n",
         )
         .await;
         let resp = post_json(
@@ -508,7 +508,7 @@ mod update_flow_tests {
             &t,
             &sid,
             "pre-update.yaml",
-            "version: 2\nrun:\n  - log: pre\n",
+            "run:\n  - log: pre\n",
         )
         .await;
         t.controller.set_status(staged_status("upd-busy"));
@@ -539,7 +539,7 @@ mod update_flow_tests {
             &t,
             &sid,
             "during-update.yaml",
-            "version: 2\nrun:\n  - log: x\n",
+            "run:\n  - log: x\n",
         )
         .await;
     }

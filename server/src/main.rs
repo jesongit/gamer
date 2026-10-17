@@ -26,9 +26,12 @@ mod cron_extension;
 mod deps_probe;
 mod device;
 mod extensions;
+mod external_control;
 mod logging;
 mod maintenance;
 mod matcher;
+mod mcp;
+mod mcp_core;
 mod media;
 mod metrics;
 mod migrations;
@@ -309,6 +312,8 @@ struct RuntimeServices {
     runs: Arc<run_manager::RunManager>,
     scheduler: Arc<scheduler::Scheduler>,
     extensions: Arc<extensions::ExtensionService>,
+    mcp: Arc<mcp::McpService>,
+    external_control: Arc<external_control::ExternalControlService>,
 }
 
 impl RuntimeServices {
@@ -323,7 +328,7 @@ impl RuntimeServices {
         auth: Arc<api::auth::AuthState>,
         update: Arc<update::service::UpdateService>,
     ) -> axum::Router {
-        api::build_router_with_extensions(
+        api::build_router_with_external(
             db,
             self.devices.clone(),
             self.runs.clone(),
@@ -335,6 +340,8 @@ impl RuntimeServices {
             auth,
             update,
             self.extensions.clone(),
+            self.mcp.clone(),
+            self.external_control.clone(),
         )
     }
 }
@@ -369,7 +376,6 @@ impl RuntimeServices {
         // 校验与 gamer-keymap 的方案校验。裸 Core（不注册）时保存不做内容
         // 校验（§8.9 验收锚点）。
         extensions::gamer_yaml::register_resource_handlers(&packages);
-        extensions::video::project::register_resource_handlers(&packages);
         extensions::register_resource_handlers(&packages);
         let viewers: webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -391,27 +397,23 @@ impl RuntimeServices {
             db.clone(),
             runs.clone(),
         );
-        let ai_service = Arc::new(extensions::ai::AiService::new(
-            extensions::ai::Runtime {
-                devices: devices.clone(),
-                packages: packages.clone(),
-                runs: runs.clone(),
-                scheduler: scheduler.clone(),
-                capabilities: capabilities.clone(),
-            },
-            &cfg.data_dir,
-        )?);
-        runs.register_executor(extensions::ai::ID, ai_service.executor());
         let generation_service = Arc::new(
             extensions::gamer_yaml::generation::GenerationService::new(
                 packages.clone(),
                 runs.clone(),
             )
             .with_diagnostics(db.clone())
-            .with_ffmpeg_path(cfg.ffmpeg_path.clone()),
+            .with_event_sink(Arc::new(run_journal::JournalEventSink {
+                db: db.clone(),
+                runs: runs.clone(),
+                viewer: Arc::new(
+                    webrtc::ViewerEventSink::new(viewers.clone())
+                        .with_browsers(devices.browsers.clone()),
+                ),
+            }))
+            .with_devices(devices.clone()),
         );
         generation_service.recover_all()?;
-        generation_service.attach_model_canceller(ai_service.automation_canceller());
         let yaml_registrar = Arc::new(
             extensions::gamer_yaml::timer_yaml::YamlTimerRunnerRegistrar::new(
                 scheduler.clone(),
@@ -420,35 +422,80 @@ impl RuntimeServices {
                 packages.clone(),
             ),
         );
-        let runner_registrar = Arc::new(extensions::CompositeTimerRunnerRegistrar::new(vec![
-            yaml_registrar,
-            ai_service.registrar(),
-        ]));
+        let ocr_service = Arc::new(extensions::ocr::OcrService::new(&cfg.data_dir)?);
+        let live_service = Arc::new(extensions::live::LiveService::new(
+            extensions::live::runtime::Runtime {
+                devices: devices.clone(),
+                packages: packages.clone(),
+                scheduler: scheduler.clone(),
+                runs: runs.clone(),
+                db: db.clone(),
+            },
+            &cfg.data_dir,
+        )?);
         let extensions = Arc::new(
-            extensions::ExtensionService::for_data_root(cfg.data_dir.clone(), capabilities)
-                .with_runner_registrar(runner_registrar)
-                .with_builtin_service(ai_service.clone())
+            extensions::ExtensionService::for_data_root(cfg.data_dir.clone(), capabilities.clone())
+                .with_runner_registrar(yaml_registrar)
+                .with_builtin_service(ocr_service.clone())
                 .with_builtin_service(generation_service.clone())
-                .with_builtin_service(Arc::new(extensions::notify::NotifyService::new(
-                    &cfg.data_dir,
-                )?))
-                .with_builtin_service(Arc::new(extensions::live::LiveService::new(
-                    extensions::live::runtime::Runtime {
-                        devices: devices.clone(),
-                        packages: packages.clone(),
-                        scheduler: scheduler.clone(),
-                        runs: runs.clone(),
-                        db: db.clone(),
-                    },
-                    &cfg.data_dir,
-                )?)),
+                .with_builtin_service(Arc::new(
+                    extensions::notify::NotifyService::new(&cfg.data_dir)?.with_db(db.clone()),
+                ))
+                .with_builtin_service(live_service.clone()),
         );
-        ai_service.attach(&extensions);
+        for (id, handler) in [
+            (
+                extensions::gamer_yaml::YAML_EXTENSION_ID,
+                Arc::new(extensions::gamer_yaml::external_tools::YamlTools::new(
+                    generation_service.clone(),
+                )) as Arc<dyn extensions::ExternalToolHandler>,
+            ),
+            (
+                "gamer-video",
+                Arc::new(extensions::video::sample::external_tools::VideoTools::new(
+                    &cfg.data_dir,
+                )),
+            ),
+            (
+                "gamer-keymap",
+                Arc::new(extensions::KeymapExternalTools::new(packages.clone())),
+            ),
+            (
+                "gamer-ocr",
+                Arc::new(extensions::ocr::external::ExternalTools::new(
+                    ocr_service,
+                    capabilities.clone(),
+                    db.clone(),
+                    packages.clone(),
+                    scheduler.runner_registry(),
+                )),
+            ),
+            (
+                "gamer-live",
+                Arc::new(extensions::live::external::ExternalTools::new(live_service)),
+            ),
+        ] {
+            extensions.register_external_handler(&extensions::ExtensionId::parse(id)?, handler)?;
+        }
         generation_service.attach(&extensions);
-        ai_service.attach_automation(&generation_service);
+        let (mcp, external_control) = mcp_core::assemble(
+            cfg,
+            db.clone(),
+            devices.clone(),
+            packages.clone(),
+            runs.clone(),
+            scheduler.clone(),
+            extensions.clone(),
+            capabilities,
+        )?;
         scheduler.set_result_hook(extensions::notify::task::result_hook(
             Arc::downgrade(&extensions),
             db.clone(),
+        ));
+        runs.set_result_hook(extensions::notify::run::result_hook(
+            Arc::downgrade(&extensions),
+            db.clone(),
+            cfg.data_dir.clone(),
         ));
         let ctx = Self {
             packages,
@@ -457,6 +504,8 @@ impl RuntimeServices {
             runs,
             scheduler,
             extensions,
+            mcp,
+            external_control,
         };
         // 与常规路径一致：在任何设备扫描/保活启动前接入统一 drain，避免
         // activation 后初始化窗口收到 SIGTERM 时漏掉已创建的运行依赖。
@@ -505,18 +554,24 @@ fn slot_drain(slot: DrainSlot) -> shutdown::DrainFn {
     })
 }
 
-/// 完整初始化后装配真实 drain（RunManager drain → 踢 viewer → 拆 scrcpy 会话）
+/// 完整初始化后装配真实 drain（录制收尾 → 扩展/运行 drain → 踢 viewer → 拆会话）
 fn install_drain(slot: &DrainSlot, ctx: &RuntimeServices) {
     let runs = ctx.runs.clone();
     let viewers = ctx.viewers.clone();
     let devices = ctx.devices.clone();
     let extensions = ctx.extensions.clone();
+    let external_control = ctx.external_control.clone();
+    let recordings = recording::service(&ctx.devices.cfg);
     *slot.write().unwrap() = Some(Arc::new(move || {
         let runs = runs.clone();
         let viewers = viewers.clone();
         let devices = devices.clone();
         let extensions = extensions.clone();
+        let external_control = external_control.clone();
+        let recordings = recordings.clone();
         Box::pin(async move {
+            recordings.shutdown().await;
+            external_control.shutdown().await;
             extensions.shutdown_builtin_service().await;
             shutdown::drain_sessions(runs, viewers, devices).await;
         }) as futures_util::future::BoxFuture<'static, ()>

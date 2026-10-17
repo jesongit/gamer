@@ -81,4 +81,9 @@ pub trait DeviceService: Send + Sync {
     async fn start_app(&self, device: &DeviceHandle, app: &AppId) -> CapabilityResult<()>;
 
     async fn stop_app(&self, device: &DeviceHandle, app: &AppId) -> CapabilityResult<()>;
+
+    /// Return the bound target to its entry point: reload a browser page or
+    /// cold-start the configured Android application. Retire old observations.
+    async fn reset_input(&self, device: &DeviceHandle, app: Option<&AppId>)
+        -> CapabilityResult<()>;
 }

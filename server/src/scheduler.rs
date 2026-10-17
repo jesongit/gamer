@@ -290,6 +290,10 @@ impl Scheduler {
             .map(|run| run.run_id)
     }
 
+    pub(crate) fn active_task_run_id(&self, task_id: &str) -> Option<String> {
+        self.core.active_task_run_id(task_id)
+    }
+
     pub async fn cancel_task(&self, task_id: &str) -> anyhow::Result<()> {
         self.core.cancel_task(task_id, self.runners.clone()).await
     }

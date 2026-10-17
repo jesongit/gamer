@@ -1,31 +1,34 @@
 //! Platform-neutral, process-owned media output. No platform credentials or room semantics.
 use super::stream_mux;
-use crate::{
-    core::ActivityKind,
-    device::{scrcpy::AudioFrame, DeviceManager},
-};
+mod source;
+mod video_folder;
+use crate::device::DeviceManager;
 use anyhow::{bail, ensure, Context, Result};
 use axum::{
-    extract::{Path, State},
     http::{header, StatusCode},
-    response::IntoResponse,
-    routing::get,
-    Router,
+    response::{IntoResponse, Response},
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::{
-    path::PathBuf,
-    process::Stdio,
-    sync::{atomic::Ordering, Arc},
-    time::Duration,
+use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use tokio::{
+    io::AsyncWriteExt,
+    sync::{mpsc, oneshot, watch, Mutex as AsyncMutex},
+    task::JoinHandle,
 };
-use tokio::{io::AsyncWriteExt, sync::watch, task::JoinHandle};
+pub use video_folder::VideoFolderInfo;
+
+pub async fn inspect_video_folder(folder: &str) -> Result<VideoFolderInfo> {
+    video_folder::inspect_video_folder(folder).await
+}
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputRequest {
+    #[serde(default)]
     pub device_id: String,
+    #[serde(default)]
+    pub video_folder: Option<String>,
     #[serde(default = "local_mode")]
     pub mode: String,
     #[serde(default)]
@@ -51,7 +54,15 @@ fn bitrate() -> u32 {
 }
 impl OutputRequest {
     pub fn validate(&self) -> Result<()> {
-        ensure!(!self.device_id.trim().is_empty(), "请选择设备");
+        let device = !self.device_id.trim().is_empty();
+        let folder = self
+            .video_folder
+            .as_deref()
+            .is_some_and(|path| !path.trim().is_empty());
+        ensure!(
+            device ^ folder,
+            "请选择设备或本地视频文件夹，且只能选择一种来源"
+        );
         ensure!((10..=60).contains(&self.fps), "帧率范围为 10–60");
         ensure!(
             (500..=20000).contains(&self.bitrate_kbps),
@@ -78,6 +89,9 @@ impl OutputRequest {
 pub struct OutputStatus {
     pub id: String,
     pub device_id: String,
+    pub source_kind: String,
+    pub video_file: Option<String>,
+    pub video_position_secs: f64,
     pub state: String,
     pub mode: String,
     pub source_url: Option<String>,
@@ -89,13 +103,125 @@ pub struct OutputStatus {
     pub audio: bool,
     pub fps: u32,
     pub bitrate_kbps: u32,
+    pub width: u32,
+    pub height: u32,
+}
+struct SwitchCommand {
+    source: source::Source,
+    reply: oneshot::Sender<Result<OutputStatus>>,
 }
 pub struct OutputHandle {
     pub status: Arc<Mutex<OutputStatus>>,
     stop: watch::Sender<bool>,
     task: JoinHandle<()>,
+    devices: Arc<DeviceManager>,
+    switches: mpsc::Sender<SwitchCommand>,
+    switch_gate: AsyncMutex<()>,
+    playlist: Option<Arc<video_folder::Playlist>>,
+    hls_root: PathBuf,
 }
 impl OutputHandle {
+    /// The trusted host owns the URL and HTTP boundary; Core only reads files
+    /// produced by this active local output.
+    pub async fn local_file(&self, name: &str) -> Response {
+        let segment = name.strip_suffix(".ts").is_some_and(|number| {
+            !number.is_empty()
+                && number.len() <= 20
+                && number.bytes().all(|byte| byte.is_ascii_digit())
+        });
+        if !(name == "index.m3u8" || segment) || self.status.lock().mode != "local" {
+            return local_file_not_found();
+        }
+        if !self.local_available() {
+            return local_file_unavailable();
+        }
+        match tokio::fs::read(self.hls_root.join(name)).await {
+            Ok(data) if self.local_available() => (
+                [
+                    (
+                        header::CONTENT_TYPE,
+                        if segment {
+                            "video/mp2t"
+                        } else {
+                            "application/vnd.apple.mpegurl"
+                        },
+                    ),
+                    (header::CACHE_CONTROL, "no-store"),
+                ],
+                data,
+            )
+                .into_response(),
+            Ok(_) => local_file_unavailable(),
+            Err(_) if name == "index.m3u8" => local_file_unavailable(),
+            Err(_) => local_file_not_found(),
+        }
+    }
+    fn local_available(&self) -> bool {
+        let status = self.status.lock();
+        status.mode == "local"
+            && !["stopped", "failed"].contains(&status.state.as_str())
+            && !self.finished()
+            && !*self.stop.borrow()
+    }
+    pub async fn switch_device(&self, device_id: &str) -> Result<OutputStatus> {
+        let _gate = self.switch_gate.lock().await;
+        ensure!(
+            !self.finished() && !*self.stop.borrow(),
+            "live.output_not_running: 请先在直播助手开始输出"
+        );
+        let current = self.status.lock().clone();
+        if current.source_kind == "device" && current.device_id == device_id {
+            return Ok(current);
+        }
+        // Admission/preparation completes before touching the active producer.
+        // A bad target leaves the old encoder, URL and source untouched.
+        let source = tokio::time::timeout(
+            Duration::from_secs(20),
+            source::Source::start(self.devices.clone(), device_id),
+        )
+        .await
+        .context("live.switch_prepare_timeout: 等待新设备画面超时")??;
+        self.commit_source(source).await
+    }
+    /// Resume the initial folder at its last presented frame, keeping the encoder.
+    pub async fn switch_video_folder(&self) -> Result<OutputStatus> {
+        let _gate = self.switch_gate.lock().await;
+        ensure!(
+            !self.finished() && !*self.stop.borrow(),
+            "live.output_not_running: 输出已结束"
+        );
+        let current = self.status.lock().clone();
+        if current.source_kind == "video_folder" {
+            return Ok(current);
+        }
+        let playlist = self
+            .playlist
+            .clone()
+            .context("live.video_folder_missing: 本次输出没有配置视频文件夹")?;
+        let source = tokio::time::timeout(
+            Duration::from_secs(20),
+            source::Source::start_video_folder(
+                &self.devices.cfg.ffmpeg_path,
+                playlist,
+                current.fps,
+                current.audio,
+            ),
+        )
+        .await
+        .context("live.switch_prepare_timeout: 等待视频文件画面超时")??;
+        self.commit_source(source).await
+    }
+    async fn commit_source(&self, source: source::Source) -> Result<OutputStatus> {
+        let (reply, result) = oneshot::channel();
+        self.switches
+            .send(SwitchCommand { source, reply })
+            .await
+            .map_err(|_| anyhow::anyhow!("live.output_stopped: 输出已结束"))?;
+        tokio::time::timeout(Duration::from_secs(5), result)
+            .await
+            .context("live.switch_timeout: 输出切换超时")?
+            .context("live.output_stopped: 输出已结束")?
+    }
     pub async fn stop(mut self) {
         let _ = self.stop.send(true);
         // The worker owns and reaps its child before completing.
@@ -112,90 +238,66 @@ impl OutputHandle {
         self.task.is_finished()
     }
 }
+fn local_file_not_found() -> Response {
+    (StatusCode::NOT_FOUND, [(header::CACHE_CONTROL, "no-store")]).into_response()
+}
+fn local_file_unavailable() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::RETRY_AFTER, "1"),
+        ],
+    )
+        .into_response()
+}
 impl Drop for OutputHandle {
     fn drop(&mut self) {
         let _ = self.stop.send(true);
     }
 }
-#[derive(Clone)]
-struct SourceFiles {
-    root: PathBuf,
-    token: String,
-}
-async fn source_file(
-    State(files): State<SourceFiles>,
-    Path((token, name)): Path<(String, String)>,
-) -> impl IntoResponse {
-    let segment = name
-        .strip_suffix(".ts")
-        .is_some_and(|n| !n.is_empty() && n.len() <= 20 && n.bytes().all(|b| b.is_ascii_digit()));
-    if token != files.token || !(name == "index.m3u8" || segment) {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    match tokio::fs::read(files.root.join(&name)).await {
-        Ok(data) => (
-            [
-                (
-                    header::CONTENT_TYPE,
-                    if segment {
-                        "video/mp2t"
-                    } else {
-                        "application/vnd.apple.mpegurl"
-                    },
-                ),
-                (header::CACHE_CONTROL, "no-store"),
-            ],
-            data,
-        )
-            .into_response(),
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
-    }
-}
-pub async fn start(devices: Arc<DeviceManager>, req: OutputRequest) -> Result<OutputHandle> {
+pub async fn start(
+    devices: Arc<DeviceManager>,
+    req: OutputRequest,
+    local_source_url: Option<String>,
+) -> Result<OutputHandle> {
     let update_activity = crate::update::barrier::activity().map_err(anyhow::Error::msg)?;
     req.validate()?;
-    ensure!(
-        crate::targets::capabilities(&devices, &req.device_id)?.media_output,
-        "target_capability_unsupported: 当前目标尚不支持音视频输出"
-    );
-    let lease = devices.acquire_activity(&req.device_id, ActivityKind::Extension);
-    // Connection has a bounded startup; later retries run inside the owned worker.
-    tokio::time::timeout(
-        Duration::from_secs(15),
-        devices.connect_device(&req.device_id),
+    let source_url = if req.mode == "local" {
+        let url = local_source_url.context("本机素材模式需要宿主提供访问地址")?;
+        ensure!(!url.trim().is_empty(), "本机素材模式需要宿主提供访问地址");
+        Some(url)
+    } else {
+        None
+    };
+    let playlist = match req.video_folder.as_deref() {
+        Some(folder) if !folder.trim().is_empty() => {
+            Some(video_folder::Playlist::open(folder).await?)
+        }
+        _ => None,
+    };
+    let initial_source = tokio::time::timeout(
+        Duration::from_secs(25),
+        prepare_source(
+            devices.clone(),
+            &req,
+            playlist.clone(),
+            &req.device_id,
+            playlist.is_some(),
+        ),
     )
     .await
-    .context("设备连接超时")??;
+    .context("等待输出设备超时")??;
+    let first = initial_source.frame().context("缺少输出画面")?;
+    // BGR24 VFW scanlines use four-byte alignment; H.264 yuv420p needs
+    // even dimensions. Pad the fixed canvas rather than stretching pixels.
+    let (width, height) = ((first.width + 3) & !3, (first.height + 1) & !1);
     let id = uuid::Uuid::new_v4().simple().to_string();
     let root = devices.cfg.data_dir.join("media-output").join(&id);
     tokio::fs::create_dir_all(&root).await?;
     let (stop, mut stopped) = watch::channel(false);
-    let (source_url, server) = if req.mode == "local" {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let token = uuid::Uuid::new_v4().simple().to_string();
-        let url = format!(
-            "http://127.0.0.1:{}/{token}/index.m3u8",
-            listener.local_addr()?.port()
-        );
-        let app = Router::new()
-            .route("/:token/:name", get(source_file))
-            .with_state(SourceFiles {
-                root: root.clone(),
-                token,
-            });
-        let mut cancel = stop.subscribe();
-        let server = tokio::spawn(async move {
-            let _ = axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    let _ = cancel.changed().await;
-                })
-                .await;
-        });
-        (Some(url), Some(server))
-    } else {
-        (None, None)
-    };
-    let status = Arc::new(Mutex::new(OutputStatus {
+    let (switches, mut switch_rx) = mpsc::channel::<SwitchCommand>(4);
+    let mut initial_status = OutputStatus {
         id,
         device_id: req.device_id.clone(),
         state: "preparing".into(),
@@ -205,24 +307,65 @@ pub async fn start(devices: Arc<DeviceManager>, req: OutputRequest) -> Result<Ou
         audio: req.audio,
         fps: req.fps,
         bitrate_kbps: req.bitrate_kbps,
+        width,
+        height,
         ..Default::default()
-    }));
+    };
+    initial_source.update_status(&mut initial_status);
+    let status = Arc::new(Mutex::new(initial_status));
     let report = status.clone();
     let finished = stop.clone();
+    let worker_devices = devices.clone();
+    let worker_playlist = playlist.clone();
+    let worker_root = root.clone();
     let task = tokio::spawn(async move {
         let _update_activity = update_activity;
-        let _lease = lease;
+        let devices = worker_devices;
+        let root = worker_root;
+        let mut prepared = Some((initial_source, None));
         for attempt in 0..=5 {
             if *stopped.borrow() {
                 break;
             }
-            let result = pump(&devices, &req, &root, &report, &mut stopped).await;
+            let (current_device, folder_active) = {
+                let state = report.lock();
+                (state.device_id.clone(), state.source_kind == "video_folder")
+            };
+            let source = match prepared.take() {
+                Some(source) => Ok(source),
+                None => tokio::select! {
+                    _ = stopped.changed() => break,
+                    source = prepare_source(devices.clone(), &req, worker_playlist.clone(), &current_device, folder_active) => source.map(|source| (source, None)),
+                    command = switch_rx.recv() => match command {
+                        Some(command) if !command.reply.is_closed() => Ok((command.source, Some(command.reply))),
+                        Some(command) => { command.source.stop().await; continue; },
+                        None => break,
+                    },
+                },
+            };
+            let result = match source {
+                Ok((source, reply)) => {
+                    pump(
+                        &devices.cfg.ffmpeg_path,
+                        &req,
+                        &root,
+                        &report,
+                        &mut stopped,
+                        &mut switch_rx,
+                        source,
+                        reply,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
             if *stopped.borrow() {
                 break;
             }
             match result {
                 Ok(()) => break,
                 Err(error) => {
+                    tracing::warn!(%error, attempt, device_id = %current_device, "媒体输出重建编码进程");
                     let mut s = report.lock();
                     s.error = Some(error.to_string());
                     s.state = if attempt == 5 {
@@ -231,30 +374,58 @@ pub async fn start(devices: Arc<DeviceManager>, req: OutputRequest) -> Result<Ou
                         "reconnecting"
                     }
                     .into();
-                    s.reconnects = attempt;
+                    s.reconnects = attempt + 1;
                 }
             }
             if attempt == 5 {
                 break;
             }
-            tokio::select! { _ = stopped.changed() => break, _ = tokio::time::sleep(Duration::from_secs(1 << attempt.min(3))) => {} }
+            tokio::select! {
+                _ = stopped.changed() => break,
+                _ = tokio::time::sleep(Duration::from_secs(1 << attempt.min(3))) => {},
+                command = switch_rx.recv() => match command {
+                    Some(command) if !command.reply.is_closed() => prepared = Some((command.source, Some(command.reply))),
+                    Some(command) => command.source.stop().await,
+                    None => break,
+                },
+            }
         }
         if *stopped.borrow() {
             report.lock().state = "stopped".into();
         }
         let _ = finished.send(true);
-        if let Some(mut server) = server {
-            if tokio::time::timeout(Duration::from_secs(2), &mut server)
-                .await
-                .is_err()
-            {
-                server.abort();
-                let _ = server.await;
-            }
-        }
         let _ = tokio::fs::remove_dir_all(&root).await;
     });
-    Ok(OutputHandle { status, stop, task })
+    Ok(OutputHandle {
+        status,
+        stop,
+        task,
+        devices,
+        switches,
+        switch_gate: AsyncMutex::new(()),
+        playlist,
+        hls_root: root,
+    })
+}
+
+async fn prepare_source(
+    devices: Arc<DeviceManager>,
+    request: &OutputRequest,
+    playlist: Option<Arc<video_folder::Playlist>>,
+    device_id: &str,
+    folder: bool,
+) -> Result<source::Source> {
+    if folder {
+        source::Source::start_video_folder(
+            &devices.cfg.ffmpeg_path,
+            playlist.context("视频文件夹未配置")?,
+            request.fps,
+            request.audio,
+        )
+        .await
+    } else {
+        source::Source::start(devices, device_id).await
+    }
 }
 
 async fn write_packet(stdin: &mut tokio::process::ChildStdin, data: &[u8]) -> Result<()> {
@@ -265,88 +436,40 @@ async fn write_packet(stdin: &mut tokio::process::ChildStdin, data: &[u8]) -> Re
 }
 
 async fn pump(
-    devices: &Arc<DeviceManager>,
+    ffmpeg: &str,
     req: &OutputRequest,
     root: &std::path::Path,
     status: &Arc<Mutex<OutputStatus>>,
     stop: &mut watch::Receiver<bool>,
+    switches: &mut mpsc::Receiver<SwitchCommand>,
+    mut source: source::Source,
+    mut initial_reply: Option<oneshot::Sender<Result<OutputStatus>>>,
 ) -> Result<()> {
-    tokio::select! {
-        _=stop.changed()=>return Ok(()),
-        result=tokio::time::timeout(Duration::from_secs(12),devices.connect_device(&req.device_id))=>result.context("等待设备超时")??,
-    }
-    let session = devices.session(&req.device_id).context("设备会话不可用")?;
-    let video = devices
-        .frames_tx(&req.device_id)
-        .context("视频广播不可用")?
-        .subscribe();
-    let mut audio = devices
-        .audio_frames_tx(&req.device_id)
-        .context("音频广播不可用")?
-        .subscribe();
-    let cache = devices
-        .frame_cache(&req.device_id)
-        .context("视频缓存不可用")?;
-    let initial = tokio::select! {
-      _=stop.changed()=>return Ok(()),
-      result=tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(frames) = cache.initial_frames() {
-                if frames.iter().any(|f| f.is_keyframe) {
-                    break frames;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })=>result.context("等待设备关键帧超时")?,
+    let (width, height) = {
+        let state = status.lock();
+        (state.width, state.height)
     };
-    let (width, height) = session.video_size();
     let header = stream_mux::raw_header(width, height, req.audio)?;
-    if *stop.borrow() {
-        return Ok(());
-    }
-    let latest = Arc::new(Mutex::new(None));
-    let (decode_stop, decode_rx) = watch::channel(false);
-    let decoder = super::live_decoder::run(
-        &devices.cfg.ffmpeg_path,
-        width,
-        height,
-        initial,
-        video,
-        latest.clone(),
-        decode_rx,
-    );
-    tokio::pin!(decoder);
-    // Drive the decoder while waiting for its first complete frame.
-    let prepared = tokio::select! {
-        result=&mut decoder=>return result.and_then(|_|anyhow::bail!("视频解码已结束")),
-        _=stop.changed()=>false,
-        result=tokio::time::timeout(Duration::from_secs(10),async {
-            while latest.lock().is_none() {tokio::time::sleep(Duration::from_millis(10)).await;}
-        })=>result.is_ok(),
-    };
-    if !prepared {
-        let _ = decode_stop.send(true);
-        let _ = decoder.await;
-        ensure!(*stop.borrow(), "等待解码画面超时");
-        return Ok(());
-    }
-    // Discard audio accumulated during decoder startup; fresh audio and repeated
-    // decoded video share one monotonic output clock, including static screens.
-    while audio.try_recv().is_ok() {}
-    let _ = tokio::fs::remove_file(root.join("index.m3u8")).await;
-    let mut cmd = ffmpeg_command(&devices.cfg.ffmpeg_path, req, root);
+    let mut cmd = ffmpeg_command(ffmpeg, req, root);
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(_) => {
-            let _ = decode_stop.send(true);
-            let _ = decoder.await;
+            source.stop().await;
             bail!("无法启动 FFmpeg，请检查服务端 ffmpeg_path");
         }
     };
     let mut stdin = child.stdin.take().context("FFmpeg 输入不可用")?;
+    let mut reaping: Vec<JoinHandle<()>> = vec![];
     let encode = async {
+        source.check()?;
+        ensure!(
+            !initial_reply
+                .as_ref()
+                .is_some_and(oneshot::Sender::is_closed),
+            "live.switch_cancelled: 切换请求已取消"
+        );
         write_packet(&mut stdin, &header).await?;
+        source.activate();
         let origin = tokio::time::Instant::now();
         let mut video_clock =
             tokio::time::interval(Duration::from_micros(1_000_000 / req.fps as u64));
@@ -354,41 +477,74 @@ async fn pump(
         video_clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         audio_clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut timer = tokio::time::interval(Duration::from_secs(1));
-        let mut pending_audio = std::collections::VecDeque::new();
+        let mut pending_audio = std::collections::VecDeque::<Vec<u8>>::new();
+        let mut rendered: Option<(bytes::Bytes, u32, u32, bytes::Bytes)> = None;
         loop {
+            reaping.retain(|task| !task.is_finished());
             tokio::select! {
-                _=stop.changed()=>return Ok(()),
-                _=video_clock.tick()=>{
-                    let pixels=latest.lock().clone().context("缺少视频画面")?;
-                    write_packet(&mut stdin,&stream_mux::raw_packet(1,origin.elapsed().as_micros() as u64,true,&pixels)?).await?;
-                    status.lock().video_frames+=1;
+                _ = stop.changed() => return Ok(()),
+                command = switches.recv() => {
+                    let Some(SwitchCommand { source: next, reply }) = command else { return Ok(()); };
+                    if reply.is_closed() { reaping.push(tokio::spawn(next.stop())); continue; }
+                    if let Err(error) = next.check() {
+                        let _ = reply.send(Err(error)); reaping.push(tokio::spawn(next.stop())); continue;
+                    }
+                    let Some(frame) = next.frame() else { let _ = reply.send(Err(anyhow::anyhow!("新来源画面尚未就绪"))); reaping.push(tokio::spawn(next.stop())); continue; };
+                    let prepared_frame = frame.clone();
+                    let pixels = match tokio::task::spawn_blocking(move || source::fit(&prepared_frame, width, height)).await? {
+                        Ok(pixels) => pixels,
+                        Err(error) => { let _ = reply.send(Err(error)); reaping.push(tokio::spawn(next.stop())); continue; }
+                    };
+                    // A cancelled admission cannot commit after preparation.
+                    if reply.is_closed() { reaping.push(tokio::spawn(next.stop())); continue; }
+                    write_packet(&mut stdin, &stream_mux::raw_packet(1, origin.elapsed().as_micros() as u64, true, &pixels)?).await?;
+                    source.deactivate();
+                    next.activate();
+                    next.presented(&frame);
+                    let old = std::mem::replace(&mut source, next);
+                    pending_audio.clear(); rendered = None;
+                    let result = { let mut state = status.lock(); source.update_status(&mut state); state.video_frames += 1; state.error = None; state.clone() };
+                    let _ = reply.send(Ok(result));
+                    reaping.push(tokio::spawn(old.stop()));
                 },
-                frame=audio.recv(),if req.audio=>match frame {
-                    Ok(AudioFrame {data,is_config:false,..})=>{pending_audio.push_back(data);while pending_audio.len()>5 {pending_audio.pop_front();}},
-                    Ok(_)=>{},
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>{pending_audio.clear();},
-                    Err(_)=>bail!("音频流中断，正在重建输出"),
+                _ = video_clock.tick() => {
+                    ensure!(!initial_reply.as_ref().is_some_and(oneshot::Sender::is_closed), "live.switch_cancelled: 切换请求已取消");
+                    let frame = source.frame().context("缺少视频画面")?;
+                    let key = (frame.pixels.as_ptr() as usize, frame.width, frame.height);
+                    if rendered.as_ref().is_none_or(|cache| (cache.0.as_ptr() as usize, cache.1, cache.2) != key) {
+                        let original = frame.pixels.clone();
+                        let prepared_frame = frame.clone();
+                        let pixels = tokio::task::spawn_blocking(move || source::fit(&prepared_frame, width, height)).await??;
+                        rendered = Some((original, key.1, key.2, pixels));
+                    }
+                    write_packet(&mut stdin, &stream_mux::raw_packet(1, origin.elapsed().as_micros() as u64, true, &rendered.as_ref().unwrap().3)?).await?;
+                    source.presented(&frame);
+                    { let mut state = status.lock(); source.update_status(&mut state); state.video_frames += 1; }
+                    if let Some(reply) = initial_reply.take() {
+                        let result = { let mut state = status.lock(); source.update_status(&mut state); state.error = None; state.clone() };
+                        let _ = reply.send(Ok(result));
+                    }
                 },
-                _=audio_clock.tick(),if req.audio=>{
-                    let data=pending_audio.pop_front();
-                    // Standard Opus 20 ms DTX silence keeps muxing live when a
-                    // device/app cannot capture audio. Never captures a microphone.
-                    write_packet(&mut stdin,&stream_mux::raw_packet(2,origin.elapsed().as_micros() as u64,true,data.as_deref().unwrap_or(&[0xf8,0xff,0xfe]))?).await?;
-                    if data.is_some(){status.lock().audio_packets+=1;}
+                packet = source.audio_packet(), if req.audio => {
+                    if let Some(packet) = packet? { pending_audio.push_back(packet); while pending_audio.len() > 5 { pending_audio.pop_front(); } }
                 },
-                _=timer.tick()=>{
-                    ensure!(session.connected.load(Ordering::Acquire),"设备已断开");
-                    ensure!(session.video_size()==(width,height),"设备分辨率变化，正在重建输出");
-                    if let Some(exit)=child.try_wait()? {bail!("FFmpeg 输出失败（退出状态 {exit}），请检查编码支持和目标地址");}
-                    if req.mode!="local"||root.join("index.m3u8").exists(){let mut s=status.lock();s.state="streaming".into();s.error=None;}
+                _ = audio_clock.tick(), if req.audio => {
+                    let packet = pending_audio.pop_front();
+                    write_packet(&mut stdin, &stream_mux::raw_packet(2, origin.elapsed().as_micros() as u64, true, packet.as_deref().unwrap_or(&[0xf8,0xff,0xfe]))?).await?;
+                    if packet.is_some() { status.lock().audio_packets += 1; }
+                },
+                _ = timer.tick() => {
+                    source.check()?;
+                    if let Some(exit) = child.try_wait()? { bail!("FFmpeg 输出失败（退出状态 {exit}），请检查编码支持和目标地址"); }
+                    if req.mode != "local" || root.join("index.m3u8").exists() { let mut state = status.lock(); state.state = "streaming".into(); state.error = None; }
                 }
             }
         }
     };
-    let (decoder_finished, result) = tokio::select! {result=&mut decoder=>(true,result.and_then(|_|anyhow::bail!("视频解码已结束"))), result=encode=>(false,result)};
-    let _ = decode_stop.send(true);
-    if !decoder_finished {
-        let _ = decoder.await;
+    let result = encode.await;
+    source.stop().await;
+    for task in reaping {
+        let _ = task.await;
     }
     drop(stdin);
     let _ = child.kill().await;
@@ -478,3 +634,11 @@ fn ffmpeg_command(
 #[cfg(test)]
 #[path = "output_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "output_switch_tests.rs"]
+mod switch_tests;
+
+#[cfg(test)]
+#[path = "output_video_folder_tests.rs"]
+mod video_folder_tests;

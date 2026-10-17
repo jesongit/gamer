@@ -67,6 +67,14 @@ mod tests {
         async fn stop_app(&self, _device: &DeviceHandle, _app: &AppId) -> CapabilityResult<()> {
             Ok(())
         }
+
+        async fn reset_input(
+            &self,
+            _device: &DeviceHandle,
+            _app: Option<&AppId>,
+        ) -> CapabilityResult<()> {
+            Ok(())
+        }
     }
 
     #[test]

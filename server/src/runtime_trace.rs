@@ -238,6 +238,18 @@ fn recover_payloads(root: &Path, runs: &mut HashMap<String, Manifest>) {
         if !valid_id(&id) || !regular_dir(&entry.path()) {
             continue;
         }
+        if !runs.contains_key(&id) {
+            match std::fs::symlink_metadata(entry.path().join("index.json")) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                _ => {
+                    // An unreadable or unfamiliar committed index is not proof
+                    // that its images were never committed. Preserve the whole
+                    // directory for recovery rather than deleting its evidence.
+                    tracing::warn!(run_id = %id, "Trace index could not be loaded; evidence directory preserved");
+                    continue;
+                }
+            }
+        }
         let mut expected = HashSet::new();
         if let Some(run) = runs.get(&id) {
             for image in &run.images {
@@ -410,6 +422,45 @@ impl TraceStore {
             .retained
             .get(run_id)
             .and_then(|run| run.record.clone())
+    }
+    pub(crate) fn is_retained(&self, run_id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retained
+            .contains_key(run_id)
+    }
+    /// Remove only the temporary evidence owned by an ended run. Drain queued
+    /// image writes first and retain explicitly preserved copies untouched.
+    pub(crate) fn delete_completed_temporary(&self, run_id: &str) -> anyhow::Result<bool> {
+        anyhow::ensure!(valid_id(run_id), "invalid run id");
+        self.flush();
+        let _io = self.io.lock().unwrap_or_else(|p| p.into_inner());
+        {
+            let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(run) = state.runs.get(run_id) else {
+                return Ok(false);
+            };
+            anyhow::ensure!(run.finished_at.is_some(), "run_active");
+        }
+        expire_run(&self.root, &self.state, run_id)?;
+        let dir = self.root.join(run_id);
+        if dir.exists() {
+            anyhow::ensure!(regular_dir(&dir), "unsafe trace directory");
+            match std::fs::remove_file(dir.join("index.json")) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            // Foreign files are deliberately left alone.
+            let _ = std::fs::remove_dir(dir);
+        }
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.runs.remove(run_id);
+        state.dirty.remove(run_id);
+        state.last_consumed.remove(run_id);
+        state.root_errors.remove(run_id);
+        Ok(true)
     }
     /// Drop tiny expired indexes when the independent base-history window ends.
     /// Durable copies and all Package/template/sample paths remain untouched.
@@ -1269,6 +1320,38 @@ mod tests {
         assert!(store.snapshot("../escape", json!({})).is_err());
         assert!(!dir.path().join("escape").exists());
     }
+
+    #[test]
+    fn explicit_completed_cleanup_drains_images_keeps_retained_and_foreign_files() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TraceStore::open(root.path(), TraceConfig::default()).unwrap();
+        store.register("ended", None);
+        store
+            .snapshot("ended", json!({"source":"private"}))
+            .unwrap();
+        submit(&store, "ended", 17, "consumed", true, false);
+        store.register("ended", Some(now()));
+        store.retain("ended").unwrap();
+        let before = store.page("ended", 0, 100);
+        let foreign = root.path().join("runtime-traces/ended/foreign.txt");
+        std::fs::write(&foreign, b"not owned").unwrap();
+        store.register("active", None);
+        submit(&store, "active", 20, "consumed", true, false);
+        assert!(store
+            .delete_completed_temporary("active")
+            .unwrap_err()
+            .to_string()
+            .contains("run_active"));
+        assert!(store.delete_completed_temporary("ended").unwrap());
+        store.flush();
+        assert_eq!(store.page("ended", 0, 100), before);
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"not owned");
+        assert!(!root.path().join("runtime-traces/ended/index.json").exists());
+        assert!(!store.delete_completed_temporary("ended").unwrap());
+        assert!(store
+            .delete_completed_temporary("../retained-traces/ended")
+            .is_err());
+    }
     #[test]
     fn concurrent_runs_do_not_mix_pixels_or_snapshots() {
         let dir = tempfile::tempdir().unwrap();
@@ -1356,6 +1439,37 @@ mod bounds_tests {
             .unwrap()
             .is_empty());
     }
+    #[test]
+    fn restart_preserves_original_png_and_index_bytes_when_index_cannot_be_parsed() {
+        for invalid_index in [
+            b"{malformed".as_slice(),
+            br#"{"future_trace_format":4}"#.as_slice(),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = TraceStore::open(dir.path(), Default::default()).unwrap();
+            let image_id = image(&store, "unreadable", 17).unwrap();
+            store.flush();
+            let asset = store.state.lock().unwrap().runs["unreadable"].images[0]
+                .asset
+                .clone();
+            let original_png = store
+                .read_image("unreadable", &image_id, false)
+                .unwrap()
+                .unwrap();
+            assert!(image::load_from_memory(&original_png).is_ok());
+            drop(store);
+            let run_dir = dir.path().join("runtime-traces/unreadable");
+            std::fs::write(run_dir.join("index.json"), invalid_index).unwrap();
+            let restarted = TraceStore::open(dir.path(), Default::default()).unwrap();
+            restarted.flush();
+            assert_eq!(
+                std::fs::read(run_dir.join("index.json")).unwrap(),
+                invalid_index
+            );
+            assert_eq!(std::fs::read(run_dir.join(&asset)).unwrap(), original_png);
+        }
+    }
+
     #[test]
     fn restart_removes_uncommitted_payloads_without_touching_retained_or_foreign_files() {
         let dir = tempfile::tempdir().unwrap();

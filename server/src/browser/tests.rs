@@ -26,6 +26,217 @@ fn target(url: &str, profile: &str) -> BrowserTarget {
 }
 
 #[tokio::test]
+#[ignore = "requires installed browser; isolated reload, bound page and input barrier"]
+async fn reset_input_reloads_bound_page_and_retires_held_input_and_old_frames() {
+    use axum::{response::Html, routing::get, Router};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let app = Router::new().route("/", get(|| async {
+        Html("<!doctype html><style>body{margin:0;background:#234}</style><script>window.loads=Number(sessionStorage.loads||0)+1;sessionStorage.loads=loads;</script>")
+    })).route("/popup", get(|| async { Html("<!doctype html>popup") }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        data_dir: dir.path().into(),
+        ..Default::default()
+    };
+    let controls = Arc::new(crate::core::control::ControlRegistry::default());
+    let target = target(&url, "reset-input");
+    let session = CdpSession::launch_with_controls(
+        &target,
+        &cfg,
+        browser_executable(&cfg).unwrap(),
+        controls.clone(),
+    )
+    .await
+    .unwrap();
+    session.capture_for_prepare().await.unwrap();
+    let before = session.stamp();
+    let original_page = session.target_id.clone();
+    let lease = controls.claim(&target.id, "reset-test").await.unwrap();
+    let check = async {
+        session.evaluate_for_test("document.cookie='reset_cookie=kept;path=/';window.scratch='changed';window.open('/popup');true").await;
+        assert!(
+            session.reload(Some(&before)).await.is_err(),
+            "unowned reload must be rejected"
+        );
+        assert_eq!(session.evaluate_for_test("loads").await, json!(1));
+        controls
+            .execute(
+                &lease,
+                session.input(
+                    &json!({"type":"key","key":"a","action":"down"}),
+                    Some(&before),
+                ),
+            )
+            .await
+            .unwrap();
+        controls
+            .execute(
+                &lease,
+                session.input(
+                    &json!({"type":"pointer","action":"down","x":20,"y":30}),
+                    Some(&before),
+                ),
+            )
+            .await
+            .unwrap();
+        controls
+            .execute(&lease, session.reload(Some(&before)))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(session.target_id, original_page);
+        assert_eq!(session.evaluate_for_test("location.href").await, json!(url));
+        assert_eq!(session.evaluate_for_test("loads").await, json!(2));
+        assert_eq!(
+            session.evaluate_for_test("typeof scratch").await,
+            json!("undefined")
+        );
+        assert_eq!(
+            session
+                .evaluate_for_test("document.cookie.includes('reset_cookie=kept')")
+                .await,
+            json!(true)
+        );
+        assert_ne!(session.stamp(), before);
+        assert_eq!(
+            controls.status(&target.id).owner.as_deref(),
+            Some("reset-test")
+        );
+        session.capture_for_prepare().await.unwrap();
+        controls
+            .execute(
+                &lease,
+                session.input(&json!({"type":"tap","x":20,"y":30}), Some(&session.stamp())),
+            )
+            .await
+            .unwrap();
+        assert!(controls
+            .execute(
+                &lease,
+                session.input(&json!({"type":"tap","x":20,"y":30}), Some(&before))
+            )
+            .await
+            .is_err());
+    };
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(check)).await;
+    controls
+        .release(&lease, async {
+            session.release_inputs().await;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    session.close().await;
+    server.abort();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires installed browser; production adapter admission and reload acknowledgement"]
+async fn reset_input_adapter_returns_before_page_load_without_outer_admission() {
+    use crate::capabilities::{DeviceHandle, DeviceId, DeviceService};
+    use axum::{response::Html, routing::get, Router};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let loads = Arc::new(AtomicUsize::new(0));
+    let loading = Arc::new(tokio::sync::Semaphore::new(0));
+    let requests = loads.clone();
+    let blocker = loading.clone();
+    let app = Router::new().route(
+        "/",
+        get(move || {
+            let requests = requests.clone();
+            let blocker = blocker.clone();
+            async move {
+                if requests.fetch_add(1, Ordering::SeqCst) > 0 {
+                    blocker.acquire().await.unwrap().forget();
+                }
+                Html("<!doctype html><style>body{background:#234}</style>ready")
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        data_dir: dir.path().into(),
+        ..Default::default()
+    };
+    let db = Arc::new(crate::store::Store::open(&cfg).unwrap());
+    let target = target(&url, "reset-adapter");
+    db.save_browser_target(target.clone()).unwrap();
+    let devices = Arc::new(crate::device::DeviceManager::new(db, cfg));
+    let session = devices.browsers.prepare(&target.id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    session.capture_for_prepare().await.unwrap();
+    let before = session.stamp();
+    let handle =
+        DeviceHandle::new(DeviceId::new(target.id.clone())).with_expected_frame(before.clone());
+    let adapter = crate::capabilities::adapters::DeviceAdapter::new(devices.clone());
+    let result =
+        tokio::time::timeout(Duration::from_secs(2), adapter.reset_input(&handle, None)).await;
+    loading.add_permits(1);
+    session.close().await;
+    server.abort();
+    result
+        .expect("reset must not reacquire its own admission or wait for the blocked page")
+        .unwrap();
+    assert_ne!(session.stamp(), before);
+    assert!(devices.controls.status(&target.id).owner.is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires installed browser; real startup navigation and fresh-frame recovery"]
+async fn preparation_recaptures_after_navigation_without_accepting_old_inputs() {
+    use axum::{response::Html, routing::get, Router};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let app = Router::new().route("/", get(|| async {
+        Html("<!doctype html><style>body{margin:0;background:#234}</style><script>window.inputs=0;addEventListener('mousedown',()=>inputs++);</script>")
+    }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        data_dir: dir.path().into(),
+        ..Default::default()
+    };
+    let session = CdpSession::launch(
+        &target(&url, "prepare-navigation"),
+        &cfg,
+        browser_executable(&cfg).unwrap(),
+    )
+    .await
+    .unwrap();
+    let check = async {
+        session.capture_for_prepare().await.unwrap();
+        let old = session.stamp();
+        session.evaluate_for_test("window.n=0;window.changing=setInterval(()=>location.hash=String(++n),20);setTimeout(()=>clearInterval(changing),500);true").await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        session.capture_for_prepare().await.unwrap();
+        assert_ne!(old, session.stamp());
+        assert!(session
+            .manual_input(&json!({"type":"tap","x":20,"y":20}), &old)
+            .await
+            .is_err());
+        assert_eq!(session.evaluate_for_test("inputs").await, json!(0));
+        session.capture_for_prepare().await.unwrap();
+        session.close().await;
+        let error = session.capture_for_prepare().await.unwrap_err();
+        assert!(error.to_string().contains("已断开"));
+    };
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(check)).await;
+    session.close().await;
+    server.abort();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
 #[ignore = "requires installed browser; local AI control barrier integration"]
 async fn ai_pause_keeps_browser_run_slot_and_opens_manual_only_after_cleanup() {
     use axum::{response::Html, routing::get, Router};

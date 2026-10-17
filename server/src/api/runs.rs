@@ -192,15 +192,25 @@ pub(super) async fn api_get_run(
 
 #[derive(Deserialize)]
 pub(super) struct HistoryQuery {
-    device_id: String,
+    device_id: Option<String>,
     entrypoint: Option<String>,
     before: Option<String>,
+    task_id: Option<String>,
 }
 pub(super) async fn api_run_history(
     State(st): State<AppState>,
     Query(q): Query<HistoryQuery>,
 ) -> Response {
-    match st.db.run_history(q.device_id, q.entrypoint, q.before).await {
+    if q.device_id.as_deref().is_none_or(str::is_empty)
+        && q.task_id.as_deref().is_none_or(str::is_empty)
+    {
+        return err_response(StatusCode::BAD_REQUEST, "device_id_or_task_id_required");
+    }
+    match st
+        .db
+        .run_history(q.device_id, q.entrypoint, q.before, q.task_id)
+        .await
+    {
         Ok(mut records) => {
             for record in &mut records {
                 if let Some(live) = record["run_id"].as_str().and_then(|id| st.runs.get_run(id)) {

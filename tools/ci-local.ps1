@@ -62,10 +62,12 @@ if ($null -eq (Get-Command pnpm -ErrorAction SilentlyContinue)) {
 # ---- 关卡定义（顺序即执行顺序；与 ci.yml 步骤一一对应）----
 $gates = New-Object System.Collections.Generic.List[object]
 $gates.Add([pscustomobject]@{ Group = 'sdk'; Name = 'pinned plugin SDK'; Exe = 'node'; ArgList = @('tools/check-plugin-sdk.mjs'); Dir = $RepoRoot })
+$gates.Add([pscustomobject]@{ Group = 'sdk'; Name = 'offline plugin delivery boundaries'; Exe = (Get-Process -Id $PID).Path; ArgList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'release/packaging/test-package-app-retired-artifacts.ps1'); Dir = $RepoRoot })
 if (-not $SkipRust) {
     $serverDir = Join-Path $RepoRoot 'server'
     # 与 ci.yml 相同：兼容即将落地的 OPS-004 配置失败即退出策略（dev 档允许无 config.toml）
     $env:GAMER_PROFILE = 'dev'
+    $env:GAMER_PLUGIN_TEST_FIXTURE_ROOT = Join-Path $RepoRoot 'server/target/plugin-test-fixtures'
     $gates.Add([pscustomobject]@{ Group = 'rust'; Name = 'cargo fmt --check';        Exe = 'cargo'; ArgList = @('fmt', '--all', '--', '--check');                       Dir = $serverDir })
     $gates.Add([pscustomobject]@{ Group = 'rust'; Name = 'cargo clippy -D warnings'; Exe = 'cargo'; ArgList = @('clippy', '--all-targets', '--all-features', '--', '-D', 'warnings'); Dir = $serverDir })
     # 无 WASM 退出路径防退化（与 ci.yml 同步）：default 已含 wasm-runtime

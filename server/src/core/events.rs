@@ -71,6 +71,14 @@ pub enum RuntimeEventKind {
         target: String,
         depth: u32,
     },
+    /// A function/script scope completed; execution identity stays in trace.
+    CallEnd {
+        target: String,
+        depth: u32,
+        ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// 单次模板匹配结果（模板名 / 相对坐标，无帧数据）。
     Vision {
         template: String,

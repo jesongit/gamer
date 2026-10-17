@@ -17,6 +17,7 @@
 //!   manifest.toml 可解析、wasm 包 entry 存在且为 `\0asm` magic（builtin 包跳过
 //!   entry 校验）。打印 id=/version=/kind=/sha256=/size=。
 //!
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::{Read as _, Write as _};
@@ -25,6 +26,190 @@ use std::process::ExitCode;
 
 const MANIFEST_FILE: &str = "manifest.toml";
 const WASM_MAGIC: [u8; 4] = [0x00, b'a', b's', b'm'];
+const MAX_SCHEMA_BYTES: usize = 256 * 1024;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ToolDeclaration {
+    tool_id: String,
+    action: String,
+    description: String,
+    input_schema: String,
+    #[serde(default)]
+    output_schema: Option<String>,
+    required_scopes: Vec<String>,
+    #[serde(default)]
+    required_permissions: Vec<String>,
+    effect: String,
+    #[serde(default)]
+    context: ToolContext,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct ToolContext {
+    device_field: Option<String>,
+    package_field: Option<String>,
+    plugin_field: Option<String>,
+    runner_field: Option<String>,
+    run_field: Option<String>,
+    task_field: Option<String>,
+    media_field: Option<String>,
+    control_session_field: Option<String>,
+}
+fn validate_archive_path(path: &str) -> Result<(), String> {
+    if path.is_empty()
+        || path.len() > 1024
+        || path.contains(['\\', ':', '\0'])
+        || path.chars().any(char::is_control)
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(format!("Invalid archive path: {path}"));
+    }
+    Ok(())
+}
+fn validate_tools(
+    id: &str,
+    permissions: &[String],
+    tools: &[ToolDeclaration],
+) -> Result<(), String> {
+    let mut ids = std::collections::BTreeSet::new();
+    let mut actions = std::collections::BTreeSet::new();
+    for tool in tools {
+        if tool.tool_id.is_empty()
+            || !tool
+                .tool_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            || format!("gamer.plugin.{id}.{}", tool.tool_id).len() > 128
+            || !ids.insert(&tool.tool_id)
+            || tool.action.trim().is_empty()
+            || tool.action.len() > 128
+            || tool.action.chars().any(char::is_control)
+            || !actions.insert(&tool.action)
+            || tool.description.trim().is_empty()
+            || tool.description.len() > 16 * 1024
+        {
+            return Err("Invalid or duplicate external tool identity/action/description".into());
+        }
+        if tool.required_scopes.is_empty()
+            || tool.required_scopes.iter().any(|scope| {
+                scope.is_empty()
+                    || scope.len() > 128
+                    || !scope
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-:".contains(&b))
+            })
+        {
+            return Err("Every tool requires explicit valid scopes".into());
+        }
+        if tool
+            .required_permissions
+            .iter()
+            .any(|permission| !permissions.contains(permission))
+        {
+            return Err("Tool requires a permission not granted by its manifest".into());
+        }
+        if tool.effect == "read"
+            && tool.required_permissions.iter().any(|permission| {
+                ![
+                    "device.read",
+                    "vision.match",
+                    "vision.color",
+                    "vision.ocr",
+                    "resource.read",
+                    "runtime.sleep",
+                    "media.read",
+                    "media.events.read",
+                    "ui.host",
+                ]
+                .contains(&permission.as_str())
+            })
+        {
+            return Err("A read-only tool cannot declare write permissions".into());
+        }
+        if ![
+            "read",
+            "draft_write",
+            "resource_write",
+            "media_write",
+            "input",
+            "run_submit",
+            "task_write",
+            "external_send",
+        ]
+        .contains(&tool.effect.as_str())
+        {
+            return Err("Invalid tool effect".into());
+        }
+        validate_archive_path(&tool.input_schema)?;
+        if let Some(path) = &tool.output_schema {
+            validate_archive_path(path)?;
+        }
+        for field in [
+            &tool.context.device_field,
+            &tool.context.package_field,
+            &tool.context.plugin_field,
+            &tool.context.runner_field,
+            &tool.context.run_field,
+            &tool.context.task_field,
+            &tool.context.media_field,
+            &tool.context.control_session_field,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if field.is_empty() || field.len() > 128 || field.chars().any(char::is_control) {
+                return Err("Invalid tool context selector".into());
+            }
+        }
+    }
+    Ok(())
+}
+fn reject_external_refs(value: &Value, depth: usize) -> Result<(), String> {
+    if depth > 64 {
+        return Err("Tool schema exceeds nesting limit".into());
+    }
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if ["$ref", "$dynamicRef", "$recursiveRef"].contains(&key.as_str())
+                    && !value.as_str().is_some_and(|v| v.starts_with('#'))
+                {
+                    return Err("Tool schemas support only local references".into());
+                }
+                if key == "$id"
+                    && value
+                        .as_str()
+                        .is_some_and(|id| !id.is_empty() && !id.starts_with('#'))
+                {
+                    return Err("External tool schema identifiers are forbidden".into());
+                }
+                reject_external_refs(value, depth + 1)?;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                reject_external_refs(item, depth + 1)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+fn validate_schema(content: &[u8], input: bool) -> Result<(), String> {
+    let schema: Value = serde_json::from_slice(content)
+        .map_err(|error| format!("Tool schema must be valid JSON: {error}"))?;
+    reject_external_refs(&schema, 0)?;
+    if input && schema["type"] != "object" {
+        return Err("Tool input schema must declare type object".into());
+    }
+    jsonschema::draft202012::options()
+        .build(&schema)
+        .map_err(|error| format!("Invalid tool JSON Schema: {error}"))?;
+    Ok(())
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -152,6 +337,9 @@ fn meta_from_manifest(text: &str) -> Result<Value, String> {
         .and_then(|t| t.get("builtin_id"))
         .and_then(|value| value.as_str())
         .map(|s| s.to_string());
+    if kind == "builtin" && builtin_id.as_deref() == Some("gamer-ai") {
+        return Err("gamer-ai builtin is retired; connect an external Agent to Core MCP".into());
+    }
     let host_version = execution
         .and_then(|t| t.get("host_version"))
         .and_then(|value| value.as_str())
@@ -163,16 +351,55 @@ fn meta_from_manifest(text: &str) -> Result<Value, String> {
             .map(|s| s.to_string())
     });
 
-    let permissions: Vec<String> = table
-        .get("permissions")
-        .and_then(|value| value.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|value| value.as_str().map(|s| s.to_string()))
-                .collect()
+    let permissions: Vec<String> = match table.get("permissions") {
+        Some(value) => serde_json::from_value(toml_to_json(value))
+            .map_err(|_| "manifest permissions must be an array of strings".to_string())?,
+        None => Vec::new(),
+    };
+    let permissions: Vec<String> = permissions
+        .into_iter()
+        .map(|permission| {
+            let permission = permission.trim();
+            if permission == "ai.connect" {
+                return Err("ai.connect is retired; update the plugin before distribution".into());
+            }
+            if ![
+                "device.read",
+                "device.app",
+                "vision.match",
+                "vision.color",
+                "vision.ocr",
+                "input.tap",
+                "input.swipe",
+                "input.key",
+                "input.text",
+                "touch",
+                "resource.read",
+                "resource.write",
+                "package.publish",
+                "run.submit",
+                "run.control",
+                "runtime.sleep",
+                "log.write",
+                "media.stream",
+                "live.connect",
+                "notify.send",
+                "media.read",
+                "media.import",
+                "media.record",
+                "media.write",
+                "media.events.read",
+                "ui.host",
+            ]
+            .contains(&permission)
+            {
+                return Err(format!(
+                    "Unknown or forbidden manifest permission: {permission}"
+                ));
+            }
+            Ok(permission.to_owned())
         })
-        .unwrap_or_default();
+        .collect::<Result<_, String>>()?;
     let host_api = table
         .get("host_api")
         .map(toml_to_json)
@@ -183,6 +410,13 @@ fn meta_from_manifest(text: &str) -> Result<Value, String> {
         .and_then(|value| value.as_array())
         .map(|items| Value::Array(items.iter().map(toml_to_json).collect()))
         .unwrap_or_else(|| json!([]));
+    let tools = table
+        .get("tools")
+        .map(toml_to_json)
+        .unwrap_or_else(|| json!([]));
+    let declarations: Vec<ToolDeclaration> = serde_json::from_value(tools.clone())
+        .map_err(|error| format!("Invalid explicit tools declaration: {error}"))?;
+    validate_tools(&id, &permissions, &declarations)?;
 
     Ok(json!({
         "manifest_version": table.get("manifest_version").and_then(|v| v.as_integer()),
@@ -196,6 +430,7 @@ fn meta_from_manifest(text: &str) -> Result<Value, String> {
         "permissions": permissions,
         "host_api": host_api,
         "ui": { "contributions": contributions },
+        "tools": tools,
     }))
 }
 
@@ -298,6 +533,8 @@ fn pack(flags: &Flags) -> Result<(), String> {
             .finish()
             .map_err(|error| format!("收尾 zip 失败: {error}"))?;
     }
+    // Reject missing/invalid declared schemas before writing any artifact.
+    verify_archive_bytes(&bytes)?;
     if let Some(parent) = PathBuf::from(&out).parent() {
         std::fs::create_dir_all(parent).map_err(|error| format!("创建目录失败: {error}"))?;
     }
@@ -311,9 +548,31 @@ fn pack(flags: &Flags) -> Result<(), String> {
 fn verify(flags: &Flags) -> Result<(), String> {
     let archive_path = require(flags, "archive")?;
     let bytes = std::fs::read(&archive_path).map_err(|error| format!("读取归档失败: {error}"))?;
+    let meta = verify_archive_bytes(&bytes)?;
+    println!("id={}", meta["id"].as_str().unwrap_or_default());
+    println!("version={}", meta["version"].as_str().unwrap_or_default());
+    println!(
+        "kind={}",
+        meta["execution"]["kind"].as_str().unwrap_or("wasm")
+    );
+    println!("sha256={:x}", Sha256::digest(&bytes));
+    println!("size={}", bytes.len());
+    Ok(())
+}
+
+/// Build-side validation complements the real host's authoritative install
+/// validation. It never disables or replaces that host validation.
+fn verify_archive_bytes(bytes: &[u8]) -> Result<Value, String> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes))
         .map_err(|error| format!("zip 中央目录校验失败: {error}"))?;
     let names: Vec<String> = archive.file_names().map(|name| name.to_string()).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    for name in &names {
+        validate_archive_path(name)?;
+        if !seen.insert(name) {
+            return Err(format!("Duplicate archive path: {name}"));
+        }
+    }
     if !names.iter().any(|name| name == MANIFEST_FILE) {
         return Err(format!("归档缺少 {MANIFEST_FILE}"));
     }
@@ -350,12 +609,30 @@ fn verify(flags: &Flags) -> Result<(), String> {
             return Err("entry 不是 WASM 二进制".into());
         }
     }
-    println!("id={}", meta["id"].as_str().unwrap_or_default());
-    println!("version={}", meta["version"].as_str().unwrap_or_default());
-    println!("kind={kind}");
-    println!("sha256={:x}", Sha256::digest(&bytes));
-    println!("size={}", bytes.len());
-    Ok(())
+    let tools: Vec<ToolDeclaration> =
+        serde_json::from_value(meta["tools"].clone()).map_err(|error| error.to_string())?;
+    for tool in tools {
+        for (path, input) in std::iter::once((&tool.input_schema, true))
+            .chain(tool.output_schema.as_ref().map(|path| (path, false)))
+        {
+            let mut file = archive
+                .by_name(path)
+                .map_err(|_| format!("Declared tool schema is missing: {path}"))?;
+            if file.is_dir() || file.size() > MAX_SCHEMA_BYTES as u64 {
+                return Err(format!("Invalid tool schema size: {path}"));
+            }
+            let mut content = Vec::new();
+            (&mut file)
+                .take(MAX_SCHEMA_BYTES as u64 + 1)
+                .read_to_end(&mut content)
+                .map_err(|error| error.to_string())?;
+            if content.len() > MAX_SCHEMA_BYTES {
+                return Err(format!("Tool schema exceeds limit: {path}"));
+            }
+            validate_schema(&content, input)?;
+        }
+    }
+    Ok(meta)
 }
 
 fn write_entry(
@@ -364,6 +641,7 @@ fn write_entry(
     content: &[u8],
     options: zip::write::SimpleFileOptions,
 ) -> Result<(), String> {
+    validate_archive_path(name)?;
     writer
         .start_file(name, options)
         .map_err(|error| format!("写入 {name} 失败: {error}"))?;
@@ -371,4 +649,114 @@ fn write_entry(
         .write_all(content)
         .map_err(|error| format!("写入 {name} 内容失败: {error}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const BASE:&str="manifest_version=2\nid='com.example.tools'\nversion='1.0.0'\nname='Tools'\npermissions=['resource.read']\n[execution]\nkind='builtin'\nbuiltin_id='com.example.tools'\n";
+    const TOOL:&str="\n[[tools]]\ntool_id='read'\naction='read'\ndescription='Read'\ninput_schema='schemas/read.json'\nrequired_scopes=['resource.read']\nrequired_permissions=['resource.read']\neffect='read'\n";
+    #[test]
+    fn retired_ai_permissions_and_builtin_cannot_be_repackaged() {
+        for permission in ["ai.connect", " ai.connect ", "network.http", "unknown"] {
+            let manifest = BASE.replace("resource.read", permission);
+            assert!(meta_from_manifest(&manifest).is_err());
+            let mut bytes = Vec::new();
+            {
+                let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+                write_entry(
+                    &mut writer,
+                    MANIFEST_FILE,
+                    manifest.as_bytes(),
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+                writer.finish().unwrap();
+            }
+            assert!(verify_archive_bytes(&bytes).is_err());
+        }
+        assert!(meta_from_manifest(&BASE.replace(
+            "permissions=['resource.read']",
+            "permissions=['resource.read',1]"
+        ))
+        .is_err());
+        assert!(meta_from_manifest(
+            &BASE.replace("permissions=['resource.read']", "permissions='ai.connect'")
+        )
+        .is_err());
+        assert!(meta_from_manifest(
+            &BASE.replace("builtin_id='com.example.tools'", "builtin_id='gamer-ai'")
+        )
+        .is_err());
+        assert!(meta_from_manifest(&BASE.replace(
+            "permissions=['resource.read']",
+            "permissions=[' resource.read ']"
+        ))
+        .is_ok());
+    }
+    fn bundle(schema: Option<&[u8]>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+            let options = zip::write::SimpleFileOptions::default();
+            write_entry(
+                &mut writer,
+                MANIFEST_FILE,
+                format!("{BASE}{TOOL}").as_bytes(),
+                options,
+            )
+            .unwrap();
+            if let Some(schema) = schema {
+                write_entry(&mut writer, "schemas/read.json", schema, options).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        bytes
+    }
+    #[test]
+    fn explicit_tools_are_preserved_and_require_valid_scopes_and_permissions() {
+        let meta = meta_from_manifest(&format!("{BASE}{TOOL}")).unwrap();
+        assert_eq!(meta["tools"][0]["input_schema"], "schemas/read.json");
+        for tool in [
+            TOOL.replace("['resource.read']", "[]"),
+            TOOL.replace("effect='read'", "effect='unknown'"),
+            TOOL.replace("schemas/read.json", "../secret.json"),
+            format!("{TOOL}\nunknown=true"),
+            format!("{TOOL}{TOOL}"),
+        ] {
+            assert!(meta_from_manifest(&format!("{BASE}{tool}")).is_err());
+        }
+        assert!(meta_from_manifest(&format!(
+            "{BASE}{}",
+            TOOL.replace(
+                "required_permissions=['resource.read']",
+                "required_permissions=['resource.write']"
+            )
+        ))
+        .is_err());
+    }
+    #[test]
+    fn archive_requires_real_schema_files_and_offline_valid_schema() {
+        assert!(verify_archive_bytes(&bundle(Some(
+            br#"{"type":"object","properties":{},"additionalProperties":false}"#
+        )))
+        .is_ok());
+        assert!(verify_archive_bytes(&bundle(None)).is_err());
+        for schema in [
+            b"not json".as_slice(),
+            br#"{"type":"unknown"}"#,
+            br#"{"type":"object","$ref":"https://example.invalid/schema"}"#,
+            br#"{"type":"object","$id":"file:///secret.json"}"#,
+        ] {
+            assert!(verify_archive_bytes(&bundle(Some(schema))).is_err());
+        }
+    }
+    #[test]
+    fn write_schema_may_use_core_injected_operation_id() {
+        assert!(validate_schema(
+            br#"{"type":"object","properties":{},"additionalProperties":false}"#,
+            true
+        )
+        .is_ok());
+    }
 }

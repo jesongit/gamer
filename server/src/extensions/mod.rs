@@ -14,11 +14,11 @@
     reason = "The extension facade is consumed incrementally by later adapters"
 )]
 
-#[path = "../../../plugins/gamer-ai/host/mod.rs"]
-pub(crate) mod ai;
 mod archive;
 mod builtin;
 mod error;
+mod external_tools;
+pub(crate) use external_tools::{ExternalToolHandler, ToolDeclaration};
 
 /// gamer-yaml 扩展（YAML 栈边界）：见 gamer_yaml/mod.rs。
 #[path = "../../../plugins/gamer-yaml/host/mod.rs"]
@@ -26,6 +26,7 @@ pub(crate) mod gamer_yaml;
 mod host_api;
 #[path = "../../../plugins/gamer-keymap/host/mod.rs"]
 mod keymap;
+pub(crate) use keymap::KeymapExternalTools;
 #[path = "../../../plugins/gamer-live/host/mod.rs"]
 pub(crate) mod live;
 mod manifest;
@@ -33,6 +34,8 @@ pub(crate) mod market;
 mod model;
 #[path = "../../../plugins/gamer-notify/host/mod.rs"]
 pub(crate) mod notify;
+#[path = "../../../plugins/gamer-ocr/host/mod.rs"]
+pub(crate) mod ocr;
 #[path = "../../../plugins/gamer-package-publisher/host/mod.rs"]
 pub(crate) mod package_publisher;
 mod permissions;
@@ -76,6 +79,8 @@ pub(crate) use model::{
     ExtensionId, ExtensionPath, ExtensionRecord, ExtensionState, ExtensionVersion,
 };
 pub(crate) use permissions::{Permission, PermissionSet};
+#[cfg(test)]
+pub(crate) use service::BuiltinService;
 pub(crate) use service::{
     CompositeTimerRunnerRegistrar, DependencyStatus, ExtensionInspection, ExtensionInstallContext,
     ExtensionService, ExtensionSnapshot, PermissionDiff, PluginCallContext, TimerRunnerRegistrar,
@@ -110,8 +115,8 @@ pub(crate) fn native_call_action(
 /// Side-effect-free native action lookup used by the lifecycle gate before
 /// invoking `native_call_action`.
 pub(crate) fn is_public_native_action(id: &ExtensionId, action: &str) -> bool {
-    ai::accepts(id.as_str(), action)
-        || notify::accepts(id.as_str(), action)
+    notify::accepts(id.as_str(), action)
+        || ocr::accepts(id.as_str(), action)
         || live::accepts(id.as_str(), action)
         || package_publisher::accepts(id.as_str(), action)
         || gamer_yaml::is_public_native_action(id.as_str(), action)
@@ -122,25 +127,33 @@ pub(crate) fn native_action_expected_caller(
     id: &ExtensionId,
     action: &str,
 ) -> Option<&'static str> {
+    if id.as_str() == ocr::ID && action == "recognize" {
+        return Some(gamer_yaml::YAML_EXTENSION_ID);
+    }
     if id.as_str() == notify::ID && action == notify::SEND {
         return Some(gamer_yaml::YAML_EXTENSION_ID);
     }
-    ai::expected_caller(id.as_str(), action)
-        .or_else(|| gamer_yaml::native_action_expected_caller(id.as_str(), action))
+    if id.as_str() == live::ID && (action == "stream.switch" || live::internal_action(action)) {
+        return Some(gamer_yaml::YAML_EXTENSION_ID);
+    }
+    gamer_yaml::native_action_expected_caller(id.as_str(), action)
+}
+
+pub(crate) fn is_internal_native_action(id: &ExtensionId, action: &str) -> bool {
+    id.as_str() == live::ID && live::internal_action(action)
 }
 
 pub(crate) fn native_action_requires_package_context(id: &ExtensionId, action: &str) -> bool {
     gamer_yaml::native_action_requires_package_context(id.as_str(), action)
         || video::sample::accepts(id.as_str(), action)
-        || ai::requires_package_context(id.as_str(), action)
 }
 
 pub(crate) fn native_action_required_permissions(
     id: &ExtensionId,
     action: &str,
 ) -> Option<&'static [Permission]> {
-    ai::permissions(id.as_str(), action)
-        .or_else(|| notify::permissions(id.as_str(), action))
+    notify::permissions(id.as_str(), action)
+        .or_else(|| ocr::permissions(id.as_str(), action))
         .or_else(|| live::permissions(id.as_str(), action))
         .or_else(|| package_publisher::permissions(id.as_str(), action))
         .or_else(|| gamer_yaml::native_action_required_permissions(id.as_str(), action))
@@ -151,11 +164,19 @@ pub(crate) fn native_action_caller_permissions(
     id: &ExtensionId,
     action: &str,
 ) -> Option<&'static [Permission]> {
+    if id.as_str() == ocr::ID && action == "recognize" {
+        return Some(&[Permission::VisionOcr]);
+    }
     if id.as_str() == notify::ID && action == notify::SEND {
         return Some(&[Permission::NotifySend]);
     }
-    ai::caller_permissions(id.as_str(), action)
-        .or_else(|| gamer_yaml::native_action_caller_permissions(id.as_str(), action))
+    if id.as_str() == live::ID && action == "stream.switch" {
+        return Some(&[Permission::MediaStream]);
+    }
+    if id.as_str() == live::ID && live::internal_action(action) {
+        return Some(&[Permission::RuntimeSleep]);
+    }
+    gamer_yaml::native_action_caller_permissions(id.as_str(), action)
 }
 
 /// 公开动作目录（能力发现读端，简化计划 Phase 4）：目标插件原生声明的版本化
@@ -163,17 +184,25 @@ pub(crate) fn native_action_caller_permissions(
 /// 集合由 `service.rs::declarative_actions` 从 manifest 读出，两条目录在
 /// `service.capability_actions` 合并。
 pub(crate) fn native_public_actions(id: &ExtensionId) -> Vec<serde_json::Value> {
+    if id.as_str() == ocr::ID {
+        return ocr::ACTIONS
+            .iter()
+            .map(|action| {
+                serde_json::json!({
+                    "action": action, "version": 1, "surface": "native",
+                    "permissions": ["vision.ocr"]
+                })
+            })
+            .collect();
+    }
     if id.as_str() == video::VIDEO_EXTENSION_ID {
         return video::sample::catalog();
-    }
-    if id.as_str() == ai::ID {
-        return ai::ACTIONS.iter().map(|action| serde_json::json!({"action":action,"version":1,"surface":"native","caller":ai::expected_caller(id.as_str(),action),"permissions":ai::permissions(id.as_str(),action).unwrap_or_default().iter().map(|permission|permission.as_str()).collect::<Vec<_>>()})).collect();
     }
     if id.as_str() == notify::ID {
         return notify::ACTIONS.iter().map(|action| serde_json::json!({"action":action,"version":1,"surface":"native","permissions":["notify.send"]})).collect();
     }
     if id.as_str() == live::ID {
-        return live::ACTIONS.iter().map(|action| serde_json::json!({"action":action,"version":1,"surface":"native","permissions":live::permissions(id.as_str(),action).unwrap_or_default().iter().map(|p|p.as_str()).collect::<Vec<_>>()})).collect();
+        return live::ACTIONS.iter().filter(|action| !live::internal_action(action)).map(|action| serde_json::json!({"action":action,"version":1,"surface":"native","permissions":live::permissions(id.as_str(),action).unwrap_or_default().iter().map(|p|p.as_str()).collect::<Vec<_>>()})).collect();
     }
     if id.as_str() == package_publisher::ID {
         return package_publisher::ACTIONS.iter().map(|action| serde_json::json!({"action":action,"version":1,"surface":"native","permissions":["package.publish"]})).collect();

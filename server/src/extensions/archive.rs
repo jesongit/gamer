@@ -97,6 +97,7 @@ pub(crate) fn inspect_archive(bytes: &[u8]) -> ExtensionResult<ExtensionManifest
             )));
         }
     }
+    super::external_tools::validate_archive(&manifest, bytes)?;
     Ok(manifest)
 }
 

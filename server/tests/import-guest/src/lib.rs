@@ -22,6 +22,9 @@ wit_bindgen::generate!({
 use exports::gamer::host::extension::Guest;
 use gamer::host::context;
 use gamer::host::log;
+use gamer::host::runtime;
+use std::sync::atomic::{AtomicUsize, Ordering};
+static CALLS: AtomicUsize = AtomicUsize::new(0);
 
 fn context_json() -> String {
     let context = context::get();
@@ -43,12 +46,18 @@ impl Guest for ImportEcho {
 
     fn call(action: String, _values_json: String) -> Result<String, String> {
         match action.as_str() {
-            "ping" => Ok(serde_json::json!({
-                "action": action,
-                "context": serde_json::from_str::<serde_json::Value>(&context_json())
-                    .unwrap_or(serde_json::Value::Null),
-            })
-            .to_string()),
+            "ping" | "sleep" => {
+                if action == "sleep" {
+                    runtime::sleep(2).map_err(|error| error.message)?;
+                }
+                Ok(serde_json::json!({
+                    "action": action,
+                    "invocation_counter": CALLS.fetch_add(1, Ordering::SeqCst) + 1,
+                    "context": serde_json::from_str::<serde_json::Value>(&context_json())
+                        .unwrap_or(serde_json::Value::Null),
+                })
+                .to_string())
+            }
             other => Err(format!("未知 action: {other}")),
         }
     }

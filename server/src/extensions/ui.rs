@@ -44,6 +44,24 @@ pub(crate) struct UiContributionRegistry {
 }
 
 impl UiContributionRegistry {
+    /// Publish a complete discovery snapshot. Concurrent asset reads must never
+    /// observe the empty/partially rebuilt registry between clear and register.
+    pub(crate) fn replace(&self, manifests: &[&ExtensionManifest]) {
+        let next = Self::default();
+        for manifest in manifests {
+            next.register(manifest);
+        }
+        let entries = next
+            .entries
+            .read()
+            .expect("extension UI registry poisoned")
+            .clone();
+        *self
+            .entries
+            .write()
+            .expect("extension UI registry poisoned") = entries;
+    }
+
     pub(crate) fn clear(&self) {
         self.entries
             .write()

@@ -35,6 +35,23 @@ impl InputAdapter {
 
 #[async_trait]
 impl InputService for InputAdapter {
+    async fn hover_from_frame(
+        &self,
+        device: &DeviceHandle,
+        point: TouchPoint,
+        stamp: Option<&super::super::FrameStamp>,
+    ) -> CapabilityResult<()> {
+        if !crate::targets::is_browser(device.id().as_str()) {
+            return Err(CapabilityError::Unavailable("当前目标不支持鼠标悬浮"));
+        }
+        self.device
+            .browser_input(
+                device,
+                &serde_json::json!({"type":"pointer","action":"move","x":point.x(),"y":point.y()}),
+                stamp,
+            )
+            .await
+    }
     async fn tap_from_frame(
         &self,
         device: &DeviceHandle,

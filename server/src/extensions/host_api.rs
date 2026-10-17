@@ -132,6 +132,14 @@ pub(crate) struct HostApi {
     registry: CapabilityRegistry,
     catalog: HostApiCatalog,
     permissions: PermissionSet,
+    external: Option<ExternalGrant>,
+}
+#[derive(Clone)]
+struct ExternalGrant {
+    context: crate::mcp::InvocationContext,
+    permissions: PermissionSet,
+    effect: crate::mcp::ToolEffect,
+    deadline: std::time::Instant,
 }
 
 impl HostApi {
@@ -140,15 +148,36 @@ impl HostApi {
         catalog: HostApiCatalog,
         manifest: &ExtensionManifest,
     ) -> ExtensionResult<Self> {
+        manifest.ensure_supported()?;
         catalog.validate(manifest)?;
         Ok(Self {
             registry,
             catalog,
             permissions: manifest.permissions().clone(),
+            external: None,
         })
     }
 
     pub(crate) fn authorize(&self, permission: Permission) -> ExtensionResult<()> {
+        if let Some(external) = &self.external {
+            self.check_external()?;
+            if !external.permissions.allows(permission)
+                || (external.effect.is_read_only()
+                    && !super::external_tools::permission_is_read_only(permission))
+            {
+                return Err(ExtensionError::Permission(PermissionError::NotGranted(
+                    permission.as_str().into(),
+                )));
+            }
+            // Direct external input and child run creation require the Core
+            // control/Runner adapters. Never inherit a manual identity just
+            // because this guest was called from a local transport.
+            if super::external_tools::requires_host_adapter(permission) {
+                return Err(ExtensionError::CallRejected(
+                    "External device input and runs require a controlled host adapter".into(),
+                ));
+            }
+        }
         if self.permissions.allows(permission) {
             Ok(())
         } else {
@@ -156,6 +185,78 @@ impl HostApi {
                 permission.as_str().to_string(),
             )))
         }
+    }
+    pub(crate) fn for_external(
+        &self,
+        context: crate::mcp::InvocationContext,
+        permissions: PermissionSet,
+        effect: crate::mcp::ToolEffect,
+    ) -> Self {
+        let mut host = self.clone();
+        host.external = Some(ExternalGrant {
+            context,
+            permissions,
+            effect,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+        });
+        host
+    }
+    pub(crate) fn external_context(&self) -> Option<&crate::mcp::InvocationContext> {
+        self.external.as_ref().map(|grant| &grant.context)
+    }
+    pub(crate) fn check_external(&self) -> ExtensionResult<()> {
+        if let Some(grant) = &self.external {
+            grant
+                .context
+                .check_active()
+                .map_err(|error| ExtensionError::CallRejected(error.to_string()))?;
+            if std::time::Instant::now() >= grant.deadline {
+                return Err(ExtensionError::CallRejected(
+                    "External guest call exceeded its deadline".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn authorize_device_id(&self, id: &str) -> ExtensionResult<()> {
+        if let Some(grant) = &self.external {
+            self.check_external()?;
+            grant
+                .context
+                .authorize_device(id)
+                .map_err(|error| ExtensionError::CallRejected(error.to_string()))?;
+            if grant
+                .context
+                .device_id
+                .as_deref()
+                .is_some_and(|selected| selected != id)
+            {
+                return Err(ExtensionError::CallRejected(
+                    "Device differs from the invocation context".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn authorize_package_id(&self, id: &str) -> ExtensionResult<()> {
+        if let Some(grant) = &self.external {
+            self.check_external()?;
+            grant
+                .context
+                .authorize_package(id)
+                .map_err(|error| ExtensionError::CallRejected(error.to_string()))?;
+            if grant
+                .context
+                .package_id
+                .as_deref()
+                .is_some_and(|selected| selected != id)
+            {
+                return Err(ExtensionError::CallRejected(
+                    "Package differs from the invocation context".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn api_version(&self, domain: HostApiDomain) -> Option<&Version> {

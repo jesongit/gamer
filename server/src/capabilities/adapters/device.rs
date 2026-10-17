@@ -147,4 +147,39 @@ impl DeviceService for DeviceAdapter {
             .map(|_| ())
             .map_err(|error| CapabilityError::Failed(error.to_string()))
     }
+
+    async fn reset_input(
+        &self,
+        device: &DeviceHandle,
+        app: Option<&AppId>,
+    ) -> CapabilityResult<()> {
+        let permit = self.admit(device).await?;
+        permit
+            .scope(async {
+                if crate::targets::is_browser(device.id().as_str()) {
+                    return self
+                        .devices
+                        .browsers
+                        .session(device.id().as_str())
+                        .map_err(|error| CapabilityError::Failed(error.to_string()))?
+                        .reload(device.expected_frame())
+                        .await
+                        .map_err(|error| CapabilityError::Failed(error.to_string()));
+                }
+                let app = app.ok_or_else(|| {
+                    CapabilityError::InvalidRequest("设备未配置 Android 应用包名".into())
+                })?;
+                Self::check_app_name(app)?;
+                if app.as_str().starts_with('+') || app.as_str().starts_with('?') {
+                    return Err(CapabilityError::InvalidRequest(
+                        "reset_input expects the configured package without a launch prefix".into(),
+                    ));
+                }
+                self.session(device)?
+                    .restart_app(app.as_str())
+                    .await
+                    .map_err(|error| CapabilityError::Failed(error.to_string()))
+            })
+            .await
+    }
 }

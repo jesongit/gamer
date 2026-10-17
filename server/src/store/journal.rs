@@ -17,6 +17,38 @@ CREATE INDEX idx_run_events_run ON run_events(run_id, id);
 "#;
 
 impl Store {
+    /// Exact identities are supplied by the owning producer; Core does not
+    /// interpret runner-specific script versions or payloads.
+    pub(crate) async fn run_records_for_scope(
+        &self,
+        runner: String,
+        entrypoint: String,
+        package: String,
+    ) -> anyhow::Result<Vec<Value>> {
+        self.request_async(move |conn| {
+            let mut stmt = conn.prepare("SELECT record FROM run_records WHERE entrypoint=?1 AND json_extract(record,'$.runner_id')=?2 AND json_extract(record,'$.content_package')=?3")?;
+            let rows = stmt.query_map(rusqlite::params![entrypoint,runner,package], |r| r.get::<_,String>(0))?;
+            rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+        }).await
+    }
+
+    pub(crate) fn delete_terminal_run_records(&self, ids: Vec<String>) -> anyhow::Result<usize> {
+        self.request(move |conn| {
+            let tx = conn.transaction()?;
+            let mut removed = 0;
+            for id in ids {
+                let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM run_records WHERE run_id=?1 AND (finished_at IS NULL OR COALESCE(json_extract(record,'$.state'),'') NOT IN ('success','failed','cancelled')))", [&id], |r| r.get(0))?;
+                anyhow::ensure!(!active, "run_active");
+                let protected: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM run_records WHERE run_id=?1 AND (json_extract(record,'$.task_id') IS NOT NULL OR COALESCE(json_extract(record,'$.source'),'')!='manual'))", [&id], |r| r.get(0))?;
+                anyhow::ensure!(!protected, "run_protected");
+                // Explicitly remove events even on databases without FK enforcement.
+                tx.execute("DELETE FROM run_events WHERE run_id=?1", [&id])?;
+                removed += tx.execute("DELETE FROM run_records WHERE run_id=?1", [&id])?;
+            }
+            tx.commit()?;
+            Ok(removed)
+        })
+    }
     pub(crate) fn save_run_record(
         &self,
         record: &crate::run_manager::RunRecord,
@@ -63,15 +95,18 @@ impl Store {
 
     pub(crate) async fn run_history(
         &self,
-        device: String,
+        device: Option<String>,
         entrypoint: Option<String>,
         before: Option<String>,
+        task: Option<String>,
     ) -> anyhow::Result<Vec<Value>> {
         self.request_async(move |conn| {
-            let mut stmt = conn.prepare("SELECT record FROM run_records WHERE device_id=?1 AND (?2 IS NULL OR entrypoint=?2)
-                AND (?3 IS NULL OR (started_at,run_id) < (SELECT started_at,run_id FROM run_records WHERE run_id=?3 AND device_id=?1))
+            let mut stmt = conn.prepare("SELECT record FROM run_records WHERE (?1 IS NULL OR device_id=?1) AND (?2 IS NULL OR entrypoint=?2)
+                AND (?4 IS NULL OR json_extract(record,'$.task_id')=?4)
+                AND (?3 IS NULL OR (started_at,run_id) < (SELECT started_at,run_id FROM run_records WHERE run_id=?3
+                    AND (?1 IS NULL OR device_id=?1) AND (?4 IS NULL OR json_extract(record,'$.task_id')=?4)))
                 ORDER BY started_at DESC,run_id DESC LIMIT 30")?;
-            let rows = stmt.query_map(rusqlite::params![device,entrypoint,before], |r| r.get::<_,String>(0))?;
+            let rows = stmt.query_map(rusqlite::params![device,entrypoint,before,task], |r| r.get::<_,String>(0))?;
             rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
         }).await
     }
@@ -143,6 +178,7 @@ mod tests {
             device_id: device.into(),
             runner_id: "test".into(),
             entrypoint: "p/example".into(),
+            content_package: Some("p".into()),
             script_id: "p/example".into(),
             source: crate::run_manager::RunSource::Manual,
             task_id: None,
@@ -152,6 +188,58 @@ mod tests {
             finished_at: None,
             error: None,
         }
+    }
+
+    #[tokio::test]
+    async fn exact_terminal_cleanup_is_transactional_and_protects_active_and_task_history() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Store::open(&Config {
+            data_dir: root.path().into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let mut ended = record("ended", "d");
+        ended.state = crate::run_manager::RunState::Success;
+        ended.finished_at = Some(Utc::now());
+        db.save_run_record(&ended).unwrap();
+        db.save_run_record(&record("active", "d2")).unwrap();
+        db.append_run_event("ended".into(), serde_json::json!({"ev":"detail"}))
+            .await
+            .unwrap();
+        assert!(db
+            .delete_terminal_run_records(vec!["ended".into(), "active".into()])
+            .unwrap_err()
+            .to_string()
+            .contains("run_active"));
+        assert!(db.stored_run("ended".into()).await.unwrap().is_some());
+        assert_eq!(
+            db.run_event_page("ended".into(), 0).await.unwrap()["events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let mut task = ended.clone();
+        task.run_id = "task".into();
+        task.task_id = Some("task-id".into());
+        db.save_run_record(&task).unwrap();
+        assert!(db
+            .delete_terminal_run_records(vec!["ended".into(), "task".into()])
+            .unwrap_err()
+            .to_string()
+            .contains("run_protected"));
+        assert_eq!(
+            db.delete_terminal_run_records(vec!["ended".into()])
+                .unwrap(),
+            1
+        );
+        assert!(db.stored_run("ended".into()).await.unwrap().is_none());
+        assert_eq!(
+            db.run_event_page("ended".into(), 0).await.unwrap()["events"],
+            serde_json::json!([])
+        );
+        assert!(db.stored_run("task".into()).await.unwrap().is_some());
+        assert!(db.stored_run("active".into()).await.unwrap().is_some());
     }
 
     #[tokio::test]
@@ -186,14 +274,14 @@ mod tests {
         assert_eq!(second["events"].as_array().unwrap().len(), 2);
         assert_eq!(second["has_more"], false);
         assert_eq!(
-            db.run_history("d1".into(), Some("p/example".into()), None)
+            db.run_history(Some("d1".into()), Some("p/example".into()), None, None)
                 .await
                 .unwrap()
                 .len(),
             1
         );
         assert!(db
-            .run_history("d1".into(), Some("other".into()), None)
+            .run_history(Some("d1".into()), Some("other".into()), None, None)
             .await
             .unwrap()
             .is_empty());
@@ -300,36 +388,105 @@ mod tests {
             db.save_run_record(&run).unwrap();
         }
         db.save_run_record(&record("other-device", "d2")).unwrap();
-        let first = db.run_history("d1".into(), None, None).await.unwrap();
+        let first = db
+            .run_history(Some("d1".into()), None, None, None)
+            .await
+            .unwrap();
         assert_eq!(first.len(), 30);
         assert_eq!(first[0]["run_id"], "run-064");
         assert_eq!(first[29]["run_id"], "run-035");
         db.save_run_record(&record("new-arrival", "d1")).unwrap();
         let second = db
-            .run_history("d1".into(), None, Some("run-035".into()))
+            .run_history(Some("d1".into()), None, Some("run-035".into()), None)
             .await
             .unwrap();
         assert_eq!(second.len(), 30);
         assert_eq!(second[0]["run_id"], "run-034");
         assert_eq!(second[29]["run_id"], "run-005");
         let third = db
-            .run_history("d1".into(), None, Some("run-005".into()))
+            .run_history(Some("d1".into()), None, Some("run-005".into()), None)
             .await
             .unwrap();
         assert_eq!(third.len(), 5);
         assert_eq!(third[4]["run_id"], "run-000");
         let functions = db
             .run_history(
-                "d1".into(),
+                Some("d1".into()),
                 Some("p#function".into()),
                 Some("run-035".into()),
+                None,
             )
             .await
             .unwrap();
         assert_eq!(functions.len(), 18);
         assert!(functions.iter().all(|r| r["entrypoint"] == "p#function"));
         assert!(db
-            .run_history("d2".into(), None, Some("run-035".into()))
+            .run_history(Some("d2".into()), None, Some("run-035".into()), None)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn task_history_filters_before_pagination_and_survives_target_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Store::open(&Config {
+            data_dir: dir.path().into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let start = Utc::now();
+        for i in 0..35 {
+            let mut run = record(
+                &format!("task-run-{i:03}"),
+                if i < 10 {
+                    "old-device"
+                } else {
+                    "current-device"
+                },
+            );
+            run.task_id = Some("task-a".into());
+            run.started_at = start;
+            if i < 10 {
+                run.entrypoint = "p/previous".into();
+            }
+            db.save_run_record(&run).unwrap();
+        }
+        for i in 0..40 {
+            let mut run = record(&format!("unrelated-{i:03}"), "current-device");
+            run.started_at = start + chrono::Duration::seconds(1);
+            if i % 2 == 0 {
+                run.task_id = Some("task-b".into());
+            }
+            db.save_run_record(&run).unwrap();
+        }
+        let first = db
+            .run_history(None, None, None, Some("task-a".into()))
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 30);
+        assert!(first.iter().all(|run| run["task_id"] == "task-a"));
+        assert_eq!(first[0]["run_id"], "task-run-034");
+        let older = db
+            .run_history(
+                None,
+                None,
+                Some("task-run-005".into()),
+                Some("task-a".into()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(older.len(), 5);
+        assert!(older
+            .iter()
+            .all(|run| run["device_id"] == "old-device" && run["entrypoint"] == "p/previous"));
+        assert!(db
+            .run_history(
+                None,
+                None,
+                Some("unrelated-038".into()),
+                Some("task-a".into())
+            )
             .await
             .unwrap()
             .is_empty());

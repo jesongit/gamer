@@ -26,6 +26,10 @@ use super::{
     KeymapWasmStartRequest, NoKeymapWasmRuntime, ScreenSize,
 };
 
+#[cfg(test)]
+#[path = "service/local_http_tests.rs"]
+mod local_http_tests;
+
 /// Extension lifecycle → Timer runner registry seam（ADR-13 / P11.2）。The
 /// service only knows *when* a lifecycle transition happened; the
 /// composition-root implementation owns the registry (the Scheduler) and each
@@ -105,84 +109,6 @@ impl TimerRunnerRegistrar for CompositeTimerRunnerRegistrar {
 #[cfg(test)]
 mod protocol_seam_tests {
     use super::*;
-    use std::{
-        io::Write,
-        sync::atomic::{AtomicUsize, Ordering},
-    };
-
-    struct McpBuiltin {
-        calls: AtomicUsize,
-    }
-
-    #[async_trait]
-    impl BuiltinService for McpBuiltin {
-        fn extension_id(&self) -> &str {
-            "gamer-video"
-        }
-        async fn call(&self, _: &str, _: serde_json::Value) -> ExtensionResult<serde_json::Value> {
-            Err(ExtensionError::CallRejected("unused".into()))
-        }
-        async fn stop(&self) {}
-        async fn mcp(
-            &self,
-            request: serde_json::Value,
-            token: &str,
-        ) -> ExtensionResult<Option<serde_json::Value>> {
-            if token != "test-only" {
-                return Err(ExtensionError::ProtocolUnauthorized);
-            }
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Some(request))
-        }
-    }
-
-    #[tokio::test]
-    async fn protocol_dispatch_requires_running_and_rechecks_token_per_request() {
-        let directory = tempfile::tempdir().unwrap();
-        let builtin = Arc::new(McpBuiltin {
-            calls: AtomicUsize::new(0),
-        });
-        let service =
-            ExtensionService::for_data_root(directory.path(), CapabilityRegistry::default())
-                .with_builtin_service(builtin.clone());
-        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        writer
-            .start_file("manifest.toml", zip::write::SimpleFileOptions::default())
-            .unwrap();
-        writer.write_all(b"manifest_version = 2\nid = \"gamer-video\"\nname = \"Test\"\nversion = \"1.0.0\"\n[execution]\nkind = \"builtin\"\nbuiltin_id = \"gamer-video\"\n").unwrap();
-        let bytes = writer.finish().unwrap().into_inner();
-        let snapshot = service.install(&bytes).await.unwrap();
-        let id = snapshot.id();
-        assert!(service
-            .call_builtin_mcp(id, serde_json::json!({}), "test-only")
-            .await
-            .is_err());
-        service.enable(id).await.unwrap();
-        assert!(service
-            .call_builtin_mcp(id, serde_json::json!({}), "test-only")
-            .await
-            .is_err());
-        service.start(id).await.unwrap();
-        assert_eq!(
-            service
-                .call_builtin_mcp(id, serde_json::json!({"id":1}), "test-only")
-                .await
-                .unwrap(),
-            Some(serde_json::json!({"id":1}))
-        );
-        assert!(matches!(
-            service
-                .call_builtin_mcp(id, serde_json::json!({}), "revoked")
-                .await,
-            Err(ExtensionError::ProtocolUnauthorized)
-        ));
-        service.disable(id).await.unwrap();
-        assert!(service
-            .call_builtin_mcp(id, serde_json::json!({}), "test-only")
-            .await
-            .is_err());
-        assert_eq!(builtin.calls.load(Ordering::SeqCst), 1);
-    }
 
     struct Registrar {
         name: &'static str,
@@ -249,18 +175,28 @@ mod protocol_seam_tests {
 #[async_trait]
 pub(crate) trait BuiltinService: Send + Sync {
     fn extension_id(&self) -> &str;
+    /// Notify cancellable work before management waits for the call write gate.
+    /// The optional guard prevents new work until the transition finishes; its
+    /// Drop restores admission if management is rejected or cancelled.
+    fn cancel_inflight(&self) -> Option<Box<dyn Send>> {
+        None
+    }
     async fn call(
         &self,
         action: &str,
         values: serde_json::Value,
     ) -> ExtensionResult<serde_json::Value>;
     async fn stop(&self);
-    async fn mcp(
+    /// A plugin-owned read surface on the host's loopback HTTP listener.
+    /// Routing and read credentials belong to the plugin; the host admits only
+    /// a live builtin under the same lifecycle lease as other protocol calls.
+    async fn local_http(
         &self,
-        _request: serde_json::Value,
-        _token: &str,
-    ) -> ExtensionResult<Option<serde_json::Value>> {
-        Err(ExtensionError::CallRejected("该插件未提供 MCP 服务".into()))
+        _path: &str,
+        _headers: axum::http::HeaderMap,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        axum::http::StatusCode::NOT_FOUND.into_response()
     }
     async fn shutdown(&self) {
         self.stop().await;
@@ -436,7 +372,14 @@ pub(crate) struct ExtensionService {
     ui: UiContributionRegistry,
     runner_registrar: Option<Arc<dyn TimerRunnerRegistrar>>,
     builtin_service: Vec<Arc<dyn BuiltinService>>,
+    external_handlers: std::sync::Mutex<HashMap<ExtensionId, RegisteredExternalHandler>>,
     shutting_down: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Clone)]
+struct RegisteredExternalHandler {
+    handler: Arc<dyn super::external_tools::ExternalToolHandler>,
+    contract: Option<Arc<ExtensionManifest>>,
 }
 
 impl ExtensionService {
@@ -469,6 +412,7 @@ impl ExtensionService {
             ui: UiContributionRegistry::default(),
             runner_registrar: None,
             builtin_service: Vec::new(),
+            external_handlers: std::sync::Mutex::new(HashMap::new()),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -489,9 +433,266 @@ impl ExtensionService {
         self
     }
 
+    pub(crate) fn register_external_handler(
+        &self,
+        id: &ExtensionId,
+        handler: Arc<dyn super::external_tools::ExternalToolHandler>,
+    ) -> ExtensionResult<()> {
+        let contract = handler
+            .trusted_manifest()
+            .map(|source| super::manifest::parse_manifest(source.as_bytes()))
+            .transpose()?;
+        if contract
+            .as_ref()
+            .is_some_and(|manifest| manifest.id() != id)
+        {
+            return Err(ExtensionError::CallRejected(
+                "External handler contract belongs to a different plugin".into(),
+            ));
+        }
+        let mut handlers = self.external_handlers.lock().unwrap();
+        if handlers.contains_key(id) {
+            return Err(ExtensionError::CallRejected(
+                "External tool handler already registered".into(),
+            ));
+        }
+        handlers.insert(
+            id.clone(),
+            RegisteredExternalHandler {
+                handler,
+                contract: contract.map(Arc::new),
+            },
+        );
+        Ok(())
+    }
+    pub(crate) fn external_tool_provider(
+        self: &Arc<Self>,
+        id: ExtensionId,
+    ) -> Arc<dyn crate::mcp::ToolProvider> {
+        Arc::new(super::external_tools::PluginToolProvider {
+            service: Arc::downgrade(self),
+            id,
+        })
+    }
+    pub(crate) fn external_tools_provider(self: &Arc<Self>) -> Arc<dyn crate::mcp::ToolProvider> {
+        Arc::new(super::external_tools::AllPluginTools {
+            service: Arc::downgrade(self),
+        })
+    }
+    pub(crate) fn external_tool_descriptors(
+        &self,
+        id: &ExtensionId,
+    ) -> ExtensionResult<Vec<crate::mcp::ToolDescriptor>> {
+        let snapshot = self.snapshot_for(id)?;
+        self.require_current_process_running(id, snapshot.state(), "external tools")?;
+        let handler = self.external_handlers.lock().unwrap().get(id).cloned();
+        if handler
+            .as_ref()
+            .is_some_and(|handler| handler.contract.is_none())
+        {
+            return Ok(Vec::new());
+        }
+        let handled = handler.is_some();
+        let scoped_wasm = self.runtime.supports_scoped_external()
+            && self.running.lock().unwrap().contains_key(id);
+        if !handled && !scoped_wasm {
+            return Ok(Vec::new());
+        }
+        let versions = self.versions_for(id)?;
+        let state = self.store.read_state()?;
+        let record = state_for_versions(id, &versions, state.get(id).cloned())?;
+        let installed = active_version(&versions, &record)?;
+        snapshot
+            .manifest()
+            .tools()
+            .iter()
+            .filter(|tool| {
+                handled
+                    || tool
+                        .required_permissions
+                        .iter()
+                        .all(|permission| !super::external_tools::requires_host_adapter(permission))
+            })
+            .map(|tool| {
+                if let Some(contract) = handler
+                    .as_ref()
+                    .and_then(|handler| handler.contract.as_deref())
+                {
+                    super::external_tools::validate_native_contract(tool, contract)?;
+                }
+                let input = installed.read_file(&tool.input_schema)?;
+                let output = tool
+                    .output_schema
+                    .as_ref()
+                    .map(|path| installed.read_file(path))
+                    .transpose()?;
+                tool.descriptor(id, &input, output.as_deref())
+            })
+            .collect()
+    }
+    fn prepare_external_tool(
+        &self,
+        mut context: crate::mcp::InvocationContext,
+        id: &ExtensionId,
+        name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<
+        (
+            crate::mcp::InvocationContext,
+            super::external_tools::ToolDeclaration,
+        ),
+        crate::mcp::McpError,
+    > {
+        context.check_active()?;
+        context.authorize_plugin(id.as_str())?;
+        if self
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(crate::mcp::McpError::internal("Extension host is stopping"));
+        }
+        let snapshot = self
+            .snapshot_for(id)
+            .map_err(super::external_tools::error)?;
+        self.require_current_process_running(id, snapshot.state(), "external tools")
+            .map_err(super::external_tools::error)?;
+        let tool = snapshot
+            .manifest()
+            .tools()
+            .iter()
+            .find(|tool| tool.name(id) == name)
+            .cloned()
+            .ok_or_else(|| {
+                crate::mcp::McpError::forbidden("Tool is not declared by the installed plugin")
+            })?;
+        for scope in &tool.required_scopes {
+            context.require_scope(scope)?;
+        }
+        let host = HostApi::for_manifest(
+            self.capabilities.clone(),
+            self.host_api.clone(),
+            snapshot.manifest(),
+        )
+        .map_err(super::external_tools::error)?;
+        for permission in tool.required_permissions.iter() {
+            host.authorize(permission)
+                .map_err(super::external_tools::error)?;
+        }
+        let descriptor = self
+            .external_tool_descriptors(id)
+            .map_err(super::external_tools::error)?
+            .into_iter()
+            .find(|descriptor| descriptor.name == name)
+            .ok_or_else(|| crate::mcp::McpError::forbidden("Tool backend is unavailable"))?;
+        crate::mcp::validate_tool_arguments(&descriptor.input_schema, arguments)?;
+        crate::mcp::bind_context(&mut context, &descriptor.context, arguments)?;
+        Ok((context, tool))
+    }
+    pub(crate) async fn authorize_external_tool(
+        &self,
+        context: crate::mcp::InvocationContext,
+        id: &ExtensionId,
+        name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<(), crate::mcp::McpError> {
+        let _lease = self.call_gate(id).read_owned().await;
+        let (context, tool) = self.prepare_external_tool(context, id, name, arguments)?;
+        let handler = self
+            .external_handlers
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|entry| entry.handler.clone());
+        if let Some(handler) = handler {
+            handler.authorize(&context, &tool.action, arguments).await
+        } else {
+            context.check_active()
+        }
+    }
+    pub(crate) async fn call_extension_from_external(
+        &self,
+        context: crate::mcp::InvocationContext,
+        id: &ExtensionId,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<crate::mcp::ToolResult, crate::mcp::McpError> {
+        let lease = self.call_gate(id).read_owned().await;
+        let (context, tool) = self.prepare_external_tool(context, id, name, &arguments)?;
+        let handler = self
+            .external_handlers
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|entry| entry.handler.clone());
+        if let Some(handler) = handler {
+            handler
+                .authorize(&context, &tool.action, &arguments)
+                .await?;
+            // The child owns admission until the actual native future completes,
+            // even when the HTTP response waiter is dropped.
+            return tokio::spawn(async move {
+                let _lease = lease;
+                handler.call(context, &tool.action, arguments).await
+            })
+            .await
+            .map_err(|_| crate::mcp::McpError::internal("External plugin operation failed"))?;
+        }
+        let versions = self
+            .versions_for(id)
+            .map_err(super::external_tools::error)?;
+        let states = self
+            .store
+            .read_state()
+            .map_err(super::external_tools::error)?;
+        let record = state_for_versions(id, &versions, states.get(id).cloned())
+            .map_err(super::external_tools::error)?;
+        let installed = active_version(&versions, &record).map_err(super::external_tools::error)?;
+        let host = HostApi::for_manifest(
+            self.capabilities.clone(),
+            self.host_api.clone(),
+            installed.manifest(),
+        )
+        .map_err(super::external_tools::error)?
+        .for_external(context, tool.required_permissions, tool.effect);
+        let request = WasmStartRequest {
+            id: id.clone(),
+            version: installed.manifest().version().clone(),
+            wasm: installed
+                .read_wasm()
+                .map_err(super::external_tools::error)?,
+            host,
+            app_context: None,
+        };
+        let runtime = self.runtime.clone();
+        tokio::spawn(async move {
+            let _lease = lease;
+            let instance = runtime
+                .start(request)
+                .await
+                .map_err(super::external_tools::error)?;
+            let result = runtime
+                .call(instance, &tool.action, &arguments.to_string())
+                .await;
+            let cleanup = runtime.stop(instance).await;
+            let result = result.map_err(super::external_tools::error)?;
+            cleanup.map_err(super::external_tools::error)?;
+            let value = serde_json::from_str(&result).map_err(|_| {
+                crate::mcp::McpError::internal("External guest did not return JSON")
+            })?;
+            Ok(crate::mcp::ToolResult::json(value))
+        })
+        .await
+        .map_err(|_| crate::mcp::McpError::internal("External guest operation failed"))?
+    }
+
     pub(crate) async fn shutdown_builtin_service(&self) {
         self.shutting_down
             .store(true, std::sync::atomic::Ordering::Release);
+        let _cancellation = self
+            .builtin_service
+            .iter()
+            .filter_map(|service| service.cancel_inflight())
+            .collect::<Vec<_>>();
         for service in &self.builtin_service {
             if let Ok(id) = ExtensionId::parse(service.extension_id()) {
                 let gate = self.call_gate(&id);
@@ -620,6 +821,22 @@ impl ExtensionService {
         state: ExtensionState,
         operation: &'static str,
     ) -> ExtensionResult<()> {
+        self.require_current_process_running_with_manifest(
+            id,
+            state,
+            operation,
+            self.snapshot_for(id)?.manifest(),
+        )
+    }
+
+    fn require_current_process_running_with_manifest(
+        &self,
+        id: &ExtensionId,
+        state: ExtensionState,
+        operation: &'static str,
+        manifest: &ExtensionManifest,
+    ) -> ExtensionResult<()> {
+        ensure_runtime_manifest_supported(manifest)?;
         if state != ExtensionState::Running {
             return Err(invalid_transition(id, operation, state));
         }
@@ -719,6 +936,29 @@ impl ExtensionService {
         let Some(instance) = instance else {
             return Ok(InputResult::pass());
         };
+        // Input is a hot path: authorize against the current state and the exact
+        // active immutable version, without enumerating unrelated history for
+        // every mouse move. The call lease keeps lifecycle transitions ordered.
+        let states = self.store.read_state()?;
+        let record = states
+            .get(&id)
+            .ok_or_else(|| ExtensionError::InvalidState(format!("插件 {id} 缺少运行状态")))?;
+        let version = record
+            .active_version
+            .as_ref()
+            .ok_or_else(|| ExtensionError::InvalidState(format!("插件 {id} 缺少活动版本")))?;
+        let active = self.store.installed(&id, version)?.ok_or_else(|| {
+            ExtensionError::VersionNotInstalled {
+                id: id.to_string(),
+                version: version.to_string(),
+            }
+        })?;
+        self.require_current_process_running_with_manifest(
+            &id,
+            record.state,
+            "input",
+            active.manifest(),
+        )?;
         self.keymap_runtime
             .dispatch(instance, device, screen, event, trace)
             .await
@@ -736,6 +976,20 @@ impl ExtensionService {
     /// callers must use `call_extension_from_plugin`, which has a separate
     /// trusted caller and Package Context contract.
     pub(crate) async fn call_extension(
+        &self,
+        id: &ExtensionId,
+        action: &str,
+        values: serde_json::Value,
+    ) -> ExtensionResult<serde_json::Value> {
+        if super::is_internal_native_action(id, action) {
+            return Err(ExtensionError::CallRejected(
+                "该动作仅接受运行宿主的可信插件调用".into(),
+            ));
+        }
+        self.call_extension_authorized(id, action, values).await
+    }
+
+    async fn call_extension_authorized(
         &self,
         id: &ExtensionId,
         action: &str,
@@ -812,15 +1066,12 @@ impl ExtensionService {
             .map_err(|error| ExtensionError::Runtime(format!("插件 call 返回值不是 JSON: {error}")))
     }
 
-    /// A separately authenticated protocol surface, with the same short
-    /// lifecycle lease as builtin calls. Plugins own their bearer-token and
-    /// per-tool capability checks; this method only admits a live builtin.
-    pub(crate) async fn call_builtin_mcp(
+    pub(crate) async fn call_builtin_local_http(
         &self,
         id: &ExtensionId,
-        request: serde_json::Value,
-        token: &str,
-    ) -> ExtensionResult<Option<serde_json::Value>> {
+        path: &str,
+        headers: axum::http::HeaderMap,
+    ) -> ExtensionResult<axum::response::Response> {
         let gate = self.call_gate(id);
         let _call_lease = gate.read().await;
         if self
@@ -830,13 +1081,15 @@ impl ExtensionService {
             return Err(ExtensionError::CallRejected("服务正在停止".into()));
         }
         let snapshot = self.snapshot_for(id)?;
-        self.require_current_process_running(id, snapshot.state(), "mcp")?;
+        self.require_current_process_running(id, snapshot.state(), "local_http")?;
         let service = self
             .builtin_service
             .iter()
             .find(|service| service.extension_id() == id.as_str())
-            .ok_or(ExtensionError::RuntimeUnavailable("该插件 MCP 服务未装配"))?;
-        service.mcp(request, token).await
+            .ok_or(ExtensionError::RuntimeUnavailable(
+                "该插件本机读取服务未装配",
+            ))?;
+        Ok(service.local_http(path, headers).await)
     }
 
     /// Issue an opaque cross-extension call context from the current live
@@ -957,7 +1210,7 @@ impl ExtensionService {
                 ));
             }
         }
-        self.call_extension(target, action, values).await
+        self.call_extension_authorized(target, action, values).await
     }
 
     pub(crate) fn store(&self) -> &ExtensionStore {
@@ -971,10 +1224,15 @@ impl ExtensionService {
 
     /// 单条依赖的实时状态：已安装？版本兼容？目标 Running？
     fn dependency_status(&self, dep: &super::manifest::ExtensionDependency) -> DependencyStatus {
-        let installed = self.list().ok().and_then(|all| {
-            all.into_iter()
-                .find(|snapshot| snapshot.id().as_str() == dep.id().as_str())
-        });
+        let all = self.list().unwrap_or_default();
+        self.dependency_status_from(dep, all.iter().find(|snapshot| snapshot.id() == dep.id()))
+    }
+
+    fn dependency_status_from(
+        &self,
+        dep: &super::manifest::ExtensionDependency,
+        installed: Option<&ExtensionSnapshot>,
+    ) -> DependencyStatus {
         let (version, state) = match &installed {
             Some(snapshot) => (
                 Some(snapshot.active_version().to_string()),
@@ -987,6 +1245,9 @@ impl ExtensionService {
                 .matches(snapshot.active_version().semver())
         });
         let running = state.is_some_and(ExtensionState::is_running)
+            && installed.as_ref().is_some_and(|snapshot| {
+                ensure_runtime_manifest_supported(snapshot.manifest()).is_ok()
+            })
             && self.has_live_instance_or_runner(dep.id());
         let satisfied = version_ok && running;
         let note = (!satisfied).then(|| {
@@ -1014,10 +1275,24 @@ impl ExtensionService {
 
     /// 依赖状态报告（快照附带；插件中心/面板据此做缺依赖提示与可选能力降级）。
     pub(crate) fn dependency_report(&self, manifest: &ExtensionManifest) -> Vec<DependencyStatus> {
+        let all = self.list().unwrap_or_default();
+        self.dependency_report_from(manifest, &all)
+    }
+
+    pub(crate) fn dependency_report_from(
+        &self,
+        manifest: &ExtensionManifest,
+        all: &[ExtensionSnapshot],
+    ) -> Vec<DependencyStatus> {
         manifest
             .dependencies()
             .iter()
-            .map(|dep| self.dependency_status(dep))
+            .map(|dep| {
+                self.dependency_status_from(
+                    dep,
+                    all.iter().find(|snapshot| snapshot.id() == dep.id()),
+                )
+            })
             .collect()
     }
 
@@ -1187,6 +1462,9 @@ impl ExtensionService {
         &self,
         manifest: &ExtensionManifest,
     ) -> Vec<serde_json::Value> {
+        if ensure_runtime_manifest_supported(manifest).is_err() {
+            return Vec::new();
+        }
         let mut actions: Vec<serde_json::Value> = native_public_actions(manifest.id());
         for action in declarative_actions(manifest) {
             // native 目录与 declarative 集合概念互斥（native 动作不经按钮集合）；
@@ -1356,8 +1634,38 @@ impl ExtensionService {
         context: &ExtensionInstallContext,
     ) -> ExtensionResult<ExtensionSnapshot> {
         let incoming_manifest = self.inspect_compatible(archive)?;
+        // Reject invalid/duplicate/unauthorized updates before cancelling any
+        // live builtin work. The existing checks are repeated under the write
+        // gate and operation lock to retain management's race protection.
+        let inspection = self.inspect_with_context(archive, context)?;
+        ensure_permission_confirmation(&inspection, context)?;
+        let versions = self.versions_for(incoming_manifest.id())?;
+        if versions.is_empty() {
+            return Err(ExtensionError::NotInstalled {
+                id: incoming_manifest.id().to_string(),
+            });
+        }
+        if versions
+            .iter()
+            .any(|candidate| candidate.manifest().version() == incoming_manifest.version())
+        {
+            return Err(ExtensionError::AlreadyInstalled {
+                id: incoming_manifest.id().to_string(),
+                version: incoming_manifest.version().to_string(),
+            });
+        }
+        self.ensure_version_satisfies_running_dependents(
+            incoming_manifest.id(),
+            incoming_manifest.version(),
+        )?;
+        let cancellation = self
+            .builtin_service
+            .iter()
+            .find(|service| service.extension_id() == incoming_manifest.id().as_str())
+            .and_then(|service| service.cancel_inflight());
         let call_gate = self.call_gate(incoming_manifest.id());
         let _call_gate = call_gate.write().await;
+        let _cancellation = cancellation;
 
         let (was_running, restore_context, old_active_version, install_error) = {
             let _guard = self.operation_lock.lock().await;
@@ -1599,6 +1907,9 @@ impl ExtensionService {
             match record.state {
                 ExtensionState::Running => {
                     if self.is_process_running(id) {
+                        ensure_runtime_manifest_supported(
+                            active_version(&versions, &record)?.manifest(),
+                        )?;
                         // 已在本进程运行：启用意图已满足，直接返回现状（幂等）。
                         return self.snapshot_for(id);
                     }
@@ -1628,8 +1939,18 @@ impl ExtensionService {
     /// rejecting disable-while-running. 简化计划 Phase 3：目标被运行中插件的
     /// 必需依赖引用时拒绝（提示先停用依赖方，不做自动级联停用）。
     pub(crate) async fn disable(&self, id: &ExtensionId) -> ExtensionResult<ExtensionSnapshot> {
+        // Preserve the normal rejection for a provider required by a running
+        // dependent before disturbing its work. Recheck under the existing
+        // operation lock after the call gate is acquired.
+        self.ensure_provider_transition(id, None)?;
+        let cancellation = self
+            .builtin_service
+            .iter()
+            .find(|service| service.extension_id() == id.as_str())
+            .and_then(|service| service.cancel_inflight());
         let call_gate = self.call_gate(id);
         let _call_gate = call_gate.write().await;
+        let _cancellation = cancellation;
         let _guard = self.operation_lock.lock().await;
         self.ensure_provider_transition(id, None)?;
         let mut states = self.store.read_state()?;
@@ -1695,6 +2016,9 @@ impl ExtensionService {
             return Err(invalid_transition(id, "start", record.state));
         }
         let active = active_version(&versions, &record)?;
+        if let Err(error) = ensure_runtime_manifest_supported(active.manifest()) {
+            return self.mark_start_failed(id, states, record, error).await;
+        }
         // 依赖门禁（简化计划 Phase 3）：必需依赖缺失/版本不兼容/未启用或形成
         // 循环 → 结构化拒绝启动。依赖缺失 ≠ 插件损坏：状态保留 Enabled 并记录
         // last_error（区别于运行时错误的 Failed），可从插件中心处置后重试。
@@ -1843,8 +2167,15 @@ impl ExtensionService {
     }
 
     pub(crate) async fn stop(&self, id: &ExtensionId) -> ExtensionResult<ExtensionSnapshot> {
+        self.ensure_provider_transition(id, None)?;
+        let cancellation = self
+            .builtin_service
+            .iter()
+            .find(|service| service.extension_id() == id.as_str())
+            .and_then(|service| service.cancel_inflight());
         let call_gate = self.call_gate(id);
         let _call_gate = call_gate.write().await;
+        let _cancellation = cancellation;
         let _guard = self.operation_lock.lock().await;
         self.ensure_provider_transition(id, None)?;
         let mut states = self.store.read_state()?;
@@ -2034,8 +2365,39 @@ impl ExtensionService {
         id: &ExtensionId,
         version: &ExtensionVersion,
     ) -> ExtensionResult<bool> {
+        let states = self.store.read_state()?;
+        let versions = self.versions_for(id)?;
+        let record = state_for_versions(id, &versions, states.get(id).cloned())?;
+        if !versions
+            .iter()
+            .any(|candidate| candidate.manifest().version() == version)
+        {
+            return Err(ExtensionError::VersionNotInstalled {
+                id: id.to_string(),
+                version: version.to_string(),
+            });
+        }
+        let is_active = record.active_version.as_ref() == Some(version);
+        if is_active {
+            let next_active = versions
+                .iter()
+                .filter(|candidate| candidate.manifest().version() != version)
+                .map(|candidate| candidate.manifest().version())
+                .max();
+            self.ensure_provider_transition(id, next_active)?;
+        }
+        // Removing an inactive archive does not stop the active implementation.
+        let cancellation = if is_active {
+            self.builtin_service
+                .iter()
+                .find(|service| service.extension_id() == id.as_str())
+                .and_then(|service| service.cancel_inflight())
+        } else {
+            None
+        };
         let call_gate = self.call_gate(id);
         let _call_gate = call_gate.write().await;
+        let _cancellation = cancellation;
 
         let (was_running, restore_context, removal_error, removed) = {
             let _guard = self.operation_lock.lock().await;
@@ -2182,6 +2544,22 @@ impl ExtensionService {
                 ));
             }
         }
+        if let Some(handler) = self
+            .external_handlers
+            .lock()
+            .unwrap()
+            .get(manifest.id())
+            .cloned()
+        {
+            let trusted = handler.contract.ok_or_else(|| {
+                ExtensionError::CallRejected(
+                    "Host external handler has no trusted tool contract".into(),
+                )
+            })?;
+            for tool in manifest.tools() {
+                super::external_tools::validate_native_contract(tool, &trusted)?;
+            }
+        }
         Ok(manifest)
     }
 
@@ -2211,18 +2589,21 @@ impl ExtensionService {
                 .or_default()
                 .push(extension);
         }
-        self.ui.clear();
-        for (id, versions) in by_id {
-            let record = state_for_versions(&id, &versions, states.get(&id).cloned())?;
+        let mut visible = Vec::new();
+        for (id, versions) in &by_id {
+            let record = state_for_versions(id, versions, states.get(id).cloned())?;
             // UI 贡献只在 Running 可见（Phase 1 语义收紧）：Enabled 表示「已
             // 启用但没有活实例/runner」，面板与 ui 资产随 stop/disable 一并
             // 撤销，start 才重新发布。避免「看起来在跑、点进去没有能力」的
             // 半启用态。
             if record.state == ExtensionState::Running {
-                self.ui
-                    .register(active_version(&versions, &record)?.manifest());
+                let manifest = active_version(versions, &record)?.manifest();
+                if ensure_runtime_manifest_supported(manifest).is_ok() {
+                    visible.push(manifest);
+                }
             }
         }
+        self.ui.replace(&visible);
         Ok(())
     }
 
@@ -2549,8 +2930,285 @@ fn snapshot_from_versions(
             .map(|extension| extension.manifest().version().clone())
             .collect(),
         state: record.state,
-        last_error: record.last_error,
+        last_error: ensure_runtime_manifest_supported(active.manifest())
+            .err()
+            .map(|error| error.to_string())
+            .or(record.last_error),
     })
+}
+
+/// Listing immutable packages is independent of availability of their old
+/// host features. Execution always checks both gates before creating a host
+/// permission view or entering native/guest code.
+fn ensure_runtime_manifest_supported(manifest: &ExtensionManifest) -> ExtensionResult<()> {
+    if let Some(id) = manifest.execution().builtin_id() {
+        if super::builtin::builtin_extension(id).is_none() {
+            return Err(ExtensionError::HostFeatureUnavailable(id.to_owned()));
+        }
+    }
+    manifest.ensure_supported()
+}
+
+#[cfg(all(test, feature = "wasm-runtime"))]
+mod input_history_tests {
+    use super::*;
+    use crate::capabilities::{DeviceHandle, DeviceId};
+
+    #[tokio::test]
+    async fn keymap_input_ignores_unrelated_history_but_keeps_live_manifest_and_process_guards() {
+        let directory = tempfile::tempdir().unwrap();
+        let service =
+            ExtensionService::for_data_root(directory.path(), CapabilityRegistry::default());
+        let component = super::super::keymap::build_guest_fixture_component();
+        let archive = super::super::keymap::package_guest_fixture_gplugin(&component, &[]);
+        let id = super::super::keymap::keymap_extension_id();
+        service.install(&archive).await.unwrap();
+        service.enable_and_start(&id, None, None).await.unwrap();
+        let historical = directory.path().join("extensions/gamer-keymap/0.0.1");
+        std::fs::create_dir_all(&historical).unwrap();
+        std::fs::write(historical.join("manifest.toml"), "invalid = [").unwrap();
+        assert!(service.store.list_installed().is_err());
+
+        let dispatch = || {
+            service.dispatch_keymap_input(
+                DeviceHandle::new(DeviceId::new("isolated-input-test")),
+                ScreenSize::new(640, 480),
+                InputEvent::MouseMove {
+                    x: 10,
+                    y: 20,
+                    delta_x: 0,
+                    delta_y: 0,
+                },
+                None,
+            )
+        };
+        assert!(!dispatch().await.unwrap().consume);
+        service.clear_process_running(&id);
+        assert!(matches!(
+            dispatch().await,
+            Err(ExtensionError::RuntimeUnavailable(_))
+        ));
+        service.mark_process_running(&id, None, None);
+        let mut states = service.store.read_state().unwrap();
+        states.get_mut(&id).unwrap().state = ExtensionState::Disabled;
+        service.store.write_state(&states).unwrap();
+        assert!(dispatch().await.is_err());
+        states.get_mut(&id).unwrap().state = ExtensionState::Running;
+        service.store.write_state(&states).unwrap();
+
+        let manifest_path = directory
+            .path()
+            .join("extensions/gamer-keymap/1.0.0/manifest.toml");
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        std::fs::write(
+            &manifest_path,
+            manifest.replace("permissions = []", "permissions = [\"ai.connect\"]"),
+        )
+        .unwrap();
+        assert!(matches!(
+            dispatch().await,
+            Err(ExtensionError::RetiredPermissions { .. })
+        ));
+        // Temporary test files only. Stop the guest without requiring a
+        // management snapshot of the deliberately corrupt history.
+        service.stop_running_instance(&id).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod retired_installation_tests {
+    use super::*;
+    use std::{
+        fs,
+        io::Write,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    fn historical_manifest(id: &str, version: &str, builtin: bool) -> Vec<u8> {
+        let execution = if builtin {
+            format!("[execution]\nkind='builtin'\nbuiltin_id='{id}'\n")
+        } else {
+            "entry='plugin.wasm'\n".into()
+        };
+        format!("manifest_version=2\nid='{id}'\nversion='{version}'\nname='Historical plugin'\npermissions=['resource.read','ai.connect']\n{execution}").into_bytes()
+    }
+    fn seed_historical_version(
+        root: &std::path::Path,
+        id: &str,
+        version: &str,
+        builtin: bool,
+    ) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        let version_root = root.join("extensions").join(id).join(version);
+        fs::create_dir_all(&version_root).unwrap();
+        let mut files = vec![
+            (
+                version_root.join("manifest.toml"),
+                historical_manifest(id, version, builtin),
+            ),
+            (
+                version_root.join("retained.json"),
+                b"historical immutable bytes".to_vec(),
+            ),
+        ];
+        if !builtin {
+            files.push((
+                version_root.join("plugin.wasm"),
+                b"\0asm\x01\0\0\0".to_vec(),
+            ));
+        }
+        for (path, bytes) in &files {
+            fs::write(path, bytes).unwrap();
+        }
+        files
+    }
+    fn assert_unchanged(files: &[(std::path::PathBuf, Vec<u8>)]) {
+        for (path, original) in files {
+            let current = fs::read(path).unwrap();
+            assert_eq!(
+                Sha256::digest(&current),
+                Sha256::digest(original),
+                "Historical manifest/file must remain byte-for-byte unchanged"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn strict_install_rejects_retired_permissions_before_staging() {
+        let directory = tempfile::tempdir().unwrap();
+        let service =
+            ExtensionService::for_data_root(directory.path(), CapabilityRegistry::default());
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        archive
+            .start_file("manifest.toml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive
+            .write_all(&historical_manifest("com.example.retired", "1.0.0", false))
+            .unwrap();
+        archive
+            .start_file("plugin.wasm", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(b"\0asm\x01\0\0\0").unwrap();
+        let error = service
+            .install(&archive.finish().unwrap().into_inner())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ExtensionError::Permission(super::super::PermissionError::Retired(_))
+        ));
+        assert!(!directory.path().join("extensions").exists());
+    }
+    struct NeverCalled(AtomicUsize);
+    #[async_trait]
+    impl BuiltinService for NeverCalled {
+        fn extension_id(&self) -> &str {
+            "gamer-video"
+        }
+        async fn call(&self, _: &str, _: serde_json::Value) -> ExtensionResult<serde_json::Value> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({"executed":true}))
+        }
+        async fn stop(&self) {}
+    }
+    #[tokio::test]
+    async fn historical_permissions_do_not_grant_execution_or_rewrite_any_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut files = seed_historical_version(directory.path(), "gamer-video", "1.0.0", true);
+        files.extend(seed_historical_version(
+            directory.path(),
+            "gamer-video",
+            "2.0.0",
+            true,
+        ));
+        let calls = Arc::new(NeverCalled(AtomicUsize::new(0)));
+        let service =
+            ExtensionService::for_data_root(directory.path(), CapabilityRegistry::default())
+                .with_builtin_service(calls.clone());
+        let id = ExtensionId::parse("gamer-video").unwrap();
+        let list = service.list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].installed_versions().len(), 2);
+        assert_eq!(list[0].manifest().permissions().names(), ["resource.read"]);
+        assert_eq!(list[0].manifest().retired_permissions(), ["ai.connect"]);
+        assert!(list[0]
+            .last_error()
+            .unwrap()
+            .contains("plugin_update_required"));
+        assert!(service.capability_actions(list[0].manifest()).is_empty());
+        assert!(HostApi::for_manifest(
+            CapabilityRegistry::default(),
+            HostApiCatalog::default(),
+            list[0].manifest()
+        )
+        .is_err());
+        assert_unchanged(&files);
+        service.enable(&id).await.unwrap();
+        assert!(matches!(
+            service.start(&id).await,
+            Err(ExtensionError::RetiredPermissions { .. })
+        ));
+        // Even a stale durable Running record and process marker cannot turn
+        // retired metadata into authority for a native action or guest call.
+        service
+            .force_state(&id, ExtensionState::Running, None)
+            .await
+            .unwrap();
+        service.mark_process_running(&id, None, None);
+        assert!(matches!(
+            service
+                .call_extension(&id, "media.list", serde_json::json!({}))
+                .await,
+            Err(ExtensionError::RetiredPermissions { .. })
+        ));
+        assert!(matches!(
+            service.guest_for_run(&id).await,
+            Err(ExtensionError::RetiredPermissions { .. })
+        ));
+        assert!(matches!(
+            service.plugin_call_context(&id).await,
+            Err(ExtensionError::RetiredPermissions { .. })
+        ));
+        assert!(matches!(
+            service.external_tool_descriptors(&id),
+            Err(ExtensionError::RetiredPermissions { .. })
+        ));
+        assert!(service.ui_contributions().unwrap().is_empty());
+        assert!(matches!(
+            service.enable_and_start(&id, None, None).await,
+            Err(ExtensionError::RetiredPermissions { .. })
+        ));
+        assert_eq!(calls.0.load(Ordering::SeqCst), 0);
+        assert_eq!(service.store.list_installed().unwrap().len(), 2);
+        assert_unchanged(&files);
+    }
+    #[tokio::test]
+    async fn removed_builtin_stays_listable_but_cannot_start_or_call() {
+        let directory = tempfile::tempdir().unwrap();
+        let files = seed_historical_version(directory.path(), "gamer-ai", "1.0.0", true);
+        let service =
+            ExtensionService::for_data_root(directory.path(), CapabilityRegistry::default());
+        let id = ExtensionId::parse("gamer-ai").unwrap();
+        assert!(super::super::builtin_extension("gamer-ai").is_none());
+        let list = service.list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0]
+            .last_error()
+            .unwrap()
+            .contains("host_feature_unavailable"));
+        assert_eq!(list[0].manifest().retired_permissions(), ["ai.connect"]);
+        service.enable(&id).await.unwrap();
+        assert!(matches!(
+            service.start(&id).await,
+            Err(ExtensionError::HostFeatureUnavailable(_))
+        ));
+        assert!(matches!(
+            service
+                .call_extension(&id, "session.start", serde_json::json!({}))
+                .await,
+            Err(ExtensionError::HostFeatureUnavailable(_))
+        ));
+        assert!(service.ui_contributions().unwrap().is_empty());
+        assert_unchanged(&files);
+    }
 }
 
 impl ExtensionService {
@@ -2749,14 +3407,37 @@ mod tests {
     /// gamer-yaml 安装包：无实例执行模型下 `start` 不读 guest 字节，占位
     /// wasm 即可通过安装；真实 v3 运行验收在 gamer_yaml 的端到端测试。
     fn gamer_yaml_archive() -> Vec<u8> {
-        zip_archive(&[
+        let mut entries = vec![
             (
-                "manifest.toml",
+                "manifest.toml".to_owned(),
                 YAML_EXTENSION_MANIFEST_TOML.as_bytes().to_vec(),
             ),
-            ("plugin.wasm", b"\0asm\x01\0\0\0".to_vec()),
-            ("ui/plugin.js", b"export const sdkVersion = 1;".to_vec()),
-        ])
+            ("plugin.wasm".to_owned(), b"\0asm\x01\0\0\0".to_vec()),
+            (
+                "ui/plugin.js".to_owned(),
+                b"export const sdkVersion = 1;".to_vec(),
+            ),
+        ];
+        let manifest =
+            super::super::parse_manifest(YAML_EXTENSION_MANIFEST_TOML.as_bytes()).unwrap();
+        let plugin_root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../plugins/gamer-yaml");
+        let mut schemas = std::collections::BTreeSet::new();
+        for tool in manifest.tools() {
+            schemas.insert(tool.input_schema.as_str().to_owned());
+            if let Some(output) = &tool.output_schema {
+                schemas.insert(output.as_str().to_owned());
+            }
+        }
+        for path in schemas {
+            let bytes = std::fs::read(plugin_root.join(&path)).unwrap();
+            entries.push((path, bytes));
+        }
+        let borrowed = entries
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), bytes.clone()))
+            .collect::<Vec<_>>();
+        zip_archive(&borrowed)
     }
 
     fn snapshot_state(service: &ExtensionService, id: &ExtensionId) -> ExtensionState {
@@ -3708,12 +4389,15 @@ entry = "plugin.wasm"
         let running_values = serde_json::json!({
             "package_id": "native-call",
             "name": "running",
-            "yaml": "version: 2\nrun:\n  - log: running\n"
+            "png_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            "region": [0.1,0.2,0.3,0.4],
+            "frame": {"media_id":"fixture","frame_index":0},
+            "calibration": {"version":1,"reference_size":[100,100],"rotation":0}
         });
         service
             .call_extension(
                 &id,
-                super::super::gamer_yaml::actions::AUTOMATION_SAVE_DRAFT,
+                super::super::gamer_yaml::actions::TEMPLATE_CREATE_FROM_FRAME,
                 running_values,
             )
             .await
@@ -3723,12 +4407,15 @@ entry = "plugin.wasm"
         let blocked_values = serde_json::json!({
             "package_id": "native-call",
             "name": "blocked",
-            "yaml": "version: 2\nrun:\n  - log: blocked\n"
+            "png_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            "region": [0.1,0.2,0.3,0.4],
+            "frame": {"media_id":"fixture","frame_index":0},
+            "calibration": {"version":1,"reference_size":[100,100],"rotation":0}
         });
         let error = service
             .call_extension(
                 &id,
-                super::super::gamer_yaml::actions::AUTOMATION_SAVE_DRAFT,
+                super::super::gamer_yaml::actions::TEMPLATE_CREATE_FROM_FRAME,
                 blocked_values,
             )
             .await
@@ -3736,11 +4423,11 @@ entry = "plugin.wasm"
         assert!(matches!(error, ExtensionError::InvalidTransition { .. }));
         assert!(!temp
             .path()
-            .join("packages/native-call/plugins/gamer-yaml/automations/blocked.yaml")
+            .join("packages/native-call/plugins/gamer-yaml/templates/blocked#100_200_300_400.png")
             .exists());
         assert!(temp
             .path()
-            .join("packages/native-call/plugins/gamer-yaml/automations/running.yaml")
+            .join("packages/native-call/plugins/gamer-yaml/templates/running#100_200_300_400.png")
             .exists());
 
         let blocked_template = serde_json::json!({
@@ -3796,11 +4483,14 @@ entry = "plugin.wasm"
         let error = service
             .call_extension(
                 &id,
-                super::super::gamer_yaml::actions::AUTOMATION_SAVE_DRAFT,
+                super::super::gamer_yaml::actions::TEMPLATE_CREATE_FROM_FRAME,
                 serde_json::json!({
                     "package_id": "stale-call",
                     "name": "must-not-write",
-                    "yaml": "version: 2\nrun:\n  - log: stale\n"
+                    "png_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            "region": [0.1,0.2,0.3,0.4],
+            "frame": {"media_id":"fixture","frame_index":0},
+            "calibration": {"version":1,"reference_size":[100,100],"rotation":0}
                 }),
             )
             .await
@@ -3811,7 +4501,7 @@ entry = "plugin.wasm"
         );
         assert!(!temp
             .path()
-            .join("packages/stale-call/plugins/gamer-yaml/automations/must-not-write.yaml")
+            .join("packages/stale-call/plugins/gamer-yaml/templates/must-not-write#100_200_300_400.png")
             .exists());
     }
 
@@ -3845,11 +4535,14 @@ entry = "plugin.wasm"
         let error = service
             .call_extension(
                 &id,
-                super::super::gamer_yaml::actions::AUTOMATION_SAVE_DRAFT,
+                super::super::gamer_yaml::actions::TEMPLATE_CREATE_FROM_FRAME,
                 serde_json::json!({
                     "package_id": "permission-call",
                     "name": "must-not-write",
-                    "yaml": "version: 2\nrun:\n  - log: blocked\n"
+                    "png_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            "region": [0.1,0.2,0.3,0.4],
+            "frame": {"media_id":"fixture","frame_index":0},
+            "calibration": {"version":1,"reference_size":[100,100],"rotation":0}
                 }),
             )
             .await
@@ -3857,7 +4550,7 @@ entry = "plugin.wasm"
         assert!(matches!(error, ExtensionError::Permission(_)), "{error}");
         assert!(!temp
             .path()
-            .join("packages/permission-call/plugins/gamer-yaml/automations/must-not-write.yaml")
+            .join("packages/permission-call/plugins/gamer-yaml/templates/must-not-write#100_200_300_400.png")
             .exists());
     }
 
@@ -3913,11 +4606,14 @@ entry = "plugin.wasm"
         service.enable(&attacker).await.unwrap();
         service.start(&attacker).await.unwrap();
 
-        let action = super::super::gamer_yaml::actions::AUTOMATION_SAVE_DRAFT;
+        let action = super::super::gamer_yaml::actions::TEMPLATE_CREATE_FROM_FRAME;
         let values = serde_json::json!({
             "package_id": package.as_str(),
             "name": "from-video",
-            "yaml": "version: 2\nrun:\n  - log: from video\n"
+            "png_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            "region": [0.1,0.2,0.3,0.4],
+            "frame": {"media_id":"fixture","frame_index":0},
+            "calibration": {"version":1,"reference_size":[100,100],"rotation":0}
         });
         let video_context = service.plugin_call_context(&video).await.unwrap();
         service
@@ -3926,14 +4622,17 @@ entry = "plugin.wasm"
             .unwrap();
         assert!(temp
             .path()
-            .join("packages/plugin-context/plugins/gamer-yaml/automations/from-video.yaml")
+            .join("packages/plugin-context/plugins/gamer-yaml/templates/from-video#100_200_300_400.png")
             .exists());
 
         let spoofed = serde_json::json!({
             "package_id": package.as_str(),
             "caller": video.as_str(),
             "name": "spoofed",
-            "yaml": "version: 2\nrun:\n  - log: spoofed\n"
+            "png_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            "region": [0.1,0.2,0.3,0.4],
+            "frame": {"media_id":"fixture","frame_index":0},
+            "calibration": {"version":1,"reference_size":[100,100],"rotation":0}
         });
         let attacker_context = service.plugin_call_context(&attacker).await.unwrap();
         let error = service
@@ -3943,13 +4642,18 @@ entry = "plugin.wasm"
         assert!(error.to_string().contains("不匹配动作"), "{error}");
         assert!(!temp
             .path()
-            .join("packages/plugin-context/plugins/gamer-yaml/automations/spoofed.yaml")
+            .join(
+                "packages/plugin-context/plugins/gamer-yaml/templates/spoofed#100_200_300_400.png"
+            )
             .exists());
 
         let wrong_package = serde_json::json!({
             "package_id": "other-context",
             "name": "wrong-package",
-            "yaml": "version: 2\nrun:\n  - log: wrong package\n"
+            "png_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            "region": [0.1,0.2,0.3,0.4],
+            "frame": {"media_id":"fixture","frame_index":0},
+            "calibration": {"version":1,"reference_size":[100,100],"rotation":0}
         });
         let error = service
             .call_extension_from_plugin(&video_context, &yaml, action, wrong_package)
@@ -3958,7 +4662,7 @@ entry = "plugin.wasm"
         assert!(error.to_string().contains("Package Context"), "{error}");
         assert!(!temp
             .path()
-            .join("packages/other-context/plugins/gamer-yaml/automations/wrong-package.yaml")
+            .join("packages/other-context/plugins/gamer-yaml/templates/wrong-package#100_200_300_400.png")
             .exists());
 
         service.disable(&video).await.unwrap();
@@ -3970,7 +4674,10 @@ entry = "plugin.wasm"
                 serde_json::json!({
                     "package_id": package.as_str(),
                     "name": "stale-context",
-                    "yaml": "version: 2\nrun:\n  - log: stale\n"
+                    "png_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            "region": [0.1,0.2,0.3,0.4],
+            "frame": {"media_id":"fixture","frame_index":0},
+            "calibration": {"version":1,"reference_size":[100,100],"rotation":0}
                 }),
             )
             .await
@@ -3978,7 +4685,7 @@ entry = "plugin.wasm"
         assert!(matches!(stale_error, ExtensionError::RuntimeUnavailable(_)));
         assert!(!temp
             .path()
-            .join("packages/plugin-context/plugins/gamer-yaml/automations/stale-context.yaml")
+            .join("packages/plugin-context/plugins/gamer-yaml/templates/stale-context#100_200_300_400.png")
             .exists());
     }
 

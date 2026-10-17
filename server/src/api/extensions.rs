@@ -18,30 +18,39 @@ use crate::extensions::{
 };
 
 pub(super) async fn api_list_extensions(State(st): State<AppState>) -> Response {
-    match st.extensions.list() {
+    // Installed history lives on disk. Discovery/TOML work cannot occupy the
+    // Tokio workers that also deliver preview frames and process display ACKs.
+    let result = tokio::task::spawn_blocking(move || match st.extensions.list() {
         Ok(extensions) => {
             let ui = match st.extensions.ui_contributions() {
                 Ok(ui) => ui,
-                Err(error) => return extension_error(error),
+                Err(error) => return Err(error),
             };
-            Json(serde_json::json!({
+            Ok(serde_json::json!({
                 "runtime_available": st.extensions.runtime_available(),
                 "extensions": extensions
                     .iter()
-                    .map(|snapshot| snapshot_json(&st.extensions, snapshot))
+                    .map(|snapshot| snapshot_json_with_dependencies(snapshot,
+                        st.extensions.dependency_report_from(snapshot.manifest(), &extensions)))
                     .collect::<Vec<_>>(),
                 "ui_contributions": ui,
             }))
-            .into_response()
         }
-        Err(error) => extension_error(error),
+        Err(error) => Err(error),
+    })
+    .await;
+    match result {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(error)) => extension_error(error),
+        Err(error) => ApiError::internal(error.to_string()).into_response(),
     }
 }
 
 pub(super) async fn api_list_ui_contributions(State(st): State<AppState>) -> Response {
-    match st.extensions.ui_contributions() {
-        Ok(contributions) => Json(contributions).into_response(),
-        Err(error) => extension_error(error),
+    match tokio::task::spawn_blocking(move || st.extensions.ui_contributions()).await {
+        Ok(Ok(contributions)) => Json(contributions).into_response(),
+        Ok(Err(error)) => extension_error(error),
+        Err(error) => ApiError::internal(error.to_string()).into_response(),
     }
 }
 
@@ -275,14 +284,13 @@ pub(super) async fn api_get_extension_ui_asset(
         Ok(path) => path,
         Err(error) => return extension_error(error),
     };
-    match st.extensions.read_ui_file(&id, &path) {
-        Ok((bytes, _)) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, content_type(path.as_str()))],
-            bytes,
-        )
-            .into_response(),
-        Err(error) => extension_error(error),
+    let mime = content_type(path.as_str());
+    match tokio::task::spawn_blocking(move || st.extensions.read_ui_file(&id, &path)).await {
+        Ok(Ok((bytes, _))) => {
+            (StatusCode::OK, [(header::CONTENT_TYPE, mime)], bytes).into_response()
+        }
+        Ok(Err(error)) => extension_error(error),
+        Err(error) => ApiError::internal(error.to_string()).into_response(),
     }
 }
 
@@ -358,6 +366,13 @@ async fn auto_start_installed(
 }
 
 fn snapshot_json(service: &ExtensionService, snapshot: &ExtensionSnapshot) -> serde_json::Value {
+    snapshot_json_with_dependencies(snapshot, service.dependency_report(snapshot.manifest()))
+}
+
+fn snapshot_json_with_dependencies(
+    snapshot: &ExtensionSnapshot,
+    dependencies: Vec<crate::extensions::DependencyStatus>,
+) -> serde_json::Value {
     let manifest = snapshot.manifest();
     let host_api = manifest
         .host_api()
@@ -366,7 +381,6 @@ fn snapshot_json(service: &ExtensionService, snapshot: &ExtensionSnapshot) -> se
         .collect::<std::collections::BTreeMap<_, _>>();
     // 依赖实时状态（简化计划 Phase 3）：必需依赖缺失 → 启动会失败的原因；
     // 可选依赖缺失 → 前端据此降级相关功能入口。
-    let dependencies = service.dependency_report(manifest);
     serde_json::json!({
         "id": snapshot.id(),
         "version": manifest.version(),
@@ -382,6 +396,7 @@ fn snapshot_json(service: &ExtensionService, snapshot: &ExtensionSnapshot) -> se
         "last_error": snapshot.last_error(),
         "host_api": host_api,
         "permissions": manifest.permissions().names(),
+        "retired_permissions": manifest.retired_permissions(),
         "dependencies": dependencies,
         "ui": manifest.ui().iter().map(ui_json).collect::<Vec<_>>(),
     })
@@ -443,7 +458,8 @@ fn extension_error(error: ExtensionError) -> Response {
             ApiError::conflict(error.to_string())
         }
         ExtensionError::PermissionConfirmationRequired(_)
-        | ExtensionError::HostFeatureUnavailable(_) => ApiError::conflict(error.to_string()),
+        | ExtensionError::HostFeatureUnavailable(_)
+        | ExtensionError::RetiredPermissions { .. } => ApiError::conflict(error.to_string()),
         ExtensionError::DependencyUnsatisfied { .. }
         | ExtensionError::DependencyOfRunningExtension { .. } => {
             ApiError::conflict(error.to_string())

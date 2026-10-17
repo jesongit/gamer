@@ -225,6 +225,11 @@ pub struct Config {
     /// 0 = 关闭（空闲会话永不进低功耗）
     #[serde(default = "default_idle_power_secs")]
     pub idle_power_secs: u64,
+    /// Opt-in idle browser process reclamation. A browser without a Core
+    /// consumer can still be queueing a cloud game, so the default is disabled.
+    /// Closing preserves the profile, but cannot preserve page/queue state.
+    #[serde(default)]
+    pub browser_idle_secs: u64,
     /// 服务端文件日志按天轮转的保留天数（含今天；文件形如
     /// gamer-server.log.YYYY-MM-DD，超窗旧文件启动及每日零点各清理一次）。
     /// 仅 GB_LOG 指向文件时生效；0 = 永不清理
@@ -300,6 +305,7 @@ impl Default for Config {
             fps: 15,
             probe_encoder: false,
             idle_power_secs: default_idle_power_secs(),
+            browser_idle_secs: 0,
             log_retain_days: default_log_retain_days(),
             trace: Default::default(),
             compute_max_concurrency: 0,
@@ -439,7 +445,7 @@ impl Config {
     pub fn non_sensitive_summary(&self) -> String {
         format!(
             "port={} local_only={} data_dir={} threshold={:.2} \
-             decode_frames={} max_size={} bitrate_mbps={} fps={} idle_power_secs={}s \
+             decode_frames={} max_size={} bitrate_mbps={} fps={} idle_power_secs={}s browser_idle_secs={}s \
              log_retain_days={}d compute_max_concurrency={} \
              rtc_external_ip={} rtc_udp_port={} rtc_external_port={} \
              session_abs_secs={} session_idle_secs={} \
@@ -453,6 +459,7 @@ impl Config {
             self.bitrate_mbps,
             self.fps,
             self.idle_power_secs,
+            self.browser_idle_secs,
             self.log_retain_days,
             self.compute_max_concurrency,
             if self.rtc_external_ip.is_empty() {
@@ -529,6 +536,10 @@ impl Config {
                 "port = {} 非法：HTTP 监听端口须在 1-65535",
                 self.port
             ));
+        }
+
+        if self.browser_idle_secs > 604800 {
+            errs.push("browser_idle_secs 须在 0～604800 秒之间；0 为关闭浏览器空闲回收".into());
         }
 
         if !(0.0 < self.threshold && self.threshold <= 1.0) {

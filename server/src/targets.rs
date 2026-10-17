@@ -97,7 +97,7 @@ impl TargetCapabilities {
             multitouch: false,
             android_app: false,
             recording: true,
-            media_output: false,
+            media_output: true,
             ..Self::android()
         }
     }
@@ -163,7 +163,7 @@ pub async fn prepare(devices: &DeviceManager, id: &str) -> anyhow::Result<()> {
         })
         .await?;
         session.release_inputs().await;
-        session.capture().await?;
+        session.capture_for_prepare().await?;
     } else if devices.session(id).is_none() {
         devices.connect_device(id).await?;
     }
@@ -171,10 +171,7 @@ pub async fn prepare(devices: &DeviceManager, id: &str) -> anyhow::Result<()> {
 }
 pub fn acquire(devices: &DeviceManager, id: &str) -> anyhow::Result<Box<dyn ActivityLease>> {
     if is_browser(id) {
-        let s = devices.browsers.session(id)?;
-        anyhow::ensure!(s.is_alive(), "目标已断开");
-        s.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        return Ok(Box::new(crate::browser::BrowserRunLease::new(s)));
+        return Ok(Box::new(devices.browsers.acquire(id)?));
     }
     Ok(Box::new(devices.acquire_activity(id, ActivityKind::Run)))
 }

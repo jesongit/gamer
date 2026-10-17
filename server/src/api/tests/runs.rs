@@ -1,5 +1,28 @@
 use super::*;
 
+#[tokio::test]
+async fn task_history_requires_auth_and_returns_only_the_requested_task_across_devices() {
+    let t = build_app("task-history", test_credential("admin123"), Default::default());
+    for (id, device, task) in [("wanted-old", "old-device", Some("task-a")), ("wanted-new", "current-device", Some("task-a")), ("other-task", "current-device", Some("task-b")), ("manual", "current-device", None)] {
+        let run = crate::run_manager::RunRecord {
+            run_id: id.into(), device_id: device.into(), runner_id: "test".into(),
+            entrypoint: "p/daily".into(), content_package: Some("p".into()), script_id: "p/daily".into(),
+            source: crate::run_manager::RunSource::Manual, task_id: task.map(str::to_owned), scheduled_at: None,
+            state: crate::run_manager::RunState::Failed, started_at: chrono::Utc::now(), finished_at: Some(chrono::Utc::now()), error: Some("failed".into()),
+        };
+        t.devices.db.save_run_record(&run).unwrap();
+    }
+    assert_eq!(get_json(&t, "", "/api/runs?task_id=task-a").await.status(), StatusCode::UNAUTHORIZED);
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    assert_eq!(get_json(&t, &sid, "/api/runs").await.status(), StatusCode::BAD_REQUEST);
+    let history = json_body(get_json(&t, &sid, "/api/runs?task_id=task-a").await).await;
+    assert_eq!(history.as_array().unwrap().len(), 2);
+    assert!(history.as_array().unwrap().iter().all(|run| run["task_id"] == "task-a"));
+    let scoped = json_body(get_json(&t, &sid, "/api/runs?task_id=task-a&device_id=old-device").await).await;
+    assert_eq!(scoped.as_array().unwrap().len(), 1);
+    assert_eq!(scoped[0]["run_id"], "wanted-old");
+}
+
 // ---------- 统一执行入口（POST /api/runs，P11.6）----------
 //
 // 经 TimerRunnerRegistry 分发到 gamer-yaml runner（测试装配同步注册）；
@@ -83,7 +106,7 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     // 建函数库（V1 functions: 包装 + 参数声明；Phase 1 起函数库存 automations/_function.yaml）
     let body = serde_json::json!({
         "name": "_function.yaml",
-        "content": "version: 2\nfunctions:
+        "content": "functions:
   login:
     params:
       who:
@@ -316,7 +339,7 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     // 设备恢复：取消后可再次提交（脚本入口同样带 args）
     let body = serde_json::json!({
         "name": "runme.yaml",
-        "content": "version: 2\nparams:\n  msg:\n    type: string\n    default: \"默认\"\nrun:\n  - log: $msg\n",
+        "content": "params:\n  msg:\n    type: string\n    default: \"默认\"\nrun:\n  - log: $msg\n",
     });
     let name = body["name"].as_str().unwrap().to_string();
     let content = body["content"].as_str().unwrap().to_string();

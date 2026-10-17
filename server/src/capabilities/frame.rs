@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use super::{CapabilityResult, DeviceHandle};
+use super::{CapabilityError, CapabilityResult, DeviceHandle, SearchRegion};
 
 /// Opaque decoded-frame reference. The RGB/YUV storage remains owned by the
 /// frame adapter and is never copied through this contract.
@@ -89,4 +89,21 @@ pub trait FrameService: Send + Sync {
     async fn capture(&self, device: &DeviceHandle) -> CapabilityResult<FrameHandle>;
 
     async fn size(&self, frame: FrameHandle) -> CapabilityResult<FrameSize>;
+
+    /// Encode the exact pixels referenced by `frame`, optionally cropping an
+    /// entirely in-bounds pixel region. Never capture another frame, rescale the
+    /// image, or clamp invalid regions. This is an on-demand byte boundary; no
+    /// additional persistent decoded-frame copy is implied.
+    async fn image_png(
+        &self,
+        _frame: FrameHandle,
+        _region: Option<SearchRegion>,
+    ) -> CapabilityResult<Vec<u8>> {
+        Err(CapabilityError::Unavailable("frame.image_png"))
+    }
+
+    /// Release a handle acquired by this caller when its pixels are no longer
+    /// needed. Releasing an already-released or expired handle is harmless.
+    /// Submit any trace evidence first; evidence owns its retained pixels.
+    fn release(&self, _frame: FrameHandle) {}
 }

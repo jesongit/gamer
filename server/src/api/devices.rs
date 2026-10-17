@@ -650,6 +650,20 @@ pub(super) async fn api_disconnect_device(
 
 pub(super) async fn api_screenshot(State(st): State<AppState>, Path(id): Path<String>) -> Response {
     let _capture_lease = st.devices.acquire_activity(&id, ActivityKind::Capture);
+    if crate::targets::is_browser(&id) {
+        let capture = async { st.devices.browsers.session(&id)?.capture().await }.await;
+        return match capture {
+            Ok((png, stamp)) => Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "image/png")
+                // Preview JPEGs may be smaller; tools consume this original image
+                // together with its exact coordinate/session identity.
+                .header("X-Frame-Stamp", serde_json::to_string(&stamp).unwrap())
+                .body(Body::from(png))
+                .unwrap(),
+            Err(e) => err_response(StatusCode::BAD_GATEWAY, &format!("截图失败: {}", e)),
+        };
+    }
     match st.devices.screenshot(&id).await {
         Ok(png) => Response::builder()
             .status(StatusCode::OK)

@@ -537,21 +537,22 @@ struct CollectedFile {
 /// 从包目录递归收集全部文件（排序、跳过隐藏文件/目录）。`sub` 限定子目录
 /// （空串 = 整包）。顶层 `media/` 不收集——媒体索引与素材字节由导出器按
 /// 当前媒体库引用状态重新生成（包目录内的 index.json 可能已过期）。
-fn collect_dir(root: &Path, prefix: &str, out: &mut Vec<CollectedFile>) {
+fn collect_dir(
+    root: &Path,
+    prefix: &str,
+    out: &mut Vec<CollectedFile>,
+) -> Result<(), ArchiveError> {
     let dir = if prefix.is_empty() {
         root.to_path_buf()
     } else {
         root.join(prefix)
     };
-    let Ok(rd) = fs::read_dir(&dir) else {
-        return;
-    };
-    for entry in rd.flatten() {
-        let name = match entry.file_name().into_string() {
-            Ok(name) => name,
-            Err(_) => continue,
-        };
-        if name.starts_with('.') || name == archive_limits::MANIFEST_NAME {
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let name = entry.file_name().into_string().map_err(|_| {
+            ArchiveError::Invalid("包内文件名必须是 UTF-8，拒绝省略资源后导出".into())
+        })?;
+        if name.starts_with('.') || (prefix.is_empty() && name == archive_limits::MANIFEST_NAME) {
             // 隐藏文件/临时文件不进包；manifest 由打包器显式写入（防重复条目）
             continue;
         }
@@ -564,15 +565,21 @@ fn collect_dir(root: &Path, prefix: &str, out: &mut Vec<CollectedFile>) {
             format!("{prefix}/{name}")
         };
         let path = entry.path();
-        if path.is_dir() {
-            collect_dir(root, &rel, out);
-        } else if path.is_file() {
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            collect_dir(root, &rel, out)?;
+        } else if kind.is_file() {
             out.push(CollectedFile {
                 name: rel,
                 absolute: path,
             });
+        } else {
+            return Err(ArchiveError::Invalid(format!(
+                "包内资源不是普通文件或目录，拒绝省略后导出: {rel}"
+            )));
         }
     }
+    Ok(())
 }
 
 /// 导出一个 Package 为 .gamerpkg 归档（package.toml 自然第一 + shared/ +
@@ -597,7 +604,7 @@ pub fn export_package(
         .package_dir(pkg)
         .map_err(|e| ArchiveError::Invalid(e.to_string()))?;
     let mut files = Vec::new();
-    collect_dir(&dir, "", &mut files);
+    collect_dir(&dir, "", &mut files)?;
 
     // 媒体引用 → 索引条目（+ 可选素材字节）
     let mut index = MediaIndex {
@@ -674,12 +681,10 @@ pub fn export_package(
             extra_entries
         )));
     }
-    let total: u64 = files
-        .iter()
-        .map(|f| fs::metadata(&f.absolute).map(|m| m.len()).unwrap_or(0))
-        .sum::<u64>()
-        + index_bytes.len() as u64
-        + media_bytes_total;
+    let resource_bytes = files.iter().try_fold(0u64, |total, file| {
+        fs::metadata(&file.absolute).map(|metadata| total + metadata.len())
+    })?;
+    let total: u64 = resource_bytes + index_bytes.len() as u64 + media_bytes_total;
     if total > IMPORT_MAX_TOTAL_BYTES as u64 {
         return Err(ArchiveError::Invalid(format!(
             "解压总量 {total} 字节超过上限 {IMPORT_MAX_TOTAL_BYTES} 字节"
@@ -805,6 +810,52 @@ mod tests {
     fn manifest_bytes(id: &str) -> Vec<u8> {
         format!("id = \"{id}\"\nversion = \"1.0.0\"\n[targets.android]\npackages = [\"*\"]\n")
             .into_bytes()
+    }
+
+    #[test]
+    fn export_directory_collection_fails_instead_of_omitting_unreadable_subtrees() {
+        let root = tempfile::tempdir().unwrap();
+        let mut files = Vec::new();
+        assert!(matches!(
+            collect_dir(root.path(), "missing", &mut files),
+            Err(ArchiveError::Io(_))
+        ));
+        fs::write(root.path().join("not-a-directory"), b"preserve me").unwrap();
+        assert!(matches!(
+            collect_dir(root.path(), "not-a-directory", &mut files),
+            Err(ArchiveError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn export_preserves_dormant_plugin_nested_manifest_bytes_and_unknown_fields() {
+        let (store, _dir) = temp_store();
+        let nested = b"future_unknown_field = { keep = 'original' }\n";
+        let source = archive(vec![
+            (
+                "package.toml",
+                manifest_bytes("official.dormant").as_slice(),
+            ),
+            ("plugins/not-installed/package.toml", nested.as_slice()),
+            (
+                "plugins/not-installed/archive/history.json",
+                b"{\"old\":1,\"future\":2}",
+            ),
+        ]);
+        let staging = store.staging_root().join("nested-manifest");
+        extract_archive(&source, &staging).unwrap();
+        fs::rename(&staging, store.package_dir("official.dormant").unwrap()).unwrap();
+        let exported = export_package(&store, "official.dormant", None, false).unwrap();
+        let restored = store.staging_root().join("nested-restored");
+        extract_archive(&exported.archive, &restored).unwrap();
+        assert_eq!(
+            fs::read(restored.join("plugins/not-installed/package.toml")).unwrap(),
+            nested
+        );
+        assert_eq!(
+            fs::read(restored.join("plugins/not-installed/archive/history.json")).unwrap(),
+            b"{\"old\":1,\"future\":2}"
+        );
     }
 
     #[test]

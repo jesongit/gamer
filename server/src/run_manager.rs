@@ -80,6 +80,9 @@ pub struct RunRecord {
     /// display field for the existing HTTP contract.
     pub runner_id: String,
     pub entrypoint: String,
+    /// Authoritative resource context; never inferred from the target application.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_package: Option<String>,
     /// Compatibility display label; this is not interpreted by RunManager.
     pub script_id: String,
     pub source: RunSource,
@@ -216,6 +219,8 @@ struct ActiveRun {
 const HISTORY_CAP: usize = 256;
 
 pub struct RunManager {
+    /// Serializes terminal persistence with explicit history removal.
+    archive_gate: Mutex<()>,
     journal: Option<crate::store::Db>,
     executor: Arc<dyn RunExecutor>,
     executors: std::sync::RwLock<HashMap<String, Arc<dyn RunExecutor>>>,
@@ -231,11 +236,14 @@ pub struct RunManager {
     inflight: AtomicUsize,
     /// 状态/归档变化通知；测试等待状态时使用，避免依赖固定 sleep。
     state_changed: tokio::sync::Notify,
+    /// Composition-root observer for archived outcomes, independent of task hooks.
+    result_hook: Mutex<Option<FinishHook>>,
 }
 
 impl RunManager {
     pub fn new(executor: Arc<dyn RunExecutor>) -> Self {
         Self {
+            archive_gate: Mutex::new(()),
             executor,
             executors: std::sync::RwLock::new(HashMap::new()),
             journal: None,
@@ -245,12 +253,17 @@ impl RunManager {
             draining: AtomicBool::new(false),
             inflight: AtomicUsize::new(0),
             state_changed: tokio::sync::Notify::new(),
+            result_hook: Mutex::new(None),
         }
     }
 
     pub fn with_journal(mut self, db: crate::store::Db) -> Self {
         self.journal = Some(db);
         self
+    }
+
+    pub fn set_result_hook(&self, hook: FinishHook) {
+        *self.result_hook.lock().unwrap() = Some(hook);
     }
 
     /// Composition-root registration; payload semantics remain in the runner.
@@ -290,6 +303,48 @@ impl RunManager {
             .iter()
             .find(|r| r.run_id == run_id)
             .cloned()
+    }
+
+    pub(crate) fn records_for_scope(
+        &self,
+        runner: &str,
+        entrypoint: &str,
+        package: &str,
+    ) -> Vec<RunRecord> {
+        let runs = self.runs.lock().unwrap();
+        let history = self.history.lock().unwrap();
+        runs.values()
+            .map(|run| &run.record)
+            .chain(history.iter())
+            .filter(|run| {
+                run.runner_id == runner
+                    && run.entrypoint == entrypoint
+                    && run.content_package.as_deref() == Some(package)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Runner-neutral cleanup. Active slots (including terminal states still
+    /// releasing their lease) are rejected; retained evidence is independent.
+    pub(crate) fn delete_terminal_records(
+        &self,
+        db: &crate::store::Store,
+        ids: &[String],
+    ) -> anyhow::Result<usize> {
+        let _archive = self.archive_gate.lock().unwrap();
+        let runs = self.runs.lock().unwrap();
+        anyhow::ensure!(!ids.iter().any(|id| runs.contains_key(id)), "run_active");
+        anyhow::ensure!(
+            !ids.iter().any(|id| db.trace.is_retained(id)),
+            "run_retained"
+        );
+        let removed = db.delete_terminal_run_records(ids.to_vec())?;
+        self.history
+            .lock()
+            .unwrap()
+            .retain(|record| !ids.contains(&record.run_id));
+        Ok(removed)
     }
 
     /// Wait for terminal state and release of the active run/activity lease.
@@ -387,6 +442,12 @@ impl RunManager {
             device_id: req.device_id().to_string(),
             runner_id: req.request.runner_id.clone(),
             entrypoint: req.request.entrypoint.clone(),
+            content_package: req
+                .request
+                .app
+                .content_package
+                .as_ref()
+                .map(ToString::to_string),
             script_id: req.display_label().to_string(),
             source: req.source,
             task_id: req.task_id.clone(),
@@ -632,6 +693,7 @@ impl RunManager {
             device_id: String::new(),
             runner_id: String::new(),
             entrypoint: String::new(),
+            content_package: None,
             script_id: String::new(),
             source: RunSource::Manual,
             task_id: None,
@@ -646,6 +708,7 @@ impl RunManager {
     /// FinishGuard Drop 出口：非终态兜底分类 + 注册表摘除 + 档案归档。
     /// 兜底规则：cancelled 在册 → cancelled；其余残留（panic/ forgotten set）→ failed。
     fn finalize(&self, run_id: &str) -> Option<RunRecord> {
+        let _archive = self.archive_gate.lock().unwrap();
         let rec = {
             // Use submit's lock order and archive atomically with slot removal.
             // Readers must never see a gap between the active map and history.
@@ -825,6 +888,20 @@ impl Drop for FinishGuard {
         let Some(rec) = self.mgr.finalize(&self.run_id) else {
             return;
         };
+        let outcome = match rec.state {
+            RunState::Success => RunOutcome::Success(vec![]),
+            RunState::Cancelled => RunOutcome::Cancelled(vec![]),
+            _ => RunOutcome::Failed(
+                rec.error
+                    .clone()
+                    .unwrap_or_else(|| "执行异常终止（panic 或未正常收尾）".into()),
+                vec![],
+            ),
+        };
+        let observer = self.mgr.result_hook.lock().unwrap().clone();
+        if let Some(observer) = observer {
+            observer(&rec, &outcome);
+        }
         // execute/prepare panic 或其它异常展开时没有机会走 complete；仍调用一次
         // 完成钩子，使 scheduled_runs 和任务结果不会永久停在 running。
         if let Some(hook) = self.on_finish.take() {
@@ -1018,8 +1095,126 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn terminal_cleanup_removes_memory_and_persistent_history_and_rejects_retained() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            crate::store::Store::open(&crate::config::Config {
+                data_dir: root.path().into(),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        let manager =
+            Arc::new(RunManager::new(Arc::new(FakeExecutor::default())).with_journal(db.clone()));
+        let run = manager
+            .submit(req("d", "pkg/cleanup", RunSource::Manual), None)
+            .unwrap();
+        manager.wait_terminal(&run.run_id).await.unwrap();
+        assert!(manager.get_run(&run.run_id).is_some());
+        assert_eq!(
+            manager
+                .delete_terminal_records(&db, &[run.run_id.clone()])
+                .unwrap(),
+            1
+        );
+        assert!(manager.get_run(&run.run_id).is_none());
+        assert!(db.stored_run(run.run_id).await.unwrap().is_none());
+        let retained = manager
+            .submit(req("d", "pkg/kept", RunSource::Manual), None)
+            .unwrap();
+        manager.wait_terminal(&retained.run_id).await.unwrap();
+        // Taking the archive gate waits for terminal journal/trace persistence.
+        {
+            let _gate = manager.archive_gate.lock().unwrap();
+        }
+        db.trace.submit(crate::runtime_trace::CapturedEvidence {
+            frame:Arc::new(crate::matcher::DecodedFrame::from_rgb(image::RgbImage::from_pixel(3,3,image::Rgb([17,23,31])))),
+            captured_at:Utc::now().to_rfc3339(),source:None,
+        },serde_json::json!({"run_id":retained.run_id,"kind":"consumed","trace_enabled":true}),false,None).unwrap();
+        db.trace.retain(&retained.run_id).unwrap();
+        assert!(manager
+            .delete_terminal_records(&db, &[retained.run_id.clone()])
+            .unwrap_err()
+            .to_string()
+            .contains("run_retained"));
+        assert!(manager.get_run(&retained.run_id).is_some());
+        assert!(db.stored_run(retained.run_id).await.unwrap().is_some());
+    }
+
     async fn settled(mgr: &Arc<RunManager>) {
         mgr.wait_settled(std::time::Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn result_observer_sees_archived_outcomes_once_after_release() {
+        for (executor, source, expected) in [
+            (
+                FakeExecutor::default(),
+                RunSource::Manual,
+                RunState::Success,
+            ),
+            (
+                FakeExecutor::connect_fail(),
+                RunSource::Scheduled,
+                RunState::Failed,
+            ),
+            (
+                FakeExecutor {
+                    step_error: Some("TEST_TIMEOUT".into()),
+                    ..Default::default()
+                },
+                RunSource::TaskNow,
+                RunState::Failed,
+            ),
+            (
+                FakeExecutor::hanging(),
+                RunSource::Manual,
+                RunState::Cancelled,
+            ),
+        ] {
+            let executor = Arc::new(executor);
+            let manager = Arc::new(RunManager::new(executor.clone()));
+            let observed = Arc::new(PlMutex::new(Vec::new()));
+            let sink = observed.clone();
+            let weak = Arc::downgrade(&manager);
+            let state = executor.state.clone();
+            manager.set_result_hook(Arc::new(move |record, _| {
+                let manager = weak.upgrade().unwrap();
+                assert!(manager.active_by_device.lock().unwrap().is_empty());
+                assert_eq!(manager.get_run(&record.run_id).unwrap(), *record);
+                let state = state.lock();
+                assert_eq!(state.releases, state.occupies);
+                sink.lock().push((record.state, record.source));
+            }));
+            let run = manager
+                .submit(req("observer-device", "pkg/demo.yaml", source), None)
+                .unwrap();
+            if expected == RunState::Cancelled {
+                manager.cancel(&run.run_id);
+            }
+            settled(&manager).await;
+            assert_eq!(*observed.lock(), vec![(expected, source)]);
+        }
+    }
+
+    #[tokio::test]
+    async fn run_record_preserves_explicit_resource_package_with_opaque_entrypoint() {
+        let manager = Arc::new(RunManager::new(Arc::new(FakeExecutor::default())));
+        let mut request = req("d", "opaque-entrypoint", RunSource::Manual);
+        request.request.app.content_package =
+            Some(crate::core::AppPackageId::new("hsr_cloud").unwrap());
+        let record = manager.submit(request, None).unwrap();
+        assert_eq!(record.content_package.as_deref(), Some("hsr_cloud"));
+        assert_eq!(
+            serde_json::to_value(&record).unwrap()["content_package"],
+            "hsr_cloud"
+        );
+        settled(&manager).await;
+        assert_eq!(
+            manager.get_run(&record.run_id).unwrap().content_package,
+            record.content_package
+        );
     }
 
     #[tokio::test]
@@ -1450,6 +1645,7 @@ mod tests {
                 device_id: "d".into(),
                 runner_id: "test.runner".into(),
                 entrypoint: "opaque-entrypoint".into(),
+                content_package: None,
                 script_id: String::new(),
                 source: RunSource::Manual,
                 task_id: None,
@@ -1609,6 +1805,15 @@ mod tests {
             releases: releases.clone(),
         });
         let mgr = Arc::new(RunManager::new(exec));
+        let observed = Arc::new(PlMutex::new(Vec::new()));
+        let observer_sink = observed.clone();
+        let observer_releases = releases.clone();
+        let weak = Arc::downgrade(&mgr);
+        mgr.set_result_hook(Arc::new(move |record, _| {
+            assert_eq!(observer_releases.load(Ordering::SeqCst), 1);
+            assert!(weak.upgrade().unwrap().active_for_device("dp").is_none());
+            observer_sink.lock().push(record.state);
+        }));
         let seen: Arc<PlMutex<Vec<RunState>>> = Arc::new(PlMutex::new(vec![]));
         let sink = seen.clone();
         let hook: FinishHook = Arc::new(move |rec, _| sink.lock().push(rec.state));
@@ -1630,6 +1835,7 @@ mod tests {
             "occupy paired even on unwind"
         );
         assert_eq!(*seen.lock(), vec![RunState::Failed]);
+        assert_eq!(*observed.lock(), vec![RunState::Failed]);
     }
     // 统一 RunTarget：函数测试目标与脚本目标同样受设备互斥 + 可取消
     #[tokio::test]

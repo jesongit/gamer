@@ -6,6 +6,7 @@
 
 mod browser;
 pub(crate) mod journal;
+mod package_import;
 pub(crate) use browser::migrate_v5_to_v6;
 
 use std::any::Any;
@@ -140,6 +141,8 @@ static DB_BLOCKING_GATE: tokio::sync::Semaphore =
 
 type ErasedDbResult = anyhow::Result<Box<dyn Any + Send>>;
 type DbTask = Box<dyn FnOnce(&mut Connection) -> ErasedDbResult + Send + 'static>;
+/// Host-supplied admission, executed after the database write lock is acquired.
+pub(crate) type TaskWriteAdmission = Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync>;
 
 struct LogRecord {
     time: String,
@@ -1332,6 +1335,47 @@ impl Store {
         let row = TaskStorage::from_task(task)?;
         self.request_async(move |conn| write_timer_task(conn, &row))
             .await
+    }
+
+    /// Compare the complete authorized snapshot inside the same transaction
+    /// that saves its replacement. None means insert only if still absent.
+    pub(crate) async fn compare_save_timer_task_async(
+        &self,
+        task: &Task,
+        expected: Option<&Task>,
+        admission: Option<TaskWriteAdmission>,
+    ) -> anyhow::Result<bool> {
+        let replacement = TaskStorage::from_task(task)?;
+        let expected = expected.cloned();
+        self.request_async(move |conn| {
+            use rusqlite::OptionalExtension;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if let Some(check) = &admission {
+                check()?;
+            }
+            let current = tx
+                .query_row(
+                    &format!("{TIMER_TASK_SELECT} WHERE id = ?1"),
+                    [&replacement.id],
+                    timer_task_storage_from_row,
+                )
+                .optional()?;
+            let matches = match (current, expected) {
+                (None, None) => true,
+                (Some(row), Some(expected)) => Task::from_storage(row)? == expected,
+                _ => false,
+            };
+            if !matches {
+                return Ok(false);
+            }
+            if let Some(check) = &admission {
+                check()?;
+            }
+            write_timer_task(&tx, &replacement)?;
+            tx.commit()?;
+            Ok(true)
+        })
+        .await
     }
 
     pub async fn delete_timer_task_async(&self, id: &str) -> anyhow::Result<()> {

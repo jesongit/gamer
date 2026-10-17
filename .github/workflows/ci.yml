@@ -42,6 +42,10 @@ jobs:
         shell: pwsh
         run: ./tools/check-version.ps1
 
+      - name: Offline plugin delivery boundary fixtures
+        shell: pwsh
+        run: ./release/packaging/test-package-app-retired-artifacts.ps1
+
   # ---------- Rust 服务端门禁 ----------
   # 媒体与离线视觉测试需要 ffmpeg/ffprobe，不依赖 Android 设备或本机配置。
   rust:
@@ -54,6 +58,7 @@ jobs:
       # 兼容即将落地的 OPS-004「配置失败即退出」：CI 无 server/config.toml，
       # dev 档允许缺省配置走默认值；策略未合入时设置此变量也无害。
       GAMER_PROFILE: dev
+      GAMER_PLUGIN_TEST_FIXTURE_ROOT: ${{ github.workspace }}/server/target/plugin-test-fixtures
     steps:
       - uses: actions/checkout@v4
         with:

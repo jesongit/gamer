@@ -125,6 +125,19 @@ pub struct Task {
 }
 
 impl Task {
+    /// Restore only host-persisted delegation metadata. Task payload remains
+    /// opaque and cannot supply execution authority.
+    fn run_request(&self) -> anyhow::Result<RunRequest> {
+        let mut request = RunRequest::for_app(
+            self.app.clone(),
+            self.runner_id.clone(),
+            self.entrypoint.clone(),
+            RunPayload::new(self.payload.clone()),
+        )?;
+        request.execution_policy =
+            crate::core::ExecutionPolicy::from_task_extensions(&self.extensions)?;
+        Ok(request)
+    }
     pub fn new(
         id: impl Into<String>,
         name: impl Into<String>,
@@ -494,6 +507,11 @@ impl TimerRun {
 pub trait TimerRunner: Send + Sync {
     fn runner_id(&self) -> &str;
 
+    /// Default deny until the owner enforces typed external delegations.
+    fn supports_external_execution(&self, _runner_id: &str) -> bool {
+        false
+    }
+
     /// A registry/multiplexer can accept more than one runner id while a
     /// concrete runner keeps the strict one-id default.
     fn supports(&self, runner_id: &str) -> bool {
@@ -679,6 +697,11 @@ impl TimerRunner for TimerRunnerRegistry {
         self.contains(runner_id)
     }
 
+    fn supports_external_execution(&self, runner_id: &str) -> bool {
+        self.get(runner_id)
+            .is_some_and(|runner| runner.supports_external_execution(runner_id))
+    }
+
     async fn submit(
         &self,
         request: RunRequest,
@@ -686,13 +709,29 @@ impl TimerRunner for TimerRunnerRegistry {
         scheduled_at: Option<i64>,
         on_complete: TimerCompletionHook,
     ) -> Result<TimerRun, TimerRunnerError> {
-        let Some(runner) = self.get(&request.runner_id) else {
+        // Capture implementation and owner from one registration snapshot.
+        // A delayed task must not transfer its frozen grant to a replacement
+        // plugin that registered the same Runner ID after acceptance.
+        let Some(registered) = self.get_runner(&request.runner_id) else {
             return Err(TimerRunnerError::DependencyMissing(format!(
                 "runner unavailable: {}",
                 request.runner_id
             )));
         };
-        runner
+        if let Some(policy) = &request.execution_policy {
+            if !registered
+                .runner
+                .supports_external_execution(&request.runner_id)
+                || !policy.allows_plugin(&registered.owner_extension_id)
+            {
+                return Err(TimerRunnerError::Invalid(
+                    "Runner implementation or current owner is outside the frozen external grant"
+                        .into(),
+                ));
+            }
+        }
+        registered
+            .runner
             .submit(request, task_id, scheduled_at, on_complete)
             .await
     }
@@ -1008,12 +1047,7 @@ impl TimerCore {
                 .await;
             return;
         }
-        let request = match RunRequest::for_app(
-            task.app.clone(),
-            task.runner_id.clone(),
-            task.entrypoint.clone(),
-            RunPayload::new(task.payload.clone()),
-        ) {
+        let request = match task.run_request() {
             Ok(request) => request,
             Err(error) => {
                 self.handle_runner_error(
@@ -1267,12 +1301,7 @@ impl TimerCore {
                 "timer task is not active".to_string(),
             ));
         }
-        let request = match RunRequest::for_app(
-            task.app.clone(),
-            task.runner_id.clone(),
-            task.entrypoint.clone(),
-            RunPayload::new(task.payload.clone()),
-        ) {
+        let request = match task.run_request() {
             Ok(request) => request,
             Err(error) => {
                 let error = TimerRunnerError::Invalid(error.to_string());
@@ -1314,6 +1343,16 @@ impl TimerCore {
             active_runs_guard.insert(task.id, run.run_id.clone());
         }
         Ok(run)
+    }
+
+    /// Capture a particular run before an externally authorized task mutation.
+    /// Callers must verify its real execution scope and cancel this ID only.
+    pub(crate) fn active_task_run_id(&self, task_id: &str) -> Option<String> {
+        self.active_runs
+            .lock()
+            .expect("timer active run mutex poisoned")
+            .get(task_id)
+            .cloned()
     }
 
     pub async fn cancel_task(
@@ -1626,6 +1665,130 @@ mod tests {
             TaskSchedule::new("opaque", serde_json::json!({"rule": "test"})).unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn task_execution_restores_frozen_policy_without_trusting_payload() {
+        let mut task = test_task();
+        task.payload = serde_json::json!({"execution_policy":{"scopes":["notify.send"]}});
+        assert!(task.run_request().unwrap().execution_policy.is_none());
+        let policy = crate::core::ExecutionPolicy::external(
+            "original-token".into(),
+            ["gamer-yaml".into()].into(),
+            ["run.submit".into()].into(),
+        );
+        policy.store_in_task(&mut task.extensions).unwrap();
+        let persisted = serde_json::to_value(&task).unwrap();
+        let restored: Task = serde_json::from_value(persisted).unwrap();
+        assert_eq!(
+            restored.run_request().unwrap().execution_policy,
+            Some(policy)
+        );
+    }
+
+    #[tokio::test]
+    async fn external_dispatch_fails_closed_for_runner_without_policy_support() {
+        let runner = Arc::new(FakeRunner {
+            id: "fake.runner",
+            submissions: AtomicUsize::new(0),
+            cancellations: AtomicUsize::new(0),
+            complete_immediately: false,
+            submit_error: None,
+        });
+        let registry = TimerRunnerRegistry::default();
+        registry
+            .register_runner("fake.runner", "fake.plugin", runner.clone())
+            .unwrap();
+        let request = test_task().run_request().unwrap().with_execution_policy(
+            crate::core::ExecutionPolicy::external(
+                "token".into(),
+                ["fake.plugin".into()].into(),
+                ["run.submit".into()].into(),
+            ),
+        );
+        assert!(!registry.supports_external_execution("fake.runner"));
+        let result = registry
+            .submit(request, "task-1", None, Arc::new(|_| {}))
+            .await;
+        assert!(matches!(result, Err(TimerRunnerError::Invalid(_))));
+        assert_eq!(runner.submissions.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn delayed_external_dispatch_rechecks_the_current_runner_owner() {
+        struct Supported(AtomicUsize);
+        #[async_trait]
+        impl TimerRunner for Supported {
+            fn runner_id(&self) -> &str {
+                "fake.runner"
+            }
+            fn supports_external_execution(&self, id: &str) -> bool {
+                id == "fake.runner"
+            }
+            async fn submit(
+                &self,
+                _: RunRequest,
+                _: &str,
+                _: Option<i64>,
+                _: TimerCompletionHook,
+            ) -> Result<TimerRun, TimerRunnerError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(TimerRun::new("synthetic"))
+            }
+            async fn cancel(&self, _: &str) -> Result<(), TimerRunnerError> {
+                Ok(())
+            }
+        }
+        let registry = TimerRunnerRegistry::default();
+        let runner = Arc::new(Supported(AtomicUsize::new(0)));
+        registry
+            .register_runner("fake.runner", "owner.one", runner.clone())
+            .unwrap();
+        let mut task = test_task();
+        crate::core::ExecutionPolicy::external(
+            "old-token".into(),
+            ["owner.one".into()].into(),
+            ["run.submit".into()].into(),
+        )
+        .store_in_task(&mut task.extensions)
+        .unwrap();
+        let task: Task = serde_json::from_value(serde_json::to_value(task).unwrap()).unwrap();
+        registry
+            .submit(
+                task.run_request().unwrap(),
+                "task-1",
+                None,
+                Arc::new(|_| {}),
+            )
+            .await
+            .unwrap();
+        registry.unregister_runner("fake.runner").unwrap();
+        registry
+            .register_runner("fake.runner", "owner.two", runner.clone())
+            .unwrap();
+        assert!(registry.supports_external_execution("fake.runner"));
+        assert!(matches!(
+            registry
+                .submit(
+                    task.run_request().unwrap(),
+                    "task-1",
+                    None,
+                    Arc::new(|_| {})
+                )
+                .await,
+            Err(TimerRunnerError::Invalid(_))
+        ));
+        assert_eq!(runner.0.load(Ordering::SeqCst), 1);
+        registry
+            .submit(
+                test_task().run_request().unwrap(),
+                "task-1",
+                None,
+                Arc::new(|_| {}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(runner.0.load(Ordering::SeqCst), 2);
     }
 
     /// 固定步进的测试 provider：core 只面向 `ScheduleExtension`，测试同样

@@ -1,5 +1,316 @@
 use super::*;
 
+fn seed_package_import_rollback_media(
+    t: &TestApp,
+    id: &str,
+    package: &str,
+) -> (crate::media::MediaMetadata, Vec<u8>) {
+    let service = crate::media::service(&Config {
+        data_dir: t.dir.clone(),
+        ..Default::default()
+    });
+    let bytes = format!("synthetic-media-{id}").into_bytes();
+    service
+        .restore_media(
+            crate::media::RestoreMedia {
+                id: crate::media::MediaId(id.into()),
+                name: "fixture.mp4".into(),
+                sha256: crate::package_archive::sha256_hex(&bytes),
+                size: bytes.len() as u64,
+                probe: None,
+            },
+            &bytes,
+            crate::media::MediaRef {
+                package_id: package.into(),
+                plugin_id: "gamer-video".into(),
+                kind: "original".into(),
+            },
+        )
+        .unwrap();
+    let path = t.dir.join("media").join(id).join("metadata.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    value["future_unknown_metadata"] = serde_json::json!({"preserve":"original raw bytes"});
+    let original = serde_json::to_vec_pretty(&value).unwrap();
+    std::fs::write(path, &original).unwrap();
+    (
+        service.get(&crate::media::MediaId(id.into())).unwrap(),
+        original,
+    )
+}
+
+fn import_rollback_manifest(package: &str, version: &str) -> Vec<u8> {
+    format!("id='{package}'\nversion='{version}'\n[targets.android]\npackages=['*']\n").into_bytes()
+}
+
+#[tokio::test]
+async fn package_import_conflict_preserves_refs_and_unknown_metadata_before_any_media_write() {
+    let t = build_app(
+        "import-conflict-rollback",
+        test_credential("admin123"),
+        Default::default(),
+    );
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    assert_eq!(
+        create_package(
+            &t,
+            &sid,
+            serde_json::json!({"id":"rollback.conflict","version":"1.0.0"})
+        )
+        .await
+        .status(),
+        StatusCode::CREATED
+    );
+    let (_, original) =
+        seed_package_import_rollback_media(&t, "originalconflict", "rollback.conflict");
+    let metadata_path = t.dir.join("media/originalconflict/metadata.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    value["refs"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "package_id":"other.package","plugin_id":"gamer-video","kind":"foreign"
+        }));
+    let original = serde_json::to_vec_pretty(&value).unwrap();
+    std::fs::write(&metadata_path, &original).unwrap();
+    let archive = craft_zip(vec![
+        (
+            "package.toml",
+            import_rollback_manifest("rollback.conflict", "2.0.0"),
+        ),
+        (
+            "media/index.json",
+            br#"{"schema_version":1,"entries":[]}"#.to_vec(),
+        ),
+    ]);
+    let response = send(
+        &t.app,
+        req_bytes(
+            "POST",
+            "/api/packages/import",
+            None,
+            &zip_headers(sid.clone()),
+            archive,
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        t.packages.manifest("rollback.conflict").unwrap().version,
+        "1.0.0"
+    );
+    assert_eq!(std::fs::read(&metadata_path).unwrap(), original);
+    let service = crate::media::service(&Config {
+        data_dir: t.dir.clone(),
+        ..Default::default()
+    });
+    let id = crate::media::MediaId("originalconflict".into());
+    let file = service.file_path(&id).unwrap();
+    let original_bytes = std::fs::read(&file).unwrap();
+    let no_media_index = craft_zip(vec![(
+        "package.toml",
+        import_rollback_manifest("rollback.conflict", "2.0.0"),
+    )]);
+    let response = send(
+        &t.app,
+        req_bytes(
+            "POST",
+            "/api/packages/import?overwrite=true",
+            None,
+            &zip_headers(sid),
+            no_media_index,
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        json_body(response).await
+    );
+    let retained_media = service.get(&id).unwrap();
+    assert_eq!(retained_media.refs.len(), 1);
+    assert_eq!(retained_media.refs[0].package_id, "other.package");
+    assert_eq!(std::fs::read(file).unwrap(), original_bytes);
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(metadata_path).unwrap()).unwrap();
+    assert_eq!(
+        metadata["future_unknown_metadata"],
+        serde_json::json!({"preserve":"original raw bytes"})
+    );
+}
+
+#[tokio::test]
+async fn package_import_media_failure_restores_reused_refs_unknown_metadata_and_new_media() {
+    let t = build_app(
+        "import-media-rollback",
+        test_credential("admin123"),
+        Default::default(),
+    );
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    assert_eq!(
+        create_package(
+            &t,
+            &sid,
+            serde_json::json!({"id":"rollback.media","version":"1.0.0"})
+        )
+        .await
+        .status(),
+        StatusCode::CREATED
+    );
+    let (_, old_metadata) = seed_package_import_rollback_media(&t, "oldmedia", "rollback.media");
+    let (reused, reused_metadata) =
+        seed_package_import_rollback_media(&t, "areused", "other.package");
+    let new = b"new media";
+    let new_sha = crate::package_archive::sha256_hex(new);
+    let broken_sha = crate::package_archive::sha256_hex(b"BAD");
+    let index = serde_json::json!({"schema_version":1,"entries":[
+        {"id":"areused","name":"fixture.mp4","sha256":reused.sha256,"size":reused.size,"plugin_id":"gamer-video","kind":"imported","included":false},
+        {"id":"bnew","name":"new.mp4","sha256":new_sha,"size":new.len(),"plugin_id":"gamer-video","kind":"imported","included":true},
+        {"id":"zbroken","name":"bad.mp4","sha256":broken_sha,"size":3,"plugin_id":"gamer-video","kind":"imported","included":true}
+    ]});
+    let new_path = format!("media/files/{new_sha}");
+    let broken_path = format!("media/files/{broken_sha}");
+    let archive = craft_zip(vec![
+        (
+            "package.toml",
+            import_rollback_manifest("rollback.media", "2.0.0"),
+        ),
+        ("media/index.json", serde_json::to_vec(&index).unwrap()),
+        (&new_path, new.to_vec()),
+        (&broken_path, b"bad".to_vec()),
+    ]);
+    let response = send(
+        &t.app,
+        req_bytes(
+            "POST",
+            "/api/packages/import?overwrite=true",
+            None,
+            &zip_headers(sid),
+            archive,
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "{}",
+        json_body(response).await
+    );
+    assert_eq!(
+        t.packages.manifest("rollback.media").unwrap().version,
+        "1.0.0"
+    );
+    assert_eq!(
+        std::fs::read(t.dir.join("media/oldmedia/metadata.json")).unwrap(),
+        old_metadata
+    );
+    assert_eq!(
+        std::fs::read(t.dir.join("media/areused/metadata.json")).unwrap(),
+        reused_metadata
+    );
+    assert!(!t.dir.join("media/bnew").exists());
+    assert!(!t.dir.join("media/zbroken").exists());
+}
+
+#[tokio::test]
+async fn package_import_preset_mid_batch_failure_restores_old_package_all_metadata_and_presets() {
+    let t = build_app(
+        "import-presets-rollback",
+        test_credential("admin123"),
+        Default::default(),
+    );
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    assert_eq!(
+        create_package(
+            &t,
+            &sid,
+            serde_json::json!({"id":"rollback.presets","version":"1.0.0"})
+        )
+        .await
+        .status(),
+        StatusCode::CREATED
+    );
+    let dormant = t
+        .dir
+        .join("packages/rollback.presets/plugins/not-installed/package.toml");
+    std::fs::create_dir_all(dormant.parent().unwrap()).unwrap();
+    std::fs::write(&dormant, b"future = { preserve = 'old plugin data' }\n").unwrap();
+    let original_manifest =
+        std::fs::read(t.dir.join("packages/rollback.presets/package.toml")).unwrap();
+    let (_, old_metadata) =
+        seed_package_import_rollback_media(&t, "oldpresetmedia", "rollback.presets");
+    let (reused, reused_metadata) =
+        seed_package_import_rollback_media(&t, "presetreused", "other.package");
+    let connection = rusqlite::Connection::open(t.dir.join("gamer.db")).unwrap();
+    connection.execute("INSERT INTO task_presets(id,app_package,name,runner_id,entrypoint,payload_json,schedule_json,created_at) VALUES ('rollback.presets:aa','rollback.presets','old','gamer-yaml','old.yaml','{\"unknown\":{\"keep\":1}}','{\"provider_id\":\"cron\",\"config\":{\"expression\":\"0 8 * * *\"}}','2026-01-01T00:00:00+00:00')", []).unwrap();
+    connection.execute_batch("CREATE TRIGGER fail_import_preset BEFORE INSERT ON task_presets WHEN NEW.id='rollback.presets:zzfail' BEGIN SELECT RAISE(ABORT,'synthetic preset failure'); END;").unwrap();
+    let old_row: Vec<String> = connection.query_row("SELECT id,app_package,name,runner_id,entrypoint,payload_json,schedule_json,created_at FROM task_presets WHERE id='rollback.presets:aa'", [], |row| (0..8).map(|index| row.get(index)).collect()).unwrap();
+    let new = b"preset media";
+    let new_sha = crate::package_archive::sha256_hex(new);
+    let new_path = format!("media/files/{new_sha}");
+    let index = serde_json::json!({"schema_version":1,"entries":[
+        {"id":"presetreused","name":"fixture.mp4","sha256":reused.sha256,"size":reused.size,"plugin_id":"gamer-video","kind":"imported","included":false},
+        {"id":"presetnew","name":"new.mp4","sha256":new_sha,"size":new.len(),"plugin_id":"gamer-video","kind":"imported","included":true}
+    ]});
+    let preset = |name: &str| {
+        format!("name: {name}\nrunner_id: gamer-yaml\nentrypoint: new.yaml\npayload: {{new: true}}\nschedule:\n  kind: cron\n  value:\n    expression: '0 8 * * *'\n").into_bytes()
+    };
+    let archive = craft_zip(vec![
+        (
+            "package.toml",
+            import_rollback_manifest("rollback.presets", "2.0.0"),
+        ),
+        ("media/index.json", serde_json::to_vec(&index).unwrap()),
+        (&new_path, new.to_vec()),
+        ("plugins/not-installed/presets/aa.yaml", preset("aa")),
+        ("plugins/not-installed/presets/zz.yaml", preset("zzfail")),
+    ]);
+    let response = send(
+        &t.app,
+        req_bytes(
+            "POST",
+            "/api/packages/import?overwrite=true",
+            None,
+            &zip_headers(sid),
+            archive,
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        json_body(response).await
+    );
+    assert_eq!(
+        std::fs::read(t.dir.join("packages/rollback.presets/package.toml")).unwrap(),
+        original_manifest
+    );
+    assert_eq!(
+        std::fs::read(&dormant).unwrap(),
+        b"future = { preserve = 'old plugin data' }\n"
+    );
+    assert_eq!(
+        std::fs::read(t.dir.join("media/oldpresetmedia/metadata.json")).unwrap(),
+        old_metadata
+    );
+    assert_eq!(
+        std::fs::read(t.dir.join("media/presetreused/metadata.json")).unwrap(),
+        reused_metadata
+    );
+    assert!(!t.dir.join("media/presetnew").exists());
+    let restored: Vec<String> = connection.query_row("SELECT id,app_package,name,runner_id,entrypoint,payload_json,schedule_json,created_at FROM task_presets WHERE id='rollback.presets:aa'", [], |row| (0..8).map(|index| row.get(index)).collect()).unwrap();
+    assert_eq!(restored, old_row);
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM task_presets", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
 #[tokio::test]
 async fn package_activity_rejects_delete_and_overwrite_with_conflict_without_changing_content() {
     let t = build_app(
@@ -186,7 +497,7 @@ async fn template_replace_updates_region_color_and_references_without_losing_ori
     );
     let root = t.dir.join("packages/replace.test/plugins/gamer-yaml");
     let original = std::fs::read(root.join(old)).unwrap();
-    let script = "version: 2\nrun:\n  - find: reward#100_200_500_500.png\n";
+    let script = "run:\n  - find: reward#100_200_500_500.png\n";
     let response = put_package_text(
         &t,
         &sid,
@@ -325,7 +636,7 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
     }
 
     // ---- 写资源：文本（JSON body）+ 字节（raw body）----
-    let script = "version: 2\nrun:\n  - log: ok\n";
+    let script = "run:\n  - log: ok\n";
     let resp = send(
         &t.app,
         req(
@@ -542,7 +853,7 @@ async fn package_import_conflicts_then_atomic_overwrite() {
             &resource_url("official.imp", "gamer-yaml", "automations/first.yaml"),
             None,
             &json_headers(sid.clone()),
-            Some(serde_json::json!({"content": "version: 2\nrun:\n  - log: v1\n"}).to_string()),
+            Some(serde_json::json!({"content": "run:\n  - log: v1\n"}).to_string()),
         ),
     )
     .await;
@@ -607,7 +918,7 @@ async fn package_import_conflicts_then_atomic_overwrite() {
             &json_headers(sid.clone()),
             Some(
                 serde_json::json!({
-                    "content": "version: 2\nrun:\n  - log: v2\n",
+                    "content": "run:\n  - log: v2\n",
                     "force": true,
                 })
                 .to_string(),
@@ -893,7 +1204,7 @@ async fn template_upload_rename_rewrites_references_and_still_matches() {
 
     // ---- 2. 保存引用该模板的 V1 脚本与函数库 ----
     let script =
-        "version: 2\nrun:\n  - find:\n      template: reward.png\n      region: [0, 0, 1, 1]\n    as: hit\n";
+        "run:\n  - find:\n      template: reward.png\n      region: [0, 0, 1, 1]\n    as: hit\n";
     let resp = put_package_text(
         &t,
         &sid,

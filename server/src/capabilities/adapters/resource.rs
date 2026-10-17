@@ -83,6 +83,31 @@ impl ResourceAdapter {
 
 #[async_trait]
 impl ResourceService for ResourceAdapter {
+    async fn freeze_bytes(
+        &self,
+        id: &ResourceId,
+        bytes: Vec<u8>,
+    ) -> CapabilityResult<ResourceHandle> {
+        crate::resources::sanitize_rel_path(id.path())
+            .map_err(|e| CapabilityError::Failed(e.to_string()))?;
+        let path = self
+            .store
+            .resource_path(id.package(), id.plugin(), id.path())
+            .map_err(|e| CapabilityError::Failed(e.to_string()))?;
+        let handle = ResourceHandle::new();
+        self.resources
+            .lock()
+            .map_err(|_| CapabilityError::Failed("resource state poisoned".into()))?
+            .insert(
+                handle,
+                ResolvedResource {
+                    id: id.clone(),
+                    path,
+                    frozen: Some(Arc::new(bytes)),
+                },
+            );
+        Ok(handle)
+    }
     fn release_frozen(&self, resource: ResourceHandle) {
         if let Ok(mut resources) = self.resources.lock() {
             if resources.get(&resource).is_some_and(|r| r.frozen.is_some()) {
@@ -197,6 +222,30 @@ impl ResourceService for ResourceAdapter {
 #[cfg(test)]
 mod immutable_resource_tests {
     use super::*;
+    #[tokio::test]
+    async fn private_bytes_are_readable_without_creating_or_replacing_package_files() {
+        let root = tempfile::tempdir().unwrap();
+        let config = crate::config::Config {
+            data_dir: root.path().into(),
+            ..Default::default()
+        };
+        let store = Arc::new(PackageStore::open(&config).unwrap());
+        store.ensure_default_package().unwrap();
+        let adapter = ResourceAdapter::new(store.clone());
+        let id = ResourceId::new("default", "gamer-yaml", "templates/private.png").unwrap();
+        let handle = adapter
+            .freeze_bytes(&id, b"private pixels".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(adapter.read(handle).unwrap(), b"private pixels");
+        assert_eq!(adapter.open(handle).await.unwrap().byte_len(), Some(14));
+        assert!(store
+            .read_binary("default", "gamer-yaml", "templates/private.png")
+            .unwrap()
+            .is_none());
+        adapter.release_frozen(handle);
+        assert!(adapter.read(handle).is_err());
+    }
     #[tokio::test]
     async fn frozen_content_survives_edits_has_full_logical_identity_and_releases() {
         let root = tempfile::tempdir().unwrap();

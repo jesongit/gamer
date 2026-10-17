@@ -113,7 +113,11 @@ entry = "ui/index.html"
     let list_json = json_body(list).await;
     assert_eq!(
         list_json["extensions"][0]["state"],
-        if cfg!(feature = "wasm-runtime") { "failed" } else { "enabled" }
+        if cfg!(feature = "wasm-runtime") {
+            "failed"
+        } else {
+            "enabled"
+        }
     );
     assert!(
         list_json["extensions"][0]["last_error"]
@@ -484,7 +488,7 @@ fn call_guest_component() -> Vec<u8> {
 }
 
 /// Phase 10 验收（官方市场端到端，使用提交进仓库的真实产物）：
-/// 市场列表（web/public/registry.json）可见官方插件 → 产物 .gplugin 的
+/// 市场列表（隔离的 plugin-test-fixtures/registry.json）可见官方插件 → 产物 .gplugin 的
 /// sha256 与 registry 一致 → 官方安装**无签名无 proof**（Phase 1：服务端
 /// 只做 manifest/Host API 校验与权限确认；`x-expected-sha256` 完整性钉可选）
 /// → 安装即用 → UI 贡献出现 → 停止 → 卸载。
@@ -499,8 +503,11 @@ async fn official_plugin_market_end_to_end_with_committed_artifacts() {
         .parent()
         .expect("server 目录必有父级")
         .to_path_buf();
-    let registry_bytes = std::fs::read(repo_root.join("web/public/registry.json"))
-        .expect("web/public/registry.json 不存在；先运行 tools/build-plugins.ps1");
+    let fixture_root = std::env::var_os("GAMER_PLUGIN_TEST_FIXTURE_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| repo_root.join("server/target/plugin-test-fixtures"));
+    let registry_bytes = std::fs::read(fixture_root.join("registry.json"))
+        .expect("隔离的 registry.json 不存在；先运行 fetch-plugins.ps1 -TestFixturesOnly，或设置 GAMER_PLUGIN_TEST_FIXTURE_ROOT 指向独立测试产物");
     let registry: serde_json::Value = serde_json::from_slice(&registry_bytes).unwrap();
     let plugins = registry["plugins"].as_array().unwrap().clone();
     let ids: Vec<&str> = plugins
@@ -526,9 +533,7 @@ async fn official_plugin_market_end_to_end_with_committed_artifacts() {
         let sha256 = entry["sha256"].as_str().unwrap();
 
         // 市场产物可下载且哈希一致（web-dist 托管后即为同源 URL）。
-        let artifact_path = repo_root
-            .join("web/public")
-            .join(download_url.trim_start_matches('/'));
+        let artifact_path = fixture_root.join(download_url.trim_start_matches('/'));
         let artifact = std::fs::read(&artifact_path)
             .unwrap_or_else(|error| panic!("官方插件产物缺失 {:?}: {error}", artifact_path));
         let digest = format!("{:x}", sha2::Sha256::digest(&artifact));
@@ -549,6 +554,30 @@ async fn official_plugin_market_end_to_end_with_committed_artifacts() {
         .await;
         let installed_status = installed.status();
         let installed_body = json_body(installed).await;
+        // P6 deliberately preserves the old bundled artifacts. Retired AI
+        // archives must be rejected instead of rewriting them or silently
+        // granting their removed permission. New candidates are verified in
+        // isolated pack/host-schema checks without replacing this catalog.
+        let retired = id == "gamer-ai"
+            || entry["permissions"].as_array().is_some_and(|permissions| {
+                permissions
+                    .iter()
+                    .any(|permission| permission == "ai.connect")
+            });
+        if retired {
+            assert_eq!(
+                installed_status,
+                StatusCode::BAD_REQUEST,
+                "{id}: {installed_body}"
+            );
+            assert!(
+                installed_body["error"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("ai.connect")),
+                "{installed_body}"
+            );
+            continue;
+        }
         assert_eq!(
             installed_status,
             StatusCode::CREATED,

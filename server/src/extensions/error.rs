@@ -8,6 +8,8 @@ pub(crate) enum PermissionError {
     Unknown(String),
     #[error("插件权限默认拒绝且不可授予: {0}")]
     Forbidden(String),
+    #[error("插件权限已退休，不可安装或授予，请更新插件: {0}")]
+    Retired(String),
     #[error("插件未获授予权限: {0}")]
     NotGranted(String),
 }
@@ -28,6 +30,8 @@ pub(crate) enum ExtensionError {
     ArchiveSha256Mismatch { expected: String, actual: String },
     #[error("host_feature_unavailable: 宿主未注册内置扩展实现 {0}（需要升级 Gamer 宿主）")]
     HostFeatureUnavailable(String),
+    #[error("plugin_update_required: 插件 {id} 声明已退休权限 {permissions}，请更新插件后再启用")]
+    RetiredPermissions { id: String, permissions: String },
     #[error("插件权限变更需要用户确认: {0}")]
     PermissionConfirmationRequired(String),
     #[error("插件归档大小 {actual} 字节超过上限 {limit} 字节")]
@@ -70,8 +74,6 @@ pub(crate) enum ExtensionError {
     Runtime(String),
     #[error("插件调用被拒绝: {0}")]
     CallRejected(String),
-    #[error("插件协议连接凭据无效或已撤销")]
-    ProtocolUnauthorized,
     #[error("插件权限错误: {0}")]
     Permission(#[from] PermissionError),
     #[error("插件状态文件无效: {0}")]

@@ -20,12 +20,14 @@ mod browser;
 mod common;
 mod devices;
 mod error;
-mod extension_mcp;
+mod extension_local;
 mod extensions;
 mod extensions_management;
 mod extensions_market;
+mod external_control;
 pub(crate) mod gate;
 mod logs;
+mod mcp;
 mod media;
 mod package_sources;
 mod packages;
@@ -33,6 +35,7 @@ mod packages_rename;
 mod recording;
 mod runs;
 mod settings;
+mod static_assets;
 pub(crate) mod system;
 mod tasks;
 #[cfg(test)]
@@ -89,6 +92,8 @@ pub struct AppState {
     pub extensions: Arc<crate::extensions::ExtensionService>,
     pub plugin_market: Arc<crate::extensions::market::PluginMarket>,
     pub package_market: Arc<crate::package_market::PackageMarket>,
+    pub mcp: Arc<crate::mcp::McpService>,
+    pub external_control: Arc<crate::external_control::ExternalControlService>,
 }
 
 /// 测试专用兼容入口：自建 capabilities registry / ExtensionService / AppState
@@ -129,6 +134,7 @@ pub fn build_router(
     clippy::too_many_arguments,
     reason = "router assembly keeps existing call shape while injecting extensions"
 )]
+#[cfg(test)]
 pub(crate) fn build_router_with_extensions(
     db: Db,
     devices: Arc<DeviceManager>,
@@ -141,6 +147,59 @@ pub(crate) fn build_router_with_extensions(
     auth: Arc<auth::AuthState>,
     update: Arc<crate::update::service::UpdateService>,
     extensions: Arc<crate::extensions::ExtensionService>,
+) -> Router {
+    let capabilities = crate::capabilities::adapters::build_registry(
+        devices.clone(),
+        packages.clone(),
+        db.clone(),
+        runs.clone(),
+    );
+    let (mcp, external_control) = crate::mcp_core::assemble(
+        &cfg,
+        db.clone(),
+        devices.clone(),
+        packages.clone(),
+        runs.clone(),
+        scheduler.clone(),
+        extensions.clone(),
+        capabilities,
+    )
+    .expect("isolated MCP service construction");
+    build_router_with_external(
+        db,
+        devices,
+        runs,
+        scheduler,
+        cfg,
+        viewers,
+        packages,
+        shutdown,
+        auth,
+        update,
+        extensions,
+        mcp,
+        external_control,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "composition root injects initialized services without starting devices in router assembly"
+)]
+pub(crate) fn build_router_with_external(
+    db: Db,
+    devices: Arc<DeviceManager>,
+    runs: Arc<crate::run_manager::RunManager>,
+    scheduler: Arc<Scheduler>,
+    cfg: Config,
+    viewers: crate::webrtc::ViewerMap,
+    packages: Arc<PackageStore>,
+    shutdown: Arc<crate::shutdown::ShutdownCoordinator>,
+    auth: Arc<auth::AuthState>,
+    update: Arc<crate::update::service::UpdateService>,
+    extensions: Arc<crate::extensions::ExtensionService>,
+    mcp: Arc<crate::mcp::McpService>,
+    external_control: Arc<crate::external_control::ExternalControlService>,
 ) -> Router {
     let metrics = db.metrics();
     let state = AppState {
@@ -156,6 +215,8 @@ pub(crate) fn build_router_with_extensions(
         auth,
         update,
         extensions,
+        mcp,
+        external_control,
         plugin_market: Arc::new(crate::extensions::market::PluginMarket::new(
             cfg.web_dist_dir(),
         )),
@@ -183,7 +244,11 @@ pub(crate) fn build_router_with_extensions(
             // 未注入回退现状 cwd 相对（开发流不变）。ServeDir 只读取该目录，
             // 版本目录只读时前端仍可服务
             let web_dist = cfg.web_dist_dir();
-            ServeDir::new(&web_dist).fallback(ServeDir::new(web_dist.join("index.html")))
+            Router::new()
+                .fallback_service(
+                    ServeDir::new(&web_dist).fallback(ServeDir::new(web_dist.join("index.html"))),
+                )
+                .layer(axmw::from_fn_with_state(web_dist, static_assets::guard))
         })
         .with_state(state.clone())
         .layer(DefaultBodyLimit::max(BODY_LIMIT_PUBLIC));
@@ -193,6 +258,28 @@ pub(crate) fn build_router_with_extensions(
     //      高风险接口标注（专项测试见文件尾 tests）：shutdown、设备控制
     //      （devices::api_control）、运行分发、资源删除。
     let protected_json: Router<()> = Router::new()
+        .route(
+            "/api/mcp/tokens",
+            get(mcp::api_list_tokens).post(mcp::api_create_token),
+        )
+        .route("/api/mcp/tokens/:id", delete(mcp::api_revoke_token))
+        .route("/api/mcp/catalog", get(mcp::api_catalog))
+        .route(
+            "/api/external-control",
+            get(external_control::list).post(external_control::start),
+        )
+        .route(
+            "/api/external-control/:id/pause",
+            post(external_control::pause),
+        )
+        .route(
+            "/api/external-control/:id/resume",
+            post(external_control::resume),
+        )
+        .route(
+            "/api/external-control/:id/stop",
+            post(external_control::stop),
+        )
         .route(
             "/api/devices/:id/input-control",
             get(devices::input_control),
@@ -516,7 +603,7 @@ pub(crate) fn build_router_with_extensions(
         )
         .route(
             "/api/extensions/:id/call",
-            post(extensions::api_call_extension),
+            post(extensions::api_call_extension).layer(DefaultBodyLimit::max(192 * 1024 * 1024)),
         )
         .route(
             "/api/extensions/:id/capabilities",
@@ -540,9 +627,22 @@ pub(crate) fn build_router_with_extensions(
     // MCP uses a plugin-scoped Bearer credential and a real loopback peer;
     // administrator cookies and the host's local_only setting do not apply.
     let local_mcp: Router<()> = Router::new()
-        .route("/api/extensions/:id/mcp", post(extension_mcp::post_message))
+        .route(
+            "/api/mcp",
+            post(mcp::post_message).layer(DefaultBodyLimit::max(BODY_LIMIT_UPLOAD)),
+        )
         .with_state(state.clone())
         .layer(DefaultBodyLimit::max(BODY_LIMIT_JSON));
+
+    // Plugin-owned read credentials are separate from administrator sessions.
+    // GET also admits HEAD; every other method remains unavailable.
+    let local_extensions: Router<()> = Router::new()
+        .route(
+            "/local/extensions/:id/*path",
+            get(extension_local::get_resource),
+        )
+        .with_state(state.clone())
+        .layer(DefaultBodyLimit::max(BODY_LIMIT_PUBLIC));
 
     // 最外层注入来源 IP 键（登录限流用）；CORS 层已移除——vite dev proxy 同源转发不受影响
     Router::new()
@@ -555,6 +655,7 @@ pub(crate) fn build_router_with_extensions(
         .merge(protected_apk)
         .merge(protected_extensions)
         .merge(local_mcp)
+        .merge(local_extensions)
         .layer(axmw::from_fn(auth::inject_ip_key))
         .layer(axmw::from_fn(crate::update::barrier::middleware))
 }

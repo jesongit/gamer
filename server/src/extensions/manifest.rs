@@ -104,6 +104,9 @@ pub(crate) struct ExtensionManifest {
     execution: ExecutionSpec,
     host_api: HostApiRequirements,
     permissions: PermissionSet,
+    /// Read-only historical declarations, absent from the effective set. An
+    /// installed version carrying any of these cannot execute.
+    retired_permissions: Vec<String>,
     /// Android 应用支持声明（`[targets.android].packages`）。缺省/空 = 通用
     /// （等价 `*`）；`*` = 全部应用；其余按 Android 包名精确匹配。仅作运行
     /// 目标声明，宿主不做硬门禁（前端按当前设备应用过滤插件入口）。
@@ -113,6 +116,7 @@ pub(crate) struct ExtensionManifest {
     /// 也不授予任何权限（依赖 ≠ 权限）。与 Package 依赖（package.toml
     /// `[plugins]`）是两个不同层面的概念。
     dependencies: Vec<ExtensionDependency>,
+    tools: Vec<super::external_tools::ToolDeclaration>,
     ui: Vec<UiContribution>,
 }
 
@@ -175,6 +179,20 @@ impl ExtensionManifest {
         &self.permissions
     }
 
+    pub(crate) fn retired_permissions(&self) -> &[String] {
+        &self.retired_permissions
+    }
+
+    pub(crate) fn ensure_supported(&self) -> ExtensionResult<()> {
+        if !self.retired_permissions.is_empty() {
+            return Err(ExtensionError::RetiredPermissions {
+                id: self.id.to_string(),
+                permissions: self.retired_permissions.join(", "),
+            });
+        }
+        Ok(())
+    }
+
     /// Android 应用支持声明（`targets.android.packages`，缺省/空 = 通用）。
     pub(crate) fn android_targets(&self) -> &[String] {
         &self.targets
@@ -187,6 +205,9 @@ impl ExtensionManifest {
 
     pub(crate) fn ui(&self) -> &[UiContribution] {
         &self.ui
+    }
+    pub(crate) fn tools(&self) -> &[super::external_tools::ToolDeclaration] {
+        &self.tools
     }
 }
 
@@ -485,6 +506,8 @@ struct RawManifest {
     #[serde(default)]
     dependencies: Vec<RawDependency>,
     #[serde(default)]
+    tools: Vec<super::external_tools::RawToolDeclaration>,
+    #[serde(default)]
     ui: RawUi,
 }
 
@@ -653,18 +676,19 @@ impl RawHostApiRequirements {
 
 /// 严格解析（安装/更新/inspect 路径）：只接受当前 `MANIFEST_VERSION`（v2）。
 pub(crate) fn parse_manifest(bytes: &[u8]) -> ExtensionResult<ExtensionManifest> {
-    parse_manifest_with_versions(bytes, &[MANIFEST_VERSION])
+    parse_manifest_with_versions(bytes, &[MANIFEST_VERSION], false)
 }
 
 /// 读端容忍解析（已安装版本目录扫描）：额外接受 v1 存量 manifest（等价 wasm
 /// 执行类型）。快照路径不因 manifest_version 升级而拒绝列出旧安装。
 pub(crate) fn parse_manifest_installed(bytes: &[u8]) -> ExtensionResult<ExtensionManifest> {
-    parse_manifest_with_versions(bytes, &[MANIFEST_VERSION, MANIFEST_VERSION_LEGACY])
+    parse_manifest_with_versions(bytes, &[MANIFEST_VERSION, MANIFEST_VERSION_LEGACY], true)
 }
 
 fn parse_manifest_with_versions(
     bytes: &[u8],
     accepted_versions: &[u32],
+    installed_read: bool,
 ) -> ExtensionResult<ExtensionManifest> {
     let text = std::str::from_utf8(bytes)
         .map_err(|error| ExtensionError::InvalidManifest(format!("必须是 UTF-8: {error}")))?;
@@ -699,7 +723,40 @@ fn parse_manifest_with_versions(
     };
     let (execution, entry) = build_execution(raw.execution.as_ref(), raw.entry.as_deref())?;
     let host_api = raw.host_api.into_requirements()?;
-    let permissions = PermissionSet::parse(raw.permissions)?;
+    let mut retired_permissions = std::collections::BTreeSet::new();
+    let mut effective_permissions = |declared: Vec<String>| {
+        declared
+            .into_iter()
+            .filter(|permission| {
+                if installed_read && super::permissions::is_retired_permission(permission) {
+                    retired_permissions.insert(permission.trim().to_owned());
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let permissions = PermissionSet::parse(effective_permissions(raw.permissions))?;
+    if raw.tools.len() > 128 {
+        return Err(ExtensionError::InvalidManifest(
+            "Too many external tools".into(),
+        ));
+    }
+    let mut tool_ids = std::collections::BTreeSet::new();
+    let tools = raw
+        .tools
+        .into_iter()
+        .map(|mut tool| {
+            if !tool_ids.insert(tool.tool_id.clone()) {
+                return Err(ExtensionError::InvalidManifest(
+                    "Duplicate external tool_id".into(),
+                ));
+            }
+            tool.required_permissions = effective_permissions(tool.required_permissions);
+            super::external_tools::ToolDeclaration::parse(tool, &id, &permissions)
+        })
+        .collect::<ExtensionResult<Vec<_>>>()?;
     let targets = parse_android_targets(
         raw.targets
             .and_then(|targets| targets.android)
@@ -735,8 +792,10 @@ fn parse_manifest_with_versions(
         execution,
         host_api,
         permissions,
+        retired_permissions: retired_permissions.into_iter().collect(),
         targets,
         dependencies,
+        tools,
         ui,
     })
 }
@@ -1398,6 +1457,40 @@ mod tests {
             b"manifest_version = 3\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\n";
         assert!(parse_manifest(future).is_err());
         assert!(parse_manifest_installed(future).is_err());
+    }
+
+    #[test]
+    fn retired_permissions_are_read_only_metadata_for_installed_versions() {
+        let legacy = b"manifest_version=2\nid='com.example.retired'\nversion='1.0.0'\nname='Historical plugin'\nentry='plugin.wasm'\npermissions=['resource.read',' ai.connect ']\n";
+        assert!(matches!(
+            parse_manifest(legacy),
+            Err(ExtensionError::Permission(
+                super::super::PermissionError::Retired(_)
+            ))
+        ));
+        let installed = parse_manifest_installed(legacy).unwrap();
+        assert_eq!(installed.permissions().names(), ["resource.read"]);
+        assert_eq!(installed.retired_permissions(), ["ai.connect"]);
+        assert!(matches!(
+            installed.ensure_supported(),
+            Err(ExtensionError::RetiredPermissions { .. })
+        ));
+        let old_tool = format!("{}\n[[tools]]\ntool_id='old'\naction='old'\ndescription='Historical tool'\ninput_schema='schemas/old.json'\nrequired_scopes=['old.use']\nrequired_permissions=['ai.connect']\neffect='external_send'\n", String::from_utf8_lossy(legacy));
+        let installed = parse_manifest_installed(old_tool.as_bytes()).unwrap();
+        assert!(installed.tools()[0].required_permissions.names().is_empty());
+        assert!(installed.ensure_supported().is_err());
+        // Read tolerance is limited to an explicitly retired permission. It
+        // does not admit arbitrary new permissions or unsafe capabilities.
+        for other in ["ai.unknown", "network.connect"] {
+            let invalid = String::from_utf8_lossy(legacy).replace("ai.connect", other);
+            assert!(parse_manifest_installed(invalid.as_bytes()).is_err());
+        }
+        let v1 =
+            String::from_utf8_lossy(legacy).replace("manifest_version=2", "manifest_version=1");
+        assert!(parse_manifest_installed(v1.as_bytes())
+            .unwrap()
+            .ensure_supported()
+            .is_err());
     }
 
     fn parse_ui(ui: &str) -> ExtensionResult<UiContribution> {
