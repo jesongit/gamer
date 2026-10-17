@@ -1,6 +1,6 @@
 # 外部 Agent 与统一 MCP
 
-Gamer 提供画面、受控输入、资源、运行证据和插件工具。模型、对话、规划与修改策略由你选择的外部 Agent 承担。这里介绍改造后的源码契约；本轮尚未部署到现有安装。
+Gamer 提供画面、受控输入、资源、运行证据和插件工具。模型、对话、规划与修改策略由你选择的外部 Agent 承担。本页适用于 Gamer 0.4.0 及配套官方插件，请先升级宿主。
 
 ## 连接
 
@@ -82,10 +82,10 @@ Agent 先读取 `control_status`，再用带当前 session_id、generation 的 `
 
 官方接入包括 YAML 18、视频素材 8、键盘映射 4、OCR 2、直播 7 项工具。通知和配置发布不开放 MCP 发送、凭据或发布动作。键盘映射工具保存资源，不自动热切换；用户在 Gamer 选用。
 
-第三方 WASM 使用每调用独立 guest/Store、上下文和句柄表，复用编译缓存。当前支持安全的读取和资源处理；没有专用受控租约适配的低层 input/touch/app/run imports 隐藏并拒绝。无需因此放宽原输入屏障。开发契约见 [插件 API](../reference/PLUGIN_API.md)。
+第三方 WASM 使用每调用独立 guest/Store、上下文和句柄表，复用编译缓存。当前支持安全的读取和资源处理；没有专用受控租约适配的低层 input/touch/app/run imports 隐藏并拒绝。无需因此放宽原输入屏障。开发契约见 [插件 API](https://github.com/jesongit/gamer/blob/main/docs/reference/PLUGIN_API.md)。
 
 ## 本轮验证范围
 
-本轮只进行本地源码构建、临时数据与合成目标验证，未更新已安装插件、部署服务或操作真实设备。真实 Agent 客户端的长期使用、Android/浏览器游戏效果与跨网络投屏需另行验收。完整测试及备份证据见 [改造进度](../evidence/EXTERNAL_AGENT_MCP_REFACTOR_PROGRESS.md)。
+外部 Agent 改造阶段的验收覆盖本地源码构建、临时数据与合成目标，不代表所有真实 Agent 客户端、Android/浏览器游戏或跨网络投屏已经验收。完整测试及备份证据见 [改造进度](https://github.com/jesongit/gamer/blob/main/docs/evidence/EXTERNAL_AGENT_MCP_REFACTOR_PROGRESS.md)。
 
-候选文件、工作树 SDK 来源和保留新增数据的恢复步骤见 [交接与恢复说明](external-agent-mcp-handoff.md)。历史 Runner 的所属插件已不可用且没有可信 owner 记录时，读取对应旧运行/任务需要显式“全部插件”范围；不会从 Runner 字符串猜身份。
+历史阶段候选、SDK 来源和保留新增数据的恢复步骤见 [交接与恢复说明](https://github.com/jesongit/gamer/blob/main/docs/guides/external-agent-mcp-handoff.md)。历史 Runner 的所属插件已不可用且没有可信 owner 记录时，读取对应旧运行/任务需要显式“全部插件”范围；不会从 Runner 字符串猜身份。

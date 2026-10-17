@@ -1551,6 +1551,28 @@ mod tests {
         );
     }
     #[test]
+    fn counter_release_is_atomic_and_never_underflows() {
+        use std::sync::atomic::AtomicUsize;
+
+        let counter = AtomicUsize::new(1000);
+        let released = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let counter = &counter;
+                let released = &released;
+                scope.spawn(move || {
+                    while decrement_if_positive(counter) {
+                        released.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        assert_eq!(released.load(Ordering::SeqCst), 1000);
+        assert!(!decrement_if_positive(&counter));
+    }
+
+    #[test]
     fn keys_are_not_android_codes() {
         assert_eq!(key_info("Enter").unwrap().2, 13);
         assert_eq!(key_info("w").unwrap().1, "KeyW");
