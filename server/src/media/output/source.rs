@@ -313,7 +313,7 @@ fn decode_browser(data: &str) -> Result<Frame> {
         !pixels.is_empty() && pixels.len() <= 64 * 1024 * 1024,
         "浏览器输出画面过大"
     );
-    for pixel in pixels.chunks_exact_mut(3) {
+    for pixel in pixels.as_chunks_mut::<3>().0 {
         pixel.swap(0, 2);
     }
     Ok(Frame {

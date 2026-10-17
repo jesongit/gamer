@@ -175,7 +175,9 @@ async fn local_folder_stream_preserves_audio_resume_position_and_output_on_cance
         );
         let samples = decoded
             .stdout
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|sample| i16::from_le_bytes([sample[0], sample[1]]).unsigned_abs() as u64)
             .collect::<Vec<_>>();
         assert!(!samples.is_empty());

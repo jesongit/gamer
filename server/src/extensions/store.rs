@@ -67,12 +67,14 @@ struct PersistedState {
     plugins: BTreeMap<ExtensionId, ExtensionRecord>,
 }
 
+type ManifestCache = BTreeMap<PathBuf, (Vec<u8>, ExtensionManifest)>;
+
 /// Filesystem boundary for extensions. Version directories are never replaced
 /// and lifecycle state is stored separately so old versions remain immutable.
 #[derive(Clone, Debug)]
 pub(crate) struct ExtensionStore {
     data_root: PathBuf,
-    manifests: Arc<Mutex<BTreeMap<PathBuf, (Vec<u8>, ExtensionManifest)>>>,
+    manifests: Arc<Mutex<ManifestCache>>,
 }
 
 impl ExtensionStore {

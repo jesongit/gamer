@@ -315,7 +315,7 @@ fn different_source_sizes_fit_without_stretching_or_changing_colors() {
     let frame = source::Frame {
         width: 4,
         height: 4,
-        pixels: vec![0, 0, 255].repeat(16).into(),
+        pixels: [0, 0, 255].repeat(16).into(),
         playback: None,
     };
     let fitted = source::fit(&frame, 8, 4).unwrap();

@@ -26,6 +26,7 @@ pub(crate) struct CoreTools {
 
 /// Pure construction: creates only the independent MCP metadata directory and
 /// registers providers. It does not start a device, scheduler or network task.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble(
     cfg: &crate::config::Config,
     db: crate::store::Db,

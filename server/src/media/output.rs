@@ -435,6 +435,8 @@ async fn write_packet(stdin: &mut tokio::process::ChildStdin, data: &[u8]) -> Re
         .context("媒体输出进程已结束")
 }
 
+// One output task owns both lifecycle channels and its frozen source context.
+#[allow(clippy::too_many_arguments)]
 async fn pump(
     ffmpeg: &str,
     req: &OutputRequest,

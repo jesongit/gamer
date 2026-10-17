@@ -1114,7 +1114,7 @@ mod tests {
         assert!(manager.get_run(&run.run_id).is_some());
         assert_eq!(
             manager
-                .delete_terminal_records(&db, &[run.run_id.clone()])
+                .delete_terminal_records(&db, std::slice::from_ref(&run.run_id))
                 .unwrap(),
             1
         );
@@ -1134,7 +1134,7 @@ mod tests {
         },serde_json::json!({"run_id":retained.run_id,"kind":"consumed","trace_enabled":true}),false,None).unwrap();
         db.trace.retain(&retained.run_id).unwrap();
         assert!(manager
-            .delete_terminal_records(&db, &[retained.run_id.clone()])
+            .delete_terminal_records(&db, std::slice::from_ref(&retained.run_id))
             .unwrap_err()
             .to_string()
             .contains("run_retained"));
