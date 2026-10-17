@@ -80,7 +80,7 @@ it('刷新后显示更新全部，搜索不限制候选，一次确认真实权�
   expect(center.emitted('changed')).toHaveLength(1)
   await center.get('[aria-label="搜索插件"]').setValue('')
   expect(center.get('[data-plugin-id="beta"]').text()).toContain('已停用')
-  expect(center.get('[data-plugin-id="alpha"]').text()).toContain('运行中')
+  expect(center.get('[data-plugin-id="alpha"]').text()).toContain('已启用')
 })
 
 it('准备期间按钮不可重入，取消汇总确认不上传任何插件', async () => {

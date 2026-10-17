@@ -24,7 +24,10 @@ export function toDeviceCoord(clientX, clientY, rect, videoWidth, videoHeight) {
   const offY = (rect.height - dispH) / 2
   const x = Math.round((clientX - rect.left - offX) / dispW * vw)
   const y = Math.round((clientY - rect.top - offY) / dispH * vh)
-  return { x: Math.max(0, Math.min(vw, x)), y: Math.max(0, Math.min(vh, y)) }
+  // Points address pixels, unlike selection edges: the last valid point is
+  // width - 1 / height - 1. Rounding near the bottom/right edge must never
+  // produce the exclusive frame boundary accepted by a region rectangle.
+  return { x: Math.max(0, Math.min(vw - 1, x)), y: Math.max(0, Math.min(vh - 1, y)) }
 }
 
 /** 把设备像素矩形转换为叠加层使用的 CSS 样式。 */

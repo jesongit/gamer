@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { mount, flushPromises } from '@vue/test-utils'
 import ThemedCombobox from '../../plugins/ui-shared/ThemedCombobox.vue'
 import CellEditor from '../../plugins/gamer-yaml/ui/src/script-editor/components/CellEditor.vue'
 import { installDialogAccessibility } from './components/ui/dialog-accessibility'
@@ -8,15 +8,19 @@ let wrapper, uninstall, modal
 afterEach(() => { uninstall?.(); wrapper?.unmount(); modal?.remove(); vi.restoreAllMocks() })
 function dialog() {
   modal = document.createElement('div'); modal.className = 'modal-mask'; document.body.append(modal)
-  vi.spyOn(modal, 'getClientRects').mockReturnValue([{}])
+  vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue([{}])
+  const panel = document.createElement('div'); panel.className = 'modal'; modal.append(panel)
   uninstall = installDialogAccessibility()
-  const closed = vi.fn(); modal.addEventListener('click', closed)
-  return closed
+  const closed = vi.fn(), cancel = document.createElement('button')
+  cancel.textContent = '取消'; cancel.addEventListener('click', closed)
+  cancel.dataset.dialogCancel = ''; panel.append(cancel)
+  return { closed, panel, cancel }
 }
 it('弹窗中先用 Escape 关闭候选，下次 Escape 才关闭弹窗', async () => {
-  const closed = dialog()
-  wrapper = mount(ThemedCombobox, { attachTo: modal, props: { modelValue: '', options: ['one', 'two'] } })
-  await wrapper.get('.combo-toggle').trigger('click'); closed.mockClear()
+  const { closed, panel, cancel } = dialog()
+  wrapper = mount(ThemedCombobox, { attachTo: panel, props: { modelValue: '', options: ['one', 'two'] } })
+  panel.append(cancel); await flushPromises()
+  await wrapper.get('input').trigger('keydown', { key: 'ArrowDown' }); closed.mockClear()
   await wrapper.get('input').trigger('keydown', { key: 'Escape' })
   expect(document.querySelector('[role="listbox"]')).toBeNull()
   expect(closed).not.toHaveBeenCalled()
@@ -24,8 +28,9 @@ it('弹窗中先用 Escape 关闭候选，下次 Escape 才关闭弹窗', async 
   expect(closed).toHaveBeenCalledTimes(1)
 })
 it('弹窗中录入 Escape 和 Tab 不关闭弹窗或移动焦点', async () => {
-  const closed = dialog()
-  wrapper = mount(CellEditor, { attachTo: modal, props: { cell: { lit: 'BACK' }, type: 'key' } })
+  const { closed, panel, cancel } = dialog()
+  wrapper = mount(CellEditor, { attachTo: panel, props: { cell: { lit: 'BACK' }, type: 'key' } })
+  panel.append(cancel); await flushPromises()
   for (const key of ['Escape', 'Tab']) {
     await wrapper.get('.key-record').trigger('click'); closed.mockClear()
     await wrapper.get('input').trigger('keydown', { key, code: key })

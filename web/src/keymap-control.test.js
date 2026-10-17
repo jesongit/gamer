@@ -23,6 +23,43 @@ function keyEvent(code, options = {}) {
   }
 }
 
+describe('keymap-control form focus isolation', () => {
+  it.each([true, false])('preserves editing shortcuts and native controls with remote=%s', remote => {
+    const sendInputEvent = vi.fn(), sendControl = vi.fn(), fallback = { handleKeydown: vi.fn(), handleKeyup: vi.fn() }
+    const controller = createKeymapController({ remote, sendInputEvent, sendControl, fallback,
+      keymap: { version: 1, bindings: [{ key: 'KeyA', action: { type: 'tap', at: [0.2, 0.3] } }] } })
+    for (const target of [{ tagName: 'INPUT' }, { tagName: 'TEXTAREA' }, { tagName: 'SELECT' }, { role: 'dialog' }, { contentEditable: 'true' }]) {
+      for (const code of ['ControlLeft', 'KeyA', 'KeyC', 'KeyV', 'Backspace', 'Delete', 'ArrowLeft', 'Tab']) {
+        const event = keyEvent(code, { target, ctrlKey: code.startsWith('Key') })
+        expect(controller.handleKeydown(event)).toEqual({ handled: false })
+        expect(controller.handleKeyup(event)).toEqual({ handled: false })
+        expect(event.preventDefault).not.toHaveBeenCalled()
+      }
+    }
+    expect(sendInputEvent).not.toHaveBeenCalled(); expect(sendControl).not.toHaveBeenCalled()
+    expect(fallback.handleKeydown).not.toHaveBeenCalled(); expect(fallback.handleKeyup).not.toHaveBeenCalled()
+  })
+
+  it('releases a previously forwarded key after focus moves into an editor without consuming its keyup', () => {
+    const sendInputEvent = vi.fn(), controller = createKeymapController({ remote: true, sendInputEvent })
+    controller.handleKeydown(keyEvent('KeyW'))
+    const up = keyEvent('KeyW', { target: { tagName: 'INPUT' } })
+    expect(controller.handleKeyup(up)).toMatchObject({ handled: true })
+    expect(sendInputEvent.mock.calls.map(([message]) => message.event.type)).toEqual(['key_down', 'key_up'])
+    expect(up.preventDefault).not.toHaveBeenCalled()
+    controller.handleKeyup(up)
+    expect(sendInputEvent).toHaveBeenCalledTimes(2)
+    expect(controller.getPressedCodes()).toEqual([])
+  })
+
+  it('ignores composition and already consumed events before remote dispatch', () => {
+    const sendInputEvent = vi.fn(), controller = createKeymapController({ remote: true, sendInputEvent })
+    expect(controller.handleKeydown(keyEvent('KeyA', { isComposing: true }))).toEqual({ handled: false })
+    expect(controller.handleKeydown(keyEvent('KeyA', { defaultPrevented: true }))).toEqual({ handled: false })
+    expect(sendInputEvent).not.toHaveBeenCalled()
+  })
+})
+
 const KEYMAP = {
   version: 1,
   name: '战斗方案',

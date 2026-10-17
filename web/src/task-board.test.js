@@ -26,7 +26,7 @@ const ENTRYPOINT_DESCRIPTOR = {
   runner_id: 'gamer-yaml',
   entrypoint: 'com.demo/main.yml',
   kind: 'script',
-  format: 'yaml-params-v1',
+  format: 'yaml-params',
   schema: [
     { name: 'enable', type: 'boolean', required: false, default: true, desc: '' },
     { name: 'timeout', type: 'duration', required: false, default: '30s', desc: '最长等待' },
@@ -36,7 +36,7 @@ const ENTRYPOINT_DESCRIPTOR = {
 // template 参数 descriptor（模板候选下拉用例）
 const TMPL_DESCRIPTOR = {
   kind: 'script',
-  format: 'yaml-params-v1',
+  format: 'yaml-params',
   schema: [
     { name: 'account', type: 'template', required: true, default: null, desc: '账号模板' },
   ],
@@ -155,6 +155,34 @@ function saveButton(wrapper) {
   return wrapper.findAll('.modal-foot .btn').find(b => b.text() === '保存')
 }
 
+it('shows the latest task outcome and opens only that task history without changing the selected device', async () => {
+  const latest = { run_id: 'task-latest', task_id: 't1', device_id: 'dev1', runner_id: 'gamer-yaml', entrypoint: 'com.demo/main.yml', state: 'failed', started_at: '2026-10-12T20:01:00Z', finished_at: '2026-10-12T20:04:25Z', error: '单次消耗数字识别为空' }
+  const unrelated = { ...latest, run_id: 'other-task', task_id: 't2' }
+  const { wrapper, calls } = await mountView([
+    ...baseRoutes().filter(route => route.url !== '/api/tasks'),
+    { method: 'GET', url: '/api/tasks', body: [{ ...TASKS[0], last_result: '失败', last_run_at: latest.finished_at }] },
+    { method: 'GET', url: '/api/runs', body: [latest, unrelated] },
+    { method: 'GET', url: '/api/runs/task-latest', body: latest },
+    { method: 'GET', url: '/api/runs/task-latest/events', body: { events: [], next: 0, has_more: false } },
+    { method: 'GET', url: '/api/runs/task-latest/trace', body: { images: [], gaps: [], next: 0, has_more: false, status: 'available', enabled: true } },
+    { method: 'GET', url: '/api/extensions', body: [] },
+  ])
+  try {
+    expect(wrapper.find('.recent-run-summary').text()).toContain('失败')
+    expect(wrapper.find('.recent-run-summary time').attributes('datetime')).toBe(latest.finished_at)
+    await wrapper.find('button[aria-label="查看 每日签到 的运行日志"]').trigger('click'); await flushPromises()
+    expect(wrapper.find('.run-details-view').text()).toContain(latest.error)
+    const historyRequest = calls.find(call => call.url.startsWith('/api/runs?'))
+    const params = new URL(historyRequest.url, 'http://localhost').searchParams
+    expect(params.get('task_id')).toBe('t1')
+    expect(params.has('device_id')).toBe(false)
+    expect(wrapper.find('.details-toolbar select').findAll('option').map(option => option.attributes('value'))).toEqual(['', 'task-latest'])
+    await wrapper.findAll('button').find(button => button.text() === '返回任务').trigger('click'); await flushPromises()
+    expect(wrapper.find('.task-list').exists()).toBe(true)
+    expect(calls.every(call => call.method === 'GET')).toBe(true)
+  } finally { wrapper.unmount() }
+})
+
 describe('TaskBoard 边界：不感知脚本/模板资源与业务编辑组件（§6.6 验收）', () => {
   const source = read('components/TaskBoard.vue')
   for (const banned of ['ScriptPicker', 'ParamsForm', 'scriptsData', 'templatesData', 'listScripts', 'listTemplates']) {
@@ -272,13 +300,13 @@ describe('行内动作：挂起 / 取消调度 / 删除 / 启停 / 测试', () =
     routes.push({ method: 'POST', url: '/api/tasks/t2/run', status: 424, body: { code: 'dependency_unavailable', message: 'runner unavailable', task_id: 't2' } })
     const { wrapper, calls } = await mountView(routes)
     const row = wrapper.findAll('tbody tr')[1]
-    await row.findAll('button').find(b => b.text().includes('测试')).trigger('click')
+    await row.findAll('button').find(b => b.text().includes('立即运行')).trigger('click')
     await flushPromises()
     expect(calls.find(c => c.method === 'POST' && c.url === '/api/tasks/t2/run')).toMatchObject({ body: null })
-    expect(row.findAll('button').find(b => b.text().includes('测试')).attributes('disabled')).toBeUndefined()
+    expect(row.findAll('button').find(b => b.text().includes('立即运行')).attributes('disabled')).toBeUndefined()
 
     routes.push({ method: 'POST', url: '/api/tasks/t2/run', body: { run_id: 'task-run-9', state: 'queued' } })
-    await row.findAll('button').find(b => b.text().includes('测试')).trigger('click')
+    await row.findAll('button').find(b => b.text().includes('立即运行')).trigger('click')
     await flushPromises()
     expect(calls.filter(c => c.method === 'POST' && c.url === '/api/tasks/t2/run')).toHaveLength(2)
   })
@@ -291,7 +319,7 @@ describe('行内动作：挂起 / 取消调度 / 删除 / 启停 / 测试', () =
     })
     const { wrapper } = await mountView(routes)
     const row = wrapper.findAll('tbody tr')[1]
-    await row.findAll('button').find(b => b.text().includes('测试')).trigger('click')
+    await row.findAll('button').find(b => b.text().includes('立即运行')).trigger('click')
     await flushPromises()
     expect(runConflicts.value).toHaveLength(1)
     expect(runConflicts.value[0]).toMatchObject({ device_id: 'dev2', error: 'device_busy' })
@@ -598,5 +626,26 @@ describe('服务端时区标识（P11.1 后任务时间戳均为 UTC 串，常�
     const { wrapper } = await mountView(baseRoutes())
     expect(wrapper.find('[data-testid="server-tz-hint"]').text())
       .toContain('任务按服务端本地时区执行')
+  })
+})
+
+describe('普通玩家的定时表单', () => {
+  it('editing frequency and time saves the existing task contract with its runner payload', async () => {
+    const routes = baseRoutes(); routes.push({ method: 'PUT', url: '/api/tasks/t1', body: {} })
+    const { wrapper, calls } = await mountView(routes); await openEdit(wrapper)
+    await wrapper.get('[aria-label="执行频率"]').setValue('weekdays')
+    await wrapper.get('[aria-label="执行时间"]').setValue('21:30')
+    await saveButton(wrapper).trigger('click'); await flushPromises()
+    const saved = calls.find(call => call.method === 'PUT' && call.url === '/api/tasks/t1').body
+    expect(saved.schedule).toEqual({ provider_id: 'cron', config: { expression: '30 21 * * 1-5' } })
+    expect(saved.runner).toEqual(TASKS[0].runner)
+  })
+  it('an existing complex schedule remains custom and saves its exact expression', async () => {
+    const routes = baseRoutes(); routes.push({ method: 'PUT', url: '/api/tasks/t2', body: {} })
+    const { wrapper, calls } = await mountView(routes); await openEdit(wrapper, 1)
+    expect(wrapper.get('[aria-label="执行频率"]').element.value).toBe('custom')
+    await saveButton(wrapper).trigger('click'); await flushPromises()
+    const saved = calls.find(call => call.method === 'PUT' && call.url === '/api/tasks/t2').body
+    expect(saved.schedule.config.expression).toBe('*/10 * * * *')
   })
 })

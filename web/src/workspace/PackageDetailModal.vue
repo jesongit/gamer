@@ -1,7 +1,7 @@
 <template>
   <div v-if="ctx.detailModal.open" class="modal-mask" v-backdrop-dismiss="ctx.closeDetail">
     <div class="modal modal-wide">
-      <h3>配置详情<template v-if="ctx.detailModal.packageId"> · <span class="mono">{{ ctx.detailModal.packageId }}</span></template></h3>
+      <h3>配置详情<template v-if="pkg"> · {{ pkg.name || pkg.id }}</template></h3>
 
       <p v-if="ctx.detailModal.loading" class="detail-hint">加载中…</p>
       <template v-else-if="ctx.detailModal.error">
@@ -35,7 +35,7 @@
               <label class="dep-required"><input v-model="dep.required" type="checkbox" />必需</label>
               <button type="button" class="btn btn-sm" @click="ctx.removePluginDep(i)">移除</button>
             </div>
-            <button type="button" class="btn btn-sm dep-add" @click="ctx.addPluginDep">＋ 添加插件依赖</button>
+            <button type="button" class="btn btn-sm dep-add" @click="ctx.addPluginDep"><UiIcon name="plus" />添加插件依赖</button>
           </div>
         </form>
         <dl v-else class="summary">
@@ -43,7 +43,7 @@
           <dt>名称</dt><dd>{{ pkg.name || '—' }}</dd>
           <dt>版本</dt><dd class="mono">{{ pkg.version || '—' }}</dd>
           <dt>作者</dt><dd>{{ pkg.author || '—' }}</dd>
-          <dt>Revision</dt><dd class="mono">{{ pkg.revision }}</dd>
+          <dt>数据修订号</dt><dd class="mono">{{ pkg.revision }}</dd>
           <dt>适用目标</dt><dd class="mono">{{ targetsText }}</dd>
         </dl>
 
@@ -58,6 +58,7 @@
             <span v-if="ps.required" class="req-tag">必需</span>
             <span v-if="ps.state === 'missing_required'" class="miss-hint">部分功能不可用，可安装后恢复</span>
           </div>
+          <button v-if="!ctx.detailModal.editing && pluginStates.some(item => item.state !== 'available')" class="btn btn-sm" @click="openPluginManager">管理所需插件</button>
         </div>
 
         <!-- stats：文件数 / 字节 / 各插件统计 -->
@@ -84,7 +85,7 @@
               class="input mono"
               :options="ctx.detailModal.compat.kind === 'android' ? androidCandidates : []"
               aria-label="检查目标"
-              :placeholder="ctx.detailModal.compat.kind === 'web' ? 'https://sr.mihoyo.com/cloud' : 'Android 包名，如 com.miHoYo.hkrpg'"
+              :placeholder="ctx.detailModal.compat.kind === 'web' ? 'https://game.example/play' : 'Android 包名，如 com.example.game'"
               spellcheck="false"
               @commit="runCompat"
             />
@@ -106,8 +107,8 @@
           <p v-if="ctx.detailModal.compat.error" class="form-error">{{ ctx.detailModal.compat.error }}</p>
         </div>
 
-        <p v-if="ctx.detailModal.editConflict" class="conflict-warning">
-          ⚠ {{ ctx.detailModal.editError }}
+        <p v-if="ctx.detailModal.editConflict" class="conflict-warning" role="alert">
+          <UiIcon name="warning" />{{ ctx.detailModal.editError }}
         </p>
         <p v-else-if="ctx.detailModal.editError" class="form-error">{{ ctx.detailModal.editError }}</p>
 
@@ -123,7 +124,7 @@
             </button>
           </template>
           <template v-else>
-            <button class="btn" @click="ctx.startEdit">✏️ 编辑</button>
+            <button class="btn" @click="ctx.startEdit"><UiIcon name="edit" />编辑</button>
             <button class="btn btn-primary" @click="ctx.closeDetail">关闭</button>
           </template>
         </div>
@@ -140,8 +141,10 @@ import { vBackdropDismiss } from '../../../plugins/ui-shared/backdrop-dismiss.js
  * usePackageContext（detailModal），本组件只做呈现；androidCandidates 由宿主
  * 注入（如设备配置的 Android 包名），缺省手输。
  */
-import { computed, reactive } from 'vue'
+import { computed, inject, reactive } from 'vue'
+import { WORKSPACE_CONTEXT_KEY } from './context'
 import { formatBytes } from '../composables/usePackageContext'
+import UiIcon from '../components/ui/UiIcon.vue'
 import PackageTargetsEditor from './PackageTargetsEditor.vue'
 import ThemedCombobox from '../../../plugins/ui-shared/ThemedCombobox.vue'
 
@@ -151,6 +154,11 @@ const props = defineProps({
 })
 
 const ctx = reactive(props.context)
+const workspace = inject(WORKSPACE_CONTEXT_KEY, null)
+async function openPluginManager() {
+  ctx.closeDetail()
+  await workspace?.uiBridge.workspace.openPanel('plugins')
+}
 
 const pkg = computed(() => ctx.detailModal.detail?.package || null)
 const stats = computed(() => ctx.detailModal.detail?.stats || { files: 0, bytes: 0, plugins: [] })

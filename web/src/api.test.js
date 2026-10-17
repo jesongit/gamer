@@ -20,6 +20,26 @@ beforeEach(() => {
 
 afterEach(() => vi.unstubAllGlobals())
 
+it('queries task history independently of its current device and preserves the task cursor', async () => {
+  fetch.mockResolvedValue(jsonRes(200, []))
+  await api.listRunHistory(undefined, undefined, 'run#older', 'task#one')
+  const query = new URL(fetch.mock.calls[0][0], 'http://localhost').searchParams
+  expect(query.get('task_id')).toBe('task#one')
+  expect(query.get('before')).toBe('run#older')
+  expect(query.has('device_id')).toBe(false)
+})
+
+it('returns an original screenshot blob with its server-issued frame identity', async () => {
+  const stamp = { target: 'browser-one', epoch: 'connection', revision: 8 }
+  const png = new Blob(['original'], { type: 'image/png' })
+  fetch.mockResolvedValue({ ok: true, status: 200,
+    headers: { get: key => key.toLowerCase() === 'x-frame-stamp' ? JSON.stringify(stamp) : 'image/png' },
+    blob: async () => png })
+  expect(await api.screenshotFrame('browser-one')).toEqual({ blob: png, stamp })
+  expect(fetch.mock.calls[0][0]).toBe('/api/devices/browser-one/screenshot')
+  expect(fetch.mock.calls[0][1].method).toBe('POST')
+})
+
 it('keeps trace pagination and retention scoped to the selected run', async () => {
   fetch.mockResolvedValue(jsonRes(200, { images: [] }))
   await api.getRunTrace('run#one', 4, 25)

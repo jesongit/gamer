@@ -68,6 +68,8 @@ export interface RunnerEditorContribution {
   entrypointEditorProps?: (ctx: RunnerEditorContext) => Record<string, unknown>
   /** payload 编辑器：props = {entrypoint, payload, ctx}，v-model:payload，可选 expose validate() */
   payloadEditor: Component
+  /** 可选运行详情视图：props = { deviceId, taskId, backLabel }，emit edit 返回任务列表。 */
+  runDetails?: Component
   /** 保存时推导 app 包名（缺省回退既有任务 app，新建回退空串） */
   resolveAppPackages?: (entrypoint: string, payload: Record<string, unknown>, ctx: RunnerEditorContext) => RunnerAppPackages
 }

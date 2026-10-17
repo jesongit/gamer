@@ -9,18 +9,19 @@
         </select>
         <select v-model="fLevel" aria-label="日志级别" class="select select-sm" @change="load">
           <option value="">全部级别</option>
-          <option value="info">INFO</option>
-          <option value="success">SUCCESS</option>
-          <option value="warn">WARN</option>
-          <option value="error">ERROR</option>
+          <option value="info">普通信息</option>
+          <option value="success">成功</option>
+          <option value="warn">警告</option>
+          <option value="error">错误</option>
         </select>
       </div>
       <div class="lp-actions">
         <button class="btn btn-ghost refresh-toggle" :aria-pressed="autoRefresh" @click="autoRefresh = !autoRefresh"><span class="live-dot" :class="{ paused: !autoRefresh }"></span>{{ autoRefresh ? '自动刷新' : '已暂停刷新' }}</button>
         <button class="btn btn-icon btn-ghost" title="刷新日志" aria-label="刷新日志" :disabled="loading" @click="load"><UiIcon name="refresh" /></button>
-        <button class="btn btn-ghost" @click="clear"><UiIcon name="trash" />清空</button>
+        <button class="btn btn-ghost" :disabled="clearing" @click="clear"><UiIcon name="trash" />{{ clearing ? '处理中…' : '清空全部日志' }}</button>
       </div>
     </div>
+    <p class="log-scope">显示最近的操作日志；设备和级别筛选作用于读取，搜索只在已加载的记录中进行。</p>
 
     <div v-if="loadError" class="log-load-error" role="alert">{{ loadError }}</div>
     <div class="log-card">
@@ -62,8 +63,10 @@ import { OPERATION_FEEDBACK_KEY, operationReporter } from '../workspace/operatio
 import { devicesData, useToast } from '../store'
 import { api } from '../api'
 import UiIcon from './ui/UiIcon.vue'
+import { useConfirmDialog } from './ui/useConfirmDialog'
 
 const toast = useToast()
+const confirm = useConfirmDialog(), clearing = ref(false)
 const beginReport = operationReporter(inject(OPERATION_FEEDBACK_KEY, null), '', toast)
 const devices = devicesData
 const logs = ref([])
@@ -126,15 +129,18 @@ function onScroll() {
 }
 
 async function clear() {
+  if (clearing.value) return
+  clearing.value = true
   const toast = beginReport()
   try {
+    if (!await confirm('清空所有设备的操作日志？当前设备、级别和搜索筛选不会限制清空范围。', { title: '清空全部日志', confirmText: '清空全部日志', danger: true })) return
     await api.clearLogs()
     ++requestId; loading.value = false; loadError.value = ''
     logs.value = []
-    toast('日志已清空', 'success')
+    toast('全部日志已清空', 'success')
   } catch (e) {
     toast('清空失败：' + e.message, 'error')
-  }
+  } finally { clearing.value = false }
 }
 
 async function loadDevices() {
@@ -149,6 +155,7 @@ onUnmounted(() => { ++requestId; if (timer) clearInterval(timer) })
 </script>
 
 <style scoped>
+.log-scope{font-size:13px;line-height:1.6;color:var(--text-2);margin:0;flex:none}
 .logs-panel { flex:1; min-height:0; display:flex; flex-direction:column; gap:12px; container-type:inline-size; }
 .lp-head,.filters,.lp-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .lp-head { justify-content:space-between; flex-shrink:0; }

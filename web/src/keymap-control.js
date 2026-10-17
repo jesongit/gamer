@@ -15,7 +15,7 @@
  * tap/swipe/touch messages.
  */
 
-import { ANDROID_META, mapKeyboardCode } from './keyboard-control'
+import { ANDROID_META, mapKeyboardCode, shouldIgnoreKeyboardTarget } from './keyboard-control'
 
 export const KEYMAP_VERSION = 1
 export const KEYMAP_ACTION_TYPES = Object.freeze(['tap', 'swipe', 'raw_key', 'hold'])
@@ -612,6 +612,7 @@ export function createKeymapController({
   }
 
   function handleKeydown(event) {
+    if (event?.defaultPrevented || event?.isComposing || shouldIgnoreKeyboardTarget(event?.target)) return { handled: false }
     if (remoteEnabled() && !modeIsText(mode)) return forwardRemoteInput(event, 'down', event)
     const code = eventCode(event)
     if (!code || !routerEnabled() || modeIsText(mode)) return fallbackDown(event)
@@ -669,12 +670,16 @@ export function createKeymapController({
 
   function handleKeyup(event) {
     const code = eventCode(event)
+    const ignored = shouldIgnoreKeyboardTarget(event?.target)
+    // Release only keys owned by this controller after focus moves into a form.
+    // An editor's own keyup must neither reach the device nor lose its native behavior.
+    if (ignored && !remoteHeld.has(code) && !held.has(code) && !suppressedKeyups.has(code)) return { handled: false }
     if (remoteEnabled() || (code && remoteHeld.has(code))) {
-      return forwardRemoteInput(event, 'up', event)
+      return forwardRemoteInput(event, 'up', ignored ? null : event)
     }
     if (!code) return fallbackUp(event)
     if (suppressedKeyups.delete(code)) {
-      preventDefault(event)
+      if (!ignored) preventDefault(event)
       return { handled: true, mapped: true, released: false }
     }
 
@@ -684,7 +689,7 @@ export function createKeymapController({
     let sent = true
     if (current.action.type === 'raw_key') sent = sendRawKey(current.action, event, 1)
     else if (current.action.type === 'hold') sent = sendHoldUp(current)
-    preventDefault(event)
+    if (!ignored) preventDefault(event)
     return mappedResult(current.action, code, sent)
   }
 

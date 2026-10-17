@@ -1,6 +1,8 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { currentPublicAssetsPlugin } from './retired-public-assets.mjs'
 
 // WEB-006 混包告警的前端侧版本源：构建期把 web/package.json version 注入为全局
 // __APP_VERSION__（CI 由 tools/check-version.ps1 保证它与 server/Cargo.toml 同源一致）。
@@ -9,13 +11,14 @@ const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 
 
 export default defineConfig({
   plugins: [
+    currentPublicAssetsPlugin(),
     {
       name: 'gamer-prebuilt-plugin-ui',
       configureServer(server) {
         // These are independently built ES modules. Vite adds ?import to dynamic
         // imports, which its public middleware otherwise rejects as source code.
         server.middlewares.use((req, _res, next) => {
-          if (req.url?.startsWith('/plugin-ui/')) {
+          if (req.url?.startsWith('/plugin-ui/') || /^\/api\/extensions\/[a-z0-9][a-z0-9._-]*\/ui\//.test(req.url || '')) {
             const url = new URL(req.url, 'http://localhost')
             if (/\.m?js$/.test(url.pathname) && url.searchParams.has('import')) {
               url.searchParams.delete('import')
@@ -42,6 +45,14 @@ export default defineConfig({
   server: {
     port: 5173,
     host: true,
+    fs: {
+      // Host dialogs share this source module with plugin UIs. Keep the
+      // allow list narrow instead of exposing the whole repository/data root.
+      allow: [
+        fileURLToPath(new URL('./', import.meta.url)),
+        fileURLToPath(new URL('../plugins/ui-shared/', import.meta.url)),
+      ],
+    },
     proxy: {
       // Rust 服务端 API 代理。
       // changeOrigin 必须保持 false：后端对 POST/PUT/DELETE 做 Origin↔Host 同源校验，

@@ -66,13 +66,13 @@ describe('Console 壳挂载冒烟（拆分后装配接线）', () => {
       })
       await vi.advanceTimersByTimeAsync(2100)
       expect(wrapper.exists()).toBe(true)
-      expect(wrapper.text()).toContain('选择设备…')
+      expect(wrapper.text()).toContain('选择目标…')
       expect(wrapper.text()).toContain('连接')
       // 应用区 = 应用下拉（未配置时占位「未选择应用」）+ 读取 + 启动 + 停止应用；
       // 粘贴/按键等收进操控区的更多下拉（Teleport 在此已 stub，
       // 菜单内容不渲染，只断言两个触发按钮），菜单结构由 console-components 静态回归锁定
       expect(wrapper.find('button[title^="新增 / 设置"]').exists()).toBe(true)
-      expect(wrapper.text()).toContain('未选择应用')
+      expect(wrapper.text()).toContain('请选择应用，或先读取列表')
       expect(wrapper.text()).toContain('读取')
       expect(wrapper.text()).toContain('启动')
       expect(wrapper.find('[aria-label="更多投屏功能"]').exists()).toBe(true)
@@ -97,13 +97,13 @@ describe('Console 壳挂载冒烟（拆分后装配接线）', () => {
       // 右侧 Workspace 由 PanelRegistry 驱动：裸 Core（listExtensions 空）
       // 只有 任务/日志/设置 三个自有页签（P11.5：业务面板全部 manifest 驱动）
       const tabTexts = wrapper.findAll('.workspace-tab').map(tab => tab.text())
-      for (const title of ['任务', '日志', '设置']) {
+      for (const title of ['任务', '运行记录', '设置']) {
         expect(tabTexts.some(text => text.includes(title))).toBe(true)
       }
       for (const gone of ['模板', '脚本', '映射']) {
         expect(tabTexts.some(text => text.includes(gone))).toBe(false)
       }
-      expect(wrapper.findAll('.workspace-tab').map(tab => tab.text())).toEqual(['工作台', '任务', '日志', '配置包', '插件', '设置'])
+      expect(wrapper.findAll('.workspace-tab').map(tab => tab.text())).toEqual(['工作台', '任务', '运行记录', '配置包', '插件', '设置'])
       expect(wrapper.find('.workspace-tab.active').text()).toBe('工作台')
       expect(wrapper.find('.workspace-dd').exists()).toBe(false)
       expect(wrapper.text()).toContain('启用插件后')
@@ -167,12 +167,15 @@ describe('浏览器投屏的真实舞台输入接线', () => {
     const wrapper = mount(Console, { attachTo: document.body, global: { stubs: { Teleport: true } } })
     try {
       await vi.advanceTimersByTimeAsync(2100)
-      await wrapper.find('select[aria-label="设备列表"]').setValue('browser-check')
+      await wrapper.find('select[aria-label="游戏目标列表"]').setValue('browser-check')
       await flushPromises()
-      await wrapper.find('.tb-device-group .btn-primary').trigger('click')
+      await wrapper.find('select[aria-label="画面模式"]').setValue('1')
+      await flushPromises()
+      await wrapper.find('.tb-device-group button[aria-label="连接画面"]').trigger('click')
       await flushPromises()
       const stamp = { target: 'browser-check', epoch: 'one', revision: 1 }
-      socket.onmessage({ data: JSON.stringify({ type: 'frame', id: 1, jpeg: 'AA==', stamp }) })
+      socket.onmessage({ data: JSON.stringify({ type: 'frame', id: 1, jpeg: 'AA==', stamp,
+        width: 1280, height: 720, preview_width: 1280, preview_height: 720 }) })
       await nextTick()
       const img = wrapper.find('img[alt="浏览器目标画面"]')
       Object.defineProperty(img.element, 'naturalWidth', { value: 1280 })

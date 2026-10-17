@@ -34,12 +34,13 @@ export const runRegistry = reactive({
 export const appStartedDevices = new Set()
 
 export function findRun(runId) {
-  return (runId && Object.hasOwn(runRegistry.byId, runId) && runRegistry.byId[runId]) || null
+  const record = runId && runRegistry.byId[runId]
+  return (runId && Object.hasOwn(runRegistry.byId, runId) && record) || null
 }
 
 export function getActiveRun(deviceId) {
-  const rid = deviceId && Object.hasOwn(runRegistry.activeByDevice, deviceId) && runRegistry.activeByDevice[deviceId]
-  return rid ? findRun(rid) : null
+  const rid = deviceId && runRegistry.activeByDevice[deviceId]
+  return deviceId && Object.hasOwn(runRegistry.activeByDevice, deviceId) && rid ? findRun(rid) : null
 }
 
 /** 全局运行态复位（回空闲：按钮恢复运行、顶栏芯片消失） */

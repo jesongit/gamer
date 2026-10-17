@@ -134,7 +134,7 @@ describe('videoApi 录制端点（合同 §2）', () => {
 describe('videoApi 演示素材公开动作与工具函数', () => {
   it('createSample uses the video public action and unwraps its data envelope', async () => {
     const data = { manifest: { id: 's1', status: 'complete' } }
-    const values = { package_id: 'pkg', recording_id: 'r1', goal: { description: 'reward claimed', confirmed: true } }
+    const values = { recording_id: 'r1', goal: { description: 'reward claimed', confirmed: true } }
     fetchStub.mockResolvedValue(jsonResponse(200, { ok: true, data }))
     await expect(videoApi.createSample(values)).resolves.toBe(data)
     expect(fetchStub.mock.calls[0][0]).toBe('/api/extensions/gamer-video/call')
@@ -144,8 +144,8 @@ describe('videoApi 演示素材公开动作与工具函数', () => {
   it('readSample preserves plain response and immutable sample identity', async () => {
     const data = { manifest: { id: 's1', content_sha256: 'sha' }, files: [] }
     fetchStub.mockResolvedValue(jsonResponse(200, data))
-    await expect(videoApi.readSample('pkg', 's1')).resolves.toBe(data)
-    expect(JSON.parse(fetchStub.mock.calls[0][1].body)).toEqual({ action: 'sample.read', values: { package_id: 'pkg', sample_id: 's1' } })
+    await expect(videoApi.readSample('s1')).resolves.toBe(data)
+    expect(JSON.parse(fetchStub.mock.calls[0][1].body)).toEqual({ action: 'sample.read', values: { sample_id: 's1' } })
   })
 
   it('错误统一带 status：404 recording_not_found / 网络失败 status=0', async () => {
@@ -198,7 +198,7 @@ describe('videoApi 演示素材公开动作与工具函数', () => {
     await expect(videoApi.importMedia(new Uint8Array([1]), ' ')).rejects.toMatchObject({ code: 'invalid_argument' })
     await expect(videoApi.recordingStart('')).rejects.toMatchObject({ code: 'invalid_argument' })
     await expect(videoApi.recordingStatus('  ')).rejects.toMatchObject({ code: 'invalid_argument' })
-    await expect(videoApi.readSample('pkg', ' ')).rejects.toMatchObject({ code: 'invalid_argument' })
+    await expect(videoApi.readSample(' ')).rejects.toMatchObject({ code: 'invalid_argument' })
     expect(fetchStub).not.toHaveBeenCalled()
   })
 })
@@ -208,27 +208,20 @@ describe('videoApi 演示素材公开动作与工具函数', () => {
 // ---------------------------------------------------------------------------
 
 describe('videoApi 动作清单缝（gamer-yaml call）', () => {
-  it('listSamples scopes discovery to the selected package', async () => {
+  it('listSamples discovers independent samples without a Package', async () => {
     fetchStub.mockResolvedValue(jsonResponse(200, { data: { samples: [{ id: 'sample-1' }] } }))
-    expect(await videoApi.listSamples('pkg')).toEqual([{ id: 'sample-1' }])
-    expect(JSON.parse(fetchStub.mock.calls[0][1].body)).toEqual({ action: 'sample.list', values: { package_id: 'pkg' } })
+    expect(await videoApi.listSamples()).toEqual([{ id: 'sample-1' }])
+    expect(JSON.parse(fetchStub.mock.calls[0][1].body)).toEqual({ action: 'sample.list', values: {} })
   })
 
-  it('sampleUrl exports a package-scoped portable binary archive', () => {
-    expect(videoApi.sampleUrl('pkg', 'sample-1')).toBe('/api/packages/pkg/plugins/gamer-video/resources/samples/sample-1.gamersample')
-    expect(fetchStub).not.toHaveBeenCalled()
-  })
-
-  it('importSample uploads original bytes without an overwrite flag', async () => {
+  it('imports original sample bytes through the independent action', async () => {
     const bytes = new Uint8Array([1, 2, 3])
-    fetchStub.mockResolvedValue(jsonResponse(200, { ok: true }))
-    await videoApi.importSample('pkg', 'sample-1', bytes)
+    fetchStub.mockResolvedValue(jsonResponse(200, { data: { manifest: { id: 'sample-1' } } }))
+    await videoApi.importSample(bytes)
     const [url, options] = fetchStub.mock.calls[0]
-    expect(url).toBe(videoApi.sampleUrl('pkg', 'sample-1'))
-    expect(options.method).toBe('PUT')
-    expect(options.body).toBe(bytes)
-    expect(options.headers['Content-Type']).toBe('application/octet-stream')
-    expect(options.headers['X-Force']).toBeUndefined()
+    expect(url).toBe('/api/extensions/gamer-video/call')
+    expect(options.method).toBe('POST')
+    expect(JSON.parse(options.body)).toEqual({ action: 'sample.import', values: { base64: 'AQID' } })
   })
 
   it('createTemplateFromFrame → template.create_from_frame（帧身份 + 校准元数据随 values 下发）', async () => {

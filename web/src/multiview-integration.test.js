@@ -7,7 +7,7 @@ import { applyRunRecord, beginCancel, getActiveRun, resetStoreRunState, runRegis
 
 const targets = ['android-a', 'browser-b', 'android-c', 'browser-d', 'android-e', 'browser-f', 'android-g', 'browser-h', 'android-i']
 const record = (id, runId = `run-${id}`, state = 'running') => ({ device_id: id, run_id: runId, state, runner_id: 'gamer-yaml', entrypoint: 'daily/main.yaml' })
-function setup(saved) {
+function setup(saved = { gridSize: 4 }) {
   const values = new Map(saved ? [[MULTIVIEW_STORAGE_KEY, JSON.stringify(saved)]] : [])
   const storage = { getItem: key => values.get(key), setItem: (key, value) => values.set(key, value) }
   const api = {

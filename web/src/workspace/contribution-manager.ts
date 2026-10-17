@@ -40,6 +40,7 @@ export interface ExtensionRuntime {
  * resolveCore 换取真实 Vue 组件与 props 提取逻辑。
  */
 export interface CorePanelDescriptor {
+  usesPackageContext?: boolean
   component: unknown
   panelClass?: string
   aliases?: string[]
@@ -130,6 +131,7 @@ function panelFromManifest(
     aliases,
   }
   if (descriptor) {
+    contribution.usesPackageContext = descriptor.usesPackageContext
     contribution.component = descriptor.component
     if (descriptor.panelClass) contribution.panelClass = descriptor.panelClass
     if (descriptor.getProps) contribution.getProps = context => descriptor!.getProps!(context) || {}

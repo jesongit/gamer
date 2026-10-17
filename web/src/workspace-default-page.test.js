@@ -6,7 +6,7 @@ import { useConsoleWorkspacePanels } from './components/console/useConsoleWorksp
 
 let wrapper
 afterEach(() => wrapper?.unmount())
-async function setup(panel) {
+async function setup(panel, refresh = async () => ({ extensions: [] })) {
   const route = reactive({ path: '/console', query: panel ? { panel } : {} })
   const router = { push: vi.fn(async location => { route.query = location.query }), replace: vi.fn(async location => { route.query = location.query }) }
   const active = ref('workbench')
@@ -15,7 +15,7 @@ async function setup(panel) {
   wrapper = mount({ setup() {
     workspace = useConsoleWorkspacePanels({ route, router, activePanelKey: active,
       panelRegistry: { resolve: key => key === tasks.key ? tasks : null },
-      serverUiAdapter: { refresh: async () => ({ extensions: [] }), dispose() {} },
+      serverUiAdapter: { refresh, dispose() {} },
       remoteKeymapRunning: ref(false), connected: ref(false), keymap: {},
     })
     return () => null
@@ -46,4 +46,19 @@ it('插件、配置包页面被保留，失效跳转回工作台', async () => {
   expect(active.value).toBe('packages')
   await workspace.openPanel('missing:panel')
   expect(active.value).toBe('workbench')
+})
+it('slow discovery shares one request and a settled request allows a fresh poll', async () => {
+  let resolve
+  const refresh = vi.fn(() => new Promise(done => { resolve = done }))
+  const { workspace } = await setup('workbench', refresh)
+  const first = workspace.refreshServerExtensions()
+  const second = workspace.refreshServerExtensions()
+  expect(second).toBe(first)
+  expect(refresh).toHaveBeenCalledTimes(1)
+  resolve({ extensions: [] })
+  await first
+  const next = workspace.refreshServerExtensions()
+  expect(refresh).toHaveBeenCalledTimes(2)
+  resolve({ extensions: [] })
+  await next
 })

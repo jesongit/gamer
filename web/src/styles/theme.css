@@ -1,27 +1,31 @@
 /* ============ Gamer 主题 ============ */
 :root {
   color-scheme: dark;
-  --bg-0: #17191a;
-  --bg-1: #1d2021;
-  --bg-2: #282b2d;
-  --bg-3: #343739;
-  --chrome: #131516;
-  --field: #181b1c;
-  --border: #454b4e;
-  --control-border: #626a6e;
-  --text-0: #edf0ee;
-  --text-1: #c5cbc8;
-  --text-2: #a4adaa;
-  --accent: #e4c956;
-  --accent-2: #e4c956;
+  --bg-0: #17191c;
+  --bg-1: #202226;
+  --bg-2: #282a2f;
+  --bg-3: #34363b;
+  --chrome: #111315;
+  --field: #191b1f;
+  --border: #3b3d42;
+  --control-border: #7d7b75;
+  --text-0: #eeece6;
+  --text-1: #cecac1;
+  --text-2: #b6b6ae;
+  --accent: #dda951;
+  --accent-2: #edbc6c;
   --danger: #ed9696;
-  --warn: #e4c956;
+  --warn: #f0cb7f;
   --ok: #8fc9ae;
   --radius: 4px;
   --radius-sm: 3px;
+  --workspace-inset: 8px;
   --shadow: 0 8px 24px rgba(0, 0, 0, .35);
   --mono: 'Cascadia Code', 'JetBrains Mono', Consolas, 'Courier New', monospace;
 }
+
+@font-face { font-family: 'Gamer Brand'; src: url('/fonts/quicksand-brand-700.woff2') format('woff2'); font-weight: 700; font-display: swap; }
+@font-face { font-family: 'Gamer Heading'; src: url('/fonts/noto-sans-sc-title-600.woff2') format('woff2'); font-weight: 600; font-display: swap; }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -36,22 +40,27 @@ body {
 }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: #2b3349; border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: #3a4460; }
+::-webkit-scrollbar-thumb { background: #55565a; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #75746f; }
 ::-webkit-scrollbar-track { background: transparent; }
+* { scrollbar-color: #55565a transparent; scrollbar-width: thin; }
+::selection { background: #dda951; color: #201d16; }
+input, textarea { caret-color: var(--accent); }
+input::placeholder,textarea::placeholder { color:var(--text-2); opacity:1; }
+:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
 
 /* ============ 通用组件 ============ */
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
-  min-height: 28px; padding: 3px 10px; border-radius: var(--radius-sm);
+  min-height: 32px; padding: 5px 10px; border-radius: var(--radius-sm);
   border: 1px solid var(--border); background: var(--bg-3);
   color: var(--text-0); font-size: 13px; cursor: pointer;
-  transition: all .15s; user-select: none; white-space: nowrap;
+  transition: color .15s, background-color .15s, border-color .15s; user-select: none; white-space: nowrap;
 }
 .btn:hover { border-color: var(--accent); color: var(--accent); }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
-.btn-primary { background: var(--accent); border-color: var(--accent); color: #202015; font-weight: 600; }
-.btn-primary:hover { background: #eed978; color: #202015; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: #201d16; font-weight: 600; }
+.btn-primary:hover { background: var(--accent-2); color: #201d16; }
 .btn-danger { background: transparent; border-color: var(--danger); color: var(--danger); }
 .btn-danger:hover { background: rgba(248,113,113,.12); }
 .btn-sm { padding: 3px 8px; font-size: 13px; }

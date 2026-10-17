@@ -26,9 +26,17 @@ export function useConsoleWorkspacePanels({
   const extensionsReady = ref(false)
   let extensionUiPollTimer = null
   let gamepadPollTimer = null
+  let extensionRefresh = null
   const gamepadSnapshot = new Map()
 
-  async function refreshServerExtensions() {
+  function refreshServerExtensions() {
+    // Slow discovery must not accumulate overlapping polling requests.
+    if (extensionRefresh) return extensionRefresh
+    extensionRefresh = refreshExtensions().finally(() => { extensionRefresh = null })
+    return extensionRefresh
+  }
+
+  async function refreshExtensions() {
     try {
       const response = await serverUiAdapter.refresh()
       extensionsReady.value = true

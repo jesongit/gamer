@@ -2,7 +2,11 @@
 export const MULTIVIEW_STORAGE_KEY = 'gamer.console.multiview.v1'
 const clone = value => JSON.parse(JSON.stringify(value))
 const emptyConfig = () => ({ packageId: '', scriptId: '', runnerId: '', args: {} })
-const own = (object, key) => object && Object.hasOwn(object, key) ? object[key] : undefined
+const own = (object, key) => {
+  // Read missing keys too so Vue subscribes before polling adds a run/configuration.
+  const value = object?.[key]
+  return object && Object.hasOwn(object, key) ? value : undefined
+}
 const cleanString = value => typeof value === 'string' ? value.trim() : ''
 function cleanConfig(value) {
   return {
@@ -14,7 +18,7 @@ export function createMultiviewWorkspace({ reactive = value => value, storage, a
   let saved
   try { saved = JSON.parse(storage?.getItem(MULTIVIEW_STORAGE_KEY) || 'null') } catch {}
   const targetIds = [...new Set((Array.isArray(saved?.targetIds) ? saved.targetIds : []).filter(id => typeof id === 'string' && id))].slice(0, 9)
-  const state = reactive({ gridSize: saved?.gridSize === 9 ? 9 : 4, targetIds, selectedTargetId: null, configs: Object.create(null), pending: Object.create(null), errors: Object.create(null) })
+  const state = reactive({ gridSize: [1, 4, 9].includes(saved?.gridSize) ? saved.gridSize : 1, targetIds, selectedTargetId: null, configs: Object.create(null), pending: Object.create(null), errors: Object.create(null) })
   // Removing a preview does not forget its configuration. Restore remembered targets
   // separately from layout membership; only explicit addTarget brings them back.
   if (saved?.configs && typeof saved.configs === 'object' && !Array.isArray(saved.configs)) {
@@ -23,9 +27,11 @@ export function createMultiviewWorkspace({ reactive = value => value, storage, a
     }
   }
   for (const id of targetIds) state.configs[id] ||= emptyConfig()
-  state.selectedTargetId = targetIds.slice(0, state.gridSize).includes(saved?.selectedTargetId) ? saved.selectedTargetId : targetIds[0] || null
+  state.selectedTargetId = (state.gridSize === 1 ? targetIds : targetIds.slice(0, state.gridSize)).includes(saved?.selectedTargetId) ? saved.selectedTargetId : targetIds[0] || null
   let timer = null, refreshing = null, selecting = false
-  const visible = () => state.targetIds.slice(0, state.gridSize)
+  const visible = () => state.gridSize === 1
+    ? state.targetIds.filter(id => id === state.selectedTargetId)
+    : state.targetIds.slice(0, state.gridSize)
   const persist = () => { try { storage?.setItem(MULTIVIEW_STORAGE_KEY, JSON.stringify({ gridSize: state.gridSize, targetIds: state.targetIds, selectedTargetId: state.selectedTargetId, configs: state.configs })) } catch {} }
   function getConfig(id) { return own(state.configs, id) || null }
   function updateConfig(id, patch) {
@@ -39,7 +45,7 @@ export function createMultiviewWorkspace({ reactive = value => value, storage, a
     state.targetIds.push(id); state.configs[id] ||= emptyConfig(); persist(); return true
   }
   async function selectTarget(id, { beforeChange = async () => true, project = async () => true } = {}) {
-    if (id !== null && !visible().includes(id)) return false
+    if (id !== null && !(state.gridSize === 1 ? state.targetIds : visible()).includes(id)) return false
     if (id === state.selectedTargetId) return true
     if (selecting) return false
     selecting = true
@@ -52,14 +58,14 @@ export function createMultiviewWorkspace({ reactive = value => value, storage, a
   async function removeTarget(id, options) {
     if (selecting) return false
     if (!state.targetIds.includes(id)) return false
-    if (state.selectedTargetId === id && !await selectTarget(visible().find(candidate => candidate !== id) || null, options)) return false
+    if (state.selectedTargetId === id && !await selectTarget((state.gridSize === 1 ? state.targetIds : visible()).find(candidate => candidate !== id) || null, options)) return false
     state.targetIds = state.targetIds.filter(candidate => candidate !== id)
     // Keep its configuration during this session; removing a tile never cancels its run.
     persist(); return true
   }
   async function setGridSize(size, options) {
     if (selecting) return false
-    if (size !== 4 && size !== 9) return false
+    if (![1, 4, 9].includes(size)) return false
     if (size === 4 && state.targetIds.indexOf(state.selectedTargetId) >= 4 && !await selectTarget(state.targetIds[0] || null, options)) return false
     state.gridSize = size; persist(); return true
   }

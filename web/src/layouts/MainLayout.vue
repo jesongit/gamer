@@ -10,7 +10,7 @@
       </div>
       <header class="topbar">
         <div class="tb-left">
-          <router-link to="/console" class="gamer-brand" aria-label="Gamer 首页"><span class="gamer-mark">G</span><span>amer</span></router-link>
+          <router-link to="/console" class="gamer-brand" aria-label="Gamer 首页"><span class="gamer-mark" aria-hidden="true"></span><span>Gamer</span></router-link>
         </div>
         <div id="gamer-main-navigation" class="tb-navigation"></div>
         <div class="tb-right">
@@ -108,7 +108,7 @@ function stopRunning() {
   display: flex; align-items: center; padding: 0 18px;
   gap: 12px;
 }
-.tb-left { display: flex; align-items: center; flex: 0 0 auto; }
+.tb-left { display: flex; align-items: center; flex: 0 0 150px; }
 .tb-navigation { flex: 1; min-width: 0; align-self: stretch; }
 .tb-navigation :deep(.workspace-tabs) { height: 100%; padding: 0; border: 0; gap: 4px; }
 .tb-navigation :deep(.workspace-tab-add) { margin-left: 0; }
@@ -140,5 +140,17 @@ function stopRunning() {
   .run-chip { gap: 4px; padding-inline: 6px; }
   .run-chip > span:not(.dot) { max-width: 60px; overflow: hidden; text-overflow: ellipsis; }
 }
-.gamer-brand{display:flex;align-items:center;text-decoration:none;color:var(--text-0);font-size:22px;font-weight:750;letter-spacing:-1px}.gamer-mark{display:grid;place-items:center;width:27px;height:27px;margin-right:2px;background:var(--text-0);color:var(--chrome);clip-path:polygon(0 0,100% 0,100% 72%,72% 100%,0 100%);font-size:22px}
+.gamer-brand { display:flex; align-items:center; gap:9px; text-decoration:none; color:var(--text-0); font:italic 700 24px/1 'Gamer Brand',sans-serif; letter-spacing:-.02em; }
+.gamer-mark { width:25px; height:27px; position:relative; }
+.gamer-mark::before,.gamer-mark::after { content:''; position:absolute; top:1px; width:4px; height:25px; background:var(--accent); transform:skew(-25deg); }
+.gamer-mark::before { left:6px; }.gamer-mark::after { left:14px; }
+@media(max-width:700px) {
+  .topbar { height:auto; min-height:48px; flex-wrap:wrap; gap:0 10px; padding:6px 10px 0; }
+  .tb-navigation { order:3; flex-basis:100%; height:40px; overflow-x:auto; }
+  .tb-right { margin-left:auto; }
+  .tb-left { flex-basis:auto; }
+  .tb-user { display:none; }
+  .gamer-brand { font-size:21px; }
+  .tb-navigation :deep(.workspace-tab) { min-height:36px; flex:1; padding-inline:10px; }
+}
 </style>

@@ -222,6 +222,13 @@ function extensionUploadOptions(options = {}) {
 }
 
 export const api = {
+  listMcpTokens: () => req('GET', '/api/mcp/tokens'),
+  getMcpCatalog: () => req('GET', '/api/mcp/catalog'),
+  createMcpToken: token => req('POST', '/api/mcp/tokens', token),
+  revokeMcpToken: id => req('DELETE', `/api/mcp/tokens/${encodeURIComponent(requireId(id, 'token_id'))}`),
+  listExternalControl: () => req('GET', '/api/external-control'),
+  startExternalControl: request => req('POST', '/api/external-control', request),
+  externalControlAction: (id, action, body = {}) => req('POST', `/api/external-control/${encodeURIComponent(requireId(id, 'session_id'))}/${action}`, body),
   packageSources: () => req('GET', '/api/package-sources'),
   savePackageSource: (repository, enabled = true) => req('POST', '/api/package-sources', { repository, enabled }),
   removePackageSource: id => req('DELETE', `/api/package-sources/${encodeURIComponent(id)}`),
@@ -306,6 +313,14 @@ export const api = {
       fr.onerror = reject
       fr.readAsDataURL(blob)
     })
+  },
+  // Browser thumbnails are only a display transport. Template tools fetch the
+  // original PNG and validate its server-issued identity before using pixels.
+  screenshotFrame: async (id, { signal } = {}) => {
+    const result = await response('POST', `/api/devices/${encodeURIComponent(id)}/screenshot`, undefined, { signal })
+    let stamp = null
+    try { stamp = JSON.parse(result.headers.get('X-Frame-Stamp') || 'null') } catch { /* rejected by the caller */ }
+    return { blob: await result.blob(), stamp }
   },
   control: (id, cmd) => req('POST', `/api/devices/${id}/control`, cmd),
   listApps: (id) => req('GET', `/api/devices/${id}/apps`),
@@ -616,7 +631,7 @@ export const api = {
       payload: payload && typeof payload === 'object' ? payload : {},
     })),
   // 统一运行实例（run_id 主键）：单次查询 RunRecord / 按次取消（终态以查询为准）
-  listRunHistory: (deviceId, entrypoint, before) => req('GET', `/api/runs?${new URLSearchParams({device_id: deviceId, ...(entrypoint ? {entrypoint} : {}), ...(before ? {before} : {})})}`),
+  listRunHistory: (deviceId, entrypoint, before, taskId) => req('GET', `/api/runs?${new URLSearchParams({...(deviceId ? {device_id: deviceId} : {}), ...(entrypoint ? {entrypoint} : {}), ...(before ? {before} : {}), ...(taskId ? {task_id: taskId} : {})})}`),
   getRunEvents: (runId, after = 0) => req('GET', `/api/runs/${encodeURIComponent(runId)}/events?after=${after}`),
   getRunTrace: (runId, after = 0, limit = 100) => req('GET', `/api/runs/${encodeURIComponent(requireId(runId, 'run_id'))}/trace?${new URLSearchParams({ after: String(after), limit: String(limit) })}`),
   retainRunTrace: (runId) => req('POST', `/api/runs/${encodeURIComponent(requireId(runId, 'run_id'))}/trace/retain`),
@@ -659,7 +674,7 @@ export const api = {
   // 参数 schema descriptor（V1）：前端不为取参数而解析 YAML——按
   // runner + entrypoint 资源 id（"<pkg>/<脚本>.yaml" 或 "<pkg>/<文件>.yaml#<函数>"，
   // 含 '/'/'#'，整体 encodeURIComponent）查询可渲染表单的参数 schema。
-  // 200 = {runner_id, entrypoint, kind, format:"yaml-params-v1", schema}
+  // 200 = {runner_id, entrypoint, kind, format:"yaml-params", schema}
   // （schema = 参数声明数组，适配见 script-editor/entrypointParams.ts）。
   // 结构化错误原样上抛（ApiError.status/code/data）：
   // 404 {error:"runner_not_found"} / 404 {error:"not_found",resource} /

@@ -9,7 +9,7 @@
           <span class="setting-value"><input class="input" type="number" :aria-label="field.label" :min="field.min" :max="field.max" step="1" v-model.number="card.form[field.key]" /><span>{{ field.unit }}</span></span>
           <span class="effect">{{ field.effect }}</span>
         </label>
-        <button class="btn btn-primary btn-sm" type="submit">{{ card.busy ? '处理中…' : `保存${card.title}设置` }}</button>
+        <button class="btn btn-primary btn-sm" type="submit" :disabled="!isDirty(card)">{{ card.busy ? '处理中…' : `保存${card.title}设置` }}</button>
       </fieldset></form>
       <p v-if="card.error" class="error" role="alert">{{ card.error }}</p>
       <p v-if="card.note" class="note" role="status">{{ card.note }}</p>
@@ -20,14 +20,34 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { api } from '../api'
+import { useConfirmDialog } from './ui/useConfirmDialog'
+const confirm = useConfirmDialog()
+const isDirty = card => JSON.stringify(card.form) !== JSON.stringify(card.expected)
 const cards = ref([]), error = ref('')
+// Settings actions may belong to a plugin's own editor (for example, model
+// credentials). Only the existing numeric descriptor belongs in this form.
+function isFormDescriptor(data) {
+  return Array.isArray(data?.fields) && data.fields.length > 0 && data.values && !Array.isArray(data.values)
+    && data.fields.every(f => typeof f.key === 'string' && typeof f.label === 'string'
+      && Number.isFinite(f.min) && Number.isFinite(f.max) && Number.isFinite(data.values[f.key]))
+}
 function apply(card, data) {
-  card.title = data.title; card.fields = data.fields; card.expected = data.values
+  card.title = data.title || card.title; card.fields = data.fields; card.expected = data.values
   card.form = structuredClone(data.values)
 }
 async function reload(card) {
+  if (card.busy) return
+  if (isDirty(card) && card.expected && !await confirm('重新读取会放弃这个插件的未保存修改。', { title:'重新读取插件设置', confirmText:'放弃修改并读取' })) return
   card.busy = true; card.error = ''; card.note = ''
-  try { apply(card, await api.callExtension(card.id, 'settings.get')) } catch (e) { card.error = e.message } finally { card.busy = false }
+  try {
+    const data = await api.callExtension(card.id, 'settings.get')
+    if (!isFormDescriptor(data)) {
+      if (card.fields) card.error = '插件设置格式已变化，请在插件功能区设置。'
+      return false
+    }
+    apply(card, data)
+    return true
+  } catch (e) { card.error = e.message; return true } finally { card.busy = false }
 }
 async function load() {
   error.value = ''
@@ -38,8 +58,7 @@ async function load() {
       const actions = new Set((capabilities.actions || []).map(a => a.action))
       if (!capabilities.running || !actions.has('settings.get') || !actions.has('settings.save')) return null
       const card = { id:e.id, title:e.name || e.id, fields:null, form:{}, expected:null, busy:false, error:'', note:'' }
-      await reload(card)
-      return card
+      return await reload(card) ? card : null
     }))
     cards.value = results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value)
     if (results.some(r => r.status === 'rejected')) error.value = '部分插件设置读取失败。'
@@ -52,7 +71,9 @@ async function save(card) {
   if (invalid) { card.error = `${invalid.label}须为 ${invalid.min}～${invalid.max} 的整数`; return }
   card.busy = true
   try {
-    apply(card, await api.callExtension(card.id, 'settings.save', { settings:card.form, expected:card.expected }))
+    const data = await api.callExtension(card.id, 'settings.save', { settings:card.form, expected:card.expected })
+    if (!isFormDescriptor(data)) throw new Error('插件返回的设置格式已变化，请重新读取。当前输入已保留。')
+    apply(card, data)
     card.note = '已保存，下次运行生效；正在运行的任务保持原值。'
   } catch (e) { card.error = e.message } finally { card.busy = false }
 }
@@ -61,4 +82,6 @@ onMounted(load)
 
 <style scoped>
 .plugin-settings{padding:16px;margin-bottom:16px}.settings-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}fieldset{border:0;padding:0;margin:0;min-width:0}.setting-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}.setting-label{flex:1;min-width:180px;font-size:13px}.setting-label small{display:block;color:var(--text-2);font-size:12px;line-height:1.6;margin-top:4px}.setting-value{display:flex;align-items:center;gap:6px;font-size:12px}.setting-value input{width:100px}.effect{color:var(--text-2);font-size:12px}.error{color:var(--danger);font-size:13px}.note{color:var(--green);font-size:13px}
+.note{color:var(--ok)}
+@media(max-width:600px){.setting-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px}.setting-label{grid-column:1/-1;min-width:0}.setting-value{justify-self:start}.effect{text-align:right}}
 </style>

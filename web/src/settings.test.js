@@ -119,8 +119,8 @@ describe('Settings：三卡片挂载（WEB-005）', () => {
     // off/notify 不强调窗口；切到 auto 后门禁说明出现
     expect(w.find('[data-testid="gate-note"]').exists()).toBe(false)
     await w.find('input[value="auto"]').setValue(true)
-    expect(w.get('[data-testid="gate-note"]').text()).toContain('门禁')
-    expect(w.get('[data-testid="gate-note"]').text()).toContain('维护窗口')
+    expect(w.get('[data-testid="gate-note"]').text()).toContain('自动安装条件')
+    expect(w.get('[data-testid="gate-note"]').text()).toContain('维护时段')
 
     await w.get('[data-testid="freeze-window"]').setValue('45')
     await w.get('[data-testid="policy-save"]').trigger('click')

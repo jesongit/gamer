@@ -8,10 +8,17 @@
       @select="selectTop"
     />
     </Teleport>
-    <!-- 功能项来自注册表，保持应用兼容过滤。 -->
-    <div v-if="isWorkbench" class="plugin-subnav-tabs" aria-label="工作台功能，可拖动排序">
+    <div v-if="isWorkbench" class="plugin-dock-header">
+      <label class="plugin-picker"><span>插件</span><select :value="selected?.pluginId || ''" aria-label="当前插件" @change="selectPlugin($event.target.value)">
+        <option v-if="!currentPlugin" value="" disabled>{{ pluginGroups.length ? '选择插件' : '暂无可用插件' }}</option>
+        <option v-for="group in pluginGroups" :key="group.pluginId" :value="group.pluginId">{{ group.pluginName }}</option>
+      </select></label>
+      <button type="button" class="btn btn-ghost dock-action" :aria-label="expanded ? '还原插件区' : '放大插件区'" :aria-pressed="expanded" @click="emit('expand')"><UiIcon :name="expanded ? 'restore' : 'expand'" /><span>{{ expanded ? '还原' : '放大' }}</span></button>
+    </div>
+    <!-- 单功能插件直接展示内容；多个贡献仅显示当前插件自己的功能。 -->
+    <div v-if="isWorkbench && currentPluginPanels.length > 1" class="plugin-subnav-tabs" aria-label="当前插件功能，可拖动排序">
       <button
-        v-for="panel in workbenchPanels"
+        v-for="panel in currentPluginPanels"
         :key="panel.key"
         type="button"
         class="workspace-subtab"
@@ -32,7 +39,7 @@
     <div class="workspace-panel-slot">
       <div v-if="activeTop === 'packages'" class="package-page">
         <section class="package-installed" aria-label="已安装配置包">
-          <PackageContextBar :context="packageContext" :dialogs="false" management />
+          <PackageContextBar :context="packageContext" :dialogs="false" :show-selection="false" management />
           <div class="package-section-head"><h3>本地配置</h3><span>{{ (packageView.pkgOptions || []).length }} 个</span><span class="package-section-note">选中后作为工作台的数据上下文</span></div>
           <div class="package-list"><button v-for="id in packageView.pkgOptions || []" :key="id" class="package-card" :class="{ active: id === packageView.currentId }" :aria-pressed="id === packageView.currentId" @click="packageView.onPackageChange({ target: { value: id } })">
             <span class="package-identity"><strong>{{ packageInfo(id).name || id }}</strong><span class="mono">{{ id }}</span></span>
@@ -45,37 +52,36 @@
         <MarketView class="package-market" />
       </div>
       <div v-else-if="activeTop === 'workbench'" class="workspace-empty">启用插件后，其功能面板会显示在工作台。<button class="btn" @click="selectTop('plugins')">管理插件</button></div>
-      <PluginCenter v-else-if="activeTop === 'plugins'" @changed="emit('extensions-changed')" />
+      <PluginCenter v-else-if="activeTop === 'plugins'" :workspace-panels="workbenchPanels" @open-plugin="selectPlugin" @changed="emit('extensions-changed')" />
       <!-- 面板渲染（Core 自有 + 扩展贡献同机制） -->
-      <template v-else-if="selected">
-        <KeepAlive v-if="selected.keepAlive === 'session'">
+      <!-- 缓存按贡献管理：切到全局页或无缓存面板不丢草稿，卸载贡献即清理。 -->
+        <KeepAlive v-for="panel in cachedPanels" :key="panel.key">
           <CorePanelHost
-            v-if="selected.runtime === 'core'"
-            :key="selected.key"
-            :contribution="selected"
+            v-if="selected?.key === panel.key && panel.runtime === 'core'"
+            :key="panel.key"
+            :contribution="panel"
             :context="coreContext"
           />
           <PluginPanelHost
-            v-else
-            :key="selected.key"
-            :contribution="selected"
+            v-else-if="selected?.key === panel.key"
+            :key="panel.key"
+            :contribution="panel"
             :bridge="uiBridge"
           />
         </KeepAlive>
         <CorePanelHost
-          v-else-if="selected.runtime === 'core'"
+          v-if="selected && selected.keepAlive !== 'session' && selected.runtime === 'core'"
           :key="selected.key"
           :contribution="selected"
           :context="coreContext"
         />
         <PluginPanelHost
-          v-else
+          v-else-if="selected && selected.keepAlive !== 'session'"
           :key="selected.key"
           :contribution="selected"
           :bridge="uiBridge"
         />
-      </template>
-      <div v-else class="workspace-empty">没有可用面板</div>
+      <div v-if="!selected && !['packages', 'plugins', 'workbench'].includes(activeTop)" class="workspace-empty">没有可用面板</div>
     </div>
   </div>
 </template>
@@ -105,20 +111,22 @@ const props = defineProps({
   androidPackageName: { type: String, default: '' },
   context: { type: Object, default: () => ({}) },
   lifecycle: { type: Object, default: null },
+  expanded: { type: Boolean, default: false },
 })
-const emit = defineEmits(['select', 'fallback', 'extensions-changed'])
+const emit = defineEmits(['select', 'fallback', 'extensions-changed', 'expand'])
 
 const packageView = computed(() => reactive(props.packageContext || {}))
 function packageInfo(id) { return packageView.value.packages?.find(item => item.id === id) || {} }
 const lifecycle = props.lifecycle || createWorkspaceLifecycle()
 const allPanels = computed(() => props.registry.getPanels())
+const cachedPanels = computed(() => allPanels.value.filter(panel => panel.keepAlive === 'session'))
 
 // 六个主页面；已安装资源与市场同页展示。
 const topTabs = computed(() => {
   const tabs = [{ key: 'workbench', title: '工作台' }]
   for (const key of ['gamer.core:tasks', 'gamer.core:logs']) {
     const panel = allPanels.value.find(p => p.key === key)
-    if (panel) tabs.push({ ...panel, icon: '' })
+    if (panel) tabs.push({ ...panel, title: key === 'gamer.core:logs' ? '运行记录' : panel.title, icon: '' })
   }
   tabs.push({ key: 'packages', title: '配置包' })
   tabs.push({ key: 'plugins', title: '插件' })
@@ -191,8 +199,8 @@ async function reorderTabKey(event, key) {
   if (!event.altKey || !event.shiftKey || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return
   event.preventDefault()
   const direction = event.key === 'ArrowRight' ? 1 : -1
-  const index = workbenchPanels.value.findIndex(panel => panel.key === key)
-  const target = workbenchPanels.value[index + direction]
+  const index = currentPluginPanels.value.findIndex(panel => panel.key === key)
+  const target = currentPluginPanels.value[index + direction]
   if (!target) return
   const element = event.currentTarget
   if (tabOrder.move(key, target.key, direction > 0)) { announceTab(key); await nextTick(); element.focus() }
@@ -219,11 +227,22 @@ const selected = computed(() => {
   // resolve 使用普通 Map；订阅贡献列表，确保冷启动/启停时重新解析同一个路由。
   void allPanels.value
   if (['plugins', 'packages', 'workbench'].includes(activeTop.value)) return null
-  return props.registry.resolve(props.activePanel) || (!props.activePanel ? props.registry.defaultPanel() : null)
+  const panel = props.registry.resolve(props.activePanel) || (!props.activePanel ? props.registry.defaultPanel() : null)
+  if (panel && panel.pluginId !== 'gamer.core' && !workbenchPanels.value.some(item => item.key === panel.key)) return null
+  return panel
 })
 
 const coreContext = computed(() => props.context.core || {})
 const uiBridge = computed(() => props.context.uiBridge || props.context.bridge)
+const currentPlugin = computed(() => pluginGroups.value.find(group => group.pluginId === selected.value?.pluginId))
+const currentPluginPanels = computed(() => workbenchPanels.value.filter(panel => panel.pluginId === currentPlugin.value?.pluginId))
+const lastPluginPanels = new Map()
+watch(selected, panel => { if (panel?.pluginId) lastPluginPanels.set(panel.pluginId, panel.key) }, { immediate: true })
+function selectPlugin(id) {
+  const panels = workbenchPanels.value.filter(panel => panel.pluginId === id)
+  const key = panels.find(panel => panel.key === lastPluginPanels.get(id))?.key || panels[0]?.key
+  if (key) emit('select', key)
+}
 function selectTop(key) {
   if (key === 'workbench') {
     emit('select', workbenchPanels.value.find(p => p.key === lastWorkbench)?.key || workbenchPanels.value[0]?.key || 'workbench')
@@ -243,6 +262,8 @@ watch(selected, (panel, previous) => {
   if (panel?.key) {
     lifecycle.ui.open(panel.key)
     if (panel.key !== props.activePanel) emit('fallback', panel.key)
+  } else if (props.activePanel && !['workbench', 'plugins', 'packages'].includes(props.activePanel) && !props.activePanel.startsWith('gamer.core:')) {
+    emit('fallback', workbenchPanels.value[0]?.key || 'workbench')
   }
 }, { immediate: true })
 
@@ -264,7 +285,13 @@ onUnmounted(() => {
 @container (max-width:700px) { .package-card { grid-template-columns:minmax(0,1fr) 80px; gap:12px; }.package-author { display:none; }.package-version { grid-column:1; }.package-selection { grid-column:2; grid-row:1; }.package-section-note { display:none; } }
 @media (max-width:700px) { .package-page { padding:12px; } }
 
-.plugin-workspace { flex:1; min-height:0; display:flex; flex-direction:column; gap:10px; overflow:hidden; }
+.plugin-workspace { flex:1; min-height:0; min-width:0; display:flex; flex-direction:column; gap:0; overflow:hidden; }
+.plugin-dock-header { display:flex; align-items:center; gap:4px; min-height:44px; padding:4px 8px; background:var(--bg-1); border-bottom:1px solid var(--border); flex:none; }
+.plugin-picker { flex:1; min-width:0; display:flex; align-items:center; gap:10px; font-size:13px; font-weight:600; }
+.plugin-picker > span { flex:none; }.plugin-picker select { width:0; min-width:0; flex:1; height:34px; padding:4px 8px; background:var(--field); color:var(--text-0); border:1px solid var(--control-border); border-radius:var(--radius-sm); font:inherit; }
+.dock-action { padding:5px 7px; min-height:34px; gap:4px; font-size:12px; }
+.plugin-picker { font-size:14px; }
+.dock-action { font-size:13px; }
 /* 插件功能子页签条：样式对齐主导航（WorkspaceTabs）的整条页签框 */
 .plugin-subnav-tabs { display:flex; flex-shrink:0; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-2); overflow-x:auto; }
 .workspace-subtab { flex:1; min-width:0; padding:7px 3px; border:0; border-left:1px solid var(--border); background:transparent; color:var(--text-1); font-size:12px; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }

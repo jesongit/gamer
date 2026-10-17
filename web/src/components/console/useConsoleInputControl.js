@@ -3,11 +3,11 @@ import { api } from '../../api'
 
 const NON_INPUT_TYPES = new Set(['audio', 'reset_video', 'ping', 'frame_ack'])
 const PHASE_MESSAGES = {
-  running: 'AI 正在控制；请先暂停 AI 并等待暂停完成，再人工操作。',
-  pausing: 'AI 正在暂停，动作收尾完成前不能人工操作。',
-  paused: 'AI 已暂停，可以人工操作。',
-  resuming: 'AI 正在恢复，人工操作已锁定。',
-  stopping: 'AI 正在停止，操作收尾完成前不能人工操作。',
+  running: '外部控制中；请在设置中暂停控制并等待完成，再人工操作。',
+  pausing: '正在暂停外部控制，动作收尾完成前不能人工操作。',
+  paused: '外部控制已暂停，可以人工操作。',
+  resuming: '正在恢复外部控制，人工操作已锁定。',
+  stopping: '正在结束外部控制，操作收尾完成前不能人工操作。',
 }
 function valueOf(source) { return typeof source === 'function' ? source() : source?.value ?? source }
 

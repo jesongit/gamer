@@ -1,5 +1,10 @@
 <template>
   <div class="task-board">
+    <template v-if="historyTask">
+      <div class="task-history-heading"><h2>{{ historyTask.name }} · 运行记录</h2><span>{{ deviceName(historyTask.app?.device_id) }}</span></div>
+      <component :is="historyViewer" :key="historyTask.id" :device-id="historyTask.app?.device_id" :task-id="historyTask.id" back-label="返回任务" @edit="closeHistory" />
+    </template>
+    <div v-else class="task-list-view">
     <div class="board-head">
       <button class="btn btn-primary" @click="openAdd"><UiIcon name="plus" />新建任务</button>
       <!-- 服务端时区标识：契约禁止 /api/system/info 携带 timezone。P11.1 后任务
@@ -8,7 +13,9 @@
       <div class="tz-hint" data-testid="server-tz-hint">
         任务按服务端本地时区执行
       </div>
+      <button class="btn btn-ghost" :disabled="loadingTasks" @click="loadTasks"><UiIcon name="refresh" />{{ loadingTasks ? '刷新中…' : '刷新' }}</button>
     </div>
+    <p v-if="tasksError" class="task-load-error" role="alert">{{ tasksError }}</p>
 
     <div class="card task-list">
       <table class="table">
@@ -17,12 +24,13 @@
             <th>任务名</th>
             <th style="width: 118px">状态</th>
             <th style="width: 68px">启用</th>
+            <th class="recent-run-heading">最近运行</th>
             <th style="width: 230px">操作</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="t in tasks" :key="t.id" :class="{ disabled: !t.enabled }">
-            <td class="task-name">{{ t.name }}</td>
+            <td class="task-name">{{ t.name }}<span class="task-device">{{ deviceName(t.app?.device_id) }}</span></td>
             <td>
               <span class="tag" :class="stateTagClass(t.state)" data-testid="state-badge">{{ stateLabel(t.state) }}</span>
               <div v-if="missingDependency(t)" class="dep-hint" data-testid="dep-hint" :title="t.suspend_reason">
@@ -30,14 +38,19 @@
               </div>
             </td>
             <td>
+              <span class="compact-label">启用</span>
               <label class="switch">
-                <input type="checkbox" :checked="t.enabled" @change="toggle(t, $event)" />
+                <input type="checkbox" :checked="t.enabled" :aria-label="'启用定时任务 ' + t.name" @change="toggle(t, $event)" />
                 <span class="track"></span>
               </label>
             </td>
+            <td class="task-recent-run">
+              <div class="recent-run-summary"><strong :class="recentResultClass(t.last_result)">{{ t.last_result || '暂无结果' }}</strong><time v-if="t.last_run_at" :datetime="t.last_run_at" :title="new Date(t.last_run_at).toLocaleString()">{{ formatRunTime(t.last_run_at) }}</time></div>
+              <button class="btn btn-sm btn-ghost" @click="historyTask = t" :aria-label="`查看 ${t.name} 的运行日志`">查看日志</button>
+            </td>
             <td>
               <div class="row-actions">
-                <button class="btn btn-sm btn-ghost" :disabled="triggeringId === t.id" title="马上运行一次（使用任务保存的 runner payload）" @click="runNow(t)"><UiIcon name="play" />{{ triggeringId === t.id ? '触发中…' : '测试' }}</button>
+                <button class="btn btn-sm btn-ghost" :disabled="triggeringId === t.id" title="立即在任务保存的目标上运行一次，使用已保存参数" @click="runNow(t)"><UiIcon name="play" />{{ triggeringId === t.id ? '触发中…' : '立即运行' }}</button>
                 <button class="btn btn-sm btn-ghost" title="编辑任务" @click="editTask(t)" aria-label="编辑任务"><UiIcon name="edit" /></button>
                 <button v-if="t.state === 'active'" class="btn btn-sm btn-ghost" title="挂起调度（任务保留，可恢复）" @click="suspendRow(t)" aria-label="挂起调度"><UiIcon name="pause" /></button>
                 <button v-if="t.state === 'suspended' || t.state === 'dependency_missing'" class="btn btn-sm btn-ghost" title="恢复调度（重算唤醒时间）" @click="resumeRow(t)" aria-label="恢复调度"><UiIcon name="refresh" /></button>
@@ -47,10 +60,11 @@
             </td>
           </tr>
           <tr v-if="!tasks.length">
-            <td colspan="4" class="empty-row">暂无定时任务，点上方「＋ 新建任务」创建。</td>
+            <td colspan="5" class="empty-row">{{ loadingTasks ? '正在读取任务…' : '暂无定时任务，点上方「＋ 新建任务」创建。' }}</td>
           </tr>
         </tbody>
       </table>
+    </div>
     </div>
 
     <!-- 新建/编辑弹窗（新建与编辑复用）：名称/设备/触发方式/执行器/执行目标/参数/启用 -->
@@ -75,10 +89,10 @@
           </div>
 
           <div class="form-item">
-            <label>触发方式（Schedule Provider）</label>
+            <label>触发方式</label>
             <select v-model="providerSelect" class="select" data-testid="provider-select">
-              <option v-for="p in providers" :key="p.provider_id" :value="p.provider_id">{{ p.provider_id }}</option>
-              <option value="__manual__">手动输入 provider…</option>
+              <option v-for="p in providers" :key="p.provider_id" :value="p.provider_id">{{ p.name || p.title || (p.provider_id === CRON_PROVIDER_ID ? '定时执行' : p.provider_id) }}</option>
+              <option value="__manual__">高级：自定义触发器…</option>
             </select>
             <!-- 降级输入：provider 未注册/列表为空，或显式选择手填 -->
             <input
@@ -90,13 +104,19 @@
               data-testid="manual-provider-input"
             />
             <template v-if="isCron">
+              <div class="schedule-controls">
+                <label>执行频率<select v-model="cronFrequency" class="select" aria-label="执行频率"><option value="daily">每天</option><option value="weekdays">工作日</option><option value="weekends">周末</option><option value="custom">自定义时间规则</option></select></label>
+                <label v-if="cronFrequency !== 'custom'">执行时间<input class="input" type="time" :value="cronTime" aria-label="执行时间" @change="changeCronTime($event)" /></label>
+              </div>
+              <details class="cron-advanced" :open="cronFrequency === 'custom'"><summary>自定义 Cron 表达式</summary>
               <input v-model="form.cronExpr" class="input mono" style="margin-top: 6px" placeholder="0 8 * * *" data-testid="cron-input" />
               <div class="cron-presets">
                 <button v-for="p in cronPresets" :key="p.cron" class="btn btn-sm cp-item" type="button" @click="form.cronExpr = p.cron">{{ p.name }}</button>
               </div>
+              </details>
             </template>
             <template v-else>
-              <label class="sub-label">provider config（JSON）</label>
+              <label class="sub-label">触发器配置（JSON）</label>
               <textarea
                 v-model="form.configJson"
                 class="input mono"
@@ -108,7 +128,7 @@
           </div>
 
           <div class="form-item">
-            <label>执行器（Runner）</label>
+            <label>执行功能</label>
             <select v-model="form.runnerId" class="select" data-testid="runner-select" @change="onRunnerChange">
               <option v-for="opt in runnerOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
@@ -130,7 +150,7 @@
               </select>
             </div>
             <div class="form-item">
-              <label>参数（由执行器声明）</label>
+              <label>运行参数</label>
               <component
                 :is="currentContrib.payloadEditor"
                 ref="payloadEditorEl"
@@ -195,17 +215,19 @@ import UiIcon from './ui/UiIcon.vue'
  *   显示 missing_dependency 提示与「恢复」动作；run/suspend/resume/cancel/
  *   enable/disable/delete 动作齐全。
  */
-import { ref, reactive, computed, onMounted, inject } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, inject } from 'vue'
 import { OPERATION_FEEDBACK_KEY, operationReporter } from '../workspace/operation-feedback'
 import { tasksData, devicesData, useToast, pushRunConflict } from '../store'
 import { api } from '../api'
 import RunConflictModal from './RunConflictModal.vue'
 import TaskNotifications from './task/TaskNotifications.vue'
+import TaskRunHistory from './task/TaskRunHistory.vue'
 import { shortRunId, isDeviceBusyConflict } from '../runs'
 import {
   getRunnerEditor, listRunnerEditors,
 } from './task/runner-editors'
 import { registerBuiltinRunnerEditors } from './task/builtin-runner-editors'
+import { readCommonSchedule, writeCommonSchedule } from './task/schedule-ui'
 
 const props = defineProps({
   // Console 传入当前包名后，任务执行目标选择器锁定该分区；独立挂载时保留自选分区行为。
@@ -225,6 +247,17 @@ const showAdd = ref(false)
 const savingTask = ref(false)
 // 测试（立即执行）触发中（行级防重复点击）；202 一返回即复位——不等任务完成
 const triggeringId = ref('')
+const historyTask = ref(null)
+const historyViewer = computed(() => getRunnerEditor(historyTask.value?.runner?.runner_id)?.runDetails || TaskRunHistory)
+const loadingTasks = ref(false), tasksError = ref('')
+let tasksRequest = 0, refreshTimer = null
+function deviceName(id) { return devices.value.find(device => device.id === id)?.name || id || '未配置目标' }
+function recentResultClass(result) { return { '成功': 'recent-success', '失败': 'recent-failed' }[result] || '' }
+function formatRunTime(time) {
+  const date = new Date(time)
+  return Number.isNaN(date.getTime()) ? '时间未知' : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+function closeHistory() { historyTask.value = null; void loadTasks() }
 
 // ---- 表单态（触发方式与执行器拆为通用字段 + 结构化编辑字段） ----
 const form = reactive({
@@ -240,6 +273,20 @@ const form = reactive({
   payload: {},
   extensions: {},
 })
+const customCron = ref(false)
+const cronTime = computed(() => readCommonSchedule(form.cronExpr).time || '08:00')
+const cronFrequency = computed({
+  get: () => customCron.value ? 'custom' : readCommonSchedule(form.cronExpr).kind,
+  set: kind => {
+    customCron.value = kind === 'custom'
+    if (!customCron.value) form.cronExpr = writeCommonSchedule(kind, cronTime.value) || form.cronExpr
+  },
+})
+function changeCronTime(event) {
+  const next = writeCommonSchedule(cronFrequency.value, event.target.value)
+  if (next) form.cronExpr = next
+  event.target.value = cronTime.value
+}
 // 编辑既有任务时保留原 app 包名（runner 无法推导包名时回退，不因表单重写丢数据）
 const originalApp = ref(null)
 // 触发方式降级手填模式（provider 未注册/列表为空/显式选择手填）
@@ -366,6 +413,8 @@ function adaptTaskRow(t) {
     enabled: !!t.enabled,
     state: t.state ?? '',
     suspend_reason: t.suspend_reason ?? '',
+    last_result: t.last_result ?? '',
+    last_run_at: t.last_run_at ?? '',
     app: t.app && typeof t.app === 'object' ? t.app : {},
     runner: t.runner && typeof t.runner === 'object'
       ? t.runner
@@ -392,6 +441,7 @@ function defaultRunnerId() {
 }
 
 function resetForm() {
+  customCron.value = false
   Object.assign(form, {
     id: null,
     name: '',
@@ -417,6 +467,7 @@ function openAdd() {
 
 /** 列表行（服务端 ADR-12 全量 JSON）→ 表单。 */
 function fillForm(t) {
+  customCron.value = false
   const schedule = t.schedule ?? {}
   const config = schedule.config ?? {}
   Object.assign(form, {
@@ -591,10 +642,16 @@ async function removeTask(t) {
 
 // ---- 数据加载（只拉任务/设备/provider/runner；脚本与模板归编辑器贡献管） ----
 async function loadTasks() {
+  if (loadingTasks.value) return
+  const request = ++tasksRequest
+  loadingTasks.value = true
   try {
     const list = await api.listTasks()
+    if (request !== tasksRequest) return
     tasks.value = (Array.isArray(list) ? list : []).map(adaptTaskRow)
-  } catch (e) {}
+    tasksError.value = ''
+  } catch (e) { if (request === tasksRequest) tasksError.value = `任务读取失败：${e.message || '请重试'}` }
+  finally { if (request === tasksRequest) loadingTasks.value = false }
 }
 async function loadDevices() {
   try { devices.value = await api.listDevices() } catch (e) {}
@@ -611,11 +668,16 @@ onMounted(() => {
   loadScheduleProviders()
   loadRunners()
   loadTasks()
+  refreshTimer = setInterval(() => { if (!showAdd.value && !historyTask.value) void loadTasks() }, 5000)
 })
+onUnmounted(() => { ++tasksRequest; clearInterval(refreshTimer); unregisterEditors() })
 </script>
 
 <style scoped>
+.schedule-controls{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px}.schedule-controls label{display:flex;flex:1;min-width:150px;flex-direction:column;gap:6px;font-size:13px}.schedule-controls .input,.schedule-controls .select{min-width:0;width:100%}.cron-advanced{margin-top:10px}.cron-advanced summary{cursor:pointer;font-size:13px;color:var(--text-2)}
 .task-board { display:flex; flex-direction:column; flex:1; min-height:0; gap:10px; }
+.task-board{container-type:inline-size}.task-list-view{display:flex;flex-direction:column;flex:1;min-height:0;gap:12px}.task-history-heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;flex:none}.task-history-heading h2{font-size:16px;font-weight:600;margin:0}.task-history-heading>span,.task-device{font-size:13px;color:var(--text-2);font-weight:400}.task-device{display:block;margin-top:6px;overflow-wrap:anywhere}.task-load-error{color:var(--danger);font-size:13px;margin:0}.recent-run-heading{width:200px}.task-recent-run .btn{margin-top:6px}.recent-run-summary{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:13px}.recent-run-summary strong{font-weight:500}.recent-run-summary time{color:var(--text-2);font-variant-numeric:tabular-nums}.recent-success{color:var(--ok)}.recent-failed{color:var(--danger)}.compact-label{display:none}
+@container(max-width:680px){.task-list .table,.task-list tbody{display:block}.task-list thead{display:none}.task-list tr{display:grid;grid-template-columns:minmax(0,1fr) auto;border-bottom:1px solid var(--border);padding:8px 0}.task-list td{border:0;padding:6px 12px;min-width:0}.task-list .task-name,.task-list .task-recent-run,.task-list td:last-child{grid-column:1/-1}.task-list .task-recent-run{display:flex;align-items:center;gap:12px;justify-content:space-between}.task-recent-run .btn{margin-top:0;flex:none}.task-list .row-actions{flex-wrap:wrap}.compact-label{display:inline;margin-right:8px;font-size:13px;color:var(--text-2)}.task-list tr.disabled{opacity:.75}}
 .task-list { min-height:0; overflow:auto; padding:0; }
 .board-head { flex-shrink:0; }
 .board-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }

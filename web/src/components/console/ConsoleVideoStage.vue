@@ -14,6 +14,7 @@
       playsinline
       :muted="props.audioMuted"
       class="video-stream"
+      :class="{ 'is-selecting': selectionMode }"
       @mousedown="props.onMouseDown"
       @mousemove="props.onMouseMove"
       @mouseup="props.onMouseUp"
@@ -23,7 +24,7 @@
     ></video>
 
     <img v-if="browserPreview?.src" v-show="stage?.kind !== 'media'" :src="browserPreview.src" alt="浏览器目标画面" draggable="false"
-      class="video-stream" @load="browserLoaded" @mousedown="props.onMouseDown" @mousemove="props.onMouseMove"
+      class="video-stream" :class="{ 'is-selecting': selectionMode }" @load="browserLoaded" @error="props.onBrowserError" @mousedown="props.onMouseDown" @mousemove="props.onMouseMove"
       @mouseup="props.onMouseUp" @wheel.prevent="props.onWheel" @contextmenu.prevent @mouseleave="props.onVideoMouseLeave" />
     <!-- 视频手势只控制本地播放；框选/取点模式优先转交舞台处理器，不向设备发输入。 -->
     <video
@@ -105,9 +106,11 @@
         <span class="dot run"></span> 正在建立画面连接…
       </div>
       <div v-else>
-        <div class="v-empty-icon"><UiIcon name="phone" /></div>
-        <div class="v-empty-text">{{ props.errorMsg || '未连接设备' }}</div>
-        <button class="btn btn-primary" @click="props.flushAndConnect">连接 {{ props.currentName }}</button>
+        <div class="v-empty-icon"><UiIcon name="game" /></div>
+        <div class="v-empty-text" :class="{ 'connection-error': props.errorMsg }">{{ props.errorMsg || '画面尚未连接' }}</div>
+        <button class="btn btn-primary" @click="props.flushAndConnect"><UiIcon name="play" />连接画面</button>
+        <p class="connection-help">连接后可查看和操作画面；自动化另行启动。</p>
+        <p class="connection-note">关闭画面不会停止自动化。</p>
       </div>
     </div>
 
@@ -165,6 +168,7 @@ const props = defineProps({
   stage: { type: Object, default: null },
   browserPreview: { type: Object, default: null },
   onBrowserLoaded: { type: Function, default: null },
+  onBrowserError: { type: Function, default: null },
   showHit: { type: Boolean, default: false },
   hitMiss: { type: Boolean, default: false },
   hitStyle: { type: Object, default: () => ({}) },
@@ -271,7 +275,7 @@ onMounted(() => {
 .player-stage { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; background: #0c0d0f; }
 .player-stage:focus { outline: none; }
 .media-stream { cursor: pointer; }
-.media-stream.is-selecting { cursor: crosshair; }
+.video-stream.is-selecting { cursor: crosshair; }
 .media-controls { flex: none; z-index: 9; background: #191b1e; border-top: 1px solid #34373c; color: #e4e6e9; }
 .mc-seek { display: block; appearance: none; width: 100%; height: 12px; margin: -6px 0 0; background: transparent; cursor: pointer; position: relative; }
 .mc-seek::-webkit-slider-runnable-track { height: 3px; background: linear-gradient(to right, var(--accent) 0 var(--progress), #484c52 var(--progress) 100%); }
@@ -363,10 +367,10 @@ onMounted(() => {
 .v-overlay {
   position: absolute; inset: 0; z-index: 10; display: flex;
   align-items: center; justify-content: center;
-  background: rgba(8,10,16,.72); backdrop-filter: blur(2px);
+  background:var(--bg-0);
 }
 .v-connecting { display: flex; align-items: center; gap: 10px; color: var(--accent); font-size: 14px; }
-.v-empty-icon { font-size: 44px; text-align: center; opacity: .6; }
+.v-empty-icon { font-size: 44px; text-align: center; }
 .v-empty-text { color: var(--text-1); margin: 10px 0 16px; max-width: 320px; text-align: center; }
 
 
@@ -377,5 +381,12 @@ onMounted(() => {
 }
 .v-fs:hover { color: var(--accent); border-color: var(--accent); }
 .video-wrap{min-height:0;background:var(--bg-0)}.v-fs{display:none}
-.v-empty-icon :deep(.ui-icon){width:38px;height:38px;color:var(--text-2)}
+.v-empty-icon :deep(.ui-icon) { width:64px; height:64px; color:var(--text-0); }
+.v-overlay > div { text-align:center; max-width:100%; padding:12px; }
+.v-empty-text { font:600 33px/1.3 'Gamer Heading','Microsoft YaHei',sans-serif; color:var(--text-0); margin:18px auto 22px; max-width:440px; overflow-wrap:anywhere; }
+.v-empty-text.connection-error { font-family:inherit; font-size:18px; }
+.v-overlay .btn-primary { min-height:44px; min-width:200px; padding:8px 28px; justify-content:center; font-size:16px; }
+.connection-help { color:var(--text-1); font-size:15px; line-height:1.7; margin-top:22px; }
+.connection-note { color:var(--text-2); font-size:14px; line-height:1.7; margin-top:7px; }
+@media(max-width:800px) { .v-empty-icon :deep(.ui-icon) { width:38px; height:38px; }.v-empty-text { font-size:23px; margin:8px auto 12px; }.connection-help { margin-top:12px; font-size:14px; }.connection-note { font-size:13px; } }
 </style>

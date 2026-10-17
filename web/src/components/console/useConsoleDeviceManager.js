@@ -56,6 +56,9 @@ export function useConsoleDeviceManager({
   const scanning = consoleRuntime.scanning
   // 配置保存进行中标志：防止重复提交
   const configApplying = ref(false)
+  const formError = ref('')
+  let addingDevice = false
+  function invalidForm(message) { formError.value = message; toast(message, 'error') }
   const forceReconnecting = ref(false)
 
   // 已安装应用列表：读取后合并到右侧包名下拉；选择包名本身不触发任何启动动作。
@@ -112,6 +115,7 @@ export function useConsoleDeviceManager({
   /** 把设备记录载入表单（编辑模式）。设备与 Package 是两个独立上下文，
    *  切换设备不再改写 currentPackageId（plan §38）。 */
   function loadForm(d) {
+    formError.value = ''
     mode.value = 'edit'
     form.name = d.name || ''
     form.addr = d.addr || ''
@@ -127,9 +131,10 @@ export function useConsoleDeviceManager({
     const d = current.value
     if (!d || mode.value !== 'edit') return false
     const norm = (v, fb) => (v === '' || v === null || v === undefined ? fb : v)
-    // 接入方式 / ADB 地址是新增时确定的连接属性，编辑时只读，不参与 dirty 判断
+    // 地址也可编辑；修改后由服务端按会话参数处理重连。
     return !(
       d.name === norm(form.name, '') &&
+      String(d.addr || '').trim() === String(form.addr || '').trim() &&
       (d.screen_mode || 'virtual') === norm(form.screen_mode, 'virtual') &&
       (d.vd_res || '1920x1080') === norm(form.vd_res, '1920x1080') &&
       Number(d.vd_dpi || 0) === Number(norm(form.vd_dpi, 0)) &&
@@ -139,6 +144,7 @@ export function useConsoleDeviceManager({
 
   /** 手动新增：重置为默认配置（1920x1080 / 30fps / DPI 自动）并打开设置弹窗 */
   function startAdd() {
+    formError.value = ''
     mode.value = 'add'
     form.name = ''
     form.addr = ''
@@ -160,6 +166,8 @@ export function useConsoleDeviceManager({
 
   /** 关闭设置弹窗：丢弃未保存修改，恢复当前设备的已保存配置 */
   function cancelSettings() {
+    if (configApplying.value) return
+    formError.value = ''
     settingsOpen.value = false
     const d = current.value
     if (d) loadForm(d)
@@ -232,7 +240,7 @@ export function useConsoleDeviceManager({
       screen_mode: form.screen_mode,
       vd_res: form.screen_mode === 'virtual' ? form.vd_res.trim() : null,
       vd_dpi: form.screen_mode === 'virtual' ? Number(form.vd_dpi) || 0 : null,
-      // pkg 是旧版本设备配置字段；设备设置不再编辑它，保留旧值避免保存投屏参数时清空兼容数据。
+      // Android 应用归工具条选择；保存设备设置时保留该独立运行目标。
       pkg: mode.value === 'edit' ? (current.value?.pkg || null) : null,
       fps: Number(form.fps) || 30
     }
@@ -255,12 +263,13 @@ export function useConsoleDeviceManager({
    *  前端无需手动重连（避免与自动重连并发导致双连接）；仅改名称时
    *  服务端保持会话，投屏不中断。 */
   async function saveSettings() {
+    formError.value = ''
     if (mode.value === 'add') return addDevice()
     const d = current.value
     if (!d || configApplying.value) return
     const payload = buildPayload()
-    if (!payload.name) return toast('请填写设备名称', 'error')
-    if (!payload.addr) return toast('请填写 ADB 地址或序列号', 'error')
+    if (!payload.name) return invalidForm('请填写设备名称')
+    if (!payload.addr) return invalidForm('请填写 ADB 地址或序列号')
     const wasConnected = connected.value
     const castingChanged = castingParamsChanged(d, payload)
     configApplying.value = true
@@ -273,7 +282,8 @@ export function useConsoleDeviceManager({
       settingsOpen.value = false
       report(wasConnected && castingChanged ? '配置已保存，投屏参数变更，自动重连中…' : '配置已保存', 'success')
     } catch (e) {
-      toast('保存失败：' + e.message, 'error')
+      formError.value = '保存失败：' + e.message
+      toast(formError.value, 'error')
     } finally {
       configApplying.value = false
     }
@@ -314,12 +324,16 @@ export function useConsoleDeviceManager({
 
   /** 手动新增设备（POST 返回 id，创建后自动选中） */
   async function addDevice() {
+    if (addingDevice || configApplying.value) return
+    formError.value = ''
     const payload = buildPayload()
-    if (!payload.name) return toast('请填写设备名称', 'error')
-    if (!payload.addr) return toast('请填写 ADB 地址或序列号', 'error')
+    if (!payload.name) return invalidForm('请填写设备名称')
+    if (!payload.addr) return invalidForm('请填写 ADB 地址或序列号')
+    addingDevice = true; configApplying.value = true
     try {
       const r = await api.createDevice(payload)
       await loadData()
+      configApplying.value = false
       // 新增成功后切换到新设备：先断开旧设备连接，避免画面/控制仍指向旧设备
       if (selectTarget) await selectTarget(r.id)
       else {
@@ -331,8 +345,9 @@ export function useConsoleDeviceManager({
       settingsOpen.value = false
       toast('设备已添加，点击连接开始投屏', 'success')
     } catch (e) {
-      toast('添加失败：' + e.message, 'error')
-    }
+      formError.value = '添加失败：' + e.message
+      toast(formError.value, 'error')
+    } finally { addingDevice = false; configApplying.value = false }
   }
 
   async function removeDevice() {
@@ -599,14 +614,14 @@ export function useConsoleDeviceManager({
 
   const deviceSettingsContext = {
     settingsOpen, mode, form, vdPresets, fpsPresets, formDirty,
-    configApplying, saveSettings, cancelSettings, current, connected, screenSummary,
+    configApplying, formError, saveSettings, cancelSettings, current, connected, screenSummary,
   }
 
   return {
     // 设备与设置弹窗
     vdPresets, fpsPresets, mode, form, scanning, configApplying,
     appList, appLoading, currentApplication, devices, current, currentName, pkgOptions, packageOptionLabel,
-    screenSummary, formDirty, settingsOpen,
+    screenSummary, formDirty, settingsOpen, formError,
     loadForm,
     startAdd, openSettings, cancelSettings, onDeviceSelect, refreshDeviceStatus, refreshDevices,
     saveSettings, flushAndConnect, addDevice, removeDevice, disconnect, loadApps,

@@ -57,12 +57,12 @@ onMounted(refresh)
           </select>
           <input v-else class="input mono" :value="policy.results[result.key].channels.join(', ')" placeholder="通道 ID，多个用英文逗号分隔" @input="changeRule(result.key, { channels: [...new Set($event.target.value.split(',').map(s => s.trim()).filter(Boolean))] })" />
           <label>标题</label>
-          <input class="input" :value="policy.results[result.key].title" placeholder="留空使用任务名与结果" @input="changeRule(result.key, { title: $event.target.value })" />
+          <input class="input" :value="policy.results[result.key].title" placeholder="留空使用目标名、任务名与结果" @input="changeRule(result.key, { title: $event.target.value })" />
           <label>正文</label>
-          <textarea class="input" rows="3" :value="policy.results[result.key].content" placeholder="留空使用默认摘要：任务、设备、结果、时间、耗时、错误" @input="changeRule(result.key, { content: $event.target.value })" />
+          <textarea class="input" rows="3" :value="policy.results[result.key].content" placeholder="留空使用默认摘要：任务、目标、结果、时间、耗时、错误" @input="changeRule(result.key, { content: $event.target.value })" />
         </div>
       </details>
-      <p class="hint variables">可用变量：<code v-pre>{{task.name}} {{task.id}} {{device.name}} {{device.id}} {{result}} {{time}} {{elapsed}} {{error}} {{entrypoint}} {{run.id}}</code></p>
+      <p class="hint variables">可用变量：<code v-pre>{{task.name}} {{task.id}} {{target.name}} {{target.id}} {{device.name}} {{device.id}} {{result}} {{time}} {{elapsed}} {{error}} {{entrypoint}} {{run.id}}</code></p>
     </template>
   </section>
 </template>

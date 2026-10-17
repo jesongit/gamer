@@ -241,3 +241,17 @@ describe('P2-UI M02/M03 插件中心回归', () => {
     expect(uninstall.snapshot).toBeNull()
   })
 })
+
+it('opens only an enabled plugin with an applicable workspace contribution, without a lifecycle mutation', async () => {
+  const { wrapper, client } = await mountCenter([], [installed('demo.tools', '1.0.0', { state: 'running' })])
+  try {
+    await wrapper.setProps({ workspacePanels: [{ pluginId: 'demo.tools', key: 'demo.tools:main' }] })
+    const open = wrapper.findAll('button').find(button => button.text() === '打开功能')
+    await open.trigger('click')
+    expect(wrapper.emitted('open-plugin')).toEqual([['demo.tools']])
+    expect(client.enableExtension).not.toHaveBeenCalled()
+    expect(client.disableExtension).not.toHaveBeenCalled()
+    await wrapper.setProps({ workspacePanels: [] })
+    expect(wrapper.findAll('button').some(button => button.text() === '打开功能')).toBe(false)
+  } finally { wrapper.unmount() }
+})

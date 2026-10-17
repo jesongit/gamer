@@ -41,10 +41,10 @@
                     <h3>{{ item.info.name || item.id }}</h3>
                     <span class="plugin-version mono">{{ item.info.active_version || item.info.version || '未知版本' }}</span>
                   </div>
-                  <div class="plugin-meta"><code>{{ item.id }}</code><span>来源：{{ item.installed ? sourceLabel(item.installed.source) : '官方市场' }}</span><span>{{ item.info.publisher || item.entry?.publisher || '发布者未声明' }}</span></div>
                   </div>
                   <p v-if="item.info.description || item.entry?.description" class="plugin-description">{{ item.info.description || item.entry.description }}</p>
                   <template v-if="item.installed">
+                    <div v-if="item.installed.retired_permissions?.length" class="dependency-line warn-text">此版本使用已移除的能力，需更新插件。历史版本和配置数据已保留。</div>
                     <div v-if="item.installed.last_error" class="dependency-line danger-text">失败：{{ item.installed.last_error }}</div>
                     <div v-if="dependencyState(item.installed).missing.length" class="dependency-line danger-text">缺少必需依赖：{{ dependencyState(item.installed).missing.map(dep => dep.id).join('、') }}（请搜索并安装对应插件）</div>
                     <div v-if="dependencyState(item.installed).disabled.length" class="dependency-line warn-text">必需依赖未启用：{{ dependencyState(item.installed).disabled.map(dep => dep.id + '（' + dep.state + '）').join('、') }}</div>
@@ -55,6 +55,7 @@
                   <div v-if="item.relation?.kind === 'incompatible'" class="dependency-line warn-text">{{ item.relation.reason }}</div>
                   <div v-if="item.entry && ['install','update'].includes(item.relation?.kind) && !canInstallMarket(item.entry)" class="dependency-line warn-text">缺少固定 SHA-256，无法安全下载</div>
                   <details class="plugin-details"><summary>详情 <UiIcon name="down" /></summary>
+                  <div class="plugin-meta"><code>{{ item.id }}</code><span>来源：{{ item.installed ? sourceLabel(item.installed.source) : '官方市场' }}</span><span>{{ item.info.publisher || item.entry?.publisher || '发布者未声明' }}</span></div>
                   <div class="plugin-facts">
                     <span>执行形态：{{ executionLabel(item.info.execution) }}</span>
                     <span>权限：{{ item.info.permissions?.length ? item.info.permissions.join('、') : '无' }}</span>
@@ -77,6 +78,7 @@
                 </div>
                 <div class="plugin-card-actions">
                   <template v-if="item.installed">
+                    <button v-if="installedKnown && item.installed.state === 'running' && workspacePanels.some(panel => panel.pluginId === item.id)" class="btn btn-sm btn-primary" :disabled="busy || loading" @click="emit('open-plugin', item.id)">打开功能</button>
                     <button class="btn btn-sm" :disabled="busy || !installedKnown" @click="runAction(item.installed.state === 'running' ? 'disable' : 'enable', item.installed)">{{ item.installed.state === 'running' ? '停用' : '启用' }}</button>
                     <button v-if="item.relation?.kind === 'update'" class="btn btn-sm btn-primary" :disabled="busy || !installedKnown || !canInstallMarket(item.entry)" @click="installMarket(item.entry, item.installed)">更新到 {{ item.entry.version }}</button>
                   </template>
@@ -116,10 +118,11 @@ import {
 } from './plugin-service'
 
 const props = defineProps({
+  workspacePanels: { type: Array, default: () => [] },
   apiClient: { type: Object, default: () => api },
   registryUrl: { type: String, default: DEFAULT_REGISTRY_URL },
 })
-const emit = defineEmits(['changed'])
+const emit = defineEmits(['changed', 'open-plugin'])
 const confirmDialog = useConfirmDialog()
 
 const query = ref('')
@@ -260,8 +263,8 @@ function dependentItems(plugin) {
   const dependent = plugin.dependent || {}
   return [...(dependent.app_packages || []), ...(dependent.tasks || []), ...(dependent.workflows || [])]
 }
-function stateClass(state) { return state === 'running' ? 'run' : state === 'enabled' ? 'ok' : state === 'failed' ? 'err' : 'idle' }
-function stateLabel(state) { return ({ installed: '已安装', enabled: '已启用', running: '运行中', disabled: '已停用', failed: '失败' })[state] || state || '未知' }
+function stateClass(state) { return state === 'running' ? 'run' : state === 'enabled' ? 'warn' : state === 'failed' ? 'err' : 'idle' }
+function stateLabel(state) { return ({ installed: '未启用', enabled: '启用未完成', running: '已启用', disabled: '已停用', failed: '启动失败' })[state] || state || '未知' }
 function sourceLabel(source) { return sourceText(source || 'unknown') }
 
 function formatPermissionDiff(diff) {
@@ -302,7 +305,6 @@ function inspectionConfirmation(inspection, source, current) {
       ...(requestedPermissions.includes('ui.host') ? [{ title: '宿主界面权限', text: '此插件的界面与 Gamer 页面在同一环境运行，可访问当前会话和工作区。仅安装你信任的插件；更新界面后需刷新页面生效。', tone: 'warn' }] : []),
       ...(requestedPermissions.includes('media.stream') ? [{ title: '音视频输出权限', text: '此插件可读取设备画面和游戏声音，并提供本机素材地址或发送到你指定的 RTMP 地址。', tone: 'warn' }] : []),
       ...(requestedPermissions.includes('live.connect') ? [{ title: '直播互动权限', text: '此插件使用你填写的账号凭据连接直播平台，接收已授权的直播间消息。', tone: 'warn' }] : []),
-      ...(requestedPermissions.includes('ai.connect') ? [{ title: 'AI 模型连接权限', text: '此插件使用保存的密钥连接你设置的模型 API，并提交目标描述、截图与必要的操作记录。AI 操作在你开始的会话中执行，人工操作需要先暂停 AI。', tone: 'warn' }] : []),
       ...(requestedPermissions.includes('package.publish') ? [{ title: '配置发布权限', text: '此插件可导出你选择的配置，并使用运行 Gamer 的电脑上的 gh 登录向 GitHub 仓库上传和公开 Release。请核对发布账号和目标仓库。', tone: 'warn' }] : []),
       ...(current ? [{ title: '权限变化', text: formatPermissionDiff(summary.diff), tone: summary.diff.added.length ? 'warn' : '' }] : []),
       ...(executionChangeLine ? [{ title: '执行方式变化', text: executionChangeLine, tone: 'warn' }] : []),

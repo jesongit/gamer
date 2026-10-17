@@ -28,6 +28,13 @@ const paths = {
   expand: 'M8 3H3v5m13-5h5v5M3 16v5h5m8 0h5v-5',
   info: 'M12 8h.01M12 11v6M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20',
   back: 'm10 5-7 7 7 7M3 12h18',
+  game: 'M8 6h8c3 0 4 3 5 8l.5 4c0 2-2 3-3.5 1l-3-3H9l-3 3c-1.5 2-3.5 1-3.5-1L3 14c1-5 2-8 5-8ZM7 10v5M4.5 12.5h5M16 11h.01M18 14h.01',
+  chat: 'M4 3h16v13h-7l-6 5v-5H4ZM8 9h.01M12 9h.01M16 9h.01',
+  warning: 'M12 3 2 21h20ZM12 9v5m0 3h.01',
+  panel: 'M3 4h18v16H3ZM14 4v16',
+  restore: 'M8 8h13v13H8ZM3 16V3h13',
+  send: 'm3 3 19 9-19 9 4-9ZM7 12h15',
+  grip: 'M8 7v10M12 4v16M16 7v10',
 }
 </script>
 <style scoped>.ui-icon{width:16px;height:16px;flex:none;vertical-align:middle}</style>

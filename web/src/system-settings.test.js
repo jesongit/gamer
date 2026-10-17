@@ -3,20 +3,42 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import SystemSettings from './components/SystemSettings.vue'
 import ExtensionSettings from './components/ExtensionSettings.vue'
+import { confirmation, finishConfirmation } from './components/ui/useConfirmDialog'
 
-const base = { idle_power_secs:300, log_retain_days:14, compute_max_concurrency:0,
+const base = { idle_power_secs:300, browser_idle_secs:0, log_retain_days:14, compute_max_concurrency:0,
   auth:{ session_abs_secs:43200, session_idle_secs:7200, login_max_fails:10, login_window_secs:300 } }
 const view = (saved = base, restart_required = false) => ({ saved, active:base, revision:'r1', restart_required })
 const response = (body, status = 200) => ({ ok:status < 400, status, text:async () => JSON.stringify(body), json:async () => body, headers:{ get:() => 'application/json' } })
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { finishConfirmation(false); vi.unstubAllGlobals() })
 
 describe('系统设置表单', () => {
+  it('重新读取须明确放弃修改，取消保留输入且不发请求', async () => {
+    const fetch = vi.fn().mockResolvedValue(response(view()))
+    vi.stubGlobal('fetch', fetch)
+    const wrapper = mount(SystemSettings)
+    await flushPromises()
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('[aria-label="空闲省电时间"]').setValue(180)
+    await wrapper.get('button').trigger('click')
+    expect(confirmation.value.confirmText).toBe('放弃修改并读取')
+    finishConfirmation(false)
+    await flushPromises()
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[aria-label="空闲省电时间"]').element.value).toBe('180')
+    await wrapper.get('button').trigger('click')
+    finishConfirmation(true)
+    await flushPromises()
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[aria-label="空闲省电时间"]').element.value).toBe('300')
+    wrapper.unmount()
+  })
   it('保存稀疏修改后的完整白名单设置，显示待重启，并保留冲突时的输入', async () => {
     const fetch = vi.fn(async (_url, options = {}) => {
       if (options.method !== 'PUT') return response(view())
       const request = JSON.parse(options.body)
       expect(request.expected_revision).toBe('r1')
       expect(request.settings.auth).toEqual(base.auth)
+      expect(request.settings.browser_idle_secs).toBe(120)
       expect(request.settings).not.toHaveProperty('password_hash')
       if (request.settings.idle_power_secs === 100) return response({ error:'配置已发生变化，请重新读取后再保存' },409)
       return response(view(request.settings, true))
@@ -25,11 +47,13 @@ describe('系统设置表单', () => {
     const wrapper = mount(SystemSettings)
     await flushPromises()
     await wrapper.get('[aria-label="空闲省电时间"]').setValue(90)
+    await wrapper.get('[aria-label="浏览器空闲回收时间"]').setValue(120)
     await wrapper.get('[aria-label="计算并发上限"]').setValue(2)
     await wrapper.get('form').trigger('submit')
     await flushPromises()
     expect(wrapper.text()).toContain('重启服务后生效')
     expect(wrapper.text()).toContain('当前设置：自动')
+    expect(wrapper.text()).toContain('云游戏排队和未保存页面状态会丢失')
     await wrapper.get('[aria-label="空闲省电时间"]').setValue(100)
     await wrapper.get('form').trigger('submit')
     await flushPromises()
@@ -55,6 +79,40 @@ describe('系统设置表单', () => {
 })
 
 describe('插件设置按能力发现', () => {
+  it('插件自有模型配置不误渲染为空数字表单', async () => {
+    vi.stubGlobal('fetch', vi.fn(async url => {
+      if (url === '/api/extensions') return response({ extensions:[{ id:'model-plugin', name:'模型助手', state:'running' }] })
+      if (url.endsWith('/capabilities')) return response({ running:true, actions:[{ action:'settings.get' },{ action:'settings.save' }] })
+      return response({ has_key:false, model:'', base_url:'' })
+    }))
+    const wrapper = mount(ExtensionSettings)
+    await flushPromises()
+    expect(wrapper.find('form').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('undefined')
+    wrapper.unmount()
+  })
+  it('取消重新读取保留插件设置草稿，确认后才重新取值', async () => {
+    const fetch = vi.fn(async url => {
+      if (url === '/api/extensions') return response({ extensions:[{ id:'test-plugin', state:'running' }] })
+      if (url.endsWith('/capabilities')) return response({ running:true, actions:[{ action:'settings.get' },{ action:'settings.save' }] })
+      return response({ title:'测试', values:{ wait:10 }, fields:[{ key:'wait', label:'等待秒数', min:1, max:60 }] })
+    })
+    vi.stubGlobal('fetch', fetch)
+    const wrapper = mount(ExtensionSettings)
+    await flushPromises()
+    await wrapper.get('[aria-label="等待秒数"]').setValue(25)
+    await wrapper.get('button').trigger('click')
+    finishConfirmation(false)
+    await flushPromises()
+    expect(fetch).toHaveBeenCalledTimes(3)
+    expect(wrapper.get('[aria-label="等待秒数"]').element.value).toBe('25')
+    await wrapper.get('button').trigger('click')
+    finishConfirmation(true)
+    await flushPromises()
+    expect(fetch).toHaveBeenCalledTimes(4)
+    expect(wrapper.get('[aria-label="等待秒数"]').element.value).toBe('10')
+    wrapper.unmount()
+  })
   it('只展示已运行且提供设置动作的插件，保存默认值并显示生效时机', async () => {
     const metadata = { title:'自动化', values:{default_timeout_secs:10,before_click_ms:300,after_click_ms:300}, fields:[{key:'default_timeout_secs',label:'默认模板等待超时',unit:'秒',min:1,max:3600,effect:'下次运行生效',help:'步骤指定的 timeout 优先'},{key:'before_click_ms',label:'点击前延迟',unit:'毫秒',min:0,max:60000,effect:'下次运行生效'},{key:'after_click_ms',label:'点击后延迟',unit:'毫秒',min:0,max:60000,effect:'下次运行生效'}] }
     const fetch = vi.fn(async (url, options = {}) => {

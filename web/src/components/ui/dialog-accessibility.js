@@ -38,7 +38,12 @@ export function installDialogAccessibility(root = document) {
     }
     if (event.key === 'Escape') {
       event.stopPropagation(); event.preventDefault()
-      top.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      // Use the dialog's existing guarded close action. A synthetic backdrop
+      // click has no pointer gesture and is intentionally rejected by vBackdropDismiss.
+      const close = [...top.querySelectorAll('button')].find(button => !button.disabled && visible(button)
+        && (/^(取消|关闭|✕|×)$/.test(button.textContent.trim())
+          || /^关闭/.test(button.getAttribute('aria-label') || button.getAttribute('title') || '')))
+      if (close) close.click()
     } else if (event.key === 'Tab') {
       const controls = [...top.querySelectorAll(focusable)].filter(visible)
       const current = controls.indexOf(root.activeElement)

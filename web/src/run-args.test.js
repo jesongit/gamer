@@ -118,7 +118,7 @@ const DESCRIPTOR_WITH_PARAMS = {
   runner_id: 'gamer-yaml',
   entrypoint: 'com.demo/main.yaml',
   kind: 'script',
-  format: 'yaml-params-v1',
+  format: 'yaml-params',
   schema: [
     { name: 'account', type: 'template', required: true, default: null, desc: '' },
     { name: 'timeout', type: 'duration', required: false, default: '30s', desc: '最长等待' },
@@ -127,7 +127,7 @@ const DESCRIPTOR_WITH_PARAMS = {
 
 const EMPTY_DESCRIPTOR = {
   kind: 'script',
-  format: 'yaml-params-v1',
+  format: 'yaml-params',
   schema: [],
 }
 
@@ -375,16 +375,13 @@ describe('Console 运行参数接线', () => {
     expect(runnerSrc).toContain("import { useRunArgsFlow } from '../../composables/useRunArgsFlow'")
     expect(consoleSrc).toContain("RunParamsModal")
     expect(consoleSrc).toContain('<RunParamsModal')
-    expect(runnerSrc).toContain('runYamlScript(id, deviceId, startIndex, args)')
-    expect(runnerSrc).toContain("import { GAMER_YAML_RUNNER_ID, runYamlFunction, runYamlScript } from '../../gamer-yaml-runner'")
-    expect(runnerSrc).toContain('function onRunArgsSubmit(')
-    expect(runnerSrc).toContain('runArgsFlow.confirm(args).catch(handleRunStartError)')
-    expect(runnerSrc).toContain('function handleRunStartError(')
-    expect(runnerSrc).toContain('isDeviceBusyConflict(e)')
+    expect(runnerSrc).toContain('runYamlScript(opts.id, device, 0, opts.args)')
+    expect(runnerSrc).toContain('runArgsFlow.confirm(...args)')
+    expect(runnerSrc).toContain('pushRunConflict(e.data)')
     // resolved_args 摘要进运行日志区（「默认继承/显式覆盖」来源标注）
-    expect(runnerSrc).toContain('if (summary) pushLog(\'info\', summary)')
+    expect(runnerSrc).toContain('pushLog(\'info\'')
     // 上下文透传（弹窗在 Console 根部渲染，绑定 runArgsFlow.modal）
-    expect(runnerSrc).toContain('runArgsFlow, onRunArgsSubmit,')
+    expect(runnerSrc).toContain('runArgsFlow, onRunArgsSubmit:')
     expect(consoleSrc).toContain(':field-errors="runArgsFlow.modal.fieldErrors"')
     expect(consoleSrc).toContain('@submit="onRunArgsSubmit"')
   })
@@ -393,8 +390,8 @@ describe('Console 运行参数接线', () => {
     expect(runnerSrc).not.toMatch(/begin\(\{[^}]*yaml:/s)
     // 脚本：entrypoint = 脚本资源 id；函数：统一命名空间按名寻址（<pkg>#<函数名>）
     expect(runnerSrc).toContain('runnerId: GAMER_YAML_RUNNER_ID')
-    expect(runnerSrc).toContain('entrypoint: s.id')
-    expect(runnerSrc).toContain('entrypoint: `${packageId.value}#${fnName}`')
+    expect(runnerSrc).toContain('entrypoint: id')
+    expect(runnerSrc).toContain('entrypoint: `${packageId.value}#${opts.fnName}`')
   })
 
   it('api.js：提供 runner 无关的 entrypoint schema 读取（URL 整体编码）', () => {

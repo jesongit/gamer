@@ -5,14 +5,11 @@ const PANEL_STORAGE_KEY = 'gamer.console.panel-ratio'
 
 export function useConsolePanelResize({ consoleEl, videoWrap }) {
   const totalWidth = ref(1200)
-  const stageHeight = ref(0)
-  const ratio = ref(0.46)
+  const ratio = ref(0.32)
   try { const saved = Number(localStorage.getItem(PANEL_STORAGE_KEY)); if (saved > 0 && saved <= .5) ratio.value = saved } catch {}
   const PANEL_MAX_WIDTH = computed(() => Math.round(totalWidth.value * .5))
-  // 画面宽度达到可用高度 × 16/9 后继续右拖只会增加左右留白。
-  // 保留右侧编辑器至少 320px；左侧原有至少一半的约束优先。
-  const PANEL_MIN_WIDTH = computed(() => Math.min(PANEL_MAX_WIDTH.value, Math.max(320,
-    stageHeight.value > 0 ? Math.ceil(totalWidth.value - stageHeight.value * 16 / 9) : Math.round(totalWidth.value * .35))))
+  // 画面可能是竖屏或任意浏览器比例；不以固定 16:9 推导面板最小宽度。
+  const PANEL_MIN_WIDTH = computed(() => Math.min(PANEL_MAX_WIDTH.value, 320))
   const panelWidth = computed({ get: () => clampPanelWidth(totalWidth.value * ratio.value), set: width => { ratio.value = clampPanelWidth(width) / totalWidth.value } })
   const panelResizing = ref(false)
   let panelResizeState = null
@@ -58,9 +55,6 @@ export function useConsolePanelResize({ consoleEl, videoWrap }) {
 
   function clampPanelToViewport() {
     totalWidth.value = Math.max(1, (consoleEl.value?.clientWidth || window.innerWidth) - 6)
-    // 隐藏的工作台和全屏画面不能覆盖正常布局的高度；退出时重新测量。
-    const height = videoWrap?.value?.clientHeight || 0
-    if (height > 0 && !document.fullscreenElement) stageHeight.value = height
   }
   let observer
 

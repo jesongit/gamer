@@ -10,6 +10,17 @@ beforeEach(async () => {
 })
 
 describe('store run registry', () => {
+  it('computed readers follow runs registered after their first empty lookup', async () => {
+    const { computed } = await import('vue')
+    const active = computed(() => storeMod.getActiveRun('later-device'))
+    const record = computed(() => storeMod.findRun('later-run'))
+    expect(active.value).toBeNull(); expect(record.value).toBeNull()
+    storeMod.applyRunRecord({ run_id: 'later-run', device_id: 'later-device', state: 'running' })
+    expect(active.value?.run_id).toBe('later-run'); expect(record.value?.state).toBe('running')
+    storeMod.applyRunRecord({ run_id: 'later-run', device_id: 'later-device', state: 'cancelled' })
+    expect(active.value).toBeNull(); expect(record.value?.state).toBe('cancelled')
+  })
+
   it('公开状态只保留 runId，不暴露 script_id 执行句柄', () => {
     expect(storeMod.store).not.toHaveProperty('runScriptId')
     expect(storeMod.store.runId).toBeNull()

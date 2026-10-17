@@ -43,13 +43,14 @@ router.onError((err) => {
         window.location.reload()
         return
       }
-    } catch { /* 无 sessionStorage 环境（隐私模式等）直接刷新 */ }
-    window.location.reload()
+    } catch { /* Storage unavailable: leave the error visible instead of a reload loop. */ }
+    console.error('[router] 页面资源加载失败，请刷新重试', err)
     return
   }
   console.error('[router]', err)
 })
-router.afterEach(() => {
+router.afterEach((_to, _from, failure) => {
+  if (failure) return
   try { sessionStorage.removeItem('gb_chunk_reload') } catch { /* 忽略 */ }
 })
 

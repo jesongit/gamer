@@ -1,32 +1,17 @@
 <template>
-  <div ref="consoleEl" class="console" :class="{ 'is-panel-resizing': panelResizing, 'global-page': isGlobalPage }">
-    <div class="console-body">
-    <!-- 左：工具条与投屏画面共用一个键盘焦点区域 -->
-    <div
-      ref="stageFocusEl"
-      v-show="!isGlobalPage"
-      class="stage"
-      tabindex="0"
-      role="region"
-      aria-label="投屏控制区，可接收键盘控制"
-      @focusin="onStageFocusIn"
-      @focusout="onStageFocusOut"
-      @keydown="onStageKeyDown"
-      @keyup="onStageKeyUp"
-      @click="onStageClick"
-    >
-      <!-- 两行工具条：设备与配置包 / 应用与投屏操作；组内动作紧随各自对象。 -->
+  <div ref="consoleEl" class="console" :class="{ 'is-panel-resizing': panelResizing, 'global-page': isGlobalPage, 'panel-expanded': paneMode === 'expanded', 'panel-collapsed': paneMode === 'collapsed' }">
+      <!-- 常用上下文一行展示，应用与投屏工具按需展开。 -->
       <div ref="toolbarEl" class="toolbar" data-keyboard-ignore="true" @click="onToolbarClick">
         <div class="tb-row tb-context-row">
-          <div class="tb-group tb-device-group" role="group" aria-label="设备连接">
-            <span class="tb-label">设备</span>
-            <select :value="store.deviceId" class="select mono tb-dev-select" :disabled="forceReconnecting" aria-label="设备列表" @change="addAndSelectTarget($event.target.value)">
-              <option :value="null">选择设备…</option>
+          <div v-if="!isGlobalPage" class="tb-group tb-device-group" role="group" aria-label="设备连接">
+            <span class="tb-label">游戏目标</span>
+            <select :value="store.deviceId" class="select mono tb-dev-select" :disabled="forceReconnecting" aria-label="游戏目标列表" @change="addAndSelectTarget($event.target.value)">
+              <option :value="null">选择目标…</option>
               <option v-for="d in devices" :key="d.id" :value="d.id">{{ d.name }} · {{ d.status === 'online' ? '在线' : '离线' }}</option>
             </select>
-            <button v-if="!connected" class="btn btn-sm btn-primary" :disabled="!store.deviceId || connecting || forceReconnecting" @click="flushAndConnect"><UiIcon name="connect" />{{ forceReconnecting ? '强制重连中…' : connecting ? '连接中…' : '连接' }}</button>
-            <button v-else class="btn btn-sm" @click="closeSelectedPreview"><UiIcon name="disconnect" />关闭预览</button>
-            <button class="btn btn-sm" :disabled="scanning || forceReconnecting" @click="refreshDevices" title="刷新设备" aria-label="刷新设备"><UiIcon name="refresh" />刷新</button>
+            <button v-if="!connected" class="btn btn-sm btn-icon" title="连接画面" aria-label="连接画面" :disabled="!store.deviceId || connecting || forceReconnecting" @click="flushAndConnect"><UiIcon name="connect" /></button>
+            <button v-else class="btn btn-sm btn-icon" title="关闭预览，自动化继续运行" aria-label="关闭预览" @click="closeSelectedPreview"><UiIcon name="disconnect" /></button>
+            <button class="btn btn-sm btn-icon" :disabled="scanning || forceReconnecting" @click="refreshDevices" title="刷新设备" aria-label="刷新设备"><UiIcon name="refresh" /></button>
             <div class="tb-more-wrap">
               <button
                 class="btn btn-sm btn-icon"
@@ -38,12 +23,36 @@
                 @click.stop="toggleToolbarMenu('device', $event)"
               ><UiIcon name="more" /></button>
             </div>
+            <label class="tb-display-mode">
+              <span class="tb-label">画面</span>
+              <select class="select" aria-label="画面模式" :value="workspace.state.gridSize" @change="changeGridSize(Number($event.target.value), $event.target)">
+                <option :value="1">单屏</option>
+                <option :value="4">4 格</option>
+                <option :value="9">9 格</option>
+              </select>
+            </label>
+            <div v-if="!isSingleScreen || canStartTarget(store.deviceId) || workspace.getRun(store.deviceId)" class="device-run-actions" role="group" :aria-label="isSingleScreen ? '当前目标脚本' : '当前网格脚本'">
+              <template v-if="isSingleScreen">
+                <button v-if="!workspace.getRun(store.deviceId)" class="btn btn-sm btn-primary" :disabled="!canStartTarget(store.deviceId) || !!workspace.state.pending[store.deviceId]" @click="startOneTarget(store.deviceId)" title="运行当前目标保存的脚本与参数"><UiIcon name="play" />运行脚本</button>
+                <button v-else class="btn btn-sm btn-danger" :disabled="batchBusy" @click="stopOneTarget(store.deviceId)"><UiIcon name="stop" />停止脚本</button>
+              </template>
+              <template v-else>
+                <button class="btn btn-sm btn-primary" :disabled="batchBusy || !visibleTargets.some(canStartTarget)" @click="startVisibleTargets" :title="'运行当前可见的 ' + visibleTargets.length + ' 个目标各自保存的脚本；未配置目标会跳过'"><UiIcon name="play" />批量运行</button>
+                <button v-if="visibleRunningCount" class="btn btn-sm btn-danger" :disabled="batchBusy" @click="stopVisibleTargets" :title="'停止当前可见的 ' + visibleRunningCount + ' 个运行'"><UiIcon name="stop" />批量停止</button>
+              </template>
+            </div>
+            <span v-if="hiddenCount" class="tb-hidden-targets" role="status" :title="hiddenCount + ' 个目标在后台，其中 ' + hiddenRunningCount + ' 个脚本运行中'">后台 {{ hiddenCount }}<span v-if="hiddenRunningCount"> · {{ hiddenRunningCount }} 运行</span></span>
           </div>
           <div class="stage-package">
             <PackageContextBar :context="packageContext" compact />
           </div>
+          <div v-if="!isGlobalPage" class="toolbar-actions">
+            <button class="btn btn-sm" :aria-expanded="controlToolsOpen" @click="controlToolsOpen = !controlToolsOpen"><UiIcon name="settings" />游戏操作</button>
+            <button class="btn btn-sm" title="投屏全屏" aria-label="全屏" @click="fullscreen"><UiIcon name="expand" />全屏</button>
+            <button class="btn btn-sm plugin-visibility-toggle" :aria-label="paneMode === 'collapsed' ? '展开插件' : '收起插件'" :aria-expanded="paneMode !== 'collapsed'" aria-controls="gamer-plugin-workspace" :title="paneMode === 'collapsed' ? '展开插件工作区' : '收起插件，后台运行继续'" @click="setPaneMode(paneMode === 'collapsed' ? 'docked' : 'collapsed')"><UiIcon name="panel" />{{ paneMode === 'collapsed' ? '展开插件' : '收起插件' }}</button>
+          </div>
         </div>
-        <div class="tb-row tb-operation-row" :class="{ 'tb-browser-row': isBrowser }">
+        <div v-show="!isGlobalPage && controlToolsOpen" class="tb-row tb-operation-row" :class="{ 'tb-browser-row': isBrowser }">
           <div v-if="isBrowser" class="tb-group tb-browser-group" role="group" aria-label="浏览器标签页">
             <span class="tb-label">网页</span>
             <select class="select tb-page-select" :value="browserPages.bound" :disabled="!connected || manualInputLocked" aria-label="目标标签页" @change="bindBrowserPage($event.target.value)">
@@ -61,21 +70,20 @@
               :value="current?.pkg || ''"
               :disabled="!current || appSelectSaving || manualInputLocked"
               aria-label="应用（Android 运行目标）"
-              title="当前应用目标；选中即保存为设备配置，启动按钮与脚本共用"
+              title="选择即保存执行目标，选择应用不会启动它"
               @change="onAppSelect"
             >
-              <option value="" :disabled="pkgOptions.length > 0">未选择应用</option>
+              <option value="" :disabled="pkgOptions.length > 0">{{ appLoading ? '正在读取应用…' : '请选择应用，或先读取列表' }}</option>
               <option v-for="p in pkgOptions" :key="p" :value="p">{{ packageOptionLabel(p) }}</option>
             </select>
             <button class="btn btn-sm" :disabled="!store.deviceId || appLoading" :title="appLoading ? '正在读取已安装应用…' : '读取设备已安装应用列表（填充应用下拉，强制刷新缓存）'" @click="loadApps({ force: true })"><UiIcon name="refresh" />{{ appLoading ? '读取中…' : '读取列表' }}</button>
-            <button class="btn btn-sm" :disabled="!connected || manualInputLocked" @click="launchGame" :title="'启动到虚拟屏：' + (current?.pkg || '未选择应用')"><UiIcon name="play" />启动</button>
-            <button class="btn btn-sm btn-danger" :disabled="!connected || manualInputLocked" @click="stopGame()" :title="'停止应用：' + (current?.pkg || '未选择应用')"><UiIcon name="stop" />停止应用</button>
+            <button class="btn btn-sm" :disabled="!connected || !current?.pkg || manualInputLocked" @click="launchGame" :title="'冷启动当前应用，正在运行时会重启：' + (current?.pkg || '请先选择应用')"><UiIcon name="play" />启动 / 重启</button>
+            <button class="btn btn-sm btn-danger" :disabled="!connected || !current?.pkg || manualInputLocked" @click="stopGame()" :title="'关闭当前应用：' + (current?.pkg || '请先选择应用')"><UiIcon name="stop" />停止应用</button>
           </div>
           <div class="tb-group tb-control-group" role="group" aria-label="投屏操作">
             <button class="btn btn-sm" title="截图" aria-label="截图" :disabled="!connected" @click="shot"><UiIcon name="image" />截图</button>
             <button v-if="isBrowser" class="btn btn-sm" :disabled="!connected || manualInputLocked" title="粘贴文字到网页" @click="clipboard()"><UiIcon name="copy" />粘贴</button>
             <button v-if="!isBrowser" class="btn btn-sm" title="返回" aria-label="返回" :disabled="!connected || manualInputLocked" @click="key('BACK')"><UiIcon name="back" />返回</button>
-            <button class="btn btn-sm" title="全屏" aria-label="全屏" @click="fullscreen"><UiIcon name="expand" />全屏</button>
             <button
               class="btn btn-sm keyboard-mode-btn"
               :disabled="manualInputLocked"
@@ -98,6 +106,21 @@
           </div>
         </div>
       </div>
+    <div class="console-body">
+    <!-- 左：工具条与投屏画面共用一个键盘焦点区域 -->
+    <div
+      ref="stageFocusEl"
+      v-show="!isGlobalPage && paneMode !== 'expanded'"
+      class="stage"
+      tabindex="0"
+      role="region"
+      aria-label="投屏控制区，可接收键盘控制"
+      @focusin="onStageFocusIn"
+      @focusout="onStageFocusOut"
+      @keydown="onStageKeyDown"
+      @keyup="onStageKeyUp"
+      @click="onStageClick"
+    >
       <div v-if="inputControlMessage" class="input-control-hint" :class="{ paused: !manualInputLocked }" role="status" aria-live="polite">{{ inputControlMessage }}</div>
 
       <!-- 菜单脱离横向滚动行挂到 body，避免窄窗口下被工具条裁掉 -->
@@ -124,38 +147,37 @@
           <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" :disabled="manualInputLocked" @click="closeToolbarMenu(); key('APP_SWITCH')">最近应用</button>
           <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" :disabled="manualInputLocked" @click="closeToolbarMenu(); key('VOL_UP')">增大音量</button>
           <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" :disabled="manualInputLocked" @click="closeToolbarMenu(); key('VOL_DOWN')">减小音量</button>
-          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" :title="audioMuted ? '取消静音（听游戏声音）' : '静音'" @click="closeToolbarMenu(); toggleAudio()">{{ audioMuted ? '取消静音' : '静音' }}</button>
+          <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" :disabled="!isSingleScreen" :title="!isSingleScreen ? '多格模式下全部画面自动静音' : audioMuted ? '取消静音（听游戏声音）' : '静音'" @click="closeToolbarMenu(); toggleAudio()">{{ !isSingleScreen ? '多画面已静音' : audioMuted ? '取消静音' : '静音' }}</button>
+          <button v-else class="tb-more-item action-menu-item" role="menuitem" disabled title="浏览器目标只提供画面预览，后台浏览器始终静音">浏览器已静音</button>
+        </div>
+        <span v-if="targetMenuOpen" class="tb-more-mask" @click.stop="closeTargetMenu"></span>
+        <div v-if="targetMenuOpen" class="tb-more-dropdown tb-more-dropdown-fixed action-menu" :style="targetMenuStyle" role="menu" :aria-label="targetName(targetMenuOpen) + ' 的画面操作'">
+          <button v-if="!sessions[targetMenuOpen]?.connected.value" class="tb-more-item action-menu-item" role="menuitem" :disabled="sessions[targetMenuOpen]?.connecting.value" @click="sessions[targetMenuOpen]?.connect(true); closeTargetMenu()">连接预览</button>
+          <button v-else class="tb-more-item action-menu-item" role="menuitem" @click="closeTargetPreview(targetMenuOpen); closeTargetMenu()">关闭预览</button>
+          <div class="action-menu-separator" role="separator"></div>
+          <button class="tb-more-item action-menu-item" role="menuitem" title="只移出画面，后台脚本继续运行" @click="removeTargetCell(targetMenuOpen); closeTargetMenu()">移出画面</button>
         </div>
       </Teleport>
 
       <BrowserTargetModal v-if="browserModal" :target="browserEdit" @close="browserModal = false" @saved="browserSaved" />
-      <div class="multiview-toolbar" data-keyboard-ignore="true">
-        <strong>多画面</strong>
-        <button class="btn btn-sm" :class="{ active: workspace.state.gridSize === 4 }" @click="changeGridSize(4)">4 格</button>
-        <button class="btn btn-sm" :class="{ active: workspace.state.gridSize === 9 }" @click="changeGridSize(9)">9 格</button>
-        <button v-if="expandedTarget" class="btn btn-sm" @click="expandedTarget = null">返回网格</button>
-        <button class="btn btn-sm btn-primary" :disabled="batchBusy || !!expandedTarget || !visibleTargets.length" @click="startVisibleTargets">启动当前 {{ visibleTargets.length }} 格</button>
-        <button class="btn btn-sm btn-danger" :disabled="batchBusy || !!expandedTarget || !visibleTargets.length" @click="stopVisibleTargets">停止当前网格脚本</button>
-        <span v-if="expandedTarget" role="status">返回网格后可批量操作；当前可单独运行或停止此格</span>
-        <span v-if="hiddenCount" role="status">另有 {{ hiddenCount }} 个隐藏目标（{{ hiddenRunningCount }} 个运行中）</span>
-      </div>
       <div v-if="batchResult" class="multiview-result" role="status">{{ batchResult }}</div>
-      <div v-show="workspace.state.targetIds.length || stageCtl.view.kind !== 'media'" class="multiview-grid" :class="{ expanded: !!expandedTarget, nine: workspace.state.gridSize === 9 }">
-        <section v-for="id in workspace.state.targetIds" :key="id" v-show="visibleTargets.includes(id) && (!expandedTarget || expandedTarget === id)"
-          class="target-cell" :class="{ selected: id === store.deviceId }" :aria-label="targetName(id)">
-          <div class="target-heading" data-keyboard-ignore="true">
-            <button class="target-name" :aria-pressed="id === store.deviceId" @click="selectTarget(id)">{{ id === store.deviceId ? '● ' : '' }}{{ targetName(id) }}</button>
-            <span class="target-status">{{ targetStatus(id) }}</span>
-            <button class="btn btn-sm" :disabled="!!workspace.state.pending[id]" @click="startOneTarget(id)" title="运行该目标记住的脚本">运行</button>
-            <button class="btn btn-sm" :disabled="!workspace.getRun(id)" @click="stopOneTarget(id)" title="停止该目标脚本">停止</button>
-            <button class="btn btn-sm" @click="toggleExpanded(id)" :title="expandedTarget === id ? '返回网格' : '放大画面'">{{ expandedTarget === id ? '还原' : '放大' }}</button>
-            <button class="btn btn-sm" @click="closeTargetPreview(id)" title="只关闭预览，脚本继续运行">关闭预览</button>
-            <button class="btn btn-sm" @click="removeTargetCell(id)" title="移出网格，脚本继续运行">×</button>
+      <div v-show="workspace.state.targetIds.length || stageCtl.view.kind !== 'media'" class="multiview-grid" :class="{ single: isSingleScreen, nine: workspace.state.gridSize === 9 }">
+        <section v-for="id in workspace.state.targetIds" :key="id" v-show="visibleTargets.includes(id)"
+          class="target-cell" :class="{ selected: isSingleScreen && id === store.deviceId }" :aria-label="targetName(id)">
+          <div v-if="!isSingleScreen" class="target-heading" data-keyboard-ignore="true">
+              <span class="target-name" :title="targetName(id)">{{ targetName(id) }}</span>
+            <span class="target-status" :title="targetStatus(id)">{{ workspace.getRun(id) ? '运行中' : sessions[id]?.connecting.value ? '连接中' : sessions[id]?.connected.value ? '在线' : '未连接' }}</span>
+            <button v-if="!workspace.getRun(id)" class="btn btn-sm btn-icon" :disabled="!canStartTarget(id) || !!workspace.state.pending[id]" @click="startOneTarget(id)" title="运行该目标记住的脚本" :aria-label="'运行 ' + targetName(id) + ' 的脚本'"><UiIcon name="play" /></button>
+            <button v-else class="btn btn-sm btn-icon btn-danger" @click="stopOneTarget(id)" title="停止该目标脚本" :aria-label="'停止 ' + targetName(id) + ' 的脚本'"><UiIcon name="stop" /></button>
+            <button class="btn btn-sm btn-icon" @click="toggleExpanded(id)" title="单屏查看此目标" :aria-label="'单屏查看 ' + targetName(id)"><UiIcon name="expand" /></button>
+            <button class="btn btn-sm btn-icon" @click.stop="toggleTargetMenu(id, $event)" title="画面更多操作" :aria-label="targetName(id) + ' 的画面更多操作'" aria-haspopup="menu" :aria-expanded="targetMenuOpen === id"><UiIcon name="more" /></button>
           </div>
           <div v-if="workspace.state.errors[id]" class="target-error" role="status">{{ workspace.state.errors[id] }}</div>
           <div class="target-surface">
       <TargetPreviewSession
-        :target-id="id" :selected="id === store.deviceId"
+        :target-id="id" :selected="isSingleScreen && id === store.deviceId" :force-muted="!isSingleScreen"
+        :active="pageVisible && !isGlobalPage && visibleTargets.includes(id) && !(id === store.deviceId && stageCtl.view.kind === 'media')"
+        :preview-mode="isSingleScreen ? 'single' : workspace.state.gridSize === 9 ? 'grid9' : 'grid4'"
         @register="registerSession" @connected="onTargetConnected" @control-message="onTargetControlMessage"
         :bridge="deviceStageBridge"
         :current-name="targetName(id)"
@@ -184,11 +206,11 @@
         @loupe-mounted="el => { if (id === store.deviceId) onLoupeMounted(el) }"
         @media-video-mounted="el => { if (id === store.deviceId) onStageMediaVideoMounted(el) }"
       />
-            <button v-if="id !== store.deviceId" class="target-select-shield" :aria-label="'选择 ' + targetName(id) + '，本次点击不会操作设备'" @click.stop="selectTarget(id)"><span>点击选择</span></button>
+            <button v-if="!isSingleScreen || id !== store.deviceId" class="target-select-shield" :aria-label="'单屏查看 ' + targetName(id) + '，本次点击不会操作设备'" @click.stop="toggleExpanded(id)"><span>点击进入单屏</span></button>
           </div>
         </section>
-        <div v-for="slot in emptySlots" :key="'empty-' + slot" v-show="!expandedTarget" class="target-empty">
-          <span>添加目标到画面 {{ visibleTargets.length + slot }}</span>
+        <div v-for="slot in emptySlots" :key="'empty-' + slot" class="target-empty">
+          <span>{{ isSingleScreen ? '选择一个设备或浏览器开始' : '添加目标到画面 ' + (visibleTargets.length + slot) }}</span>
           <select class="select" aria-label="添加画面目标" value="" @change="addAndSelectTarget($event.target.value); $event.target.value = ''">
             <option value="">选择设备或浏览器…</option>
             <option v-for="target in availableTargets" :key="target.id" :value="target.id">{{ target.name }}</option>
@@ -241,7 +263,7 @@
 
     <!-- 左右分区拖拽条：拖动可手动调整画面区与功能区宽度 -->
     <div
-      v-show="!isGlobalPage"
+      v-show="!isGlobalPage && paneMode === 'docked'"
       class="panel-resizer"
       :class="{ active: panelResizing }"
       role="separator"
@@ -257,12 +279,13 @@
       @pointercancel="stopPanelResize"
       @lostpointercapture="stopPanelResize"
       @keydown="onPanelResizeKeydown"
-    ></div>
+    ><UiIcon name="grip" /></div>
     <!-- 右：动态 Extension Workspace；二次裁切弹窗仍挂在面板层级，任何页签可见。 -->
-    <aside class="panel" :style="{ width: isGlobalPage ? '100%' : `${panelWidth}px` }">
-      <div v-if="!isGlobalPage" class="panel-target-context" role="status" aria-live="polite">
-        <strong :title="store.deviceId ? `${targetName(store.deviceId)} · ${store.deviceId}` : '未选择画面'">当前操作目标：{{ store.deviceId ? targetName(store.deviceId) : '未选择画面' }}</strong>
-        <span>{{ store.deviceId ? '右侧操作对应选中画面' : '请先选择画面' }}</span>
+    <aside id="gamer-plugin-workspace" v-show="isGlobalPage || paneMode !== 'collapsed'" class="panel" :style="{ width: isGlobalPage || paneMode === 'expanded' ? '100%' : `${panelWidth}px` }">
+      <div v-if="!isGlobalPage" class="panel-target-context sr-context" role="status" aria-live="polite">
+        <strong v-if="isSingleScreen" :title="store.deviceId ? `${targetName(store.deviceId)} · ${store.deviceId}` : '未选择目标'">当前操作目标：{{ store.deviceId ? targetName(store.deviceId) : '未选择目标' }}</strong>
+        <strong v-else>多画面预览</strong>
+        <span>{{ !isSingleScreen ? '点击画面进入单屏操作' : store.deviceId ? '右侧操作对应当前目标' : '请先选择目标' }}</span>
       </div>
       <PluginWorkspace
         :navigation-target="navigationReady ? '#gamer-main-navigation' : ''"
@@ -274,6 +297,8 @@
         :android-package-name="currentApplication?.pkg || ''"
         :context="workspaceContext"
         :lifecycle="workspaceLifecycle"
+        :expanded="paneMode === 'expanded'"
+        @expand="setPaneMode(paneMode === 'expanded' ? 'docked' : 'expanded')"
         @select="openPanel"
         @fallback="fallbackPanel"
         @extensions-changed="refreshServerExtensions"
@@ -327,7 +352,7 @@ import { createOperationFeedback, OPERATION_FEEDBACK_KEY } from '../workspace/op
 // 传输统计 / workspace 面板接线），本文件保留投屏连接、输入控制与跨模块 glue。
 import { computed, nextTick, onMounted, onUnmounted, provide, reactive, ref, shallowReactive, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { store, devicesData, scriptsData, templatesData, useToast, appStartedDevices, projectDeviceRun } from '../store'
+import { store, devicesData, scriptsData, templatesData, useToast, appStartedDevices, projectDeviceRun, getActiveRun } from '../store'
 import { toDeviceCoord as mapControlCoord } from '../console/geometry'
 import { api } from '../api'
 import DeviceStage from '../workspace/DeviceStage.vue'
@@ -345,7 +370,8 @@ import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'
 import RunConflictModal from '../components/RunConflictModal.vue'
 import { useConsoleRuntime } from '../composables/useConsoleRuntime'
 import { usePackageContext } from '../composables/usePackageContext'
-import { loadPackages, currentPackageId, selectPackage } from '../package-store'
+import { loadPackages, currentPackageId, selectPackage, packageStore } from '../package-store'
+import { useRunningPackageContext } from '../composables/useRunningPackageContext'
 import { createKeyboardController, shouldIgnoreKeyboardTarget } from '../keyboard-control'
 import { buildTouchPhase, createKeymapController } from '../keymap-control'
 import { useConsolePanelResize } from '../components/console/useConsolePanelResize'
@@ -386,6 +412,7 @@ const videoWrap = sessionRef('videoWrap', null)
 const videoElement = sessionRef('videoElement', null)
 const keyboardFocused = ref(false)
 const keyboardMode = ref('game')
+const isSingleScreen = computed(() => workspace.state.gridSize === 1)
 const keymapPressed = reactive(new Set())
 // 当前 Package id（§38/§39）：由 package-store 统一管理，右侧 Package 栏选择；
 // 模板/脚本/函数库/映射等数据面板全部消费该上下文。Android 应用（运行目标）与
@@ -418,6 +445,15 @@ watch(() => store.running, (running) => {
 })
 
 // ---------- 左右分区拖拽（面板宽度） ----------
+const paneMode = ref('docked'), controlToolsOpen = ref(false)
+function setPaneMode(mode) {
+  releaseSelectedInput()
+  closeToolbarMenu()
+  paneMode.value = mode
+  nextTick(() => {
+    if (mode === 'collapsed') toolbarEl.value?.querySelector('.plugin-visibility-toggle')?.focus()
+  })
+}
 const {
   panelWidth, panelResizing, PANEL_MIN_WIDTH, PANEL_MAX_WIDTH,
   startPanelResize, onPanelResize, stopPanelResize, onPanelResizeKeydown,
@@ -437,8 +473,10 @@ async function loadData() {
 
 // 通用目标控制租约：按钮态和所有舞台输入使用同一服务端状态，服务端再次仲裁。
 const inputControl = useConsoleInputControl({ deviceId: () => store.deviceId, toast })
-const manualInputLocked = computed(() => !inputControl.manualAllowed.value)
-const inputControlMessage = inputControl.message
+const manualInputLocked = computed(() => !isSingleScreen.value || !inputControl.manualAllowed.value)
+const inputControlMessage = computed(() => !isSingleScreen.value
+  ? '多画面仅预览，点击画面进入单屏后操作'
+  : inputControl.message.value)
 
 // ---------- 设备管理（工具条设备控件 + 设置弹窗 + 工具条快捷动作） ----------
 const {
@@ -468,7 +506,7 @@ const {
   connect,
   cleanup,
   sendControl,
-  guardManualInput: inputControl.requireManual,
+  guardManualInput: () => isSingleScreen.value && inputControl.requireManual(),
   selectTarget: id => addAndSelectTarget(id),
   beforeTargetRemoval: id => beforeTargetChange(null),
   onTargetRemoved: id => removeTargetCell(id),
@@ -502,6 +540,7 @@ function syncKeymapPressed() {
 // 实时/视频来源切换、媒体控制、指定帧捕获与设备输入门禁收敛在 useConsoleStage；
 // 壳只接线：工具条按钮态、门禁调用（sendControl/键盘/鼠标路由）与来源切换清理。
 const isBrowser = computed(() => store.deviceId?.startsWith('browser-'))
+const pageVisible = ref(!document.hidden)
 const browserModal = ref(false), browserEdit = ref(null)
 const browserPages = ref({ bound: '', pages: [] })
 async function refreshBrowserPages() {
@@ -612,7 +651,6 @@ const {
   editorMatchThreshold: () => editorMatchThreshold(),
   clearCallParamsCache: () => clearCallParamsCache(),
   refreshScripts: () => refreshScripts(),
-  refreshFnLib: pkg => fnLib.refresh(pkg),
   onTemplateRenamed: rename => onTemplateRenamed(rename),
 })
 
@@ -625,7 +663,7 @@ const { bridgeOverlayView, showBridgeOverlay, clearBridgeOverlay } = useConsoleB
 // ---------- YAML 自动化面板运行器（脚本/函数面板共享机制 + 各自作用域上下文） ----------
 // 壳只拿接线所需的共享机制与两份面板上下文；面板内部状态（编辑模式/选择）不进壳。
 const {
-  fnLib, resourcePreview, closeResourcePreview,
+  resourcePreview, closeResourcePreview,
   runArgsFlow, onRunArgsSubmit,
   startLogPolling, stopLogPolling,
   clearCallParamsCache, editorMatchThreshold, onTemplateRenamed,
@@ -641,6 +679,17 @@ const {
   templateNames,
   tplShortName,
   loadData,
+})
+
+useRunningPackageContext({
+  deviceId: () => store.deviceId,
+  activeRun: () => getActiveRun(store.deviceId),
+  packages: () => packageStore.packages,
+  loaded: () => packageStore.loaded,
+  currentPackageId: () => currentPackageId.value,
+  selectPackage,
+  canSwitch: () => !scriptPanel.sourceEditorDirty.value && !scriptPanel.sourceEditorSaving.value
+    && !scriptPanel.startPending.value,
 })
 
 // ---------- 按键映射面板（方案选择/保存/导入导出 + 映射可视化） ----------
@@ -663,7 +712,6 @@ const {
 })
 
 watch(currentPackageId, pkg => {
-  fnLib.refresh(pkg)
   loadKeymaps(pkg)
 }, { immediate: true })
 
@@ -675,14 +723,12 @@ const packageContext = usePackageContext({
   beforePackageChange,
   currentApp: currentApplication,
   currentTargetId: () => store.deviceId,
-  loadCurrentApps: () => loadApps({ silent: true }),
   refreshAll: async () => {
     const pkg = currentPackageId.value
     await Promise.all([
       Promise.resolve(loadData?.()).catch(() => {}),
       Promise.resolve(refreshScripts?.()).catch(() => {}),
       Promise.resolve(refreshTemplatesData?.()).catch(() => {}),
-      Promise.resolve(fnLib.refresh(pkg)).catch(() => {}),
       Promise.resolve(loadKeymaps(pkg)).catch(() => {}),
     ])
   },
@@ -837,6 +883,7 @@ function isReleaseMessage(obj) {
       || (obj.event?.type === 'gamepad_axis' && !obj.event.value)))
 }
 function sendKeyboardControl(obj) {
+  if (!isSingleScreen.value && !(releasingInput && isReleaseMessage(obj))) return false
   if (!inputControl.guardDeviceInput(obj)) return false
   // 安全红线：视频来源（媒体模式）为离线只读，舞台产生的键盘/按键映射输入一律拒绝
   if (!(releasingInput && isReleaseMessage(obj)) && !stageCtl.guardDeviceInput(obj)) return false
@@ -863,6 +910,7 @@ function sendKeyboardControl(obj) {
 }
 
 function sendControl(obj) {
+  if (!isSingleScreen.value && !(releasingInput && isReleaseMessage(obj))) return false
   if (!inputControl.guardDeviceInput(obj)) return false
   // 安全红线：视频来源（媒体模式）为离线只读——鼠标触控/滚轮/按键/启停应用等
   // 舞台产生的设备输入在统一输入路由处拒绝（含 REST fallback 之前的全部路径）
@@ -918,13 +966,18 @@ function sendTouchPhase(action, pointerId, x, y) {
 
 function onStageFocusIn(e) {
   // 视频来源模式不捕获键盘焦点（键盘/按键映射属设备输入，媒体模式拒绝）
-  if (!connected.value || manualInputLocked.value || !stageCtl.view.canDeviceInput || shouldIgnoreKeyboardTarget(e?.target)) return
+  if (shouldIgnoreKeyboardTarget(e?.target)) { releaseStageKeyboard(); return }
+  if (!connected.value || manualInputLocked.value || !stageCtl.view.canDeviceInput) return
   keyboardFocused.value = true
 }
 
 function onStageFocusOut(e) {
   const next = e?.relatedTarget
-  if (next && stageFocusEl.value?.contains(next)) return
+  if (next && stageFocusEl.value?.contains(next) && !shouldIgnoreKeyboardTarget(next)) return
+  releaseStageKeyboard()
+}
+
+function releaseStageKeyboard() {
   if (isBrowser.value) browserPreview.release()
   keyboardFocused.value = false
   keymap.releaseAll()
@@ -933,7 +986,8 @@ function onStageFocusOut(e) {
 }
 
 function onStageKeyDown(e) {
-  if (!connected.value || manualInputLocked.value || !stageCtl.view.canDeviceInput || picking.value || selecting.value || cellPick.mode || isGlobalEscapeConsumed(e)) return
+  if (e.defaultPrevented || e.isComposing || shouldIgnoreKeyboardTarget(e.target) || hasOpenInputDialog()
+    || !connected.value || manualInputLocked.value || !stageCtl.view.canDeviceInput || picking.value || selecting.value || cellPick.mode || isGlobalEscapeConsumed(e)) return
   if (keyboardMode.value === 'game') {
     const mapped = keymap.handleKeyDown(e)
     syncKeymapPressed()
@@ -945,7 +999,7 @@ function onStageKeyDown(e) {
 }
 
 function onStageKeyUp(e) {
-  if (!connected.value || manualInputLocked.value || !stageCtl.view.canDeviceInput) return
+  if (shouldIgnoreKeyboardTarget(e.target) || hasOpenInputDialog() || !connected.value || manualInputLocked.value || !stageCtl.view.canDeviceInput) return
   const mapped = keymap.handleKeyUp(e)
   syncKeymapPressed()
   if (mapped?.handled || mapped === true) return
@@ -955,6 +1009,7 @@ function onStageKeyUp(e) {
 
 function onStageClick(e) {
   const target = e?.target
+  if (shouldIgnoreKeyboardTarget(target)) return
   if (target?.closest?.('button, input, select, textarea, a, [contenteditable], [role="button"], [role="link"], [role="menuitem"]')) return
   stageFocusEl.value?.focus()
 }
@@ -963,8 +1018,14 @@ function onToolbarClick(e) {
   const target = e?.target
   const button = target?.closest?.('button')
   if (!button || !toolbarEl.value?.contains(button)) return
+  // 插件显示开关留在原位置，键盘可连续收起与展开。
+  if (button.classList.contains('plugin-visibility-toggle')) return
   // 工具栏按钮执行完动作后把焦点还给组合区域，点击模式切换后可以直接输入。
-  nextTick(() => stageFocusEl.value?.focus())
+  nextTick(() => { if (!hasOpenInputDialog()) stageFocusEl.value?.focus() })
+}
+
+function hasOpenInputDialog() {
+  return browserModal.value || settingsOpen.value || [...document.querySelectorAll('[aria-modal="true"],dialog[open],.modal-mask,.tpl-view-mask')].some(el => el.getClientRects().length > 0)
 }
 
 function toggleKeyboardMode() {
@@ -975,6 +1036,7 @@ function toggleKeyboardMode() {
 /** 静音开关（「功能」菜单）：只切本地播放，音频轨仍在传输；
  *  与 onChannelOpen 建链时的 audio 消息同词表 */
 function toggleAudio() {
+  if (!isSingleScreen.value) { operationFeedback.setCore({ text: '多画面模式已自动静音' }); return }
   audioMuted.value = !audioMuted.value
   selectedSession.value?.setMuted(audioMuted.value)
   operationFeedback.setCore({ text: audioMuted.value ? '已静音' : '已取消静音' })
@@ -996,6 +1058,7 @@ function onWindowBlur() {
 }
 
 function onVisibilityChange() {
+  pageVisible.value = !document.hidden
   if (document.hidden) {
     if (isBrowser.value) browserPreview.release()
     keymap.releaseAll()
@@ -1009,7 +1072,9 @@ function isGlobalEscapeConsumed(e) {
   if (e?.code !== 'Escape' && e?.key !== 'Escape') return false
   return !!(
     cellPick.mode
+    || targetMenuOpen.value
     || toolbarMenuOpen.value
+    || browserModal.value
     || settingsOpen.value
     || viewTpl.value
     || resourcePreview?.open
@@ -1024,8 +1089,12 @@ function onGlobalKeydown(e) {
     // bridge 框选被 Esc 取消
   } else if (cellPick.mode) {
     cancelCellPick()
+  } else if (targetMenuOpen.value) {
+    closeTargetMenu()
   } else if (toolbarMenuOpen.value) {
     closeToolbarMenu()
+  } else if (browserModal.value) {
+    browserModal.value = false
   } else if (settingsOpen.value) {
     cancelSettings()
   } else if (viewTpl.value) {
@@ -1144,6 +1213,7 @@ function cancelPendingMove() {
 }
 
 function onMouseDown(e) {
+  if (!isSingleScreen.value) return
   // 步骤编辑器取点/取色模式：本次画面点击被消费（不透传触控）
   if (cellPick.mode && connected.value) {
     finishCellPick(e)
@@ -1175,6 +1245,7 @@ function onMouseDown(e) {
 }
 
 function onMouseMove(e) {
+  if (!isSingleScreen.value) return
   if (selecting.value) {
     const rect = videoWrap.value.getBoundingClientRect()
     selEnd.x = e.clientX - rect.left
@@ -1208,6 +1279,7 @@ function onMouseMove(e) {
 }
 
 function onMouseUp(e) {
+  if (!isSingleScreen.value) return
   if (selecting.value) {
     selecting.value = false
     picking.value = false
@@ -1243,7 +1315,7 @@ function onMouseUp(e) {
 
 /** 鼠标离开投屏区域时隐藏取点/框选辅助层。 */
 function onVideoMouseLeave() {
-  if (isBrowser.value) browserPreview.release()
+  if (isSingleScreen.value && isBrowser.value) browserPreview.release()
   hideLoupe()
 }
 
@@ -1289,18 +1361,33 @@ function onVideoWrapMounted(el) { videoWrap.value = el }
 
 // ---------- Multi-target layout and atomic focus projection ----------
 const visibleTargets = computed(() => workspace.visibleTargetIds)
+const visibleRunningCount = computed(() => visibleTargets.value.filter(id => workspace.getRun(id)).length)
 const availableTargets = computed(() => devices.value.filter(target => !workspace.state.targetIds.includes(target.id)))
 const emptySlots = computed(() => Math.max(0, workspace.state.gridSize - visibleTargets.value.length))
 const hiddenCount = computed(() => workspace.state.targetIds.length - visibleTargets.value.length)
 const hiddenRunningCount = computed(() => workspace.state.targetIds.filter(id => !visibleTargets.value.includes(id) && workspace.getRun(id)).length)
-const expandedTarget = ref(null), batchBusy = ref(false), batchResult = ref('')
+const batchBusy = ref(false), batchResult = ref('')
+const targetMenuOpen = ref(null), targetMenuStyle = ref({})
 const emptyFx = Object.freeze({ tap: { show: false }, swipe: { show: false }, hit: { show: false } })
 const emptyLoupe = Object.freeze({ show: false })
 function targetName(id) { return devices.value.find(device => device.id === id)?.name || id }
+function canStartTarget(id) {
+  const config = workspace.getConfig(id)
+  return !!(id && config?.packageId && config.scriptId && config.runnerId && !workspace.getRun(id)
+    && devices.value.find(device => device.id === id)?.status === 'online')
+}
+function closeTargetMenu() { targetMenuOpen.value = null }
+function toggleTargetMenu(id, event) {
+  if (targetMenuOpen.value === id) return closeTargetMenu()
+  closeToolbarMenu()
+  const rect = event.currentTarget.getBoundingClientRect()
+  targetMenuStyle.value = { left: `${Math.max(8, Math.min(rect.right - 170, window.innerWidth - 178))}px`, top: `${Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 112))}px`, width: '170px' }
+  targetMenuOpen.value = id
+}
 function targetStatus(id) {
   const session = sessions[id]
   const run = workspace.getRun(id)
-  const preview = session?.connecting.value ? '连接中' : session?.connected.value ? '预览中' : '预览关闭'
+  const preview = session?.suspended.value ? '预览已暂停' : session?.connecting.value ? '连接中' : session?.connected.value ? '预览中' : '预览关闭'
   return `${preview} · ${run ? (run.status === 'paused' ? '脚本已暂停' : '脚本运行中') : '空闲'}`
 }
 function registerSession(id, session) { if (session) sessions[id] = session; else delete sessions[id] }
@@ -1331,6 +1418,7 @@ function releaseSelectedInput() {
   scriptFx.tap.show = false; scriptFx.swipe.show = false; scriptFx.hit.show = false
   } finally { releasingInput = false }
 }
+watch(isSingleScreen, releaseSelectedInput, { flush: 'sync' })
 const focusOptions = {
   beforeChange: id => {
     if (saving.value || configApplying.value || forceReconnecting.value || appSelectSaving.value) { toast('当前目标操作尚未结束，请稍后切换', 'warn'); return false }
@@ -1356,25 +1444,29 @@ const focusOptions = {
 }
 async function selectTarget(id) {
   const ok = await workspace.selectTarget(id, focusOptions)
-  if (ok && expandedTarget.value) expandedTarget.value = id
+  if (ok) closeTargetMenu()
   return ok
 }
 async function addAndSelectTarget(id) {
   if (!id) return selectTarget(null)
   const added = !workspace.state.targetIds.includes(id)
   if (added && !workspace.addTarget(id)) { toast('最多同时保留 9 个目标，请先移出一个画面', 'warn'); return }
-  if (!workspace.visibleTargetIds.includes(id)) {
+  if (!isSingleScreen.value && !workspace.visibleTargetIds.includes(id)) {
     await workspace.setGridSize(9, focusOptions)
     toast('已切换到 9 格，显示新增目标', 'info')
   }
   await selectTarget(id)
 }
-async function changeGridSize(size) {
-  if (await workspace.setGridSize(size, focusOptions)) expandedTarget.value = null
+async function changeGridSize(size, select) {
+  if (await workspace.setGridSize(size, focusOptions)) closeTargetMenu()
+  if (select) select.value = workspace.state.gridSize
 }
 async function toggleExpanded(id) {
-  if (expandedTarget.value === id) { expandedTarget.value = null; return }
-  if (await selectTarget(id)) expandedTarget.value = id
+  if (await selectTarget(id)) {
+    await changeGridSize(1)
+    await nextTick()
+    stageFocusEl.value?.focus({ preventScroll: true })
+  }
 }
 function closeTargetPreview(id) {
   if (id === store.deviceId) releaseSelectedInput()
@@ -1384,7 +1476,7 @@ function closeSelectedPreview() { closeTargetPreview(store.deviceId) }
 async function removeTargetCell(id) {
   const running = !!workspace.getRun(id)
   if (!await workspace.removeTarget(id, focusOptions)) return
-  if (expandedTarget.value === id) expandedTarget.value = null
+  if (targetMenuOpen.value === id) closeTargetMenu()
   if (running) toast(`${targetName(id)} 的脚本仍在后台运行，可重新添加此目标查看或停止`, 'info')
 }
 function reportBatch(results) {
@@ -1393,7 +1485,7 @@ function reportBatch(results) {
 }
 async function startOneTarget(id) { reportBatch([await workspace.startTarget(id)]) }
 async function startVisibleTargets() {
-  if (expandedTarget.value) return
+  if (isSingleScreen.value) return
   batchBusy.value = true
   try { reportBatch(await workspace.startVisible()) } finally { batchBusy.value = false }
 }
@@ -1401,12 +1493,12 @@ async function confirmStops(snapshot, { batch = false } = {}) {
   if (!snapshot.length) { reportBatch([]); return }
   const names = snapshot.map(item => targetName(item.targetId)).join('、')
   if (!await confirmDialog(`停止 ${names} 的当前脚本？预览和应用将保留。`, { title: '停止脚本', confirmText: '停止脚本' })) return
-  if (batch && expandedTarget.value) { toast('请先返回网格，再批量停止脚本', 'info'); return }
+  if (batch && isSingleScreen.value) { toast('请先切换为 4 格或 9 格，再批量停止脚本', 'info'); return }
   batchBusy.value = true
   try { reportBatch(await workspace.stopCaptured(snapshot)) } finally { batchBusy.value = false }
 }
 async function stopVisibleTargets() {
-  if (expandedTarget.value) return
+  if (isSingleScreen.value) return
   await confirmStops(workspace.captureVisibleStops(), { batch: true })
 }
 async function stopOneTarget(id) { await confirmStops(workspace.captureVisibleStops().filter(item => item.targetId === id)) }
@@ -1432,6 +1524,8 @@ function restoreUpdateConnection() {
   }
 }
 onMounted(async () => {
+  document.addEventListener('visibilitychange', onVisibilityChange)
+  pageVisible.value = !document.hidden
   navigationReady.value = !!document.getElementById('gamer-main-navigation')
   // SPA 内跳转（store 存活）→ 自动重连恢复画面；页面刷新 → localStorage 恢复设备选择；
   // 首次进入仅选中第一台设备，等待用户点连接（不主动建会话，尊重空闲低功耗）
@@ -1489,7 +1583,6 @@ onMounted(async () => {
   // 其他页面已启动脚本时，本页接管状态轮询（脚本结束后复位运行状态）
   if (store.running && store.runId) startRunStatusPoll()
   window.addEventListener('blur', onWindowBlur)
-  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onUnmounted(() => {
@@ -1515,24 +1608,28 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.panel-target-context { flex:none; display:flex; flex-direction:column; gap:3px; padding:10px 12px; border-bottom:1px solid var(--border); border-left:3px solid var(--accent); background:var(--bg-1); }
+.panel-target-context { flex:none; display:flex; flex-direction:column; gap:3px; padding:10px 12px; border-bottom:1px solid var(--border); border-left:1px solid var(--accent); background:var(--bg-1); }
 .panel-target-context strong { color:var(--accent); font-size:13px; line-height:1.5; overflow-wrap:anywhere; }
 .panel-target-context span { color:var(--text-2); font-size:12px; line-height:1.4; }
 
-.multiview-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding:7px 9px; border-bottom:1px solid var(--border); font-size:12px; }
-.multiview-toolbar strong { margin-right:4px; }
-.multiview-toolbar span { color:var(--text-2); }
+.tb-display-mode { display:flex; align-items:center; gap:5px; padding-left:8px; border-left:1px solid var(--border); }
+.tb-display-mode .select { width:74px; min-width:74px; height:28px; font-size:12px; }
+.device-run-actions { display:flex; align-items:center; gap:5px; }
+.tb-hidden-targets { font-size:11px; color:var(--text-2); white-space:nowrap; }
 .multiview-result { flex:none; max-height:70px; overflow:auto; padding:6px 10px; font-size:12px; color:var(--text-1); background:var(--bg-2); }
 .multiview-grid { flex:1; min-height:0; overflow:auto; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); grid-auto-rows:minmax(180px,1fr); gap:7px; padding:7px; }
 .multiview-grid.nine { grid-template-columns:repeat(3,minmax(0,1fr)); grid-auto-rows:minmax(160px,1fr); }
-.multiview-grid.expanded { grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(0,1fr); }
+.multiview-grid.single { grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(0,1fr); grid-auto-rows:minmax(0,1fr); padding:0; gap:0; }
 .target-cell { min-width:0; min-height:0; display:flex; flex-direction:column; border:2px solid var(--border); border-radius:7px; overflow:hidden; background:var(--bg-1); }
 .target-cell.selected { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
-.target-heading { display:flex; align-items:center; flex-wrap:wrap; gap:4px; padding:5px; border-bottom:1px solid var(--border); }
+.multiview-grid.single .target-cell { border:0; border-radius:0; box-shadow:none; }
+.target-heading { display:flex; align-items:center; gap:4px; padding:5px; border-bottom:1px solid var(--border); }
 .target-heading .btn { padding:2px 5px; font-size:11px; }
-.target-name { flex:1; min-width:60px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-0); border:0; background:none; text-align:left; cursor:pointer; }
+.target-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-0); border:0; background:none; text-align:left; cursor:pointer; }
 .target-cell.selected .target-name { color:var(--accent); }
 .target-status { font-size:11px; color:var(--text-2); }
+.target-heading .btn-icon { flex:none; min-width:23px; }
+.target-heading .ui-icon { width:13px; height:13px; }
 .target-error { padding:4px 7px; color:var(--danger); font-size:11px; }
 .target-surface { position:relative; display:flex; flex:1; min-height:110px; min-width:0; }
 .target-surface :deep(.video-wrap) { min-height:110px; }
@@ -1542,12 +1639,14 @@ onUnmounted(() => {
 .target-empty { min-height:140px; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:10px; padding:12px; border:1px dashed var(--border); color:var(--text-2); font-size:12px; }
 .target-empty .select { max-width:100%; }
 @media(max-width:1100px) { .multiview-grid.nine { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media(max-width:1400px) { .target-status { display:none; } }
 @media(max-width:600px) { .multiview-grid,.multiview-grid.nine { grid-template-columns:minmax(0,1fr); grid-auto-rows:minmax(230px,1fr); } }
+.multiview-grid.single { grid-auto-rows:minmax(0,1fr); }
 
-.tb-operation-row.tb-browser-row { flex-wrap: nowrap; }
-.tb-browser-group { flex: 1; }
-.tb-page-select { flex: 1; width: 100px; min-width: 50px; max-width: 260px; font-size: 13px; text-overflow: ellipsis; }
-.tb-browser-row .tb-control-group { flex: none; flex-wrap: nowrap; }
+.tb-operation-row.tb-browser-row { flex-wrap: wrap; }
+.tb-browser-group { flex: 1 1 230px; min-width: min(230px, 100%); }
+.tb-page-select { field-sizing: fixed; flex: 1; width: 100px; min-width: 0; max-width: 260px; height: 28px; font-size: 13px; white-space: nowrap; text-overflow: ellipsis; }
+.tb-browser-row .tb-control-group { flex: 0 1 auto; flex-wrap: wrap; }
 .console {
   display: flex; height: 100%; padding: 14px; gap: 14px;
 }
@@ -1721,7 +1820,7 @@ onUnmounted(() => {
 .rp-script { color: var(--accent); }
 .rp-pct { color: var(--text-1); }
 .rp-bar { height: 5px; background: var(--bg-3); border-radius: 3px; overflow: hidden; }
-.rp-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 3px; transition: width .4s; }
+.rp-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 3px; }
 .rp-step { font-size: 12px; color: var(--text-1); }
 
 .live-logs {
@@ -1797,7 +1896,47 @@ onUnmounted(() => {
 /* 二次裁切占满整个模板区域 */
 .crop-panel-full { flex: 1; min-height: 0; border-top: none; padding-top: 0; }
 .crop-panel-full .crop-stage { flex: 1; min-height: 0; min-width: 0; }
-.console{flex-direction:column;padding:0;gap:0;background:var(--bg-0)}.console-body{flex:1;min-height:0;display:flex;gap:0}.stage{border:0;border-radius:0;background:var(--bg-0)}.panel{padding:0;border:0;border-radius:0;min-width:0;max-width:none;background:var(--bg-2);display:flex;flex-direction:column;gap:0;flex:none}.panel-resizer{flex:0 0 6px;width:6px;margin:0;border:0;border-left:1px solid var(--border);border-right:1px solid var(--border);border-radius:0;background:var(--chrome)}.panel-resizer:hover,.panel-resizer.active{background:var(--accent)}.app-hint{top:90px}.global-page .console-body{overflow:hidden}
-
-@media(max-width:800px){.console-body{flex-direction:column;overflow:auto}.stage{flex:none;height:48vh;min-height:300px}.panel{width:100%!important;min-height:55vh;flex:1}.panel-resizer{display:none}.global-page .panel{min-height:0}.global-page .console-body{overflow:hidden}}
+.console { flex-direction:column; padding:0; gap:0; background:var(--bg-0); }
+.console-body { flex:1; min-height:0; display:flex; padding:6px 8px; gap:0; }
+.stage { border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-0); }
+.panel { padding:0; border:1px solid var(--border); border-radius:var(--radius-sm); min-width:0; max-width:none; background:var(--bg-1); display:flex; flex-direction:column; gap:0; flex:none; }
+.panel-resizer { flex:0 0 10px; width:10px; margin:0; border:0; background:transparent; }
+.panel-resizer::before { inset:auto; top:calc(50% - 28px); left:-4px; width:18px; height:56px; border-radius:4px; border:1px solid var(--control-border); background:var(--chrome); }
+.panel-resizer :deep(.ui-icon) { position:absolute; z-index:1; pointer-events:none; top:50%; left:50%; transform:translate(-50%,-50%); width:14px; height:24px; color:var(--accent); }
+.panel-resizer:hover::before,.panel-resizer.active::before,.panel-resizer:focus-visible::before { border-color:var(--accent); background:var(--bg-2); }
+.sr-context { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+.toolbar { background:var(--chrome); }
+.tb-row { min-height:46px; padding:5px 8px; gap:6px 10px; }
+.tb-label,.stage-package :deep(.pkg-bar-label) { writing-mode:horizontal-tb; text-orientation:mixed; letter-spacing:0; padding:0; font-size:12px; }
+.tb-row .btn { height:34px; min-width:34px; padding:5px 8px; }
+.toolbar .select { font-size:14px; }.tb-label,.stage-package :deep(.pkg-bar-label) { font-size:13px; }
+.tb-dev-select { field-sizing:fixed; width:250px; height:34px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.tb-display-mode { display:flex; align-items:center; gap:6px; }
+.tb-display-mode .select { height:34px; }
+.toolbar .stage-package { margin-left:0; flex:0 1 330px; min-width:min(260px, 100%); max-width:330px; }
+.stage-package :deep(.func-pkg-row) { gap:6px; }
+.stage-package :deep(.select) { height:34px; max-width:210px; }
+.stage-package :deep(.btn) { min-width:34px; height:34px; }
+.stage-package :deep(.btn[aria-label="配置包详情"]) { width:34px; font-size:0; gap:0; padding:0; justify-content:center; }
+.toolbar-actions { display:flex; align-items:center; gap:6px; margin-left:auto; }
+.app-hint { top:8px; }
+.global-page .console-body { padding:0; overflow:hidden; }.global-page .panel { border:0; }
+.panel-expanded .panel { flex:1; }
+@media(max-width:1000px) { .tb-dev-select { width:180px; }.toolbar .stage-package { max-width:280px; } }
+@media(max-width:800px) {
+  .console-body { flex-direction:column; overflow:auto; padding:4px; gap:6px; }
+  .stage { flex:none; height:38vh; min-height:230px; }
+  .panel { width:100%!important; min-height:460px; flex:1; }
+  .panel-resizer { display:none; }
+  .panel-expanded .panel { min-height:0; height:100%; }
+  .global-page .panel { min-height:0; }.global-page .console-body { overflow:hidden; }
+  .tb-device-group { flex:1 1 100%; }.tb-dev-select { flex:1; width:160px; min-width:160px; white-space:nowrap; overflow:hidden; }
+  .toolbar .stage-package { flex:1 1 280px; min-width:min(280px, 100%); max-width:100%; }
+  .stage-package :deep(.func-pkg-row) { flex-wrap:nowrap; }
+  .stage-package :deep(.select) { flex:1; max-width:none; }
+  .stage-package :deep(.func-pkg) { min-width:130px; white-space:nowrap; overflow:hidden; }
+  .tb-row .btn { min-height:36px; }.tb-context-row { gap:6px; }
+  .panel-collapsed .stage { flex:1; height:auto; }.panel-collapsed .console-body,.panel-expanded .console-body { overflow:hidden; }
+}
+@media(pointer:coarse) { .tb-row .btn,.tb-row .select { min-height:44px; } }
 </style>

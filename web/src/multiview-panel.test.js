@@ -12,7 +12,7 @@ beforeEach(async () => {
   for (const [name,result] of Object.entries({ listScripts:[],listFunctions:[],listTemplates:[],getRunnerFunctions:{functions:[]},listExtensions:[] })) vi.spyOn(api,name).mockResolvedValue(result)
   vi.spyOn(api,'getRun').mockImplementation(async id=>({...runRegistry.byId[id],run_id:id,state:'success'}))
   packageStore.packages=[{id:'one'},{id:'two'}]; packageStore.currentPackageId='one'
-  workspace.state.targetIds=[]; workspace.state.configs=Object.create(null); workspace.state.selectedTargetId=null
+  workspace.state.targetIds=[]; workspace.state.configs=Object.create(null); workspace.state.selectedTargetId=null; workspace.state.gridSize=4
   workspace.addTarget('a'); workspace.addTarget('b')
   workspace.updateConfig('a',{packageId:'one',scriptId:'one/a.yaml',runnerId:'gamer-yaml',args:{account:'A'}})
   workspace.updateConfig('b',{packageId:'two',scriptId:'two/b.yaml',runnerId:'gamer-yaml',args:{account:'B'}})

@@ -3,6 +3,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import LogsPanel from './components/LogsPanel.vue'
 import { api } from './api'
+const { confirm } = vi.hoisted(() => ({ confirm: vi.fn(async () => true) }))
+vi.mock('./components/ui/useConfirmDialog', () => ({ useConfirmDialog: () => confirm }))
 vi.mock('./api', () => ({ api: { listLogs: vi.fn(), listDevices: vi.fn(), clearLogs: vi.fn() } }))
 let wrapper
 const records = [
@@ -11,6 +13,7 @@ const records = [
 ]
 beforeEach(() => {
   vi.useFakeTimers(); vi.clearAllMocks()
+  confirm.mockReset().mockResolvedValue(true)
   api.listLogs.mockResolvedValue(records)
   api.listDevices.mockResolvedValue([{ id: 'device1', name: '测试设备' }])
   api.clearLogs.mockResolvedValue({})
@@ -47,7 +50,16 @@ it('读取失败可见，清空后在途请求不能恢复旧日志', async () =
   let resolveOld
   api.listLogs.mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve }))
   await wrapper.get('[aria-label="刷新日志"]').trigger('click')
-  await wrapper.findAll('button').find(button => button.text() === '清空').trigger('click'); await flushPromises()
+  await wrapper.findAll('button').find(button => button.text() === '清空全部日志').trigger('click'); await flushPromises()
   resolveOld(records); await flushPromises()
   expect(wrapper.findAll('.log-line')).toHaveLength(0)
+})
+it('清空始终明确全部设备的范围，取消确认不会删除筛选中的或其他日志', async () => {
+  confirm.mockResolvedValue(false)
+  wrapper = mount(LogsPanel); await flushPromises()
+  await wrapper.get('[aria-label="日志设备"]').setValue('device1'); await flushPromises()
+  await wrapper.findAll('button').find(button => button.text() === '清空全部日志').trigger('click'); await flushPromises()
+  expect(confirm).toHaveBeenCalledWith(expect.stringContaining('筛选不会限制清空范围'), expect.objectContaining({ danger: true }))
+  expect(api.clearLogs).not.toHaveBeenCalled()
+  expect(wrapper.findAll('.log-line')).toHaveLength(2)
 })

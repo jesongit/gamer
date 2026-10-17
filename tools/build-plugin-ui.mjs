@@ -6,9 +6,10 @@ import { resolve } from 'node:path'
 const repo = fileURLToPath(new URL('../', import.meta.url))
 const installOnly = process.argv.includes('--install-only')
 const requested = process.argv.slice(2).filter(value => value !== '--install-only')
-const ids = requested.length ? requested : ['gamer-yaml', 'gamer-keymap', 'gamer-video', 'gamer-package-publisher', 'gamer-live', 'gamer-notify', 'gamer-ai']
+const ids = requested.length ? requested : ['gamer-yaml', 'gamer-keymap', 'gamer-video', 'gamer-package-publisher', 'gamer-live', 'gamer-notify']
 for (const id of ids) {
   if (!/^gamer-[a-z0-9-]+$/.test(id)) throw new Error('Invalid plugin id')
+  if (id === 'gamer-ai') throw new Error('gamer-ai is retired; connect an external Agent to Core MCP')
   const plugin = resolve(repo, 'plugins', id)
   for (const args of (installOnly ? [['install', '--frozen-lockfile']] : [['install', '--frozen-lockfile'], ['build']])) {
     // pnpm is a cmd shim on Windows; arguments here are fixed, never user text.

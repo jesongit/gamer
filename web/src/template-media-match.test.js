@@ -60,4 +60,16 @@ it('匹配请求期间切换视频位置，迟到命中不能画在新画面上'
   await pending
   expect(panel.showHit.value).toBe(false)
   expect(toast).not.toHaveBeenCalled()
+  expect(panel.matchTest.value).toBeNull()
+})
+it('明确的零阈值按零发送，识别结果保留实际分值；无效阈值不请求后端', async () => {
+  const {panel, match} = setup()
+  panel.testThreshold.value = 0
+  await panel.testMatch('shot.png')
+  expect(match).toHaveBeenLastCalledWith('shot.png', null, 0, null, 'pkg', expect.anything())
+  expect(panel.matchTest.value).toMatchObject({ state: 'hit', threshold: 0, score: 1, source: '视频画面' })
+  match.mockClear(); panel.testThreshold.value = 1.5
+  await panel.testMatch('shot.png')
+  expect(match).not.toHaveBeenCalled()
+  expect(panel.matchTest.value).toMatchObject({ state: 'error' })
 })

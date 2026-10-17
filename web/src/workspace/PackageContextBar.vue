@@ -1,13 +1,15 @@
 <template>
   <div class="func-pkg-row package-context-bar" :class="{ compact, management }">
-    <span v-if="!compact" class="pkg-bar-label" title="脚本、模板等插件资源的数据上下文">{{ management ? '当前配置' : '配置包' }}</span>
+    <span v-if="showSelection" class="pkg-bar-label" title="脚本、模板等插件资源的数据上下文">{{ management ? '当前配置' : '配置包' }}</span>
     <select
-      :value="ctx.currentId || ''"
+      v-if="showSelection"
+      v-model="selection"
       class="select mono func-pkg"
+      aria-label="当前配置包"
       title="当前配置：右侧所有非全局功能的统一数据上下文"
-      @change="ctx.onPackageChange"
+      @change="changePackage"
     >
-      <option v-if="!ctx.pkgOptions.length" value="">（暂无配置）</option>
+      <option value="">{{ ctx.pkgOptions.length ? '选择配置包…' : '（暂无配置）' }}</option>
       <option v-for="id in ctx.pkgOptions" :key="id" :value="id">{{ ctx.optionLabel(id) }}</option>
     </select>
     <button class="btn btn-sm" :disabled="!ctx.currentId || ctx.busy" title="配置包详情" aria-label="配置包详情" @click="ctx.openDetail()"><UiIcon name="info" />详情</button>
@@ -22,7 +24,6 @@
         <button :class="management ? 'btn btn-sm btn-danger' : 'action-menu-item danger'" :disabled="!ctx.currentId || ctx.busy" title="删除当前配置（数据不可恢复）" @click="ctx.openDelete" aria-label="删除配置">删除</button>
       </div>
     </component>
-    <span v-if="compact" class="pkg-bar-label" title="脚本、模板等插件资源的数据上下文">配置</span>
     <!-- .gamerpkg 归档选择：change 后清空 value 支持重选同文件 -->
     <input ref="fileInput" class="pkg-import-input" type="file" accept=".gamerpkg,.zip" @change="ctx.onImportPicked" />
   </div>
@@ -30,28 +31,24 @@
   <Teleport v-if="dialogs" to="body">
   <!-- 新建 / 复制弹窗（共用表单） -->
   <div v-if="ctx.formModal.open" class="modal-mask" v-backdrop-dismiss="ctx.closeForm">
-    <div class="modal">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="配置包编辑">
       <h3>{{ ctx.formModal.mode === 'create' ? '新建配置' : '复制配置' }}</h3>
-      <label class="field">
-        <span>配置 ID（小写字母/数字开头，含 . _ -）</span>
-        <input v-model="ctx.formModal.form.id" class="input mono" placeholder="如 user.hsr.daily" spellcheck="false" />
-      </label>
-      <label class="field">
-        <span>名称（可选）</span>
-        <input v-model="ctx.formModal.form.name" class="input" placeholder="显示名" />
-      </label>
-      <label class="field">
-        <span>版本</span>
-        <input v-model="ctx.formModal.form.version" class="input mono" />
+      <fieldset class="package-form-fields" :disabled="ctx.formModal.submitting">
+      <label v-if="ctx.formModal.mode === 'create'" class="field">
+        <span>配置包名称（可选）</span>
+        <input v-model="ctx.formModal.form.name" class="input" aria-label="配置包名称" placeholder="例如：我的日常任务" />
       </label>
       <PackageTargetsEditor v-if="ctx.formModal.mode === 'create'" :form="ctx.formModal.form" :busy="ctx.addingTarget" @add-current="ctx.addCurrentFormTarget" />
-      <p v-else class="target-copy-hint">副本保留原配置的全部适用目标与资源，可在复制后进入详情编辑。</p>
-      <p v-if="ctx.formModal.error" class="form-error">{{ ctx.formModal.error }}</p>
+      <p v-else class="target-copy-hint">复制「{{ ctx.formModal.form.name }}」。副本保留原配置的名称、版本、全部适用目标与资源，可在复制后进入详情编辑。</p>
+      <details class="package-advanced"><summary>{{ ctx.formModal.mode === 'create' ? '配置标识与版本' : '副本标识' }}</summary><p class="detail-hint">已分配独立标识，用于保存和分享这份配置；它与游戏应用包名相互独立。</p>
+      <label class="field"><span>配置标识（小写字母、数字、点、下划线或连字符）</span><input v-model="ctx.formModal.form.id" class="input mono" aria-label="配置标识" spellcheck="false" /></label>
+      <label v-if="ctx.formModal.mode === 'create'" class="field"><span>版本</span><input v-model="ctx.formModal.form.version" class="input mono" aria-label="配置包版本" /></label></details>
+      </fieldset>
+      <p v-if="ctx.formModal.error" class="form-error" role="alert">{{ ctx.formModal.error }}</p>
       <div class="modal-actions">
-        <button v-if="ctx.formModal.mode === 'create'" class="btn" :disabled="ctx.formModal.submitting" @click="ctx.fillCurrentApp">填入当前应用</button>
-        <button class="btn" @click="ctx.closeForm">取消</button>
+        <button class="btn" :disabled="ctx.formModal.submitting" @click="ctx.closeForm">取消</button>
         <button class="btn btn-primary" :disabled="ctx.formModal.submitting" @click="ctx.submitForm">
-          {{ ctx.formModal.submitting ? '保存中…' : '保存' }}
+          {{ ctx.formModal.submitting ? '保存中…' : (ctx.formModal.mode === 'create' ? '创建配置包' : '确认复制') }}
         </button>
       </div>
     </div>
@@ -182,7 +179,7 @@ import UiIcon from '../components/ui/UiIcon.vue'
 import PackageDetailModal from './PackageDetailModal.vue'
 import PackageTargetsEditor from './PackageTargetsEditor.vue'
 
-const props = defineProps({ context: { type: Object, default: null }, compact: Boolean, management: Boolean, dialogs: { type: Boolean, default: true } })
+const props = defineProps({ context: { type: Object, default: null }, compact: Boolean, management: Boolean, dialogs: { type: Boolean, default: true }, showSelection: { type: Boolean, default: true } })
 const toast = useToast()
 const fileInput = ref(null)
 function closeMenu(event) {
@@ -194,6 +191,16 @@ function closeMenu(event) {
 // context 由 Console 装配（注入 refreshAll 全量刷新）；缺省自建（测试/独立使用）。
 // reactive() 解包对象内的 ref/computed（模板 ctx.busy/ctx.currentId 直接可用）。
 const ctx = reactive(props.context || usePackageContext({ toast }))
+// v-model reapplies selection when asynchronous options arrive. Keep the
+// displayed value separate until the existing draft guard accepts the change.
+const selection = ref(ctx.currentId || '')
+watch(() => ctx.currentId, value => { selection.value = value || '' })
+async function changePackage(event) {
+  const pending = ctx.onPackageChange(event)
+  selection.value = ctx.currentId || ''
+  await pending
+  selection.value = ctx.currentId || ''
+}
 const exportSearch = ref('')
 watch(() => ctx.exportModal.open, () => { exportSearch.value = '' })
 const exportFiles = computed(() => {
@@ -259,10 +266,14 @@ const androidCandidates = computed(() => {
 .summary { margin:0; display:grid; grid-template-columns:auto 1fr; gap:4px 12px; font-size:12px; }
 .summary dt { color:var(--text-2); }
 .summary dd { margin:0; word-break:break-all; }
-.compact{max-width:100%;min-width:0;flex-wrap:wrap;justify-content:flex-end}.compact .func-pkg{field-sizing:content;flex:0 1 auto;width:auto;min-width:0;max-width:100%}.compact .pkg-bar-label{font-size:12px}.pkg-more{position:relative}.pkg-menu{position:absolute;top:calc(100% + 4px);right:0;z-index:35}
+.compact{width:100%;max-width:100%;min-width:0;flex-wrap:nowrap;justify-content:flex-end}.compact .func-pkg{field-sizing:fixed;flex:1 1 auto;width:200px;min-width:80px;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.compact .pkg-bar-label{font-size:12px}.pkg-more{position:relative;flex:none}.pkg-menu{position:absolute;top:calc(100% + 4px);right:0;z-index:35}
 .management { flex-wrap:wrap; gap:8px; padding-bottom:16px; border-bottom:1px solid var(--border); }
 .management .func-pkg { flex:0 1 280px; }.management .pkg-more { margin-left:auto; }
 .management .pkg-menu { position:static; display:flex; flex-direction:row; flex-wrap:wrap; gap:6px; padding:0; background:transparent; border:0; box-shadow:none; min-width:0; }
 .management .pkg-menu .btn:not(.btn-primary) { background:transparent; border-color:var(--border); }.management .pkg-menu .btn-danger { color:var(--text-1); }.management .pkg-menu .btn-danger:hover { color:var(--danger); border-color:var(--danger); }
 .management .pkg-menu .btn-primary { background:var(--accent); border-color:var(--accent); color:#202015; }
+.package-advanced{display:flex;flex-direction:column;gap:8px;font-size:13px}.package-advanced summary{cursor:pointer;padding:5px 0}.package-advanced .field{margin-top:8px}.detail-hint{font-size:13px;color:var(--text-2);line-height:1.6}.modal{max-width:calc(100vw - 24px)}
+.package-form-fields{border:0;padding:0;margin:0;min-width:0;display:flex;flex-direction:column;gap:12px}
+/* Keep the compact selector's native label and keyboard behavior. */
+.compact .func-pkg,.compact .func-pkg::picker(select){appearance:auto}
 </style>

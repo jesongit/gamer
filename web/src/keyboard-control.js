@@ -160,6 +160,10 @@ const IGNORE_TARGET_SELECTOR = [
   '.monaco-editor',
   '.ace_editor',
   '.modal',
+  '.modal-mask',
+  '.plugin-center-mask',
+  '.tpl-view-mask',
+  '.crop-modal-mask',
   '.dialog',
   '.popup',
 ].join(',')
@@ -209,7 +213,7 @@ function hasIgnoredShape(element) {
   }
 
   const className = typeof element.className === 'string' ? element.className : ''
-  if (/(^|\s)(editor|script-editor|code-editor|yaml-editor|raw-editor|cm-editor|monaco-editor|ace_editor|modal|dialog|popup)(\s|$)/i.test(className)) {
+  if (/(^|\s)(editor|script-editor|code-editor|yaml-editor|raw-editor|cm-editor|monaco-editor|ace_editor|modal|modal-mask|plugin-center-mask|tpl-view-mask|crop-modal-mask|dialog|popup)(\s|$)/i.test(className)) {
     return true
   }
 

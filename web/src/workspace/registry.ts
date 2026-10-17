@@ -16,6 +16,7 @@ export interface PanelContribution {
   location: typeof CONSOLE_RIGHT_LOCATION | string
   runtime: PanelRuntime
   requiresDevice?: boolean
+  usesPackageContext?: boolean
   preferredWidth?: number
   keepAlive?: PanelKeepAlive
   keep_alive?: PanelKeepAlive

@@ -1,7 +1,7 @@
 import { test } from 'vitest'
 import assert from 'node:assert/strict'
 import { createMultiviewWorkspace, MULTIVIEW_STORAGE_KEY } from './console/multiview-state.mjs'
-function setup(overrides = {}, saved) {
+function setup(overrides = {}, saved = { gridSize: 4 }) {
   const registry = { byId: {}, activeByDevice: {} }, calls = [], disk = {}
   if (saved) disk[MULTIVIEW_STORAGE_KEY] = JSON.stringify(saved)
   const applyRunRecord = rec => { registry.byId[rec.run_id] = rec; if (['success','cancelled','failed'].includes(rec.state)) { if (registry.activeByDevice[rec.device_id] === rec.run_id) delete registry.activeByDevice[rec.device_id] } else registry.activeByDevice[rec.device_id] = rec.run_id }
@@ -11,6 +11,24 @@ function setup(overrides = {}, saved) {
 }
 const configure = (w, id) => { w.addTarget(id); w.updateConfig(id, { packageId: 'pkg', scriptId: 'pkg/test.yaml', runnerId: 'yaml', args: { n: id } }) }
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done }); return { promise, resolve } }
+
+test('single screen follows any selected target and preserves its hidden runs, configuration and saved mode', async () => {
+  const { workspace:w, calls, disk } = setup({}, null)
+  assert.equal(w.state.gridSize, 1)
+  for (const id of ['a','b','c','d','e','f','g']) configure(w, id)
+  await w.selectTarget('g')
+  assert.deepEqual(w.visibleTargetIds, ['g'])
+  await w.startVisible()
+  assert.deepEqual(calls.map(call => call.device_id), ['g'])
+  assert.equal(await w.setGridSize(4, { beforeChange: () => false }), false)
+  assert.equal(w.state.gridSize, 1); assert.equal(w.state.selectedTargetId, 'g')
+  await w.setGridSize(9); await w.setGridSize(1)
+  const restored = setup({}, JSON.parse(disk[MULTIVIEW_STORAGE_KEY])).workspace
+  assert.equal(restored.state.gridSize, 1); assert.deepEqual(restored.visibleTargetIds, ['g'])
+  await w.removeTarget('g')
+  assert.deepEqual(w.visibleTargetIds, ['a']); assert.equal(w.getConfig('g').args.n, 'g')
+  assert.equal(w.getRun('g').run_id, 'run-g')
+})
 test('layout deduplicates and restores without auto-starting; 9 to 4 retains hidden targets', async () => {
   const { workspace: w, calls, disk } = setup({}, { targetIds: ['a','a','b'], gridSize: 9 })
   assert.deepEqual(w.state.targetIds, ['a','b']); assert.equal(calls.length, 0)

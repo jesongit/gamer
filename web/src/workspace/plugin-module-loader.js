@@ -41,14 +41,16 @@ async function loadModule(id, url) {
 
 export async function loadInstalledModules(response) {
   installPluginModuleSdk()
-  for (const item of authorizedModuleContributions(response)) {
-    if (failures.has(item.plugin_id)) continue
+  const unique = new Map()
+  for (const item of authorizedModuleContributions(response)) if (!unique.has(item.plugin_id)) unique.set(item.plugin_id, item)
+  await Promise.all([...unique.values()].map(async item => {
+    if (failures.has(item.plugin_id)) return
     try { await loadModule(item.plugin_id, moduleAssetUrl(item.plugin_id, item.entry, item.version)) }
     catch (error) {
       failures.set(item.plugin_id, String(error.message || error))
       console.error(`插件 ${item.plugin_id} 界面加载失败`, error)
     }
-  }
+  }))
 }
 
 export async function preparePluginModules() {
@@ -57,7 +59,8 @@ export async function preparePluginModules() {
   await loadInstalledModules(await response.json())
   // These deployment-owned assets provide console integration when an official
   // plugin is absent/disabled. They are built independently of the shell bundle.
-  for (const id of official) if (!modules.has(id)) await loadModule(id, `/plugin-ui/${id}/plugin.js`)
+  await Promise.all(official.filter(id => !modules.has(id))
+    .map(id => loadModule(id, `/plugin-ui/${id}/plugin.js`)))
 }
 
 export function pluginModule(id) {

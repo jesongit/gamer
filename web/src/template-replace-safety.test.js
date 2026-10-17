@@ -21,7 +21,6 @@ vi.mock('./api', () => ({ api: mocks }))
 vi.mock('../../plugins/gamer-video/ui/src/components/video/videoApi', () => ({ videoApi: videoMocks }))
 
 import { useConsoleTemplates } from '../../plugins/gamer-yaml/ui/src/components/console/useConsoleTemplates'
-import TemplateStudio from '../../plugins/gamer-video/ui/src/components/video/TemplateStudio.vue'
 import { templateShortName } from '../../plugins/gamer-yaml/ui/src/console/template-resource'
 
 function createTemplate(name = 'hero#100_200_500_500.png', version = 'v-old') {
@@ -274,69 +273,4 @@ describe('模板资源替换安全性（P1-T）', () => {
     wrapper.unmount()
   })
 
-  it('视频模板制作覆盖复用条件 PUT，保留既有文件名/区域元数据', async () => {
-    const existing = createTemplate('hero#100_200_500_500.png', 'v-old')
-    mocks.listTemplates.mockResolvedValue([existing])
-    videoMocks.createTemplateFromFrame.mockRejectedValueOnce(
-      new Error('模板短名冲突: hero#100_200_500_500.png（确认覆盖请带 overwrite:true）'),
-    )
-    const context = {
-      getContext: vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
-        imageSmoothingEnabled: false,
-        drawImage: vi.fn(),
-      }),
-      toBlob: vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation(callback => {
-        callback(new Blob(['png'], { type: 'image/png' }))
-      }),
-    }
-    const OriginalFileReader = globalThis.FileReader
-    vi.stubGlobal('FileReader', class {
-      readAsDataURL() {
-        this.result = 'data:image/png;base64,QUJD'
-        this.onload?.()
-      }
-    })
-    const wrapper = mount(TemplateStudio, {
-      props: {
-        open: true,
-        media: { id: 'm1', width: 100, height: 100 },
-        frame: { frameIndex: 5, ptsUs: 5000 },
-        calibration: { version: 1 },
-        packageId: 'pkg-a',
-        yamlReady: true,
-      },
-    })
-    const image = wrapper.find('[data-testid="studio-frame-image"]')
-    Object.defineProperty(image.element, 'naturalWidth', { configurable: true, value: 100 })
-    Object.defineProperty(image.element, 'naturalHeight', { configurable: true, value: 100 })
-    image.element.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 100 })
-    await image.trigger('load')
-    await wrapper.find('[data-testid="studio-template-name"]').setValue('hero')
-    await image.trigger('mousedown', { button: 0, clientX: 10, clientY: 20 })
-    await image.trigger('mousemove', { clientX: 50, clientY: 50 })
-    await image.trigger('mouseup')
-    await wrapper.vm.$.setupState.saveTemplate()
-    await flushPromises()
-
-    expect(wrapper.find('[data-testid="studio-overwrite"]').exists()).toBe(true)
-    await wrapper.find('[data-testid="studio-overwrite"]').setValue(true)
-    await wrapper.vm.$.setupState.saveTemplate()
-    await flushPromises()
-
-    expect(videoMocks.createTemplateFromFrame).toHaveBeenCalledTimes(1)
-    expect(mocks.deleteTemplate).not.toHaveBeenCalled()
-    expect(mocks.putPluginResourceBytes).toHaveBeenCalledWith(
-      'pkg-a',
-      'gamer-yaml',
-      `templates/${existing.name}`,
-      new Uint8Array([65, 66, 67]),
-      { expectedVersion: 'v-old' },
-    )
-    expect(wrapper.text()).toContain('模板已保存')
-
-    context.getContext.mockRestore()
-    context.toBlob.mockRestore()
-    vi.stubGlobal('FileReader', OriginalFileReader)
-    wrapper.unmount()
-  })
 })

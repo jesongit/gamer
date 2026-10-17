@@ -11,7 +11,7 @@
     </div>
 
     <div v-if="st.loading && !st.info && !st.update" class="card state-card" role="status">
-      <div class="state-icon">⏳</div>
+      <UiIcon class="state-icon" name="refresh" />
       <div>
         <div class="state-title">正在读取系统状态</div>
         <div class="state-desc">正在向服务端请求系统信息与更新状态。</div>
@@ -20,6 +20,7 @@
 
     <template v-else>
       <SystemSettings />
+      <ExternalAccessSettings />
       <ExtensionSettings />
       <SystemInfoCard class="stack-gap" :info="st.info" :error="infoErrorText"
         @check="onCheck" @install="requestInstall" />
@@ -46,7 +47,7 @@
               </label>
 
               <div class="window-fields" :class="{ dim: policyForm.strategy !== 'auto' }">
-                <span>维护窗口（仅 auto 使用）</span>
+                <span>维护时段（自动更新时使用）</span>
                 <input type="time" v-model="policyForm.start" data-testid="window-start" />
                 <span>–</span>
                 <input type="time" v-model="policyForm.end" data-testid="window-end" />
@@ -59,7 +60,7 @@
               </div>
 
               <p v-if="policyForm.strategy === 'auto'" class="gate-note" data-testid="gate-note">
-                auto 门禁：仅维护窗口内、无运行中脚本、无其他升级/维护事务、且距下一次定时任务触发大于冻结窗口时才自动安装；
+                自动安装条件：在维护时段内、没有运行中的脚本或其他升级操作、且距下一次定时任务触发大于冻结窗口时才安装；
                 不满足则一直等待，不会中断运行中的脚本。窗口允许跨午夜（如 23:00–05:00）。
               </p>
 
@@ -108,6 +109,7 @@ import { OPERATION_FEEDBACK_KEY, operationReporter } from '../workspace/operatio
 import UiIcon from './ui/UiIcon.vue'
 import SystemInfoCard from './SystemInfoCard.vue'
 import SystemSettings from './SystemSettings.vue'
+import ExternalAccessSettings from './ExternalAccessSettings.vue'
 import ExtensionSettings from './ExtensionSettings.vue'
 import UpdateStatusCard from './UpdateStatusCard.vue'
 import UpdateConfirmModal from './UpdateConfirmModal.vue'
@@ -347,7 +349,7 @@ async function savePolicy() {
   padding: 6px 10px; background: rgba(251, 191, 36, .06);
 }
 .policy-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.save-note { color: var(--green, #57d38c); font-size: 12px; }
+.save-note { color: var(--ok); font-size: 12px; }
 .save-error { color: var(--danger, #ef6b73); font-size: 12px; }
 .policy-unavailable { display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--text-1); }
 .policy-unavailable p { margin: 0; }

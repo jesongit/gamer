@@ -9,6 +9,7 @@ import { operationReporter } from '../workspace/operation-feedback'
 import { computed, reactive, ref, watch } from 'vue'
 import { api as defaultApi } from '../api'
 import { sha256Hex } from '../workspace/plugin-center/registry-client'
+import { pluginMessageChannel } from '../workspace/plugin-messages'
 import {
   packageStore, loadPackages, selectPackage, refreshPackages, currentPackageId,
 } from '../package-store'
@@ -30,8 +31,7 @@ export function isValidPackageId(value) {
 /**
  * 依赖注入：toast / refreshAll()（包切换或
  * 导入后重拉资源面板）/ download(blob, filename) / api。均可替换以便测试。
- * currentApp 提供当前设备的 Android 应用包名与显示名；loadCurrentApps 用于在
- * 显示名尚未读取时补读应用列表。
+ * currentApp 提供当前设备的应用显示名；适用目标通过 targetIdentity 权威读取。
  */
 export function usePackageContext({
   api = defaultApi,
@@ -42,7 +42,6 @@ export function usePackageContext({
   download,
   currentApp,
   currentTargetId,
-  loadCurrentApps,
 } = {}) {
   const beginReport = operationReporter(feedback, '', toast)
   const busy = ref(false)
@@ -269,7 +268,7 @@ export function usePackageContext({
 
   // ---------- 新建 / 复制（同一表单弹窗） ----------
   const formModal = reactive({
-    open: false, mode: 'create', submitting: false, error: '',
+    open: false, mode: 'create', sourceId: null, submitting: false, error: '',
     form: { id: '', name: '', version: PACKAGE_INITIAL_VERSION, androidPackagesText: '', webUrlPrefixesText: '' },
   })
 
@@ -285,33 +284,15 @@ export function usePackageContext({
     return value && typeof value === 'object' ? value : null
   }
 
-  /** 将当前设备的 Android 应用填入新建配置表单。 */
-  async function fillCurrentApp() {
-    let app = currentAppSnapshot()
-    let packageName = String(app?.pkg || app?.package_name || app?.packageName || '').trim()
-    if (!packageName) {
-      toast('当前没有可用的应用包名，请先在左侧应用下拉中选择', 'warn')
-      return false
-    }
-
-    // 连接后通常已有缓存；名称缺失时补读一次，取得 API 返回的真实 label。
-    if (!String(app?.label || app?.name || '').trim() && typeof loadCurrentApps === 'function') {
-      try { await loadCurrentApps() } catch { /* 名称读取失败时仍可使用包名填充 */ }
-      app = currentAppSnapshot()
-      packageName = String(app?.pkg || app?.package_name || app?.packageName || packageName).trim()
-    }
-
-    formModal.form.id = normalizePackageId(packageName)
-    formModal.form.androidPackagesText = packageName
-    formModal.form.name = String(app?.label || app?.name || packageName).trim()
-    formModal.error = ''
-    return true
+  function newPackageId() {
+    return `user.${Array.from(crypto.getRandomValues(new Uint8Array(6)), byte => byte.toString(16).padStart(2, '0')).join('')}`
   }
 
   function openCreate() {
     formModal.mode = 'create'
+    formModal.sourceId = null
     // 由用户明确选择适用目标，不默认扩大范围。
-    formModal.form = { id: '', name: '', version: PACKAGE_INITIAL_VERSION, androidPackagesText: '', webUrlPrefixesText: '' }
+    formModal.form = { id: newPackageId(), name: '', version: PACKAGE_INITIAL_VERSION, androidPackagesText: '', webUrlPrefixesText: '' }
     formModal.error = ''
     formModal.open = true
   }
@@ -321,9 +302,10 @@ export function usePackageContext({
     if (!id) return
     const src = packages.value.find(p => p.id === id)
     formModal.mode = 'duplicate'
+    formModal.sourceId = id
     formModal.form = {
-      id: `user.${id.replace(/^user\./, '')}.copy`,
-      name: src?.name ? `${src.name}（副本）` : '',
+      id: newPackageId(),
+      name: src?.name || id,
       version: src?.version || PACKAGE_INITIAL_VERSION,
       androidPackagesText: (src?.targets?.android?.packages || []).join(', '),
       webUrlPrefixesText: (src?.targets?.web?.url_prefixes || []).join('\n'),
@@ -333,6 +315,7 @@ export function usePackageContext({
   }
 
   function closeForm() {
+    if (formModal.submitting) return
     formModal.open = false
     formModal.error = ''
   }
@@ -373,7 +356,7 @@ export function usePackageContext({
         })
         toast(`配置已创建：${id}`, 'success')
       } else {
-        await api.duplicatePackage(currentId.value, id)
+        await api.duplicatePackage(formModal.sourceId, id)
         toast(`已复制为 ${id}`, 'success')
       }
       formModal.open = false
@@ -431,6 +414,7 @@ export function usePackageContext({
     form: { name: '', version: '', author: '', androidPackagesText: '', webUrlPrefixesText: '', plugins: [] },
     compat: { input: '', kind: 'android', checking: false, error: '', result: null },
   })
+  let detailRequest = 0
 
   /** GET /api/packages/:pkg 响应 → 组件友好形态（plugin_states → pluginStates）。 */
   function normalizeDetail(rep) {
@@ -461,14 +445,16 @@ export function usePackageContext({
   }
 
   async function reloadDetail() {
+    const token = ++detailRequest, pkg = detailModal.packageId
     detailModal.loading = true
     detailModal.error = ''
     try {
-      detailModal.detail = normalizeDetail(await api.getPackage(detailModal.packageId))
+      const detail = normalizeDetail(await api.getPackage(pkg))
+      if (token === detailRequest && pkg === detailModal.packageId && detailModal.open) detailModal.detail = detail
     } catch (e) {
-      detailModal.error = e?.message || '加载配置详情失败'
+      if (token === detailRequest && pkg === detailModal.packageId && detailModal.open) detailModal.error = e?.message || '加载配置详情失败'
     } finally {
-      detailModal.loading = false
+      if (token === detailRequest) detailModal.loading = false
     }
   }
 
@@ -487,10 +473,27 @@ export function usePackageContext({
   }
 
   function closeDetail() {
+    detailRequest++
     ++compatGeneration
     detailModal.open = false
     detailModal.error = ''
   }
+  const packageResourcesChanged = pluginMessageChannel('core:package-resources-changed')
+  watch(() => packageResourcesChanged.seq, async () => {
+    const pkg = packageResourcesChanged.packageId
+    if (pkg !== currentId.value) return
+    await refreshPackages({ api })
+    if (!detailModal.open || detailModal.packageId !== pkg || detailModal.saving) return
+    if (!detailModal.editing) { await reloadDetail(); return }
+    // Refresh counts while retaining the user's metadata form and its base revision.
+    const token = ++detailRequest
+    try {
+      const detail = normalizeDetail(await api.getPackage(pkg))
+      if (token === detailRequest && detailModal.open && detailModal.packageId === pkg && detailModal.editing) {
+        detailModal.detail = { ...detailModal.detail, stats: detail.stats, pluginStates: detail.pluginStates }
+      }
+    } catch { /* The normal detail refresh remains available after transient failure. */ }
+  })
 
   function startEdit() {
     const p = detailModal.detail?.package
@@ -642,6 +645,7 @@ export function usePackageContext({
         toast?.(`已添加网页前缀（不含查询参数与片段）。${identity.note}`, 'success')
       } else {
         form.androidPackagesText = [...new Set([...parseAndroidPackages(form.androidPackagesText), identity.value])].join(', ')
+        if (form === formModal.form && !form.name) form.name = String(currentAppSnapshot()?.label || identity.value)
       }
       errorOwner[errorOwner === detailModal ? 'editError' : 'error'] = ''
     } catch (e) {
@@ -654,7 +658,7 @@ export function usePackageContext({
     loadPackages, refreshPackages,
     pickImportFile, onImportPicked, importPackage,
     exportPackage, exportModal, refreshExport, confirmExport, closeExport,
-    formModal, openCreate, openDuplicate, fillCurrentApp, submitForm, closeForm,
+    formModal, openCreate, openDuplicate, submitForm, closeForm,
     overwriteModal, confirmOverwrite, closeOverwrite,
     deleteModal, openDelete, confirmDelete, closeDelete,
     detailModal, openDetail, closeDetail, reloadDetail,

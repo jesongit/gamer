@@ -1,21 +1,64 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-10-06T18:03:34Z",
+  "generated_at": "2026-10-13T14:00:01Z",
   "host_api": "1.0.0",
   "provenance": {
-    "plugin_commit": "f133d6be7e72222812e69764739691ac67df4481",
-    "sdk_host_commit": "3568008090442700888770f08c00e6351b4aa277"
+    "plugin_commit": "74c690c7b8380b91d70a5277485a40f7c4312dfb",
+    "sdk_host_commit": "8e0dc6a7dfa65a4817441045877a44a61528deb7"
   },
   "plugins": [
     {
-      "id": "gamer-ai",
-      "version": "0.3.10",
-      "name": "AI 助手",
-      "description": "Agent 对话、配置包攻略记忆与混合检索，可选联网服务和本机 MCP 游玩接入",
+      "id": "gamer-live",
+      "version": "0.2.7",
+      "name": "直播助手",
+      "description": "设备直播与文件夹视频自动直播，弹幕排队执行脚本并自动切换画面；支持直播姬与手动 RTMP 输出",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-ai-0.3.10.gplugin",
-      "sha256": "44a27aff4834de17d96cc737efdeaa8ac3d7cabff92f53d615ccceae6a305096",
-      "size": 109842,
+      "download_url": "/plugins/gamer-live-0.2.7.gplugin",
+      "sha256": "26f6069a313e0e0a61dc84246da2aa9d015e6d04559e5901a6f0e480ad1bfb2e",
+      "size": 26849,
+      "permissions": [
+        "ui.host",
+        "media.stream",
+        "live.connect",
+        "resource.read",
+        "run.submit",
+        "run.control"
+      ],
+      "host_api": {
+        "media": "^1.0",
+        "resource": "^1.0",
+        "run": "^1.0",
+        "runtime": "^1.0",
+        "ui": "^1.0"
+      },
+      "ui": {
+        "contributions": [
+          {
+            "component": "LiveWorkspace",
+            "entry": "ui/plugin.js",
+            "location": "console.right",
+            "order": 50,
+            "panel_id": "live",
+            "requires_device": false,
+            "runtime": "core",
+            "title": "直播助手"
+          }
+        ]
+      },
+      "execution": {
+        "kind": "builtin",
+        "host_version": ">=0.3.0"
+      }
+    },
+    {
+      "id": "gamer-ai",
+      "version": "0.4.12",
+      "name": "AI 助手",
+      "description": "Agent 对话、攻略记忆、设备游玩与自动化生成和事后诊断",
+      "publisher": "gamer.dev",
+      "download_url": "/plugins/gamer-ai-0.4.12.gplugin",
+      "sha256": "a7297ba22a08bebf1fde64630cbd1b1acfe3b9c469e01af80caf49754eb858bf",
+      "size": 113592,
       "permissions": [
         "ui.host",
         "ai.connect",
@@ -55,7 +98,7 @@
       },
       "execution": {
         "kind": "builtin",
-        "host_version": ">=0.2.14"
+        "host_version": ">=0.3.0"
       }
     },
     {
@@ -65,8 +108,8 @@
       "description": "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键",
       "publisher": "gamer.dev",
       "download_url": "/plugins/gamer-keymap-0.1.5.gplugin",
-      "sha256": "b089662387f1a3aaf586f7c6a56cef823a94ba3d12b40c62d82c1557415d35ff",
-      "size": 132038,
+      "sha256": "80541849e1be1a33fe1a877bf74edbd87299ff3d3a15acc0fc49709b0a813439",
+      "size": 131933,
       "permissions": [
         "ui.host",
         "input.tap",
@@ -100,56 +143,13 @@
       }
     },
     {
-      "id": "gamer-live",
-      "version": "0.2.5",
-      "name": "直播助手",
-      "description": "向直播姬提供设备音视频素材，接收 B 站直播互动；支持手动 RTMP 输出",
-      "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-live-0.2.5.gplugin",
-      "sha256": "ea9f03d91026b2152c9d096e0baae63dac7c5db5ce96136481a48e43febbcf6f",
-      "size": 22325,
-      "permissions": [
-        "ui.host",
-        "media.stream",
-        "live.connect",
-        "resource.read",
-        "run.submit",
-        "run.control"
-      ],
-      "host_api": {
-        "media": "^1.0",
-        "resource": "^1.0",
-        "run": "^1.0",
-        "runtime": "^1.0",
-        "ui": "^1.0"
-      },
-      "ui": {
-        "contributions": [
-          {
-            "component": "LiveWorkspace",
-            "entry": "ui/plugin.js",
-            "location": "console.right",
-            "order": 50,
-            "panel_id": "live",
-            "requires_device": false,
-            "runtime": "core",
-            "title": "直播助手"
-          }
-        ]
-      },
-      "execution": {
-        "kind": "builtin",
-        "host_version": ">=0.2.5"
-      }
-    },
-    {
       "id": "gamer-notify",
       "version": "0.1.0",
       "name": "通知助手",
       "description": "全局通知通道、任务结果通知与自动化通知",
       "publisher": "gamer.dev",
       "download_url": "/plugins/gamer-notify-0.1.0.gplugin",
-      "sha256": "e5006ef20a8110498b531e6c3ed0cc1b1d5e28aeb2603f4ad434c8ffc7ba3794",
+      "sha256": "09c3e3046d3be32a8893f09549b425d86399598b4966eeb7dca9019ce4bbdc19",
       "size": 5994,
       "permissions": [
         "ui.host",
@@ -179,13 +179,80 @@
       }
     },
     {
+      "id": "gamer-ocr",
+      "version": "0.1.0",
+      "name": "文字识别",
+      "description": "按需本地 OCR，为自动化提供文字、置信度和位置",
+      "publisher": "gamer.dev",
+      "download_url": "/plugins/gamer-ocr-0.1.0.gplugin",
+      "sha256": "26504243f01f44419e6f3cee061500be065f540c2d7b876603a172119631dcc4",
+      "size": 761,
+      "permissions": [
+        "ui.host",
+        "vision.ocr"
+      ],
+      "host_api": {
+        "runtime": "^1.0",
+        "ui": "^1.1",
+        "vision": "^1.0"
+      },
+      "ui": {
+        "contributions": [
+          {
+            "description": "OCR 使用本机 Tesseract，识别结束即退出。路径留空使用自动检测；语言包需提前安装，不会自动下载。",
+            "fields": [
+              {
+                "default": "",
+                "label": "Tesseract 程序",
+                "name": "engine_path",
+                "placeholder": "留空自动检测 tesseract.exe",
+                "type": "text"
+              },
+              {
+                "default": "",
+                "label": "语言包目录",
+                "name": "tessdata_path",
+                "placeholder": "留空使用程序旁的 tessdata",
+                "type": "text"
+              },
+              {
+                "action": "settings.save",
+                "label": "保存路径",
+                "type": "button"
+              },
+              {
+                "action": "settings.read",
+                "label": "读取配置",
+                "type": "button"
+              },
+              {
+                "action": "status",
+                "label": "检测可用性",
+                "type": "button"
+              }
+            ],
+            "location": "console.right",
+            "order": 58,
+            "panel_id": "settings",
+            "requires_device": false,
+            "runtime": "declarative",
+            "title": "文字识别"
+          }
+        ]
+      },
+      "execution": {
+        "kind": "builtin",
+        "host_version": ">=0.3.0"
+      }
+    },
+    {
       "id": "gamer-package-publisher",
       "version": "0.1.0",
       "name": "配置包发布",
       "description": "使用本机 GitHub CLI 将配置包发布到自己的公开仓库",
       "publisher": "gamer.dev",
       "download_url": "/plugins/gamer-package-publisher-0.1.0.gplugin",
-      "sha256": "de16d36c1b99c1253992b6d4412b70ce19a9f9dec0d878dc75020c850eb613a9",
+      "sha256": "9fb1175e9e46f2be73cd17c41c19394e7cf7cb574fe89c64718bf3a1da238516",
       "size": 5120,
       "permissions": [
         "ui.host",
@@ -216,13 +283,13 @@
     },
     {
       "id": "gamer-video",
-      "version": "0.1.3",
+      "version": "0.2.4",
       "name": "视频工作台",
-      "description": "视频工作台：媒体素材库、设备录制与操作草稿生成",
+      "description": "视频工作台：媒体素材库、设备录制与可携带演示素材",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-video-0.1.3.gplugin",
-      "sha256": "5793b2c867d7525daf25701376f0be9fae13cd147d75278c0c0a1a295512ba36",
-      "size": 66120,
+      "download_url": "/plugins/gamer-video-0.2.4.gplugin",
+      "sha256": "98f086a789d30105ab6822941a835800ac3e81c2f5947c7458fe7913c54711a6",
+      "size": 30201,
       "permissions": [
         "ui.host",
         "media.read",
@@ -252,18 +319,18 @@
       },
       "execution": {
         "kind": "builtin",
-        "host_version": ">=0.2.15"
+        "host_version": ">=0.3.0"
       }
     },
     {
       "id": "gamer-yaml",
-      "version": "0.2.2",
+      "version": "0.3.17",
       "name": "自动化",
-      "description": "自动化：YAML v2、AI 素材生成、离线验证与运行诊断",
+      "description": "自动化：按用户步骤编写脚本、脚本版本管理、素材与运行验证",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-yaml-0.2.2.gplugin",
-      "sha256": "9f3dd8268526efe1eae2b40e45625d692fbe03c2f4f8fc258f556f9763288a30",
-      "size": 493759,
+      "download_url": "/plugins/gamer-yaml-0.3.17.gplugin",
+      "sha256": "673874491f142bbb4725b71187272750d522eb43c8be86f7942f6bf457b1d115",
+      "size": 442206,
       "permissions": [
         "ui.host",
         "ai.connect",
@@ -275,15 +342,18 @@
         "input.text",
         "vision.match",
         "vision.color",
+        "vision.ocr",
         "resource.read",
         "runtime.sleep",
         "log.write",
-        "notify.send"
+        "notify.send",
+        "media.stream"
       ],
       "host_api": {
         "device": "^1.0",
         "input": "^1.1",
         "log": "^1.0",
+        "media": "^1.0",
         "resource": "^1.0",
         "runtime": "^1.0",
         "ui": "^1.1",
