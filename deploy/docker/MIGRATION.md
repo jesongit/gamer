@@ -101,7 +101,7 @@ docker restart --time 90 gamer
   堆开销，实际收益依任务负载测量。计算池配置与任务并发保留原设置。
 - 继续使用 30 分钟浏览器空闲回收，保留站点登录资料；无浏览器消费者时不会常驻游戏页面。
 - 保留 info 日志及错误证据；Docker 控制台日志最多约 50 MB。新运行启用诊断采样及分层保留，
-  历史运行、素材、工作稿和原有 Trace 不直接清理，详见[诊断策略](../../docs/reference/DIAGNOSTICS.md)。
+  历史运行、素材、工作稿和原有 Trace 不直接清理，详见[诊断策略](https://github.com/jesongit/gamer/blob/docker-v1.0.1/docs/reference/DIAGNOSTICS.md)。
 - 主机备份/恢复辅助容器限制为 512 MiB，文件缓存计入该上限；批处理保持串行。
 - `/dev/shm` 的 1 GiB 是共享内存容量上限，并非启动就占用 1 GiB。不先设过低的内存/CPU 硬上限；
   多账号云游戏的活动峰值需要在目标机器实测后再限额。

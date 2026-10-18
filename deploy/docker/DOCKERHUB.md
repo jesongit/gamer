@@ -52,7 +52,7 @@ bundle's `restore.sh` validates the data and starts Gamer with scheduling disabl
 Verify account login and the task list, stop the old production instance, then run
 `bash restore.sh activate`. Only one machine should schedule the same accounts.
 
-Detailed steps: https://github.com/jesongit/gamer/blob/codex/docker-v1.0.1/deploy/docker/MIGRATION.md
+Detailed steps: https://github.com/jesongit/gamer/blob/docker-v1.0.1/deploy/docker/MIGRATION.md
 
 The optional compact transfer profile omits only explicitly listed local backup /
 diagnostic copies and disposable browser caches. It preserves application history,

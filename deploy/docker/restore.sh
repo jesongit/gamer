@@ -3,7 +3,7 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 
-image="${GAMER_IMAGE:-posase/gamer:v1.0.1}"
+image="${GAMER_IMAGE:-posase/gamer@sha256:64c01ab78b3693b1694e689ac0c257b574083f51f0459784b135329ca266511c}"
 volume='gamer-production-data'
 container='gamer'
 mode="${1:-restore}"
