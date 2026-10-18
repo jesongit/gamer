@@ -52,6 +52,10 @@ jobs:
           cache-to: type=gha,mode=max,scope=docker-${{ matrix.arch }}
       - name: Browser sandbox and OCR smoke
         run: |
+          docker run --rm --network none --user 1000:1000 --memory 512m --memory-swap 512m \
+            --security-opt seccomp=deploy/docker/chromium-seccomp.json \
+            --mount type=bind,src="$PWD/tools/test_gamer_seccomp.py",dst=/test_gamer_seccomp.py,readonly \
+            --entrypoint python3 gamer:ci /test_gamer_seccomp.py -v
           docker run --rm --init --user 1000:1000 --shm-size=1g \
             --security-opt seccomp=deploy/docker/chromium-seccomp.json \
             --entrypoint chromium gamer:ci --headless=new --disable-gpu \

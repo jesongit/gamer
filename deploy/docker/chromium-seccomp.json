@@ -51,6 +51,17 @@
 	],
 	"syscalls": [
 		{
+			"comment": "Permit runc fd cleanup and safe procfs access after seccomp is installed",
+			"names": ["close_range", "openat2"],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "Keep glibc thread creation falling back to clone on profiles without clone3",
+			"names": ["clone3"],
+			"action": "SCMP_ACT_ERRNO",
+			"errnoRet": 38
+		},
+		{
 			"comment": "Allow create user namespaces",
 			"names": [
 				"clone",

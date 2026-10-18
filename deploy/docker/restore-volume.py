@@ -20,6 +20,27 @@ def schedule(root, enabled):
     path.chmod(0o600)
 
 
+def validate(root):
+    config = tomllib.loads((root / "config.toml").read_text(encoding="utf-8-sig"))
+    if not config.get("auth", {}).get("password_hash", "").startswith("$argon2id$"):
+        raise ValueError("Backup is missing the configured administrator password hash")
+    key = root / "state/credentials.key"
+    if not key.is_file() or key.is_symlink() or len(key.read_bytes()) != 32:
+        raise ValueError("Backup is missing its original 32-byte credential key")
+    with closing(sqlite3.connect((root / "gamer.db").as_uri() + "?mode=ro", uri=True)) as db:
+        if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise ValueError("Restored database integrity check failed")
+        tasks = db.execute("SELECT count(*) FROM timer_tasks").fetchone()[0]
+    return config, tasks
+
+
+def verify(root):
+    config, tasks = validate(root)
+    if config.get("scheduler_enabled") is not False:
+        raise ValueError("Recovery start requires scheduling to remain disabled; no data was changed")
+    print(json.dumps({"verified_tasks": tasks, "scheduler_enabled": False}))
+
+
 def restore(archive, root):
     if not archive.is_file():
         raise ValueError("Migration data archive is missing")
@@ -27,17 +48,8 @@ def restore(archive, root):
         raise ValueError("Target data volume is not empty; existing data was not changed")
     with tarfile.open(archive, "r:*") as source:
         source.extractall(root, filter="data")
-    config = tomllib.loads((root / "config.toml").read_text(encoding="utf-8-sig"))
-    if not config.get("auth", {}).get("password_hash", "").startswith("$argon2id$"):
-        raise ValueError("Backup is missing the configured administrator password hash")
-    key = root / "state/credentials.key"
-    if not key.is_file() or key.is_symlink() or len(key.read_bytes()) != 32:
-        raise ValueError("Backup is missing its original 32-byte credential key")
-    key.chmod(0o600)
-    with closing(sqlite3.connect((root / "gamer.db").as_uri() + "?mode=ro", uri=True)) as db:
-        if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-            raise ValueError("Restored database integrity check failed")
-        tasks = db.execute("SELECT count(*) FROM timer_tasks").fetchone()[0]
+    _, tasks = validate(root)
+    (root / "state/credentials.key").chmod(0o600)
     schedule(root, False)
     print(json.dumps({"restored_tasks": tasks, "scheduler_enabled": False,
                       "next_step": "Verify browser logins, then run: bash restore.sh activate"}))
@@ -45,13 +57,15 @@ def restore(archive, root):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("restore", "activate"))
+    parser.add_argument("mode", choices=("restore", "activate", "verify"))
     parser.add_argument("--root", type=pathlib.Path, default=pathlib.Path("/data"))
     parser.add_argument("--archive", type=pathlib.Path, default=pathlib.Path("/migration/gamer-data.tar"))
     args = parser.parse_args()
     try:
         if args.mode == "restore":
             restore(args.archive, args.root)
+        elif args.mode == "verify":
+            verify(args.root)
         else:
             schedule(args.root, True)
             print("Automatic scheduling enabled; restart the service to apply")

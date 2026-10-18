@@ -58,6 +58,39 @@ class RestoreTests(unittest.TestCase):
             self.assertEqual(sentinel.read_bytes(), b"existing data")
             self.assertFalse((dest / "gamer.db").exists())
 
+    def test_recovery_verify_preserves_database_key_config_and_history(self):
+        with tempfile.TemporaryDirectory() as name:
+            base = pathlib.Path(name)
+            self.fixture(base)
+            root = base / "source"
+            helper.schedule(root, False)
+            before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+            with contextlib.redirect_stdout(io.StringIO()):
+                helper.verify(root)
+            after = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+            self.assertEqual(before, after)
+
+    def test_recovery_refuses_enabled_scheduling_without_changing_it(self):
+        with tempfile.TemporaryDirectory() as name:
+            base = pathlib.Path(name)
+            self.fixture(base)
+            root = base / "source"
+            config = (root / 'config.toml').read_bytes()
+            with self.assertRaisesRegex(ValueError, "remain disabled"):
+                helper.verify(root)
+            self.assertEqual((root / 'config.toml').read_bytes(), config)
+
+    def test_recovery_refuses_missing_original_key_without_generating_one(self):
+        with tempfile.TemporaryDirectory() as name:
+            base = pathlib.Path(name)
+            self.fixture(base)
+            root = base / 'source'
+            key = root / 'state/credentials.key'
+            key.unlink()
+            with self.assertRaisesRegex(ValueError, "original 32-byte"):
+                helper.verify(root)
+            self.assertFalse(key.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
