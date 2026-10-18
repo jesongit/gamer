@@ -393,6 +393,7 @@ pub(crate) fn build_router_with_external(
         )
         .route("/api/runs/:run_id/events", get(runs::api_run_events))
         .route("/api/runs/:run_id/trace", get(runs::api_run_trace))
+        .route("/api/runs/:run_id/diagnostics", get(runs::api_run_diagnostics))
         .route(
             "/api/runs/:run_id/trace/images/:image_id",
             get(runs::api_run_trace_image),

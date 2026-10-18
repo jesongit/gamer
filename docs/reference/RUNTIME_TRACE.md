@@ -2,6 +2,10 @@
 
 Runtime Trace 为现有运行记录增加图片证据，不创建新的执行器，也不需要打开投屏页面。普通运行日志仍按现有 `log_retain_days`（默认 14 天）保存。
 
+生产诊断改造将摘要、详细事件与图片的保留分开，并保护原始旧数据。
+完整规则及单次诊断包见 [生产诊断与数据保留](DIAGNOSTICS.md)。以下为当前开发版行为，
+已发布 Docker v1.0 尚未包含新改造。
+
 ## 采集与真实性
 
 - 图像 `image_id` 为独立 UUID，不能与解释器调用栈 `frame_id` 混用
@@ -20,17 +24,26 @@ Runtime Trace 为现有运行记录增加图片证据，不创建新的执行器
 
 ```toml
 [trace]
+production = true
+capture_interval_ms = 10000
+success_max_images = 5
 retain_hours = 24
+failure_retain_hours = 168
 global_max_bytes = 536870912
 run_max_bytes = 67108864
 run_max_images = 1000
+error_reserve_bytes = 16777216
 queue_capacity = 4
 min_observation_ms = 1000
 retained_max_bytes = 268435456
 retained_max_runs = 10
 ```
 
-成功和失败运行图片均从完成时起保留 24 小时，后台每 30 秒及有新工作时检查。全局超限先清理最旧已结束运行；只剩活动运行时停止后续采集并显示缺口。基本日志不随图片清理。短索引随基本运行历史到期清理。
+生产模式对普通匹配、操作前后和 OCR 图像按间隔采样，成功后最多保留首张及最近的 5 条图像记录。
+新策略图片从完成时起，成功保留 24 小时，失败/取消保留 168 小时；后台每 30 秒及有新工作时检查。
+全局超限优先清理已结束成功运行，再清理已结束失败运行；活动运行不被淘汰。根错误图有独立优先队列
+和预留容量，仍受总容量约束，无法保存时明确显示 gap。旧无策略标记或未知版本的证据原样保留。
+基本事件不随图片清理，摘要与详细事件分别按 diagnostics 策略保留。
 
 “保留记录”仅接受已完成且有图片的运行，将图片、实际模板、脚本快照、图片诊断和运行摘要复制到独立的持久目录，并受独立总容量和数量限制。普通日志的 14 天保留期不因此变更。素材包、正式模板、脚本历史与持久保留目录不会被临时 Trace 清理扫描或删除。
 
@@ -41,6 +54,7 @@ retained_max_runs = 10
 - `GET /api/runs/:run_id/trace?after=0&limit=100`：最多 100 条图片元数据，`next`/`has_more` 游标，`status`（available/expired/unavailable/retained）、`enabled`、`stopped`、`gaps`、冻结的 `snapshot`
 - `GET /api/runs/:run_id/trace/images/:image_id`：原尺寸 PNG；加 `?template=true` 读取该识别的冻结模板。错误运行的 image_id 不可跨运行读取；未知 404、到期 410
 - `POST /api/runs/:run_id/trace/retain`：复制已完成证据，已保留时幂等；活动、空证据或独立配额不足返回 409
+- `GET /api/runs/:run_id/diagnostics`：下载单次已结束运行的脱敏诊断 ZIP；活动运行 409，已有导出占用时 429；数据与下载临时文件均独立于生产备份
 
 相关运行选择应先按具体设备和自动化 entrypoint 筛选，并核对快照中的配置包与脚本版本。禁止将全局最近一次记录当成当前配置包的故障证据。
 

@@ -25,6 +25,7 @@ mod core;
 mod cron_extension;
 mod deps_probe;
 mod device;
+mod diagnostics;
 mod extensions;
 mod external_control;
 mod logging;
@@ -667,7 +668,6 @@ async fn run_log_retention(
         tokio::select! {
             _ = tick.tick() => {
                 let retain_days = cfg.current_settings().log_retain_days;
-                if retain_days == 0 { continue; }
                 match db.prune_logs_async(retain_days).await {
                     Ok(deleted) if deleted > 0 => {
                         info!(deleted, retain_days, "periodic run log cleanup removed expired rows");

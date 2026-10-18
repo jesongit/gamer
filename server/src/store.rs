@@ -951,6 +951,10 @@ pub struct VacuumReport {
 
 pub struct Store {
     pub(crate) trace: Arc<crate::runtime_trace::TraceStore>,
+    history_retention: crate::diagnostics::DiagnosticsConfig,
+    legacy_log_max_id: i64,
+    event_repeats:
+        tokio::sync::Mutex<std::collections::HashMap<String, journal::RepeatedObservation>>,
     /// 数据库主文件路径（vacuum 前后取文件大小用）
     path: PathBuf,
     tx: SyncSender<DbCommand>,
@@ -960,6 +964,23 @@ pub struct Store {
 
 impl Drop for Store {
     fn drop(&mut self) {
+        let pending: Vec<_> = self
+            .event_repeats
+            .get_mut()
+            .drain()
+            .filter_map(|(id, repeat)| repeat.finish().map(|(time, payload)| (id, time, payload)))
+            .collect();
+        if !pending.is_empty() {
+            let _ = self.request(move |conn| {
+                for (id, time, payload) in pending {
+                    conn.execute(
+                        "INSERT INTO run_events(run_id,time,payload) VALUES (?1,?2,?3)",
+                        rusqlite::params![id, time, payload.to_string()],
+                    )?;
+                }
+                Ok(())
+            });
+        }
         let _ = self.tx.send(DbCommand::Shutdown);
         if let Some(worker) = self.worker.lock().ok().and_then(|mut slot| slot.take()) {
             let _ = worker.join();
@@ -1001,17 +1022,60 @@ impl Store {
                 anyhow::bail!("database worker did not initialize: {error}");
             }
         }
-        let store = Self {
+        let mut store = Self {
             trace: crate::runtime_trace::TraceStore::open(&cfg.data_dir, cfg.trace.clone())?,
+            history_retention: cfg.diagnostics.clone(),
+            legacy_log_max_id: 0,
+            event_repeats: Default::default(),
             path: db_path(&cfg.data_dir),
             tx,
             worker: Mutex::new(Some(worker)),
             metrics,
         };
-        if cfg.log_retain_days > 0 {
-            if let Err(e) = store.prune_logs(cfg.log_retain_days) {
-                tracing::warn!(error = %e, "启动时清理过期运行日志失败");
+        if let Some(error) = cfg.diagnostics.validate() {
+            anyhow::bail!(error);
+        }
+        let policy_path = cfg.data_dir.join("diagnostics-policy.json");
+        anyhow::ensure!(
+            !policy_path.is_symlink(),
+            "diagnostic policy state must not be a symlink"
+        );
+        if !policy_path.exists() {
+            let boundary: i64 = store.request(|conn| {
+                Ok(conn.query_row("SELECT COALESCE(MAX(id),0) FROM logs", [], |row| row.get(0))?)
+            })?;
+            let mut file = tempfile::NamedTempFile::new_in(&cfg.data_dir)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.as_file()
+                    .set_permissions(std::fs::Permissions::from_mode(0o600))?;
             }
+            use std::io::Write;
+            file.write_all(
+                serde_json::to_string(
+                    &serde_json::json!({"version":1,"legacy_log_max_id":boundary}),
+                )?
+                .as_bytes(),
+            )?;
+            file.as_file().sync_all()?;
+            if let Err(error) = file.persist_noclobber(&policy_path) {
+                if error.error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(error.error.into());
+                }
+            }
+        }
+        let checkpoint: serde_json::Value = serde_json::from_slice(&std::fs::read(policy_path)?)?;
+        anyhow::ensure!(
+            checkpoint["version"] == 1
+                && checkpoint["legacy_log_max_id"]
+                    .as_i64()
+                    .is_some_and(|id| id >= 0),
+            "invalid diagnostic policy state; original data was retained"
+        );
+        store.legacy_log_max_id = checkpoint["legacy_log_max_id"].as_i64().unwrap();
+        if let Err(e) = store.prune_logs(cfg.log_retain_days) {
+            tracing::warn!(error = %e, "启动时清理过期运行日志失败");
         }
         Ok(store)
     }
@@ -2035,13 +2099,14 @@ impl Store {
     /// 分批删除过期日志，避免一次大事务长时间占用数据库锁。
     /// 返回本次删除的行数；retain_days=0 表示关闭保留清理。
     pub fn prune_logs(&self, retain_days: u32) -> anyhow::Result<u64> {
-        self.prune_run_history(retain_days)?;
+        self.prune_run_history(self.history_retention.summary_retain_days)?;
         if retain_days == 0 {
             return Ok(0);
         }
         let cutoff = (Local::now() - chrono::Duration::days(retain_days as i64))
             .format("%Y-%m-%d %H:%M:%S%.3f")
             .to_string();
+        let legacy_log_max_id = self.legacy_log_max_id;
         self.request(move |conn| {
             let mut total = 0u64;
             let mut batches = 0u64;
@@ -2049,10 +2114,11 @@ impl Store {
             let mut last_deleted_id = None;
             loop {
                 let ids = {
-                    let mut stmt =
-                        conn.prepare("SELECT id FROM logs WHERE time < ?1 ORDER BY id LIMIT ?2")?;
+                    let mut stmt = conn.prepare(
+                        "SELECT id FROM logs WHERE time < ?1 AND id > ?3 ORDER BY id LIMIT ?2",
+                    )?;
                     let rows = stmt.query_map(
-                        rusqlite::params![cutoff.as_str(), LOG_PRUNE_BATCH_SIZE],
+                        rusqlite::params![cutoff.as_str(), LOG_PRUNE_BATCH_SIZE, legacy_log_max_id],
                         |r| r.get::<_, i64>(0),
                     )?;
                     rows.collect::<Result<Vec<_>, _>>()?
@@ -2100,13 +2166,14 @@ impl Store {
     }
 
     pub async fn prune_logs_async(&self, retain_days: u32) -> anyhow::Result<u64> {
-        self.prune_run_history(retain_days)?;
+        self.prune_run_history(self.history_retention.summary_retain_days)?;
         if retain_days == 0 {
             return Ok(0);
         }
         let cutoff = (Local::now() - chrono::Duration::days(retain_days as i64))
             .format("%Y-%m-%d %H:%M:%S%.3f")
             .to_string();
+        let legacy_log_max_id = self.legacy_log_max_id;
         self.request_async(move |conn| {
             let mut total = 0u64;
             let mut batches = 0u64;
@@ -2114,10 +2181,11 @@ impl Store {
             let mut last_deleted_id = None;
             loop {
                 let ids = {
-                    let mut stmt =
-                        conn.prepare("SELECT id FROM logs WHERE time < ?1 ORDER BY id LIMIT ?2")?;
+                    let mut stmt = conn.prepare(
+                        "SELECT id FROM logs WHERE time < ?1 AND id > ?3 ORDER BY id LIMIT ?2",
+                    )?;
                     let rows = stmt.query_map(
-                        rusqlite::params![cutoff.as_str(), LOG_PRUNE_BATCH_SIZE],
+                        rusqlite::params![cutoff.as_str(), LOG_PRUNE_BATCH_SIZE, legacy_log_max_id],
                         |r| r.get::<_, i64>(0),
                     )?;
                     rows.collect::<Result<Vec<_>, _>>()?

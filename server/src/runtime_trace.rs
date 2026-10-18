@@ -17,6 +17,11 @@ use crate::matcher::DecodedFrame;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TraceConfig {
+    pub production: bool,
+    pub capture_interval_ms: u64,
+    pub success_max_images: usize,
+    pub failure_retain_hours: u32,
+    pub error_reserve_bytes: u64,
     pub retain_hours: u32,
     pub global_max_bytes: u64,
     pub run_max_bytes: u64,
@@ -29,6 +34,11 @@ pub struct TraceConfig {
 impl Default for TraceConfig {
     fn default() -> Self {
         Self {
+            production: true,
+            capture_interval_ms: 10_000,
+            success_max_images: 5,
+            failure_retain_hours: 168,
+            error_reserve_bytes: 16 * 1024 * 1024,
             retain_hours: 24,
             global_max_bytes: 512 * 1024 * 1024,
             run_max_bytes: 64 * 1024 * 1024,
@@ -65,6 +75,16 @@ pub(crate) struct TraceGap {
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Manifest {
+    #[serde(default)]
+    policy_version: Option<u32>,
+    #[serde(default)]
+    identity: Option<Value>,
+    #[serde(default)]
+    last_capture_ms: i64,
+    #[serde(default)]
+    sampled_out: u64,
+    #[serde(default)]
+    compacted_images: u64,
     run_id: String,
     status: String,
     enabled: bool,
@@ -86,6 +106,11 @@ struct Manifest {
 impl Manifest {
     fn new(run_id: &str) -> Self {
         Self {
+            policy_version: Some(crate::diagnostics::POLICY_VERSION),
+            identity: None,
+            last_capture_ms: 0,
+            sampled_out: 0,
+            compacted_images: 0,
             run_id: run_id.into(),
             status: "available".into(),
             enabled: true,
@@ -109,6 +134,21 @@ pub(crate) struct CapturedEvidence {
     pub source: Option<crate::capabilities::FrameStamp>,
 }
 type ConsumedEvidence = (CapturedEvidence, Value, Option<Arc<Vec<u8>>>);
+
+fn managed(run: &Manifest) -> bool {
+    run.policy_version == Some(crate::diagnostics::POLICY_VERSION)
+}
+fn is_error_image(kind: &str) -> bool {
+    matches!(kind, "error_last_consumed" | "error_fresh")
+}
+fn is_failure(run: &Manifest) -> bool {
+    run.record
+        .as_ref()
+        .is_some_and(|record| matches!(record["state"].as_str(), Some("failed" | "cancelled")))
+}
+fn run_expired(state: &State, id: &str) -> bool {
+    state.runs.get(id).is_none_or(|run| run.status == "expired")
+}
 
 struct State {
     runs: HashMap<String, Manifest>,
@@ -138,6 +178,7 @@ pub(crate) struct TraceStore {
     state: Arc<Mutex<State>>,
     io: Arc<Mutex<()>>,
     tx: mpsc::SyncSender<Command>,
+    priority_tx: mpsc::SyncSender<Work>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 fn now() -> String {
@@ -238,6 +279,9 @@ fn recover_payloads(root: &Path, runs: &mut HashMap<String, Manifest>) {
         if !valid_id(&id) || !regular_dir(&entry.path()) {
             continue;
         }
+        if runs.get(&id).is_some_and(|run| !managed(run)) {
+            continue; // Pre-policy evidence is preserved byte-for-byte.
+        }
         if !runs.contains_key(&id) {
             match std::fs::symlink_metadata(entry.path().join("index.json")) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -308,6 +352,10 @@ impl TraceStore {
         cfg.run_max_bytes = cfg.run_max_bytes.min(cfg.global_max_bytes);
         cfg.retained_max_bytes = cfg.retained_max_bytes.min(16 * 1024 * 1024 * 1024);
         cfg.retained_max_runs = cfg.retained_max_runs.min(1000);
+        cfg.capture_interval_ms = cfg.capture_interval_ms.min(300_000);
+        cfg.success_max_images = cfg.success_max_images.clamp(1, 20);
+        cfg.failure_retain_hours = cfg.failure_retain_hours.clamp(1, 720);
+        cfg.error_reserve_bytes = cfg.error_reserve_bytes.min(cfg.run_max_bytes / 2);
         let root = data.join("runtime-traces");
         let retained_root = data.join("retained-traces");
         private_dir(&root)?;
@@ -339,7 +387,11 @@ impl TraceStore {
         }
         let mut runs = load(&root, true);
         recover_payloads(&root, &mut runs);
-        let dirty = runs.keys().cloned().collect();
+        let dirty = runs
+            .iter()
+            .filter(|(_, run)| managed(run))
+            .map(|(id, _)| id.clone())
+            .collect();
         let state = Arc::new(Mutex::new(State {
             runs,
             retained: load(&retained_root, false),
@@ -349,6 +401,7 @@ impl TraceStore {
         }));
         let io = Arc::new(Mutex::new(()));
         let (tx, rx) = mpsc::sync_channel(cfg.queue_capacity);
+        let (priority_tx, priority_rx) = mpsc::sync_channel(8);
         let (worker_state, worker_io, worker_root, worker_cfg) =
             (state.clone(), io.clone(), root.clone(), cfg.clone());
         let worker = std::thread::Builder::new()
@@ -356,7 +409,26 @@ impl TraceStore {
             .spawn(move || loop {
                 let command = rx.recv_timeout(Duration::from_secs(30));
                 let _io = worker_io.lock().unwrap_or_else(|p| p.into_inner());
+                while let Ok(work) = priority_rx.try_recv() {
+                    process_image(&worker_root, &worker_state, &worker_cfg, work);
+                }
                 cleanup(&worker_root, &worker_state, &worker_cfg, Utc::now());
+                if worker_cfg.production {
+                    let finished: Vec<_> = worker_state
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .runs
+                        .keys()
+                        .cloned()
+                        .collect();
+                    for id in finished {
+                        if let Err(error) =
+                            compact_success(&worker_root, &worker_state, &worker_cfg, &id)
+                        {
+                            tracing::warn!(%error, "cannot compact successful trace");
+                        }
+                    }
+                }
                 let stop = match command {
                     Ok(Command::Image(work)) => {
                         process_image(&worker_root, &worker_state, &worker_cfg, work);
@@ -382,6 +454,7 @@ impl TraceStore {
             state,
             io,
             tx,
+            priority_tx,
             worker: Mutex::new(Some(worker)),
         }))
     }
@@ -394,6 +467,19 @@ impl TraceStore {
             .runs
             .entry(run_id.into())
             .or_insert_with(|| Manifest::new(run_id));
+        let completion = if finished_at.is_some()
+            && self.cfg.production
+            && run.enabled
+            && run
+                .record
+                .as_ref()
+                .is_some_and(|record| record["state"] == "success")
+        {
+            state.last_consumed.get(run_id).cloned()
+        } else {
+            None
+        };
+        let run = state.runs.get_mut(run_id).unwrap();
         if let Some(finished) = finished_at {
             run.finished_at = Some(finished);
             state.last_consumed.remove(run_id);
@@ -401,6 +487,10 @@ impl TraceStore {
         }
         state.dirty.insert(run_id.into());
         drop(state);
+        if let Some((frame, mut metadata, template)) = completion {
+            metadata["kind"] = "completion".into();
+            self.submit(frame, metadata, true, template);
+        }
         let _ = self.tx.try_send(Command::Wake);
     }
     pub(crate) fn record(&self, run_id: &str, record: Value) {
@@ -477,10 +567,11 @@ impl TraceStore {
             .runs
             .iter()
             .filter(|(_, r)| {
-                r.finished_at
-                    .as_deref()
-                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                    .is_some_and(|t| t < cutoff)
+                managed(r)
+                    && r.finished_at
+                        .as_deref()
+                        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                        .is_some_and(|t| t < cutoff)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -509,6 +600,102 @@ impl TraceStore {
         drop(state);
         let _ = self.tx.try_send(Command::Wake);
     }
+    pub(crate) fn identity(&self, run_id: &str) -> Option<Value> {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .runs
+            .get(run_id)
+            .and_then(|run| run.identity.clone())
+    }
+    /// Export only this run's validated immutable PNG payloads. Source code and
+    /// argument bodies stay in the local evidence store, identified by hashes.
+    pub(crate) fn export_assets<W: std::io::Write + std::io::Seek>(
+        &self,
+        run_id: &str,
+        archive: &mut zip::ZipWriter<W>,
+        budget: u64,
+    ) -> anyhow::Result<Value> {
+        use std::io::Write;
+        anyhow::ensure!(valid_id(run_id), "invalid run id");
+        self.flush();
+        let _io = self.io.lock().unwrap_or_else(|p| p.into_inner());
+        let (mut manifest, root) = {
+            let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let retained = state.retained.get(run_id);
+            let Some(run) = retained.or_else(|| state.runs.get(run_id)) else {
+                return Ok(
+                    json!({"status":"unavailable","files":[],"gaps":["trace_not_available"]}),
+                );
+            };
+            (
+                run.clone(),
+                if retained.is_some() {
+                    &self.retained_root
+                } else {
+                    &self.root
+                }
+                .clone(),
+            )
+        };
+        let dir = root.join(run_id);
+        let mut files = Vec::new();
+        let mut gaps = Vec::new();
+        let mut seen = HashSet::new();
+        let mut used = 0_u64;
+        let mut ordered = manifest.images.clone();
+        ordered.sort_by_key(|image| (!is_error_image(&image.kind), std::cmp::Reverse(image.seq)));
+        for image in ordered {
+            for asset in std::iter::once(image.asset).chain(image.template_asset) {
+                if !seen.insert(asset.clone()) {
+                    continue;
+                }
+                let path = dir.join(&asset);
+                let metadata = std::fs::symlink_metadata(&path).ok();
+                if !valid_asset(&asset)
+                    || !regular_dir(&dir)
+                    || metadata
+                        .as_ref()
+                        .is_none_or(|m| !m.is_file() || m.file_type().is_symlink())
+                {
+                    gaps.push(json!({"asset":asset,"reason":"asset_unavailable"}));
+                    continue;
+                }
+                let size = metadata.unwrap().len();
+                if used.saturating_add(size) > budget {
+                    gaps.push(json!({"asset":asset,"reason":"export_byte_budget"}));
+                    continue;
+                }
+                archive.start_file(
+                    format!("assets/{asset}"),
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Stored),
+                )?;
+                let mut input = std::fs::File::open(path)?;
+                let mut hash = Sha256::new();
+                let mut buffer = [0_u8; 64 * 1024];
+                let mut copied = 0_u64;
+                loop {
+                    use std::io::Read;
+                    let length = input.read(&mut buffer)?;
+                    if length == 0 {
+                        break;
+                    }
+                    copied += length as u64;
+                    anyhow::ensure!(copied <= size, "diagnostic asset changed while exporting");
+                    hash.update(&buffer[..length]);
+                    archive.write_all(&buffer[..length])?;
+                }
+                anyhow::ensure!(copied == size, "diagnostic asset changed while exporting");
+                used += size;
+                files.push(json!({"path":format!("assets/{asset}"),"bytes":size,"sha256":format!("{:x}",hash.finalize())}));
+            }
+        }
+        manifest.snapshot = None;
+        Ok(
+            json!({"trace":crate::diagnostics::redact(serde_json::to_value(manifest)?),"files":files,"export_gaps":gaps}),
+        )
+    }
     pub(crate) fn configure(&self, metadata: &Value) {
         let Some(run_id) = metadata["run_id"].as_str().filter(|id| valid_id(id)) else {
             return;
@@ -534,15 +721,40 @@ impl TraceStore {
         }
         let size = serde_json::to_vec(&snapshot)?.len() as u64;
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        let total: u64 = state.runs.values().map(|r| r.bytes).sum();
+        let total: u64 = state
+            .runs
+            .values()
+            .filter(|r| managed(r))
+            .map(|r| r.bytes)
+            .sum();
         let run = state
             .runs
             .entry(run_id.into())
             .or_insert_with(|| Manifest::new(run_id));
         // The first snapshot is frozen. Late execution callbacks cannot overwrite it.
         if run.snapshot.is_none() && run.status != "expired" {
-            if run.bytes.saturating_add(size) > self.cfg.run_max_bytes
-                || total.saturating_add(size) > self.cfg.global_max_bytes
+            if !managed(run) {
+                return Ok(());
+            }
+            run.identity = Some(crate::diagnostics::snapshot_identity(&snapshot));
+            if run.bytes.saturating_add(size)
+                > self
+                    .cfg
+                    .run_max_bytes
+                    .saturating_sub(if self.cfg.production {
+                        self.cfg.error_reserve_bytes
+                    } else {
+                        0
+                    })
+                || total.saturating_add(size)
+                    > self
+                        .cfg
+                        .global_max_bytes
+                        .saturating_sub(if self.cfg.production {
+                            self.cfg.global_max_bytes / 4
+                        } else {
+                            0
+                        })
             {
                 record_gap(&mut state, run_id, "snapshot_quota_exceeded");
             } else {
@@ -572,6 +784,7 @@ impl TraceStore {
             return None;
         }
         let kind = metadata["kind"].as_str().unwrap_or("consumed");
+        let critical = is_error_image(kind);
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let run = state
             .runs
@@ -582,15 +795,30 @@ impl TraceStore {
         }
         let disabled = !run.enabled;
         let stopped = run.stopped || run.status == "expired";
-        if kind == "consumed" {
+        if matches!(kind, "consumed" | "ocr") {
             state.last_consumed.insert(
                 run_id.clone(),
                 (evidence.clone(), metadata.clone(), template.clone()),
             );
         }
         state.dirty.insert(run_id.clone());
-        if (disabled && !forced) || stopped {
+        if (disabled && !forced) || (stopped && (!critical || run_expired(&state, &run_id))) {
             return None;
+        }
+        if self.cfg.production
+            && !forced
+            && !critical
+            && !matches!(kind, "trace_on" | "trace_off" | "completion")
+        {
+            let run = state.runs.get_mut(&run_id).unwrap();
+            let current = Utc::now().timestamp_millis();
+            if run.last_capture_ms != 0
+                && current.saturating_sub(run.last_capture_ms) < self.cfg.capture_interval_ms as i64
+            {
+                run.sampled_out = run.sampled_out.saturating_add(1);
+                return None;
+            }
+            run.last_capture_ms = current;
         }
         if evidence.frame.dimensions().0 as u64 * evidence.frame.dimensions().1 as u64 > 16_000_000
         {
@@ -606,6 +834,18 @@ impl TraceStore {
             metadata,
             template,
         };
+        if critical {
+            return match self.priority_tx.try_send(work) {
+                Ok(()) => {
+                    let _ = self.tx.try_send(Command::Wake);
+                    Some(image_id)
+                }
+                Err(_) => {
+                    self.gap(&run_id, "error_encoding_queue_full");
+                    None
+                }
+            };
+        }
         match self.tx.try_send(Command::Image(work)) {
             Ok(()) => Some(image_id),
             Err(mpsc::TrySendError::Full(_)) => {
@@ -663,7 +903,10 @@ impl TraceStore {
         let more = images.len() > limit;
         images.truncate(limit);
         let next = images.last().map(|i| i.seq).unwrap_or(after);
-        json!({"run_id":run_id,"status":if state.retained.contains_key(run_id) {"retained"} else {&run.status},"enabled":run.enabled,"finished_at":run.finished_at,"bytes":run.bytes,"gaps":run.gaps,"images":images,"next":next,"has_more":more,"snapshot":run.snapshot,"stopped":run.stopped})
+        json!({"run_id":run_id,"status":if state.retained.contains_key(run_id) {"retained"} else {&run.status},"enabled":run.enabled,"finished_at":run.finished_at,"bytes":run.bytes,"gaps":run.gaps,"images":images,"next":next,"has_more":more,"snapshot":run.snapshot,"stopped":run.stopped,
+            "identity":run.identity,"policy_version":run.policy_version,"sampled_out":run.sampled_out,"compacted_images":run.compacted_images,
+            "capture_policy":if !managed(run) {"preserved"}else if self.cfg.production {"production"}else{"full"},
+            "image_ids":run.images.iter().map(|image|&image.image_id).collect::<Vec<_>>()})
     }
     pub(crate) fn read_image(
         &self,
@@ -841,7 +1084,7 @@ fn persist_dirty(root: &Path, state: &Mutex<State>) {
         let dirty = std::mem::take(&mut state.dirty);
         dirty
             .into_iter()
-            .filter_map(|id| state.runs.get(&id).cloned())
+            .filter_map(|id| state.runs.get(&id).filter(|run| managed(run)).cloned())
             .collect::<Vec<_>>()
     };
     for run in manifests {
@@ -901,14 +1144,20 @@ fn expire_run(root: &Path, state: &Mutex<State>, id: &str) -> anyhow::Result<()>
     Ok(())
 }
 fn cleanup(root: &Path, state: &Mutex<State>, cfg: &TraceConfig, time: DateTime<Utc>) {
-    let cutoff = time - chrono::Duration::hours(cfg.retain_hours as i64);
     let ids: Vec<_> = {
         let state = state.lock().unwrap_or_else(|p| p.into_inner());
         state
             .runs
             .iter()
             .filter(|(_, run)| {
-                run.status != "expired"
+                let hours = if is_failure(run) {
+                    cfg.failure_retain_hours
+                } else {
+                    cfg.retain_hours
+                };
+                let cutoff = time - chrono::Duration::hours(hours as i64);
+                managed(run)
+                    && run.status != "expired"
                     && run
                         .finished_at
                         .as_deref()
@@ -932,14 +1181,21 @@ fn cleanup(root: &Path, state: &Mutex<State>, cfg: &TraceConfig, time: DateTime<
     loop {
         let oldest = {
             let state = state.lock().unwrap_or_else(|p| p.into_inner());
-            if state.runs.values().map(|r| r.bytes).sum::<u64>() <= cfg.global_max_bytes {
+            if state
+                .runs
+                .values()
+                .filter(|r| managed(r))
+                .map(|r| r.bytes)
+                .sum::<u64>()
+                <= cfg.global_max_bytes
+            {
                 break;
             }
             state
                 .runs
                 .iter()
-                .filter(|(_, r)| r.status != "expired" && r.finished_at.is_some())
-                .min_by_key(|(_, r)| &r.finished_at)
+                .filter(|(_, r)| managed(r) && r.status != "expired" && r.finished_at.is_some())
+                .min_by_key(|(_, r)| (is_failure(r), &r.finished_at))
                 .map(|(id, _)| id.clone())
         };
         let Some(oldest) = oldest else {
@@ -963,6 +1219,11 @@ fn process_image(root: &Path, state: &Mutex<State>, cfg: &TraceConfig, work: Wor
         let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
         record_gap(&mut state, &work.run_id, "image_encode_or_write_failed");
     }
+    if cfg.production {
+        if let Err(error) = compact_success(root, state, cfg, &work.run_id) {
+            tracing::warn!(%error, "cannot compact successful trace");
+        }
+    }
 }
 fn process_image_inner(
     root: &Path,
@@ -971,16 +1232,22 @@ fn process_image_inner(
     work: &Work,
 ) -> anyhow::Result<()> {
     let kind = work.metadata["kind"].as_str().unwrap_or("consumed");
+    let critical = is_error_image(kind);
     {
         let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
         let run = state
             .runs
             .get_mut(&work.run_id)
             .ok_or_else(|| anyhow::anyhow!("run not registered"))?;
-        if run.stopped || run.status == "expired" {
+        if (run.stopped && !critical) || run.status == "expired" || !managed(run) {
             return Ok(());
         }
-        if run.images.len() >= cfg.run_max_images {
+        let count = run
+            .images
+            .iter()
+            .filter(|image| is_error_image(&image.kind) == critical)
+            .count();
+        if count >= if critical { 2 } else { cfg.run_max_images } {
             run.stopped = true;
             record_gap(&mut state, &work.run_id, "run_image_quota_exceeded");
             return Ok(());
@@ -1043,12 +1310,19 @@ fn process_image_inner(
         let oldest = {
             let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
             let run = state.runs.get(&work.run_id).unwrap();
-            if run.metadata_bytes.saturating_add(metadata_added) > 8 * 1024 * 1024 - 16 * 1024 {
+            if run.metadata_bytes.saturating_add(metadata_added)
+                > 8 * 1024 * 1024 - if critical { 0 } else { 192 * 1024 }
+            {
                 state.runs.get_mut(&work.run_id).unwrap().stopped = true;
                 record_gap(&mut state, &work.run_id, "run_metadata_quota_exceeded");
                 return Ok(());
             }
-            if run.bytes.saturating_add(added) > cfg.run_max_bytes {
+            let reserve = if cfg.production && !critical {
+                cfg.error_reserve_bytes
+            } else {
+                0
+            };
+            if run.bytes.saturating_add(added) > cfg.run_max_bytes.saturating_sub(reserve) {
                 state.runs.get_mut(&work.run_id).unwrap().stopped = true;
                 record_gap(&mut state, &work.run_id, "run_byte_quota_exceeded");
                 return Ok(());
@@ -1056,10 +1330,17 @@ fn process_image_inner(
             if state
                 .runs
                 .values()
+                .filter(|r| managed(r))
                 .map(|r| r.bytes)
                 .sum::<u64>()
                 .saturating_add(added)
-                <= cfg.global_max_bytes
+                <= cfg
+                    .global_max_bytes
+                    .saturating_sub(if cfg.production && !critical {
+                        cfg.global_max_bytes / 4
+                    } else {
+                        0
+                    })
             {
                 // Reserve before dropping the lock; concurrent snapshot producers
                 // cannot overrun the shared budget while this image is written.
@@ -1070,9 +1351,12 @@ fn process_image_inner(
                 .runs
                 .iter()
                 .filter(|(id, r)| {
-                    *id != &work.run_id && r.status != "expired" && r.finished_at.is_some()
+                    *id != &work.run_id
+                        && managed(r)
+                        && r.status != "expired"
+                        && r.finished_at.is_some()
                 })
-                .min_by_key(|(_, r)| &r.finished_at)
+                .min_by_key(|(_, r)| (is_failure(r), &r.finished_at))
                 .map(|(id, _)| id.clone());
             if oldest.is_none() {
                 state.runs.get_mut(&work.run_id).unwrap().stopped = true;
@@ -1118,6 +1402,361 @@ fn process_image_inner(
     Ok(())
 }
 
+/// Keep the first observation and the most recent evidence of a successful run.
+/// Commit the smaller index before removing only newly unreferenced payloads.
+fn compact_success(
+    root: &Path,
+    state: &Mutex<State>,
+    cfg: &TraceConfig,
+    id: &str,
+) -> anyhow::Result<()> {
+    let (mut reduced, old_assets) = {
+        let state = state.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(run) = state.runs.get(id) else {
+            return Ok(());
+        };
+        if !managed(run)
+            || run.finished_at.is_none()
+            || run.record.as_ref().is_none_or(|r| r["state"] != "success")
+            || run.images.len() <= cfg.success_max_images
+        {
+            return Ok(());
+        }
+        let assets: HashSet<_> = run
+            .images
+            .iter()
+            .flat_map(|i| std::iter::once(i.asset.clone()).chain(i.template_asset.clone()))
+            .collect();
+        (run.clone(), assets)
+    };
+    let removed = reduced.images.len() - cfg.success_max_images;
+    if cfg.success_max_images > 1 {
+        let recent = reduced
+            .images
+            .split_off(reduced.images.len() - (cfg.success_max_images - 1));
+        reduced.images.truncate(1);
+        reduced.images.extend(recent);
+    } else {
+        reduced.images = reduced.images.into_iter().rev().take(1).collect();
+    }
+    reduced.compacted_images += removed as u64;
+    let expected: HashSet<_> = reduced
+        .images
+        .iter()
+        .flat_map(|i| std::iter::once(i.asset.clone()).chain(i.template_asset.clone()))
+        .collect();
+    reduced.metadata_bytes = 512
+        + reduced
+            .snapshot
+            .as_ref()
+            .map(|s| s.to_string().len() as u64)
+            .unwrap_or(0)
+        + reduced
+            .images
+            .iter()
+            .map(|i| i.metadata.to_string().len() as u64 + 1024)
+            .sum::<u64>();
+    let dir = root.join(id);
+    anyhow::ensure!(regular_dir(&dir), "invalid trace directory");
+    reduced.bytes = reduced.metadata_bytes
+        + expected
+            .iter()
+            .map(|asset| {
+                std::fs::symlink_metadata(dir.join(asset))
+                    .ok()
+                    .filter(|m| m.is_file() && !m.file_type().is_symlink())
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+            })
+            .sum::<u64>();
+    atomic_write(&dir.join("index.json"), &serde_json::to_vec(&reduced)?)?;
+    {
+        let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(run) = state.runs.get_mut(id) {
+            run.images = reduced.images;
+            run.bytes = reduced.bytes;
+            run.metadata_bytes = reduced.metadata_bytes;
+            run.compacted_images = reduced.compacted_images;
+        }
+        state.dirty.insert(id.into());
+    }
+    for asset in old_assets.difference(&expected) {
+        let path = dir.join(asset);
+        if valid_asset(asset)
+            && std::fs::symlink_metadata(&path)
+                .is_ok_and(|m| m.is_file() && !m.file_type().is_symlink())
+        {
+            std::fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn open_full(data: &Path, mut cfg: TraceConfig) -> anyhow::Result<Arc<TraceStore>> {
+    cfg.production = false;
+    TraceStore::open(data, cfg)
+}
+
+#[cfg(test)]
+mod production_tests {
+    use super::*;
+    fn frame(color: u8) -> CapturedEvidence {
+        CapturedEvidence {
+            frame: Arc::new(DecodedFrame::from_rgb(image::RgbImage::from_pixel(
+                20,
+                10,
+                image::Rgb([color, 1, 2]),
+            ))),
+            captured_at: now(),
+            source: None,
+        }
+    }
+    fn observe(store: &TraceStore, id: &str, color: u8) -> Option<String> {
+        store.submit(
+            frame(color),
+            json!({"run_id":id,"kind":"consumed","trace_enabled":true}),
+            false,
+            None,
+        )
+    }
+    #[test]
+    fn sampled_images_still_keep_the_actual_latest_consumed_failure_frame() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TraceStore::open(root.path(), Default::default()).unwrap();
+        for color in 0..100 {
+            observe(&store, "r", color);
+        }
+        store.flush();
+        assert_eq!(
+            store.page("r", 0, 100)["images"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(store.page("r", 0, 100)["sampled_out"], 99);
+        assert!(
+            store.root_error(&json!({"run_id":"r","kind":"error_fresh","error":"FIND_TIMEOUT"}))
+        );
+        store.flush();
+        let page = store.page("r", 0, 100);
+        let error = page["images"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["kind"] == "error_last_consumed")
+            .unwrap();
+        let bytes = store
+            .read_image("r", error["image_id"].as_str().unwrap(), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            image::load_from_memory(&bytes)
+                .unwrap()
+                .to_rgb8()
+                .get_pixel(0, 0)
+                .0,
+            [99, 1, 2]
+        );
+    }
+    #[test]
+    fn action_and_ocr_sampling_preserves_the_latest_actual_ocr_frame() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TraceStore::open(root.path(), Default::default()).unwrap();
+        observe(&store, "r", 1);
+        store.flush();
+        for kind in ["action_before", "action_after", "observation", "ocr"] {
+            assert!(store
+                .submit(
+                    frame(7),
+                    json!({"run_id":"r","kind":kind,"trace_enabled":true}),
+                    false,
+                    None
+                )
+                .is_none());
+        }
+        assert_eq!(store.page("r", 0, 100)["sampled_out"], 4);
+        store.root_error(&json!({"run_id":"r","kind":"error_fresh","error":"OCR_EMPTY"}));
+        store.flush();
+        let page = store.page("r", 0, 100);
+        let image = page["images"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|image| image["kind"] == "error_last_consumed")
+            .unwrap();
+        let png = store
+            .read_image("r", image["image_id"].as_str().unwrap(), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            image::load_from_memory(&png)
+                .unwrap()
+                .to_rgb8()
+                .get_pixel(0, 0)
+                .0,
+            [7, 1, 2]
+        );
+    }
+    #[test]
+    fn error_queue_and_image_reserve_survive_normal_queue_and_image_exhaustion() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TraceStore::open(
+            root.path(),
+            TraceConfig {
+                capture_interval_ms: 0,
+                queue_capacity: 1,
+                run_max_images: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        observe(&store, "r", 1);
+        store.flush();
+        observe(&store, "r", 2);
+        store.flush();
+        assert_eq!(store.page("r", 0, 100)["stopped"], true);
+        let guard = store.io.lock().unwrap();
+        observe(&store, "busy", 1);
+        observe(&store, "busy", 2);
+        observe(&store, "busy", 3);
+        assert!(store.root_error(&json!({"run_id":"r","kind":"error_fresh"})));
+        assert!(store
+            .submit(
+                frame(9),
+                json!({"run_id":"r","kind":"error_fresh"}),
+                true,
+                None
+            )
+            .is_some());
+        drop(guard);
+        store.flush();
+        let page = store.page("r", 0, 100);
+        assert!(page["images"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["kind"] == "error_last_consumed"));
+        assert!(page["images"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["kind"] == "error_fresh"));
+    }
+    #[test]
+    fn byte_quota_reserves_room_for_both_actual_error_images() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TraceStore::open(
+            root.path(),
+            TraceConfig {
+                capture_interval_ms: 0,
+                run_max_bytes: 5000,
+                global_max_bytes: 32768,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        observe(&store, "r", 1);
+        store.flush();
+        observe(&store, "r", 2);
+        store.flush();
+        assert_eq!(store.page("r", 0, 100)["stopped"], true);
+        store.root_error(&json!({"run_id":"r","kind":"error_fresh"}));
+        store.submit(
+            frame(9),
+            json!({"run_id":"r","kind":"error_fresh"}),
+            true,
+            None,
+        );
+        store.flush();
+        let page = store.page("r", 0, 100);
+        assert_eq!(
+            page["images"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|i| is_error_image(i["kind"].as_str().unwrap()))
+                .count(),
+            2
+        );
+        assert!(page["bytes"].as_u64().unwrap() <= 5000);
+    }
+    #[test]
+    fn successful_runs_keep_first_and_latest_images_and_failed_runs_live_seven_days() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TraceStore::open(
+            root.path(),
+            TraceConfig {
+                capture_interval_ms: 0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let first = observe(&store, "success", 0).unwrap();
+        store.flush();
+        for color in 1..12 {
+            observe(&store, "success", color);
+            store.flush();
+        }
+        store.record("success", json!({"state":"success"}));
+        store.register("success", Some(now()));
+        store.flush();
+        let page = store.page("success", 0, 100);
+        assert_eq!(page["images"].as_array().unwrap().len(), 5);
+        assert_eq!(page["images"][0]["image_id"], first);
+        assert!(page["compacted_images"].as_u64().unwrap() > 0);
+        observe(&store, "failed", 1);
+        store.flush();
+        store.record("failed", json!({"state":"failed"}));
+        store.register("failed", Some(now()));
+        store.flush();
+        {
+            let _io = store.io.lock().unwrap();
+            cleanup(
+                &store.root,
+                &store.state,
+                &store.cfg,
+                Utc::now() + chrono::Duration::hours(25),
+            );
+        }
+        assert_eq!(store.page("success", 0, 100)["status"], "expired");
+        assert_eq!(store.page("failed", 0, 100)["status"], "available");
+    }
+    #[test]
+    fn pre_policy_indexes_and_pixels_are_not_rewritten_expired_or_evicted() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TraceStore::open(
+            root.path(),
+            TraceConfig {
+                production: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let image = observe(&store, "old", 1).unwrap();
+        store.flush();
+        drop(store);
+        let path = root.path().join("runtime-traces/old/index.json");
+        let mut old: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        old.as_object_mut().unwrap().remove("policy_version");
+        old["finished_at"] = json!((Utc::now() - chrono::Duration::days(500)).to_rfc3339());
+        let original = serde_json::to_vec(&old).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let store = TraceStore::open(
+            root.path(),
+            TraceConfig {
+                global_max_bytes: 1024,
+                run_max_bytes: 1024,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        store.prune_history(365);
+        store.flush();
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(store.read_image("old", &image, false).unwrap().is_some());
+        assert_eq!(store.page("old", 0, 100)["capture_policy"], "preserved");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1154,7 +1793,7 @@ mod tests {
     #[test]
     fn lossless_exact_frame_ids_and_dedup_are_independent_of_call_frames() {
         let dir = tempfile::tempdir().unwrap();
-        let store = TraceStore::open(dir.path(), Default::default()).unwrap();
+        let store = open_full(dir.path(), Default::default()).unwrap();
         let a = submit(&store, "run", 10, "consumed", true, false).unwrap();
         store.flush();
         let b = submit(&store, "run", 10, "consumed", true, false).unwrap();
@@ -1179,7 +1818,7 @@ mod tests {
     #[test]
     fn trace_edges_disabled_consumption_and_one_root_error_remain_truthful() {
         let dir = tempfile::tempdir().unwrap();
-        let store = TraceStore::open(dir.path(), Default::default()).unwrap();
+        let store = open_full(dir.path(), Default::default()).unwrap();
         submit(&store, "run", 1, "trace_off", false, true);
         store.flush();
         assert!(submit(&store, "run", 2, "consumed", false, false).is_none());
@@ -1208,7 +1847,7 @@ mod tests {
     #[test]
     fn ttl_boundary_preserves_base_files_and_retained_copy_and_survives_restart() {
         let dir = tempfile::tempdir().unwrap();
-        let store = TraceStore::open(dir.path(), Default::default()).unwrap();
+        let store = open_full(dir.path(), Default::default()).unwrap();
         std::fs::create_dir(dir.path().join("packages")).unwrap();
         std::fs::write(dir.path().join("packages/permanent.png"), b"permanent").unwrap();
         let id = submit(&store, "run", 9, "consumed", true, false).unwrap();
@@ -1245,7 +1884,7 @@ mod tests {
             b"permanent"
         );
         drop(store);
-        let reopened = TraceStore::open(dir.path(), Default::default()).unwrap();
+        let reopened = open_full(dir.path(), Default::default()).unwrap();
         assert_eq!(reopened.page("run", 0, 100)["status"], "retained");
         assert!(reopened.read_image("run", &id, false).unwrap().is_some());
     }
@@ -1257,7 +1896,7 @@ mod tests {
             retained_max_runs: 1,
             ..Default::default()
         };
-        let store = TraceStore::open(dir.path(), cfg).unwrap();
+        let store = open_full(dir.path(), cfg).unwrap();
         for color in 0..3 {
             submit(&store, "a", color, "consumed", true, false);
             store.flush();
@@ -1281,7 +1920,7 @@ mod tests {
     #[test]
     fn queue_full_and_disk_failure_record_bounded_gaps() {
         let dir = tempfile::tempdir().unwrap();
-        let store = TraceStore::open(
+        let store = open_full(
             dir.path(),
             TraceConfig {
                 queue_capacity: 1,
@@ -1314,7 +1953,7 @@ mod tests {
     #[test]
     fn invalid_identifiers_cannot_read_or_write_outside_private_trace_root() {
         let dir = tempfile::tempdir().unwrap();
-        let store = TraceStore::open(dir.path(), Default::default()).unwrap();
+        let store = open_full(dir.path(), Default::default()).unwrap();
         assert!(submit(&store, "../escape", 1, "consumed", true, false).is_none());
         assert!(store.read_image("../escape", "bad", false).is_err());
         assert!(store.snapshot("../escape", json!({})).is_err());
@@ -1324,7 +1963,7 @@ mod tests {
     #[test]
     fn explicit_completed_cleanup_drains_images_keeps_retained_and_foreign_files() {
         let root = tempfile::tempdir().unwrap();
-        let store = TraceStore::open(root.path(), TraceConfig::default()).unwrap();
+        let store = open_full(root.path(), TraceConfig::default()).unwrap();
         store.register("ended", None);
         store
             .snapshot("ended", json!({"source":"private"}))
@@ -1355,7 +1994,7 @@ mod tests {
     #[test]
     fn concurrent_runs_do_not_mix_pixels_or_snapshots() {
         let dir = tempfile::tempdir().unwrap();
-        let store = TraceStore::open(dir.path(), Default::default()).unwrap();
+        let store = open_full(dir.path(), Default::default()).unwrap();
         let mut workers = vec![];
         for color in 0..4 {
             let store = store.clone();
@@ -1407,7 +2046,7 @@ mod bounds_tests {
     #[test]
     fn global_quota_prunes_oldest_completed_but_bounds_active_run() {
         let dir = tempfile::tempdir().unwrap();
-        let store = TraceStore::open(
+        let store = open_full(
             dir.path(),
             TraceConfig {
                 run_max_bytes: 4000,
@@ -1446,7 +2085,7 @@ mod bounds_tests {
             br#"{"future_trace_format":4}"#.as_slice(),
         ] {
             let dir = tempfile::tempdir().unwrap();
-            let store = TraceStore::open(dir.path(), Default::default()).unwrap();
+            let store = open_full(dir.path(), Default::default()).unwrap();
             let image_id = image(&store, "unreadable", 17).unwrap();
             store.flush();
             let asset = store.state.lock().unwrap().runs["unreadable"].images[0]
@@ -1460,7 +2099,7 @@ mod bounds_tests {
             drop(store);
             let run_dir = dir.path().join("runtime-traces/unreadable");
             std::fs::write(run_dir.join("index.json"), invalid_index).unwrap();
-            let restarted = TraceStore::open(dir.path(), Default::default()).unwrap();
+            let restarted = open_full(dir.path(), Default::default()).unwrap();
             restarted.flush();
             assert_eq!(
                 std::fs::read(run_dir.join("index.json")).unwrap(),
@@ -1473,7 +2112,7 @@ mod bounds_tests {
     #[test]
     fn restart_removes_uncommitted_payloads_without_touching_retained_or_foreign_files() {
         let dir = tempfile::tempdir().unwrap();
-        let store = TraceStore::open(dir.path(), Default::default()).unwrap();
+        let store = open_full(dir.path(), Default::default()).unwrap();
         let id = image(&store, "a", 1).unwrap();
         store.flush();
         store.register("a", Some(now()));
@@ -1492,7 +2131,7 @@ mod bounds_tests {
             .join(format!("staging-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&staging).unwrap();
         std::fs::write(staging.join("index.json"), b"interrupted").unwrap();
-        let reopened = TraceStore::open(dir.path(), Default::default()).unwrap();
+        let reopened = open_full(dir.path(), Default::default()).unwrap();
         reopened.flush();
         assert!(!orphan.exists());
         assert!(!staging.exists());
@@ -1502,7 +2141,7 @@ mod bounds_tests {
     #[test]
     fn restart_reconciles_lower_global_limit_without_new_capture() {
         let dir = tempfile::tempdir().unwrap();
-        let store = TraceStore::open(dir.path(), Default::default()).unwrap();
+        let store = open_full(dir.path(), Default::default()).unwrap();
         for (run, color) in [("a", 1), ("b", 2)] {
             image(&store, run, color);
             store.flush();
@@ -1510,7 +2149,7 @@ mod bounds_tests {
             store.flush();
         }
         drop(store);
-        let store = TraceStore::open(
+        let store = open_full(
             dir.path(),
             TraceConfig {
                 global_max_bytes: 2000,
@@ -1529,7 +2168,7 @@ mod bounds_tests {
     #[test]
     fn snapshot_is_immutable_and_charged_to_run_quota() {
         let dir = tempfile::tempdir().unwrap();
-        let store = TraceStore::open(
+        let store = open_full(
             dir.path(),
             TraceConfig {
                 run_max_bytes: 1024,
@@ -1551,7 +2190,7 @@ mod bounds_tests {
     #[test]
     fn observation_minimum_interval_does_not_suppress_forced_edges() {
         let dir = tempfile::tempdir().unwrap();
-        let store = TraceStore::open(dir.path(), Default::default()).unwrap();
+        let store = open_full(dir.path(), Default::default()).unwrap();
         for (millis, kind, forced) in [
             (0, "observation", false),
             (1, "observation", false),
@@ -1584,9 +2223,9 @@ mod bounds_tests {
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         symlink(outside.path(), dir.path().join("runtime-traces")).unwrap();
-        assert!(TraceStore::open(dir.path(), Default::default()).is_err());
+        assert!(open_full(dir.path(), Default::default()).is_err());
         std::fs::remove_file(dir.path().join("runtime-traces")).unwrap();
-        let store = TraceStore::open(dir.path(), Default::default()).unwrap();
+        let store = open_full(dir.path(), Default::default()).unwrap();
         let id = image(&store, "a", 1).unwrap();
         store.flush();
         let state = store.state.lock().unwrap();
@@ -1603,7 +2242,7 @@ mod bounds_tests {
     #[test]
     fn synthetic_png_storage_benchmark() {
         let dir = tempfile::tempdir().unwrap();
-        let store = TraceStore::open(dir.path(), Default::default()).unwrap();
+        let store = open_full(dir.path(), Default::default()).unwrap();
         let start = std::time::Instant::now();
         let mut enqueue_max = 0;
         for frame_index in 0..4u32 {

@@ -21,3 +21,19 @@ password_hash = ""
 
 [update]
 strategy = "off"
+
+[diagnostics]
+summary_retain_days = 365
+success_detail_retain_days = 14
+failure_detail_retain_days = 30
+aggregate_repeated_events = true
+
+[trace]
+production = true
+capture_interval_ms = 10000
+success_max_images = 5
+retain_hours = 24
+failure_retain_hours = 168
+run_max_bytes = 67108864
+global_max_bytes = 536870912
+error_reserve_bytes = 16777216

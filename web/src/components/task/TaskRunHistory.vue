@@ -7,8 +7,12 @@
         <option v-for="run in records" :key="run.run_id" :value="run.run_id">{{ new Date(run.started_at).toLocaleString() }} · {{ runState(run.state) }}</option>
       </select>
       <button class="btn" :disabled="loading" @click="load()">刷新</button>
+      <a v-if="current?.finished_at" class="btn" :href="runDiagnosticsUrl(current.run_id)" :download="runDiagnosticsFilename(current.run_id)">下载诊断包</a>
+      <button v-else-if="current" class="btn" disabled>运行结束后可下载诊断包</button>
     </div>
     <p class="history-hint">仅显示当前任务的运行；详细动作由对应执行器提供。</p>
+    <p v-if="current?.finished_at" class="history-hint">诊断包包含本次运行记录和判断画面，注明采样与证据缺口；参数值与私密配置不导出。</p>
+    <p v-if="current?.diagnostics?.details_status === 'expired'" class="history-hint">详细步骤已到期，运行结果仍保留。</p>
     <p v-if="error" class="history-error" role="alert">{{ error }}</p>
     <div v-if="current" class="history-result">
       <strong>{{ runState(current.state) }}</strong>
@@ -24,6 +28,7 @@
 import { computed, onScopeDispose, ref, watch } from 'vue'
 import { api } from '../../api'
 import { devicesData } from '../../store'
+import { runDiagnosticsFilename, runDiagnosticsUrl } from '../../run-diagnostics'
 
 const props = defineProps({ taskId: { type: String, required: true } })
 defineEmits(['edit'])

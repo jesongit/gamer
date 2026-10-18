@@ -36,6 +36,7 @@ async fn trace_endpoints_require_authentication_including_images_and_retention()
     let t = build_app("trace401", test_credential("admin123"), Default::default());
     for (method, path) in [
         ("GET", "/api/runs/missing/trace"),
+        ("GET", "/api/runs/missing/diagnostics"),
         (
             "GET",
             "/api/runs/missing/trace/images/00000000-0000-0000-0000-000000000000",
@@ -49,6 +50,68 @@ async fn trace_endpoints_require_authentication_including_images_and_retention()
             "{method} {path}"
         );
     }
+}
+
+#[tokio::test]
+async fn diagnostic_zip_is_run_scoped_redacted_and_preserves_original_pixels() {
+    let t = build_app(
+        "diagnostic_zip",
+        test_credential("admin123"),
+        Default::default(),
+    );
+    let mut run = trace_run("diagnostic-a", "device-a", false);
+    add_trace(&t, &run, 25);
+    t.devices.db.trace.snapshot(&run.run_id,serde_json::json!({"_source_files":{"a":"DO_NOT_EXPORT_SOURCE"},"args":{"password":"DO_NOT_EXPORT_ARGS"}})).unwrap();
+    t.devices.db.append_run_event(run.run_id.clone(),serde_json::json!({"ev":"detail","name":"args","data":{"api_key":"DO_NOT_EXPORT_KEY","args":{"value":"DO_NOT_EXPORT_ARGS"}}})).await.unwrap();
+    run.state = RunState::Failed;
+    run.finished_at = Some(chrono::Utc::now());
+    t.devices.db.save_run_record(&run).unwrap();
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    let response = get_json(&t, &sid, "/api/runs/diagnostic-a/diagnostics").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CACHE_CONTROL],
+        "private, no-store"
+    );
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/zip");
+    let bytes = axum::body::to_bytes(response.into_body(), 2 * 1024 * 1024)
+        .await
+        .unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut pixels = 0;
+    for index in 0..zip.len() {
+        use std::io::Read;
+        let mut entry = zip.by_index(index).unwrap();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).unwrap();
+        if entry.name().ends_with(".png") {
+            assert_eq!(
+                image::load_from_memory(&bytes)
+                    .unwrap()
+                    .to_rgb8()
+                    .get_pixel(0, 0)
+                    .0,
+                [25, 2, 3]
+            );
+            pixels += 1;
+        } else {
+            let text = String::from_utf8(bytes).unwrap();
+            for secret in [
+                "DO_NOT_EXPORT_SOURCE",
+                "DO_NOT_EXPORT_ARGS",
+                "DO_NOT_EXPORT_KEY",
+            ] {
+                assert!(!text.contains(secret));
+            }
+        }
+    }
+    assert_eq!(pixels, 1);
+    assert_eq!(
+        get_json(&t, &sid, "/api/runs/not-found/diagnostics")
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
 }
 #[tokio::test]
 async fn trace_image_access_is_private_run_scoped_and_missing_is_distinct() {

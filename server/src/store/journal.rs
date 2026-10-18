@@ -1,6 +1,31 @@
 //! Persistent, runner-neutral execution history. Event payloads belong to their producer.
 use super::*;
 use serde_json::Value;
+use std::time::{Duration, Instant};
+
+pub(super) struct RepeatedObservation {
+    key: String,
+    payload: Value,
+    count: u32,
+    first_at: String,
+    last_at: String,
+    max_score: Option<f64>,
+    since: Instant,
+}
+
+impl RepeatedObservation {
+    pub(super) fn finish(mut self) -> Option<(String, Value)> {
+        if self.count == 0 {
+            return None;
+        }
+        self.payload["aggregation"] = serde_json::json!({
+            "additional_observations": self.count,
+            "first_at": self.first_at, "last_at": self.last_at,
+            "max_score": self.max_score,
+        });
+        Some((self.last_at, self.payload))
+    }
+}
 
 pub(crate) const DDL: &str = r#"
 CREATE TABLE run_records (
@@ -17,6 +42,31 @@ CREATE INDEX idx_run_events_run ON run_events(run_id, id);
 "#;
 
 impl Store {
+    pub(crate) fn diagnostic_record(&self, id: String) -> anyhow::Result<Option<Value>> {
+        self.request(move |conn| {
+            use rusqlite::OptionalExtension;
+            conn.query_row(
+                "SELECT record FROM run_records WHERE run_id=?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|text| serde_json::from_str(&text).map_err(Into::into))
+            .transpose()
+        })
+    }
+
+    pub(crate) fn diagnostic_events(
+        &self,
+        id: String,
+        after: i64,
+    ) -> anyhow::Result<Vec<(i64, String, Value)>> {
+        self.request(move |conn| {
+            let mut statement = conn.prepare("SELECT id,time,payload FROM run_events WHERE run_id=?1 AND id>?2 ORDER BY id LIMIT 50")?;
+            let rows = statement.query_map(rusqlite::params![id,after], |r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?;
+            rows.map(|row|{ let (id,time,payload)=row?; Ok((id,time,serde_json::from_str(&payload)?)) }).collect()
+        })
+    }
     /// Exact identities are supplied by the owning producer; Core does not
     /// interpret runner-specific script versions or payloads.
     pub(crate) async fn run_records_for_scope(
@@ -53,18 +103,29 @@ impl Store {
         &self,
         record: &crate::run_manager::RunRecord,
     ) -> anyhow::Result<()> {
-        self.trace.register(
-            &record.run_id,
-            record.finished_at.map(|time| time.to_rfc3339()),
-        );
-        let record = serde_json::to_value(record)?;
+        let mut record = serde_json::to_value(record)?;
+        record["_diagnostics_version"] = crate::diagnostics::POLICY_VERSION.into();
+        let build = crate::build_info::build_info();
+        record["diagnostics"]["host"] = serde_json::json!({"version":build.version,"commit":build.commit,"target":build.target,"built_at":build.built_at});
+        if let Some(identity) = self
+            .trace
+            .identity(record["run_id"].as_str().unwrap_or_default())
+        {
+            record["diagnostics"]["identity"] = identity;
+        }
         self.trace.record(
             record["run_id"].as_str().unwrap_or_default(),
             record.clone(),
         );
+        self.trace.register(
+            record["run_id"].as_str().unwrap_or_default(),
+            record["finished_at"].as_str().map(str::to_string),
+        );
         self.request(move |conn| {
             conn.execute("INSERT INTO run_records(run_id,device_id,entrypoint,started_at,finished_at,record)
-                VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(run_id) DO UPDATE SET finished_at=excluded.finished_at,record=excluded.record",
+                VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(run_id) DO UPDATE SET finished_at=excluded.finished_at,
+                record=CASE WHEN json_extract(run_records.record,'$._diagnostics_version')=1 THEN excluded.record
+                ELSE json_remove(excluded.record,'$._diagnostics_version') END",
                 rusqlite::params![record["run_id"].as_str(), record["device_id"].as_str(), record["entrypoint"].as_str(),
                     record["started_at"].as_str(), record["finished_at"].as_str(), record.to_string()])?;
             Ok(())
@@ -83,11 +144,81 @@ impl Store {
             payload["data"] =
                 serde_json::json!({"truncated": true, "message": "内容超过 128 KiB，已省略"});
         }
+        if payload.to_string().len() > 128 * 1024 {
+            // Opaque producers can place a large value outside `data` too.
+            let original = payload.to_string();
+            payload = serde_json::json!({"ev":"detail","name":"diagnostic_truncation",
+                "data":{"truncated":true,"original_bytes":original.len(),"sha256":crate::diagnostics::digest(original.as_bytes())}});
+        }
+        let mut repeats = self.event_repeats.lock().await;
+        let key = self
+            .history_retention
+            .aggregate_repeated_events
+            .then(|| crate::diagnostics::observation_key(&payload))
+            .flatten();
+        let mut rows = Vec::new();
+        if let Some(mut prior) = repeats.remove(&run_id) {
+            if key.as_deref() == Some(prior.key.as_str())
+                && prior.since.elapsed() < Duration::from_secs(2)
+                && prior.count < 1024
+            {
+                if prior.count == 0 {
+                    prior.first_at = time.clone();
+                }
+                prior.count += 1;
+                prior.last_at = time;
+                prior.max_score = match (prior.max_score, payload["score"].as_f64()) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, b) => a.or(b),
+                };
+                prior.payload = payload;
+                repeats.insert(run_id, prior);
+                return Ok(());
+            }
+            if let Some((time, payload)) = prior.finish() {
+                rows.push((run_id.clone(), time, payload));
+            }
+        }
+        if let Some(key) = key {
+            // Bound buffers independently of caller cardinality; no live input
+            // or error event is ever delayed by this observation-only path.
+            if repeats.len() >= 64 {
+                if let Some(oldest) = repeats
+                    .iter()
+                    .min_by_key(|(_, r)| r.since)
+                    .map(|(id, _)| id.clone())
+                {
+                    if let Some((time, payload)) = repeats
+                        .remove(&oldest)
+                        .and_then(RepeatedObservation::finish)
+                    {
+                        rows.push((oldest, time, payload));
+                    }
+                }
+            }
+            repeats.insert(
+                run_id.clone(),
+                RepeatedObservation {
+                    key,
+                    payload: payload.clone(),
+                    count: 0,
+                    first_at: time.clone(),
+                    last_at: time.clone(),
+                    max_score: None,
+                    since: Instant::now(),
+                },
+            );
+        }
+        rows.push((run_id, time, payload));
         self.request_async(move |conn| {
-            conn.execute(
-                "INSERT INTO run_events(run_id,time,payload) VALUES (?1,?2,?3)",
-                rusqlite::params![run_id, time, payload.to_string()],
-            )?;
+            let tx = conn.transaction()?;
+            for (run_id, time, payload) in rows {
+                tx.execute(
+                    "INSERT INTO run_events(run_id,time,payload) VALUES (?1,?2,?3)",
+                    rusqlite::params![run_id, time, payload.to_string()],
+                )?;
+            }
+            tx.commit()?;
             Ok(())
         })
         .await
@@ -128,6 +259,7 @@ impl Store {
     }
 
     pub(crate) async fn run_event_page(&self, run_id: String, after: i64) -> anyhow::Result<Value> {
+        self.flush_run_events(&run_id).await?;
         self.request_async(move |conn| {
             let mut stmt = conn.prepare("SELECT id,time,payload FROM run_events WHERE run_id=?1 AND id>?2 ORDER BY id LIMIT 501")?;
             let rows = stmt.query_map(rusqlite::params![run_id,after.max(0)], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?;
@@ -141,8 +273,28 @@ impl Store {
             let more = events.len() > 500;
             events.truncate(500);
             let next = events.last().and_then(|e| e["id"].as_i64()).unwrap_or(after);
-            Ok(serde_json::json!({"events":events,"next":next,"has_more":more}))
+            use rusqlite::OptionalExtension;
+            let expired = conn.query_row("SELECT json_extract(record,'$.diagnostics.details_status') FROM run_records WHERE run_id=?1",
+                [&run_id], |r| r.get::<_,Option<String>>(0)).optional()?.flatten();
+            Ok(serde_json::json!({"events":events,"next":next,"has_more":more,"status":expired.unwrap_or_else(||"available".into())}))
         }).await
+    }
+
+    pub(crate) async fn flush_run_events(&self, run_id: &str) -> anyhow::Result<()> {
+        let mut repeats = self.event_repeats.lock().await;
+        if let Some((time, payload)) = repeats.remove(run_id).and_then(RepeatedObservation::finish)
+        {
+            let id = run_id.to_string();
+            self.request_async(move |conn| {
+                conn.execute(
+                    "INSERT INTO run_events(run_id,time,payload) VALUES (?1,?2,?3)",
+                    rusqlite::params![id, time, payload.to_string()],
+                )?;
+                Ok(())
+            })
+            .await?;
+        }
+        Ok(())
     }
 
     pub(crate) fn recover_run_history(&self) -> anyhow::Result<()> {
@@ -154,13 +306,38 @@ impl Store {
     }
 
     pub(crate) fn prune_run_history(&self, days: u32) -> anyhow::Result<()> {
+        let policy = self.history_retention.clone();
+        self.request(move |conn| {
+            for (state, retain_days) in [("success", policy.success_detail_retain_days), ("failure", policy.failure_detail_retain_days)] {
+                if retain_days == 0 { continue; }
+                let cutoff = (Utc::now() - chrono::Duration::days(retain_days as i64)).to_rfc3339();
+                loop {
+                    let tx = conn.transaction()?;
+                    let ids = {
+                        let mut statement = tx.prepare("SELECT run_id FROM run_records WHERE finished_at IS NOT NULL AND finished_at<?1
+                            AND json_extract(record,'$._diagnostics_version')=1
+                            AND COALESCE(json_extract(record,'$.diagnostics.details_status'),'')!='expired'
+                            AND ((?2='success' AND json_extract(record,'$.state')='success') OR (?2='failure' AND json_extract(record,'$.state') IN ('failed','cancelled'))) LIMIT 50")?;
+                        let rows = statement.query_map(rusqlite::params![cutoff,state], |r|r.get::<_,String>(0))?;
+                        rows.collect::<Result<Vec<_>,_>>()?
+                    };
+                    if ids.is_empty() { break; }
+                    for id in ids {
+                        tx.execute("DELETE FROM run_events WHERE run_id=?1", [&id])?;
+                        tx.execute("UPDATE run_records SET record=json_set(record,'$.diagnostics.details_status','expired') WHERE run_id=?1", [&id])?;
+                    }
+                    tx.commit()?;
+                }
+            }
+            Ok(())
+        })?;
         if days == 0 {
             return Ok(());
         }
         let cutoff = (Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
         loop {
             let cutoff = cutoff.clone();
-            let count = self.request(move |conn| Ok(conn.execute("DELETE FROM run_records WHERE run_id IN (SELECT run_id FROM run_records WHERE finished_at IS NOT NULL AND finished_at<?1 LIMIT 50)", [cutoff])?))?;
+            let count = self.request(move |conn| Ok(conn.execute("DELETE FROM run_records WHERE run_id IN (SELECT run_id FROM run_records WHERE finished_at IS NOT NULL AND finished_at<?1 AND json_extract(record,'$._diagnostics_version')=1 LIMIT 50)", [cutoff])?))?;
             if count == 0 {
                 self.trace.prune_history(days);
                 return Ok(());
@@ -172,6 +349,149 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn temp_config(name: &str) -> (Config, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("gamer-{name}-{}", uuid::Uuid::new_v4()));
+        (
+            Config {
+                data_dir: dir.clone(),
+                ..Default::default()
+            },
+            dir,
+        )
+    }
+    #[test]
+    fn first_policy_start_preserves_old_plain_logs_across_restarts() {
+        let root = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            data_dir: root.path().into(),
+            ..Default::default()
+        };
+        let db = Store::open(&cfg).unwrap();
+        db.request(|conn|{conn.execute("INSERT INTO logs(time,device_id,script_id,level,msg) VALUES ('2000-01-01','d','s','info','old-original')",[])?;Ok(())}).unwrap();
+        drop(db);
+        std::fs::remove_file(root.path().join("diagnostics-policy.json")).unwrap(); // Synthetic pre-policy installation.
+        let db = Store::open(&cfg).unwrap();
+        db.request(|conn|{conn.execute("INSERT INTO logs(time,device_id,script_id,level,msg) VALUES ('2000-01-01','d','s','info','new-expired')",[])?;Ok(())}).unwrap();
+        assert_eq!(db.prune_logs(14).unwrap(), 1);
+        drop(db);
+        let db = Store::open(&cfg).unwrap();
+        let messages: Vec<String> = db
+            .request(|conn| {
+                let mut statement = conn.prepare("SELECT msg FROM logs ORDER BY id")?;
+                let rows = statement.query_map([], |row| row.get(0))?;
+                Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            })
+            .unwrap();
+        assert_eq!(messages, vec!["old-original"]);
+    }
+    #[tokio::test]
+    async fn production_retention_separates_summary_details_and_preserves_unmarked_history() {
+        let (cfg, dir) = temp_config("diagnostic-retention");
+        let db = Store::open(&cfg).unwrap();
+        for (id, state, age) in [
+            ("success", crate::run_manager::RunState::Success, 20),
+            ("failed", crate::run_manager::RunState::Failed, 20),
+            ("old", crate::run_manager::RunState::Failed, 400),
+            ("legacy", crate::run_manager::RunState::Success, 400),
+        ] {
+            let mut run = record(id, "d");
+            if id == "success" {
+                db.save_run_record(&run).unwrap();
+                db.trace.snapshot(id,serde_json::json!({"_diagnostic_identity":{"source_sha256":"original-version"}})).unwrap();
+            }
+            run.state = state;
+            run.finished_at = Some(Utc::now() - chrono::Duration::days(age));
+            db.save_run_record(&run).unwrap();
+            db.append_run_event(
+                id.into(),
+                serde_json::json!({"ev":"step_end","ok":false,"error":"FIXTURE_ERROR"}),
+            )
+            .await
+            .unwrap();
+        }
+        db.request(|conn|{conn.execute("UPDATE run_records SET record=json_remove(record,'$._diagnostics_version') WHERE run_id='legacy'",[])?;Ok(())}).unwrap();
+        db.prune_logs(14).unwrap();
+        assert!(db.stored_run("success".into()).await.unwrap().is_some());
+        assert_eq!(
+            db.stored_run("success".into()).await.unwrap().unwrap()["diagnostics"]["identity"]
+                ["producer"]["source_sha256"],
+            "original-version"
+        );
+        assert_eq!(
+            db.run_event_page("success".into(), 0).await.unwrap()["status"],
+            "expired"
+        );
+        assert_eq!(
+            db.run_event_page("failed".into(), 0).await.unwrap()["events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(db.stored_run("old".into()).await.unwrap().is_none());
+        assert!(db.stored_run("legacy".into()).await.unwrap().is_some());
+        assert_eq!(
+            db.run_event_page("legacy".into(), 0).await.unwrap()["events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn repeat_buffers_preserve_counts_scores_cursor_order_and_error_boundaries() {
+        let (cfg, dir) = temp_config("observation-repeats");
+        let db = Store::open(&cfg).unwrap();
+        db.save_run_record(&record("r", "d")).unwrap();
+        for score in [0.1, 0.8, 0.2, 0.3] {
+            db.append_run_event("r".into(),serde_json::json!({"ev":"vision","template":"a","found":false,"score":score,"trace":{"frame_id":7}})).await.unwrap();
+        }
+        db.append_run_event(
+            "r".into(),
+            serde_json::json!({"ev":"step_end","ok":false,"error":"FIND_TIMEOUT"}),
+        )
+        .await
+        .unwrap();
+        let page = db.run_event_page("r".into(), 0).await.unwrap();
+        let rows = page["events"].as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1]["aggregation"]["additional_observations"], 3);
+        assert_eq!(rows[1]["aggregation"]["max_score"], 0.8);
+        assert_eq!(rows[1]["score"], 0.3);
+        assert_eq!(rows[2]["error"], "FIND_TIMEOUT");
+        let after = rows[0]["id"].as_i64().unwrap();
+        assert_eq!(
+            db.run_event_page("r".into(), after).await.unwrap()["events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        db.append_run_event(
+            "r".into(),
+            serde_json::json!({"ev":"vision","template":"a","found":false,"trace":{"frame_id":8}}),
+        )
+        .await
+        .unwrap();
+        db.append_run_event(
+            "r".into(),
+            serde_json::json!({"ev":"vision","template":"a","found":true,"trace":{"frame_id":8}}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.run_event_page("r".into(), 0).await.unwrap()["events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
     fn record(id: &str, device: &str) -> crate::run_manager::RunRecord {
         crate::run_manager::RunRecord {
             run_id: id.into(),

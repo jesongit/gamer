@@ -91,3 +91,20 @@ password_hash = ""         # 固定参数 Argon2id PHC；留空且无开发环�
 # 回环管理通道（gamer.ps1 stop / 运维脚本用）：请求头 X-Admin-Token 且来源 IP 为回环。
 # 令牌来源环境变量 GAMER_ADMIN_TOKEN；dev profile 未设置时启动自动生成并打 WARN
 # （仅对回环生效）；prod 未设置则通道禁用。脚本对接见 gamer.ps1。
+
+# 独立的运行诊断保留；只管理新策略创建的记录，原始旧数据不自动删除。
+[diagnostics]
+summary_retain_days = 365
+success_detail_retain_days = 14
+failure_detail_retain_days = 30
+aggregate_repeated_events = true
+
+[trace]
+production = true
+capture_interval_ms = 10000
+success_max_images = 5
+retain_hours = 24
+failure_retain_hours = 168
+run_max_bytes = 67108864
+global_max_bytes = 536870912
+error_reserve_bytes = 16777216

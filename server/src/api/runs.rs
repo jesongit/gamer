@@ -177,8 +177,24 @@ pub(super) async fn api_get_run(
     Path(run_id): Path<String>,
 ) -> Response {
     match st.runs.get_run(&run_id) {
-        Some(rec) => Json(serde_json::to_value(&rec).unwrap_or_else(|_| serde_json::json!({})))
-            .into_response(),
+        Some(rec) => {
+            let mut value = st
+                .db
+                .stored_run(run_id.clone())
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let (Some(saved), Some(live)) = (
+                value.as_object_mut(),
+                serde_json::to_value(&rec)
+                    .ok()
+                    .and_then(|v| v.as_object().cloned()),
+            ) {
+                saved.extend(live);
+            }
+            Json(value).into_response()
+        }
         None => match st.db.stored_run(run_id.clone()).await {
             Ok(Some(record)) => Json(record).into_response(),
             Ok(None) => match st.db.trace.retained_record(&run_id) {
@@ -214,7 +230,15 @@ pub(super) async fn api_run_history(
         Ok(mut records) => {
             for record in &mut records {
                 if let Some(live) = record["run_id"].as_str().and_then(|id| st.runs.get_run(id)) {
-                    *record = serde_json::to_value(live).unwrap();
+                    if let Some(object) = record.as_object_mut() {
+                        object.extend(
+                            serde_json::to_value(live)
+                                .unwrap()
+                                .as_object()
+                                .unwrap()
+                                .clone(),
+                        );
+                    }
                 }
             }
             Json(records).into_response()
@@ -237,6 +261,100 @@ pub(super) async fn api_run_events(
         Ok(page) => Json(page).into_response(),
         Err(error) => ApiError::internal(error.to_string()).into_response(),
     }
+}
+
+/// Authenticated, one-run support package. No whole database/profile/config export.
+pub(super) async fn api_run_diagnostics(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    use std::sync::{Arc, OnceLock};
+    use tokio::io::AsyncReadExt;
+    static EXPORTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    if id.is_empty()
+        || id.len() > 128
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    {
+        return ApiError::bad_request("invalid run id").into_response();
+    }
+    let Ok(permit) = EXPORTS
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
+        .clone()
+        .try_acquire_owned()
+    else {
+        return err_response(StatusCode::TOO_MANY_REQUESTS, "diagnostic_export_busy");
+    };
+    if let Err(error) = st.db.flush_run_events(&id).await {
+        return ApiError::internal(error.to_string()).into_response();
+    }
+    let db = st.db.clone();
+    let run_id = id.clone();
+    let temporary = match tokio::task::spawn_blocking(move || {
+        crate::diagnostics::archive(&db, &run_id)
+    })
+    .await
+    {
+        Ok(Ok(file)) => file,
+        Ok(Err(error)) if error.to_string() == "run_not_found" => {
+            return err_response(StatusCode::NOT_FOUND, "run_not_found")
+        }
+        Ok(Err(error)) if error.to_string() == "run_active" => {
+            return err_response(StatusCode::CONFLICT, "run_active")
+        }
+        _ => {
+            return err_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "diagnostic_export_failed",
+            )
+        }
+    };
+    let size = temporary.as_file().metadata().map(|m| m.len()).unwrap_or(0);
+    let file = match tokio::fs::File::open(temporary.path()).await {
+        Ok(file) => file,
+        Err(_) => {
+            return err_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "diagnostic_export_failed",
+            )
+        }
+    };
+    let stream = futures_util::stream::try_unfold(
+        (file, temporary, permit),
+        |(mut file, temporary, permit)| async move {
+            let mut bytes = vec![0; 64 * 1024];
+            let length = file.read(&mut bytes).await?;
+            if length == 0 {
+                return Ok::<_, std::io::Error>(None);
+            }
+            bytes.truncate(length);
+            Ok(Some((bytes, (file, temporary, permit))))
+        },
+    );
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/zip".to_string(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"gamer-diagnostics-{id}.zip\""),
+            ),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "private, no-store".to_string(),
+            ),
+            (
+                axum::http::header::X_CONTENT_TYPE_OPTIONS,
+                "nosniff".to_string(),
+            ),
+            (axum::http::header::CONTENT_LENGTH, size.to_string()),
+        ],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response()
 }
 
 /// POST /api/runs/:run_id/cancel → 202 {"cancelling":true}；

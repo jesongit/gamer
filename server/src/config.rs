@@ -187,7 +187,7 @@ pub struct Config {
     /// 仅本机访问：HTTP 和 WebRTC 都只监听回环地址；GAMER_LOCAL_ONLY 可覆盖。
     #[serde(default)]
     pub local_only: bool,
-    /// Production owns scheduling; disable it for development and migration checks.
+    /// Production owns automatic scheduling; development and migration checks disable it.
     #[serde(default = "default_scheduler_enabled")]
     pub scheduler_enabled: bool,
     /// 数据目录（SQLite、模板图片、脚本）
@@ -241,6 +241,10 @@ pub struct Config {
     /// Temporary runtime image evidence; independent of base log retention.
     #[serde(default)]
     pub trace: crate::runtime_trace::TraceConfig,
+    /// Independent summary/detail history windows. Existing unmarked records
+    /// are preserved; only records created under this policy are expired.
+    #[serde(default)]
+    pub diagnostics: crate::diagnostics::DiagnosticsConfig,
     /// 专用计算池并发上限（NCC 匹配 / PNG 解码等 CPU 密集工作，阶段 5
     /// PERF-003）：这些工作提交到独立 rayon 线程池执行，不占 Tokio 核心线程；
     /// 该值同时限制池线程数与在途任务数（池满排队等待，不丢弃）。
@@ -316,6 +320,7 @@ impl Default for Config {
             browser_idle_secs: 0,
             log_retain_days: default_log_retain_days(),
             trace: Default::default(),
+            diagnostics: Default::default(),
             compute_max_concurrency: 0,
             auth: AuthConfig::default(),
             update: UpdateConfig::default(),
@@ -529,6 +534,9 @@ impl Config {
 
     fn validate_with_password_hash(&self) -> Vec<String> {
         let mut errs = Vec::new();
+        if let Some(error) = self.diagnostics.validate() {
+            errs.push(error);
+        }
         if self.local_only
             && (!self.rtc_external_ip.trim().is_empty()
                 || self.rtc_udp_port != 0
@@ -817,6 +825,16 @@ fn probe_tool(name: &'static str, path: &str, args: &[&str]) -> ToolProbe {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn automatic_scheduling_can_be_disabled_without_changing_task_data() {
+        let mut config = super::Config::default();
+        assert!(config.scheduler_enabled);
+        config.scheduler_enabled = false;
+        let encoded = toml::to_string(&config).unwrap();
+        let decoded: super::Config = toml::from_str(&encoded).unwrap();
+        assert!(!decoded.scheduler_enabled);
+    }
+
     #[test]
     fn local_only_config_and_environment_are_explicit_and_validated() {
         let mut cfg = super::Config::default();

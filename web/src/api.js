@@ -9,6 +9,7 @@
 // 包装（如 YAML 自动化 runner）归扩展前端侧（插件 runner 模块 等），Core API 层
 // 不认识任何 runner 注册 id。
 import { handleUnauthorized } from './auth'
+import { runDiagnosticsFilename, runDiagnosticsUrl } from './run-diagnostics'
 import {
   GAMER_YAML_PLUGIN_ID, KEYMAP_PLUGIN_ID,
   AUTOMATION_DIR, TEMPLATE_DIR, KEYMAP_DIR, isFunctionLibraryFile,
@@ -633,6 +634,8 @@ export const api = {
   // 统一运行实例（run_id 主键）：单次查询 RunRecord / 按次取消（终态以查询为准）
   listRunHistory: (deviceId, entrypoint, before, taskId) => req('GET', `/api/runs?${new URLSearchParams({...(deviceId ? {device_id: deviceId} : {}), ...(entrypoint ? {entrypoint} : {}), ...(before ? {before} : {}), ...(taskId ? {task_id: taskId} : {})})}`),
   getRunEvents: (runId, after = 0) => req('GET', `/api/runs/${encodeURIComponent(runId)}/events?after=${after}`),
+  runDiagnosticsUrl,
+  runDiagnosticsFilename,
   getRunTrace: (runId, after = 0, limit = 100) => req('GET', `/api/runs/${encodeURIComponent(requireId(runId, 'run_id'))}/trace?${new URLSearchParams({ after: String(after), limit: String(limit) })}`),
   retainRunTrace: (runId) => req('POST', `/api/runs/${encodeURIComponent(requireId(runId, 'run_id'))}/trace/retain`),
   getRun: async (runId) => requireRunResponse(await req('GET', `/api/runs/${encodeURIComponent(requireId(runId, 'run_id'))}`)),
