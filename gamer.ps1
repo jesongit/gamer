@@ -6,7 +6,8 @@
   start / stop / restart / rebuild / status 默认同时作用于前后端：
   - 后端：Rust gamer-server（端口从 server/config.toml 读取，默认 8443）
   - 前端：Vite dev server（端口 5173，代理 /api、/ws 到后端）
-  仅管理当前仓库路径下的后端与 Vite；端口占用不能作为进程归属依据。
+  仅管理当前仓库路径下的后端、Vite 及所属浏览器；端口占用不能作为进程归属依据。
+  stop 也会清理当前数据目录 browser-profiles 下已失去父进程的 Chrome/Edge，保留登录资料。
   阶段 2 起后端 REST/WS 需浏览器会话；本脚本走「回环 + X-Admin-Token」本机管理通道
   （令牌优先取环境变量 GAMER_ADMIN_TOKEN，否则自动持久化到
   %LOCALAPPDATA%\gamer\admin-token，启动后端时注入其进程环境）完成优雅停机。
@@ -63,6 +64,9 @@ $Root         = $PSScriptRoot
 $ServerDir    = Join-Path $Root 'server'
 $WebDir       = Join-Path $Root 'web'
 $ConfigFile   = Join-Path $ServerDir 'config.toml'
+if (-not [string]::IsNullOrWhiteSpace($env:GB_CONFIG)) {
+    $ConfigFile = if ([IO.Path]::IsPathRooted($env:GB_CONFIG)) { $env:GB_CONFIG } else { Join-Path $ServerDir $env:GB_CONFIG }
+}
 
 # ---------- 回环管理通道令牌（阶段 2 鉴权配套） ----------
 # 服务端鉴权后，POST /api/shutdown 需要「回环来源 + X-Admin-Token」才能优雅停机。
@@ -114,15 +118,15 @@ function Get-ServerPort {
 
 # 数据目录：config.toml 的 data_dir（相对路径按冻结规则以配置文件所在目录为基准解析）
 function Get-DataDir {
-    if (Test-Path $ConfigFile) {
+    $d = $env:GAMER_DATA_DIR
+    if ([string]::IsNullOrWhiteSpace($d) -and (Test-Path $ConfigFile)) {
         $m = Select-String -Path $ConfigFile -Pattern '^\s*data_dir\s*=\s*["'']?([^"''\r\n]+?)["'']?\s*$' | Select-Object -First 1
-        if ($m) {
-            $d = $m.Matches[0].Groups[1].Value.Trim()
-            if ([IO.Path]::IsPathRooted($d)) { return $d }
-            return Join-Path $ServerDir $d
-        }
+        if ($m) { $d = $m.Matches[0].Groups[1].Value }
     }
-    return (Join-Path $ServerDir 'data')
+    if ([string]::IsNullOrWhiteSpace($d)) { $d = 'data' }
+    $d = $d.Trim()
+    if ([IO.Path]::IsPathRooted($d)) { return $d }
+    return Join-Path (Split-Path -Parent $ConfigFile) $d
 }
 
 function Get-BinaryPath {
@@ -353,34 +357,106 @@ function Reset-AdbServer {
     }
 }
 
+function Get-BrowserProcessProfilePath($Process) {
+    # Windows 参数可为 --user-data-dir="带空格路径" 或 "--user-data-dir=带空格路径"。
+    $arguments = @([regex]::Matches([string]$Process.CommandLine, '(?:[^\s"]|"[^"]*")+') |
+        ForEach-Object { $_.Value.Replace('"', '') })
+    $profiles = @($arguments | Where-Object { $_ -like '--user-data-dir=*' })
+    if ($profiles.Count -ne 1 -or $arguments -contains '--user-data-dir') { return $null }
+    $path = $profiles[0].Substring('--user-data-dir='.Length).Replace('/', '\')
+    # C:relative / \relative 都依赖当前进程目录，不能作为浏览器归属证据。
+    if ($path -notmatch '^(?:[a-zA-Z]:\\|\\\\)') { return $null }
+    return Get-NormalizedProcessPath $path
+}
+
+function Test-BackendBrowserProfile($Process) {
+    $profile = Get-BrowserProcessProfilePath $Process
+    $expected = Get-NormalizedProcessPath (Join-Path $DataDir 'browser-profiles')
+    if (-not $profile -or -not $expected) { return $false }
+    # 只能是资料根下的单层 profile，不能靠子串/前缀认领其他项目的浏览器。
+    return [string]::Equals([IO.Path]::GetDirectoryName($profile), $expected, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-BrowserProcessFamily($Seeds, $Processes, $ExitedParents = @{}) {
+    $family = @($Seeds)
+    $current = @{}
+    foreach ($item in $Processes) { $current[$item.ProcessId] = $item }
+    do {
+        $parents = @{}
+        foreach ($item in $family) {
+            $live = $current[$item.ProcessId]
+            if (($live -and $live.CreationDate -eq $item.CreationDate -and $live.CommandLine -eq $item.CommandLine) -or $ExitedParents.ContainsKey($item.ProcessId)) {
+                $parents[$item.ProcessId] = $item
+            }
+        }
+        $ids = @($family.ProcessId)
+        $next = @($Processes | Where-Object {
+            $parent = $parents[$_.ParentProcessId]
+            $parent -and $_.ProcessId -notin $ids -and $_.CreationDate -ge $parent.CreationDate -and
+                (-not $ExitedParents.ContainsKey($parent.ProcessId) -or $_.CreationDate -le $ExitedParents[$parent.ProcessId])
+        })
+        $family += $next
+    } while ($next.Count -gt 0)
+    return $family
+}
+
 function Get-BackendBrowserSnapshot($Backends) {
-    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    $all = @(Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe' OR Name = 'msedge.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -in @('chrome.exe', 'msedge.exe') })
-    foreach ($root in @($all | Where-Object {
-        $_.ParentProcessId -in @($Backends.Id) -and $_.CommandLine -match '--headless' -and
-        $_.CommandLine -match '--user-data-dir=' -and $_.CommandLine -notmatch '--type='
-    })) {
-        $parent = @($Backends | Where-Object { $_.Id -eq $root.ParentProcessId })[0]
-        if ($root.CreationDate -lt $parent.StartTime) { continue }
-        $family = @($root)
-        do {
-            $ids = @($family.ProcessId)
-            $next = @($all | Where-Object { $_.ParentProcessId -in $ids -and $_.ProcessId -notin $ids -and $_.CreationDate -ge $root.CreationDate })
-            $family += $next
-        } while ($next.Count -gt 0)
-        [pscustomobject]@{ Root = $root; Family = $family }
+    foreach ($candidate in $all) {
+        if (-not $candidate.CreationDate -or -not (Get-BrowserProcessProfilePath $candidate)) { continue }
+        $arguments = @([regex]::Matches([string]$candidate.CommandLine, '(?:[^\s"]|"[^"]*")+') |
+            ForEach-Object { $_.Value.Replace('"', '') })
+        $isChild = @($arguments | Where-Object { $_ -like '--type=*' }).Count -gt 0
+        $isRoot = -not $isChild -and @($arguments | Where-Object { $_ -match '^--headless(?:=new)?$' }).Count -gt 0
+        if (-not $isRoot -and -not $isChild) { continue }
+        $parent = @($Backends | Where-Object { $_.Id -eq $candidate.ParentProcessId } | Select-Object -First 1)
+        $owned = $isRoot -and $parent.Count -eq 1 -and $parent[0].StartTime -and $candidate.CreationDate -ge $parent[0].StartTime
+        if (-not $owned) {
+            if (-not (Test-BackendBrowserProfile $candidate)) { continue }
+            if ($isRoot -and ($arguments -notcontains '--remote-debugging-port=0' -or $arguments -notcontains '--remote-debugging-address=127.0.0.1')) { continue }
+            # 活着的其他父进程仍拥有其浏览器；PID 已复用时比较创建时间再判断孤儿。
+            $liveParent = Get-Process -Id $candidate.ParentProcessId -ErrorAction SilentlyContinue
+            if ($liveParent) {
+                try { if (-not $liveParent.StartTime -or $liveParent.StartTime -le $candidate.CreationDate) { continue } }
+                catch { continue }
+            }
+        }
+        $family = @(Get-BrowserProcessFamily @($candidate) $all)
+        [pscustomobject]@{ Root = $(if ($isRoot) { $candidate } else { $null }); Family = $family }
     }
 }
 
 function Close-BackendBrowsers($Snapshots) {
     foreach ($snapshot in @($Snapshots)) {
         $root = $snapshot.Root
-        $current = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $root.ProcessId) -ErrorAction SilentlyContinue
-        if ($current -and $current.CreationDate -eq $root.CreationDate -and $current.CommandLine -eq $root.CommandLine) {
+        # 停机期间可能新建 renderer/utility，关闭前补齐仍归属原身份的子进程。
+        $all = @(Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe' OR Name = 'msedge.exe'" -ErrorAction SilentlyContinue)
+        $family = @(Get-BrowserProcessFamily $snapshot.Family $all)
+        $current = if ($root) { Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $root.ProcessId) -ErrorAction SilentlyContinue }
+        $browserProcess = $null
+        if ($root -and $current -and $current.CreationDate -eq $root.CreationDate -and $current.CommandLine -eq $root.CommandLine) {
+            Write-Host ("后端: 关闭所属浏览器 PID {0} ..." -f $root.ProcessId)
+            # 固定原进程句柄；根退出后仍可取得准确 ExitTime，不把复用 PID 的后代算进来。
+            try {
+                $browserProcess = Get-Process -Id $root.ProcessId -ErrorAction Stop
+                $null = $browserProcess.Handle
+                $identity = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $root.ProcessId) -ErrorAction SilentlyContinue
+                if (-not $identity -or $identity.CreationDate -ne $root.CreationDate -or $identity.CommandLine -ne $root.CommandLine) {
+                    $browserProcess.Dispose()
+                    $browserProcess = $null
+                }
+            } catch {
+                if ($browserProcess) { try { $browserProcess.Dispose() } catch {} }
+                $browserProcess = $null
+            }
             # Graceful CDP close flushes the existing profile. Only inspect ports
             # owned by the exact browser captured from this backend's children.
-            foreach ($endpoint in @(Get-NetTCPConnection -OwningProcess $root.ProcessId -State Listen -ErrorAction SilentlyContinue |
-                Where-Object { $_.LocalAddress -eq '127.0.0.1' })) {
+            $endpoints = if ($browserProcess) {
+                @(Get-NetTCPConnection -OwningProcess $root.ProcessId -State Listen -ErrorAction SilentlyContinue |
+                    Where-Object { $_.LocalAddress -eq '127.0.0.1' })
+            } else { @() }
+            foreach ($endpoint in $endpoints) {
                 $socket = $null; $deadline = $null
                 try {
                     $info = Invoke-RestMethod -Uri ("http://127.0.0.1:{0}/json/version" -f $endpoint.LocalPort) -TimeoutSec 2 -ErrorAction Stop
@@ -393,8 +469,7 @@ function Close-BackendBrowsers($Snapshots) {
                     $bytes = [System.Text.Encoding]::UTF8.GetBytes('{"id":1,"method":"Browser.close","params":{}}')
                     $segment = New-Object 'System.ArraySegment[byte]' -ArgumentList @(,$bytes)
                     $null = $socket.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $deadline.Token).GetAwaiter().GetResult()
-                    $process = Get-Process -Id $root.ProcessId -ErrorAction SilentlyContinue
-                    if ($process) { $null = $process.WaitForExit(5000) }
+                    if ($browserProcess) { $null = $browserProcess.WaitForExit(5000) }
                     break
                 } catch {} finally {
                     if ($socket) { $socket.Dispose() }
@@ -402,13 +477,32 @@ function Close-BackendBrowsers($Snapshots) {
                 }
             }
         }
+        $exitedParents = @{}
+        if ($browserProcess) {
+            try {
+                if ($browserProcess.HasExited) { $exitedParents[$root.ProcessId] = $browserProcess.ExitTime }
+            } catch {} finally {
+                $browserProcess.Dispose()
+            }
+        }
+        $all = @(Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe' OR Name = 'msedge.exe'" -ErrorAction SilentlyContinue)
+        $family = @(Get-BrowserProcessFamily $family $all $exitedParents)
         # A forced backend exit can leave browser children behind. PID plus
         # creation time prevents cleanup from reaching a newly reused process.
-        foreach ($owned in @($snapshot.Family | Sort-Object CreationDate -Descending)) {
+        # 根进程优先，阻止兜底清理时继续派生子进程。
+        foreach ($owned in $family) {
             $remaining = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $owned.ProcessId) -ErrorAction SilentlyContinue
             if ($remaining -and $remaining.CreationDate -eq $owned.CreationDate -and $remaining.CommandLine -eq $owned.CommandLine) {
                 Write-Host ("后端: 清理所属浏览器进程 PID {0}" -f $owned.ProcessId)
                 Stop-Process -Id $owned.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+        }
+        # 强杀是异步的；等待已核验成员退出，失败须显式报告，避免 restart 继续占用旧资料目录。
+        foreach ($owned in $family) {
+            $remaining = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $owned.ProcessId) -ErrorAction SilentlyContinue
+            if ($remaining -and $remaining.CreationDate -eq $owned.CreationDate -and $remaining.CommandLine -eq $owned.CommandLine) {
+                $process = Get-Process -Id $owned.ProcessId -ErrorAction SilentlyContinue
+                if ($process -and -not $process.WaitForExit(2000)) { throw "后端: 所属浏览器进程 PID $($owned.ProcessId) 仍未退出，请检查进程权限后重试 stop" }
             }
         }
     }
@@ -416,11 +510,13 @@ function Close-BackendBrowsers($Snapshots) {
 
 function Stop-Backend {
     $procs = @(Get-BackendProcs)
+    $browsers = @(Get-BackendBrowserSnapshot $procs)
     if ($procs.Count -eq 0) {
+        Close-BackendBrowsers $browsers
+        Close-BackendBrowsers @(Get-BackendBrowserSnapshot @())
         Write-Host "后端: 当前仓库没有运行中的 gamer-server 进程" -ForegroundColor Yellow
         return $false
     }
-    $browsers = @(Get-BackendBrowserSnapshot $procs)
     # 优雅停机：先调 /api/shutdown 让服务端拆 scrcpy 会话/清 adb reverse 隧道再退出
     # （硬杀会留孤儿 adb 子进程，曾致 adb 短暂楔死后续连接，见 AGENTS.md 已知坑）。
     # 阶段 2 起该接口要求回环 + X-Admin-Token 头——令牌由 Start-Backend 注入 server
@@ -450,7 +546,11 @@ function Stop-Backend {
         Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Milliseconds 500
-    if (@(Get-BackendProcs).Count -eq 0) { Close-BackendBrowsers $browsers }
+    if (@(Get-BackendProcs).Count -eq 0) {
+        Close-BackendBrowsers $browsers
+        # 根进程随后端退出时，仍可能留下资料目录可核验的孤儿子进程。
+        Close-BackendBrowsers @(Get-BackendBrowserSnapshot @())
+    }
     if (Test-PortListening $Port) {
         Write-Host "后端: 端口 $Port 仍被占用（可能为其他程序）：" -ForegroundColor Red
         Get-PortOwner $Port | ForEach-Object { Write-Host $_ }
