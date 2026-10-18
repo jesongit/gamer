@@ -7,16 +7,17 @@ Simplified Chinese OCR. A separate browser or VNC container is not required.
 ## Release
 
 ```sh
-docker pull --platform linux/amd64 posase/gamer:v1.0.1
+docker pull --platform linux/amd64 posase/gamer:v1.0.2
 ```
 
-Docker release **v1.0.1** packages application **0.4.0** with portable credentials,
-production diagnostic retention and authenticated per-run diagnostic ZIPs.
+Docker release **v1.0.2** packages application **0.4.0** with independent production
+HTTP/HTTPS cookie configuration and Chromium/runc startup fixes. Portable credentials,
+production diagnostic retention and authenticated per-run diagnostic ZIPs remain.
 The published architecture is **linux/amd64**, for Intel/AMD x86_64 hosts.
-The previous `v1.0` tag remains available. No ARM64 release is claimed.
+The previous `v1.0` and `v1.0.1` tags remain available. No ARM64 release is claimed.
 
 Source and deployment bundle:
-https://github.com/jesongit/gamer/releases/tag/docker-v1.0.1
+https://github.com/jesongit/gamer/releases/tag/docker-v1.0.2
 
 ## Fresh installation with docker run
 
@@ -27,21 +28,28 @@ Download and extract the deployment bundle from the release above. It includes
 docker volume create gamer-production-data
 docker run --rm -it --memory 512m --memory-swap 512m --entrypoint python3 \
   --mount type=volume,src=gamer-production-data,dst=/data \
-  posase/gamer:v1.0.1 /app/tools/gamer_docker.py init
+  posase/gamer:v1.0.2 /app/tools/gamer_docker.py init
 
 docker run -d --name gamer --init --restart unless-stopped \
   --stop-timeout 90 --shm-size 1g \
   --security-opt seccomp=./deploy/docker/chromium-seccomp.json \
-  -p 127.0.0.1:18443:8443 -e TZ=Asia/Shanghai \
+  -p 18443:8443 -e TZ=Asia/Shanghai \
+  -e GAMER_PROFILE=prod -e GAMER_COOKIE_SECURE=false \
   --mount type=volume,src=gamer-production-data,dst=/data \
   --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 \
-  posase/gamer:v1.0.1
+  posase/gamer:v1.0.2
 ```
 
 Open `http://localhost:18443` using your configured password. There is no default
 password. New installations start with automatic scheduling disabled. Chromium
 runs sandboxed as UID 1000; application self-update is off. Browser idle reclamation
 is 30 minutes. CDP remains internal and must not be published.
+
+For HTTP access use `GAMER_PROFILE=prod` with `GAMER_COOKIE_SECURE=false`.
+For an HTTPS entrypoint set `GAMER_COOKIE_SECURE=true`. Password checks,
+HttpOnly/SameSite cookies and same-origin checks remain enabled. This flag requires
+v1.0.2 or later. Existing volumes retain their configuration and need an explicit
+environment setting when switching from dev to prod with HTTP.
 
 ## Existing data migration
 
@@ -52,7 +60,7 @@ bundle's `restore.sh` validates the data and starts Gamer with scheduling disabl
 Verify account login and the task list, stop the old production instance, then run
 `bash restore.sh activate`. Only one machine should schedule the same accounts.
 
-Detailed steps: https://github.com/jesongit/gamer/blob/docker-v1.0.1/deploy/docker/MIGRATION.md
+Detailed steps: https://github.com/jesongit/gamer/blob/docker-v1.0.2/deploy/docker/MIGRATION.md
 
 The optional compact transfer profile omits only explicitly listed local backup /
 diagnostic copies and disposable browser caches. It preserves application history,
@@ -68,11 +76,12 @@ provide an authenticated diagnostic ZIP from Tasks > View logs. Images may conta
 account information; review a package before sharing it.
 
 Update by replacing the image and keeping `/data`. Back up before upgrading; retain
-the previous image with its matching pre-upgrade volume for rollback. Do not attach
-an upgraded data volume directly to an older image. Data and credential keys must
-be backed up together.
+the previous image and matching pre-upgrade backup for rollback. This patch has no
+database migration; an isolated v1.0.1 upgrade/backup/rollback check is included in
+the release evidence. Data and credential keys must be backed up together.
 
-The service listens on TCP 8443. Use loopback/SSH forwarding or an HTTPS reverse
-proxy for remote access. The image contains no user data or credentials.
+The service listens on TCP 8443. Publish host TCP 18443 as above for direct HTTP,
+or use SSH forwarding / an HTTPS reverse proxy. The image contains no user data
+or credentials.
 
 Project: https://github.com/jesongit/gamer

@@ -675,4 +675,5 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - Windows 上全量备份/哈希读取会使 WSL 文件缓存膨胀，即使 Gamer 容器 RSS 很低也可能挤压宿主；批处理使用限内存的独立辅助容器、检查宿主可用内存，不在生产容器中进行全卷扫描，WSL 总上限及回收策略另按机器配置处理。
 - CI 的 cargo fmt --all 会遍历主仓通过 path 引用的插件 host 文件；发布前须连同 submodule 一起检查并分别提交格式改动，不能只检查主仓新增文件。
 
-- Docker prod 用 HTTP 局域网 IP 登录后立即出现 401：旧版将 Cookie Secure 与 profile 绑定；新源码支持独立 GAMER_COOKIE_SECURE=false（或 [auth].cookie_secure=false），HTTPS 使用 true，已发布 v1.0.1 仍需原有访问方式。
+- Docker prod 用 HTTP 局域网 IP 登录后立即出现 401：旧版将 Cookie Secure 与 profile 绑定；v1.0.2 起支持独立 GAMER_COOKIE_SECURE=false（或 [auth].cookie_secure=false），HTTPS 使用 true，旧 v1.0.1 仍需原有访问方式。
+- Docker 恢复数据后 runc 报 unsafe procfs/openat2：旧 Chromium seccomp 缺少 close_range/openat2 及 clone3 的 ENOSYS 回退；更新随 v1.0.2 发布的安全配置，已恢复数据用 start 模式复用，勿重复覆盖恢复。

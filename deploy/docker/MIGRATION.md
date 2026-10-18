@@ -56,7 +56,7 @@ curl -fLO https://github.com/jesongit/gamer/releases/download/docker-v1.0.2/game
 docker pull --platform linux/amd64 posase/gamer:v1.0.2
 docker run --rm --memory 512m --memory-swap 512m --user "$(id -u):$(id -g)" -v "$PWD:/work" --entrypoint python3 posase/gamer:v1.0.2 -m zipfile -e /work/gamer-docker-v1.0.2-amd64-deploy.zip /work
 sha256sum -c gamer-data.sha256
-bash restore.sh
+GAMER_COOKIE_SECURE=false bash restore.sh
 ```
 
 发布的恢复脚本固定在 v1.0.2 镜像摘要，只接受空数据卷和未占用的容器名 `gamer`，不自动删卷或容器。
