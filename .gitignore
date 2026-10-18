@@ -80,6 +80,10 @@ desktop.ini
 tools/mcp-client/node_modules/
 tools/mcp-client/out/
 tools/__pycache__/
+deploy/docker/__pycache__/
+/.env
+deploy/docker/local/
+server/data-dev/
 server/web-dist/
 
 # ===== 本地任务笔记 =====

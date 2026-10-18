@@ -13,3 +13,4 @@ tests/fixtures/scripts/*.yaml text eol=lf
 tests/fixtures/tasks/*.json text eol=lf
 # 官方插件 manifest（include_str! 同步锁）禁止 CRLF 漂移。
 tools/plugins/**/*.toml text eol=lf
+deploy/docker/*.sh text eol=lf

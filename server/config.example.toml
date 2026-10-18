@@ -11,6 +11,8 @@
 port = 8443
 # 仅本机访问（HTTP + WebRTC）；本机测试可用 GAMER_LOCAL_ONLY=1 临时开启。
 local_only = false
+# 使用独立开发数据目录时关闭，避免开发实例再次执行生产日常。
+scheduler_enabled = true
 # 数据目录（SQLite、模板图片、脚本按应用分区存放于其下）
 data_dir = "./data"
 

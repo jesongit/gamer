@@ -1,0 +1,30 @@
+name: gamer-production
+services:
+  gamer:
+    image: ${GAMER_IMAGE:-gamer:local}
+    build:
+      context: .
+      args:
+        GAMER_GIT_COMMIT: ${GAMER_GIT_COMMIT:-unknown}
+        GAMER_BUILD_TIME: ${GAMER_BUILD_TIME:-unknown}
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 90s
+    shm_size: 1gb
+    security_opt:
+      - seccomp=./deploy/docker/chromium-seccomp.json
+    ports:
+      - "${GAMER_BIND_ADDRESS:-127.0.0.1}:${GAMER_PORT:-18443}:8443"
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - gamer-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+volumes:
+  gamer-data:
+    external: true
+    name: ${GAMER_DATA_VOLUME:-gamer-production-data}

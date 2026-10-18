@@ -187,6 +187,9 @@ pub struct Config {
     /// 仅本机访问：HTTP 和 WebRTC 都只监听回环地址；GAMER_LOCAL_ONLY 可覆盖。
     #[serde(default)]
     pub local_only: bool,
+    /// Production owns scheduling; disable it for development and migration checks.
+    #[serde(default = "default_scheduler_enabled")]
+    pub scheduler_enabled: bool,
     /// 数据目录（SQLite、模板图片、脚本）
     pub data_dir: PathBuf,
     /// 应用资产根目录（PATH-001：GAMER_APP_DIR，launcher 注入；scrcpy jar 与
@@ -271,6 +274,10 @@ pub struct Config {
     pub rtc_external_port: u16,
 }
 
+fn default_scheduler_enabled() -> bool {
+    true
+}
+
 fn default_idle_power_secs() -> u64 {
     300
 }
@@ -290,6 +297,7 @@ impl Default for Config {
             source_path: None,
             port: 8443,
             local_only: false,
+            scheduler_enabled: true,
             data_dir: PathBuf::from("./data"),
             app_dir: None,
             adb_path: "adb".into(),

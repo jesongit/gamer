@@ -1,0 +1,59 @@
+name: Docker native builds
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - compose.yaml
+      - server/**
+      - web/**
+      - plugins
+      - sdk/**
+      - updater/**
+      - docs/reference/YAML.md
+      - release/config.default.toml
+      - deploy/docker/**
+      - tools/build-plugin-ui.mjs
+      - tools/gamer_docker.py
+      - tools/gamer_browser_sessions.py
+      - .github/workflows/docker.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: gamer:ci
+          platforms: linux/${{ matrix.arch }}
+          build-args: GAMER_GIT_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=docker-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.arch }}
+      - name: Browser sandbox and OCR smoke
+        run: |
+          docker run --rm --init --user 1000:1000 --shm-size=1g \
+            --security-opt seccomp=deploy/docker/chromium-seccomp.json \
+            --entrypoint chromium gamer:ci --headless=new --disable-gpu \
+            --dump-dom 'data:text/html,<title>gamer-container-smoke</title>' | grep gamer-container-smoke
+          docker run --rm --entrypoint tesseract gamer:ci --list-langs | grep chi_sim

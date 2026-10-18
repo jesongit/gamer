@@ -533,7 +533,11 @@ impl RuntimeServices {
         // UI 贡献），必须在 Scheduler 启动前完成——恢复出的 runner 要立即可
         // 派发任务；失败降级 Enabled，不阻塞启动。
         ctx.extensions.reconcile_startup().await;
-        ctx.scheduler.start().await;
+        if cfg.scheduler_enabled {
+            ctx.scheduler.start().await;
+        } else {
+            info!("automatic task scheduling disabled by configuration");
+        }
         Ok(ctx)
     }
 }

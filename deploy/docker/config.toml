@@ -1,0 +1,23 @@
+port = 8443
+local_only = false
+scheduler_enabled = false
+data_dir = "/data"
+adb_path = "/usr/bin/adb"
+browser_path = "/usr/bin/chromium"
+ffmpeg_path = "/usr/bin/ffmpeg"
+scrcpy_server = "/app/assets/scrcpy-server.jar"
+decode_frames = true
+max_size = 0
+bitrate_mbps = 12
+fps = 15
+idle_power_secs = 300
+browser_idle_secs = 1800
+log_retain_days = 14
+compute_max_concurrency = 4
+
+[auth]
+# Initialize this through the local migration/setup command; no default password.
+password_hash = ""
+
+[update]
+strategy = "off"
