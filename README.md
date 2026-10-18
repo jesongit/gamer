@@ -32,6 +32,12 @@ Gamer 是通过浏览器操作 Android 与浏览器游戏目标的自动化工�
 
 当前源码布局与历史公开发行包不同，不提供启动器迁移路径。使用说明见 [便携版与更新](docs/guides/UPDATE.md)。
 
+### Docker 生产部署
+
+可将稳定版本放在 Linux 容器中运行，使用持久卷保存任务、插件、配置包和浏览器登录资料，
+与本地开发隔离。镜像包含 Chromium 与本地 OCR，支持 amd64/arm64 构建。
+首次部署、Windows 数据迁移、备份和镜像更新见 [Docker 部署指南](docs/guides/DOCKER.md)。
+
 ### 从源码启动
 
 官方插件源码位于独立的 [gamer-plugins 仓库](https://github.com/jesongit/gamer-plugins)，本仓 `plugins/` 固定引用其提交。首次克隆使用 `git clone --recurse-submodules`；已有工作区更新后运行 `git submodule update --init --recursive`。不要使用 `--remote` 跟随插件最新分支。
