@@ -69,6 +69,49 @@ async fn login_remember_cookie_and_revocation_survive_router_restart() {
 }
 
 #[tokio::test]
+async fn http_cookie_policy_keeps_lan_login_protected_routes_and_logout_working() {
+    let t = build_app(
+        "http-cookie-policy",
+        test_credential(TEST_PASSWORD),
+        crate::config::AuthConfig {
+            cookie_secure: Some(false),
+            ..Default::default()
+        },
+    );
+    let lan = [
+        (header::HOST.to_string(), "192.0.2.10:18443".into()),
+        (header::ORIGIN.to_string(), "http://192.0.2.10:18443".into()),
+        (header::CONTENT_TYPE.to_string(), "application/json".into()),
+    ];
+    let response = send(
+        &t.app,
+        req("POST", "/api/login", None, &lan, Some(AUTH_ADMIN_JSON.into())),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = cookie_of(&response);
+    assert!(!cookie.contains("; Secure"));
+    assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
+    let mut authenticated = lan.to_vec();
+    authenticated.push((header::COOKIE.to_string(), first_cookie_pair(&cookie)));
+    for path in ["/api/session", "/api/extensions", "/api/system/info", "/api/system/update"] {
+        let response = send(&t.app, req("GET", path, None, &authenticated, None)).await;
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+    }
+    let response = send(&t.app, req("GET", "/api/extensions", None, &lan, None)).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let mut foreign_origin = authenticated.clone();
+    foreign_origin[1].1 = "http://foreign.invalid".into();
+    let response = send(&t.app, req("POST", "/api/logout", None, &foreign_origin, None)).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = send(&t.app, req("POST", "/api/logout", None, &authenticated, None)).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(!cookie_of(&response).contains("; Secure"));
+    let response = send(&t.app, req("GET", "/api/extensions", None, &authenticated, None)).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn unauthenticated_devices_list_is_401() {
     let t = build_app(
         "401devs",

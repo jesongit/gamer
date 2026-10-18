@@ -55,7 +55,7 @@ use session_store::{session_key, session_now};
 // GET  /api/session → 200 {authenticated:true,username} / 401 {"error":"unauthorized"}
 // POST /api/logout → 204 销毁会话 + 过期 Set-Cookie（幂等）
 // GET  /api/auth/setup → 200 {setup_required}; POST 同路径首次设置密码并自动登录
-// Secure 标志仅 GAMER_PROFILE=prod 追加；dev 纯 HTTP LAN 保持无 Secure。
+// Secure 优先取独立 cookie_secure 配置；未配置时保留 prod=true、dev=false。
 // 旧响应壳 {token:"demo-token"} 已废除。
 
 #[derive(serde::Deserialize)]
@@ -418,6 +418,7 @@ impl AuthState {
         admin_token: Option<String>,
         setup_required: bool,
     ) -> Self {
+        let secure_cookies = cfg.cookie_secure.unwrap_or(secure_cookies);
         Self {
             inner: Mutex::new(Inner {
                 sessions: HashMap::new(),
@@ -1083,6 +1084,7 @@ mod tests {
                 login_max_fails: max_fails,
                 login_window_secs: window_secs,
                 password_hash: String::new(),
+                ..Default::default()
             },
             false,
             None,
@@ -1091,6 +1093,41 @@ mod tests {
 
     fn credential(password: &str) -> Credential {
         parse_password_hash(&hash_password(password).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn cookie_secure_override_is_independent_of_profile_and_preserves_authentication() {
+        for (configured, profile_default, expected) in [
+            (Some(false), true, false),
+            (Some(true), false, true),
+            (None, true, true),
+            (None, false, false),
+        ] {
+            let auth = AuthState::new(
+                credential("cookie-policy-fixture"),
+                AuthConfig {
+                    cookie_secure: configured,
+                    ..Default::default()
+                },
+                profile_default,
+                None,
+            );
+            assert_eq!(auth.secure_cookies(), expected);
+            assert!(matches!(
+                auth.attempt_login("admin", "wrong-password", "ip"),
+                Err(LoginError::Invalid)
+            ));
+            let (sid, _) = auth
+                .attempt_login("admin", "cookie-policy-fixture", "ip")
+                .unwrap();
+            let cookie = auth.session_cookie_for(&sid);
+            assert_eq!(cookie.contains("; Secure"), expected);
+            assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
+            assert_eq!(auth.expired_cookie().contains("; Secure"), expected);
+            assert_eq!(auth.validate(&sid).as_deref(), Some("admin"));
+            auth.destroy(&sid).unwrap();
+            assert!(auth.validate(&sid).is_none());
+        }
     }
 
     fn sleep_ms(ms: u64) {

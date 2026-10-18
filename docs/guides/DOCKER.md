@@ -15,14 +15,14 @@ Linux 使用 Docker Engine，可直接使用 `docker run`。宿主休眠、关�
 Docker Hub：<https://hub.docker.com/r/posase/gamer>。
 
 ```sh
-docker pull posase/gamer:v1.0.1
+docker pull posase/gamer:v1.0.2
 ```
 
-`v1.0.1` 为 Docker 镜像补丁版本，镜像内应用版本仍为 `0.4.0`，包含 Docker 部署、凭据迁移和生产诊断优化。
+`v1.0.2` 为 Docker 镜像补丁版本，镜像内应用版本仍为 `0.4.0`；新增 prod HTTP Cookie 配置和 Chromium/runc 启动兼容修复，保留原生产诊断策略。
 该发布仅提供 `linux/amd64`，对应 Intel/AMD 的 x86_64 机器。
-摘要与源码版本见 `deploy/docker/releases/v1.0.1.json`；旧 `v1.0` 保留。
+摘要与源码版本见 `deploy/docker/releases/v1.0.2.json`；旧 `v1.0`、`v1.0.1` 保留。
 
-若使用可选 Compose，将部署目录 `.env` 中 `GAMER_IMAGE` 设为 `posase/gamer:v1.0.1`；
+若使用可选 Compose，将部署目录 `.env` 中 `GAMER_IMAGE` 设为 `posase/gamer:v1.0.2`；
 其他数据卷、端口与时区设置保持需要的值。模板为 `deploy/docker/production.env.example`。
 镜像不含用户数据；已有安装须另外迁移完整数据卷，迁移前不要在目标机器初始化新密码。
 
@@ -47,8 +47,8 @@ TZ=Asia/Shanghai
 
 ```sh
 docker volume create gamer-production-data
-docker run --rm -it --memory 512m --memory-swap 512m --entrypoint python3 --mount type=volume,src=gamer-production-data,dst=/data posase/gamer:v1.0.1 /app/tools/gamer_docker.py init
-docker run -d --name gamer --init --restart unless-stopped --stop-timeout 90 --shm-size 1g --security-opt seccomp=./deploy/docker/chromium-seccomp.json -p 127.0.0.1:18443:8443 -e TZ=Asia/Shanghai --mount type=volume,src=gamer-production-data,dst=/data --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 posase/gamer:v1.0.1
+docker run --rm -it --memory 512m --memory-swap 512m --entrypoint python3 --mount type=volume,src=gamer-production-data,dst=/data posase/gamer:v1.0.2 /app/tools/gamer_docker.py init
+docker run -d --name gamer --init --restart unless-stopped --stop-timeout 90 --shm-size 1g --security-opt seccomp=./deploy/docker/chromium-seccomp.json -p 18443:8443 -e GAMER_PROFILE=prod -e GAMER_COOKIE_SECURE=false -e TZ=Asia/Shanghai --mount type=volume,src=gamer-production-data,dst=/data --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 posase/gamer:v1.0.2
 docker ps --filter name=gamer
 ```
 
@@ -57,9 +57,57 @@ Argon2id 密码哈希；初始化在本地终端隐藏输入，配置只保存�
 准备完插件、配置包和任务后，在 `/data/config.toml` 将 `scheduler_enabled` 改为 `true` 并重启容器。
 这项开关保留任务的 enabled 状态；关闭时仍可手动试跑。
 
+### prod 模式的 HTTP / HTTPS 登录（v1.0.2 起）
+
+生产运行模式和登录 Cookie 的传输策略分开设置。局域网 HTTP 部署保留
+`GAMER_PROFILE=prod`，在 `docker run` 增加 `-e GAMER_COOKIE_SECURE=false`；
+HTTPS 入口使用 `-e GAMER_COOKIE_SECURE=true`。也可在配置文件 `[auth]` 中设置
+`cookie_secure = false/true`，环境变量优先。配置文件修改后重启服务；Docker 的环境
+变量修改需保留同一数据卷并重新创建容器。此设置不改变密码、
+认证、同源校验、HttpOnly、SameSite、生产日志/诊断、任务或数据。
+
+未配置时保持原有缺省：prod 使用 Secure Cookie，dev 不使用。新 Docker 配置模板
+为 HTTP 显式设置 false。旧 `posase/gamer:v1.0.1` 不包含这个新开关；
+已有数据卷需使用 v1.0.2 并显式设置环境变量，当前生产容器不会自动更新。
+
 镜像默认零业务资源，不把开发数据、配置、浏览器资料或凭据打进镜像。
 正式插件安装记录、WASM 和业务数据位于 `/data`，与镜像升级分离。
 容器内不使用应用自更新，更新策略为 `off`，通过替换镜像发布。
+
+### 已有 v1.0.1 更新为 v1.0.2（Bash）
+
+在目标机原部署目录执行。先等任务结束，再冷备份整个数据卷；本步骤不执行 init/restore/activate，
+保留密码、任务、自动调度、插件安装及浏览器资料。备份辅助容器限制 512 MiB。
+
+```bash
+docker pull posase/gamer:v1.0.2
+umask 077
+backup="gamer-before-v1.0.2-$(date +%Y%m%d-%H%M%S).tar.gz"
+docker stop --timeout 90 gamer
+docker run --rm --memory 512m --memory-swap 512m --entrypoint python3 \
+  --mount type=volume,src=gamer-production-data,dst=/data,readonly \
+  posase/gamer:v1.0.2 /app/tools/volume-transfer.py export --profile full --gzip > "$backup.partial" &&
+  mv -- "$backup.partial" "$backup"
+```
+
+仅在备份命令成功且文件非空后继续。失败则 `docker start gamer` 恢复旧服务并排查，
+不要将 `.partial` 视为可用备份。旧容器改名保留并关闭自动重启，避免两个版本同时使用数据卷：
+
+```bash
+test -s "$backup" && docker update --restart=no gamer && docker rename gamer "${backup%.tar.gz}"
+docker run -d --name gamer --init --restart unless-stopped --stop-timeout 90 \
+  -p 18443:8443 --shm-size 1g \
+  --security-opt "seccomp=$PWD/deploy/docker/chromium-seccomp.json" \
+  -e GAMER_PROFILE=prod -e GAMER_COOKIE_SECURE=false -e TZ=Asia/Shanghai \
+  --mount type=volume,src=gamer-production-data,dst=/data \
+  --log-opt max-size=10m --log-opt max-file=5 posase/gamer:v1.0.2
+```
+
+检查 `docker ps` 显示 healthy，重新登录后确认原 4 个任务和调度状态；不需要重新激活。
+安全配置沿用已经应用 runtime-fix 的文件；也可从新镜像的 `/app/chromium-seccomp.json` 提取更新。
+v1.0.2 无数据库迁移。需要回滚时停止新容器，将其改名保留，再把上述旧容器改名回 gamer，
+恢复 `--restart unless-stopped` 并启动。备份和原卷均保留；若需恢复数据，将备份恢复到**新空卷**，
+核验后切换挂载，禁止覆盖现有卷。
 
 ## Windows 现有数据迁移
 

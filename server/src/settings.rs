@@ -216,6 +216,7 @@ mod tests {
             ..Default::default()
         };
         cfg.auth.password_hash = crate::api::auth::hash_password("settings-test-password").unwrap();
+        cfg.auth.cookie_secure = Some(false);
         let original = format!(
             "# keep this comment\n{}\n[custom]\nkeep = 'unchanged'\n",
             toml::to_string_pretty(&cfg).unwrap()
@@ -244,6 +245,7 @@ mod tests {
         assert!(!response.contains("password_hash"));
         assert!(!response.contains(&cfg.auth.password_hash));
         let restarted: Config = toml::from_str(&disk).unwrap();
+        assert_eq!(restarted.auth.cookie_secure, Some(false));
         assert_eq!(restarted.current_settings(), updated);
         assert!(matches!(
             cfg.save_settings(before.saved.clone(), &before.revision),

@@ -39,6 +39,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
+    /// Cookie Secure 独立于运行模式；None 保留旧缺省（prod=true、dev=false）。
+    /// HTTP 部署显式 false，HTTPS 部署显式 true；GAMER_COOKIE_SECURE 优先。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cookie_secure: Option<bool>,
     /// 会话绝对有效期秒数：自登录起算，到期强制重登（滑动续期无法延长）
     pub session_abs_secs: u64,
     /// 会话空闲有效期秒数：每次认证请求刷新；连续不活动超时即失效
@@ -55,6 +59,7 @@ pub struct AuthConfig {
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
+            cookie_secure: None,
             session_abs_secs: 12 * 3600,
             session_idle_secs: 2 * 3600,
             login_max_fails: 10,
@@ -351,6 +356,9 @@ impl Config {
         loaded
             .cfg
             .apply_local_only_override(env_value("GAMER_LOCAL_ONLY").as_deref())?;
+        loaded
+            .cfg
+            .apply_cookie_secure_override(std::env::var("GAMER_COOKIE_SECURE").ok().as_deref())?;
         Ok(loaded)
     }
 
@@ -431,6 +439,17 @@ impl Config {
                 _ => bail!("GAMER_LOCAL_ONLY 必须为 true/false 或 1/0"),
             };
             ensure_valid(self)?;
+        }
+        Ok(())
+    }
+
+    fn apply_cookie_secure_override(&mut self, value: Option<&str>) -> anyhow::Result<()> {
+        if let Some(value) = value {
+            self.auth.cookie_secure = Some(match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" => true,
+                "0" | "false" => false,
+                _ => bail!("GAMER_COOKIE_SECURE 必须为 true/false 或 1/0"),
+            });
         }
         Ok(())
     }
@@ -1210,6 +1229,34 @@ rtc_external_port = 50000
             "{:?}",
             cfg.validate()
         );
+    }
+
+    #[test]
+    fn cookie_secure_configuration_and_environment_override_are_strict() {
+        let mut cfg = Config {
+            auth: toml::from_str("cookie_secure = true\n").unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.auth.cookie_secure, Some(true));
+        cfg.apply_cookie_secure_override(None).unwrap();
+        assert_eq!(cfg.auth.cookie_secure, Some(true));
+        for value in ["false", "0", " FALSE "] {
+            cfg.apply_cookie_secure_override(Some(value)).unwrap();
+            assert_eq!(cfg.auth.cookie_secure, Some(false));
+        }
+        for value in ["true", "1", " TRUE "] {
+            cfg.apply_cookie_secure_override(Some(value)).unwrap();
+            assert_eq!(cfg.auth.cookie_secure, Some(true));
+        }
+        for value in ["", "yes", "falsee", "2"] {
+            assert!(cfg.apply_cookie_secure_override(Some(value)).is_err());
+            assert_eq!(cfg.auth.cookie_secure, Some(true));
+        }
+        assert!(toml::from_str::<AuthConfig>("cookie_secure = 'false'\n").is_err());
+        assert_eq!(Config::default().auth.cookie_secure, None);
+        assert!(!toml::to_string(&Config::default())
+            .unwrap()
+            .contains("cookie_secure"));
     }
 
     #[test]

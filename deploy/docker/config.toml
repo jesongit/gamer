@@ -16,6 +16,8 @@ log_retain_days = 14
 compute_max_concurrency = 4
 
 [auth]
+# HTTP Docker entrypoint; HTTPS deployments can set true or GAMER_COOKIE_SECURE=true.
+cookie_secure = false
 # Initialize this through the local migration/setup command; no default password.
 password_hash = ""
 

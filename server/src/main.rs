@@ -181,6 +181,7 @@ async fn async_main() -> anyhow::Result<()> {
         api::auth::AuthState::new_with_setup(
             credential,
             cfg.auth.clone(),
+            // 显式 cookie_secure 配置优先，profile 只提供未配置时的缺省值。
             loaded.profile == config::Profile::Prod,
             admin_token,
             setup_required,

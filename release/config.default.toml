@@ -56,6 +56,8 @@ rtc_external_port = 0
 # 服务端会把密码转换为 Argon2id PHC 并保存；GAMER_ADMIN_PASSWORD 仍可供开发/自动化
 # 场景使用（仅进程内生效，不落盘）。
 [auth]
+# HTTP: false; HTTPS: true. Unset keeps profile defaults; GAMER_COOKIE_SECURE overrides.
+# cookie_secure = false
 session_abs_secs = 43200   # 会话绝对有效期秒 [60, 2592000]
 session_idle_secs = 7200   # 会话空闲有效期秒 [60, 604800]
 login_max_fails = 10       # 登录限流失败次数上限 [1, 1000]
