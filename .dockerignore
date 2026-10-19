@@ -38,6 +38,9 @@
 !updater/src/**
 !release/
 !release/config.default.toml
+!release/dependencies.lock.toml
+!release/runtime/
+!release/runtime/**
 !docs/
 !docs/reference/
 !docs/reference/YAML.md

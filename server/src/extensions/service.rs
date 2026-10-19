@@ -372,6 +372,7 @@ pub(crate) struct ExtensionService {
     ui: UiContributionRegistry,
     runner_registrar: Option<Arc<dyn TimerRunnerRegistrar>>,
     builtin_service: Vec<Arc<dyn BuiltinService>>,
+    pub(crate) core_ocr: Option<Arc<crate::ocr::OcrService>>,
     external_handlers: std::sync::Mutex<HashMap<ExtensionId, RegisteredExternalHandler>>,
     shutting_down: std::sync::atomic::AtomicBool,
 }
@@ -412,6 +413,7 @@ impl ExtensionService {
             ui: UiContributionRegistry::default(),
             runner_registrar: None,
             builtin_service: Vec::new(),
+            core_ocr: None,
             external_handlers: std::sync::Mutex::new(HashMap::new()),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
         }
@@ -426,6 +428,49 @@ impl ExtensionService {
     ) -> Self {
         self.runner_registrar = Some(registrar);
         self
+    }
+
+    pub(crate) fn with_core_ocr(mut self, service: Arc<crate::ocr::OcrService>) -> Self {
+        self.core_ocr = Some(service);
+        self
+    }
+
+    /// Core capability call; retains the service-issued caller token and live gate.
+    pub(crate) async fn recognize_text(
+        &self,
+        context: &PluginCallContext,
+        values: serde_json::Value,
+    ) -> ExtensionResult<serde_json::Value> {
+        let gate = self.call_gate(&context.caller);
+        let _lease = gate
+            .try_read()
+            .map_err(|_| ExtensionError::CallRejected("调用方正在停止".into()))?;
+        if self
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+            || !self
+                .process_running
+                .lock()
+                .expect("running set")
+                .get(&context.caller)
+                .is_some_and(|p| p.token == context.token)
+        {
+            return Err(ExtensionError::CallRejected("插件调用上下文已失效".into()));
+        }
+        let snapshot = self.snapshot_for(&context.caller)?;
+        self.require_current_process_running(&context.caller, snapshot.state(), "ocr")?;
+        let host = HostApi::for_manifest(
+            self.capabilities.clone(),
+            self.host_api.clone(),
+            snapshot.manifest(),
+        )?;
+        host.authorize(super::Permission::VisionOcr)?;
+        self.core_ocr
+            .as_ref()
+            .ok_or(ExtensionError::RuntimeUnavailable("Core OCR 不可用"))?
+            .recognize(values)
+            .await
+            .map_err(|e| ExtensionError::CallRejected(e.to_string()))
     }
 
     pub(crate) fn with_builtin_service(mut self, service: Arc<dyn BuiltinService>) -> Self {
@@ -688,6 +733,9 @@ impl ExtensionService {
     pub(crate) async fn shutdown_builtin_service(&self) {
         self.shutting_down
             .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(ocr) = &self.core_ocr {
+            ocr.stop().await;
+        }
         let _cancellation = self
             .builtin_service
             .iter()

@@ -342,7 +342,7 @@ impl IdleTimer {
     }
 }
 
-fn browser_executable(cfg: &Config) -> anyhow::Result<PathBuf> {
+pub(crate) fn browser_executable(cfg: &Config) -> anyhow::Result<PathBuf> {
     if !cfg.browser_path.trim().is_empty() {
         let path = PathBuf::from(&cfg.browser_path);
         anyhow::ensure!(path.is_file(), "配置的浏览器路径不存在");

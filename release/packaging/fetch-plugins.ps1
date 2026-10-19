@@ -44,7 +44,7 @@ function Assert-PublishedPluginSet {
     if (-not $TestFixturesOnly -and @($Plugins | Where-Object {
         ($_.PSObject.Properties['execution'] -and $_.execution.PSObject.Properties['builtin_id'] -and $_.execution.builtin_id -eq 'gamer-ai') -or ($_.PSObject.Properties['permissions'] -and @($_.permissions | Where-Object { $_ -is [string] -and $_.Trim() -eq 'ai.connect' }).Count -gt 0)
     }).Count -gt 0) { throw '发布锁包含已退休 ai.connect 权限；请先发布新官方插件并更新 release/plugins.lock.json，历史版本仅允许隔离 fixture 回归' }
-    $allowedIds = $RequiredIds + @('gamer-package-publisher', 'gamer-live', 'gamer-notify', 'gamer-ocr')
+    $allowedIds = $RequiredIds + @('gamer-package-publisher', 'gamer-live', 'gamer-notify')
     if ($TestFixturesOnly) { $allowedIds += 'gamer-ai' }
     if (@($Plugins.id | Sort-Object -Unique).Count -ne $Plugins.Count -or
         @($RequiredIds | Where-Object { $_ -notin $Plugins.id }).Count -gt 0 -or

@@ -1,7 +1,7 @@
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 
-const retired = plugin => plugin.id === 'gamer-ai' || plugin.execution?.builtin_id === 'gamer-ai' || plugin.permissions?.some(value => typeof value === 'string' && value.trim() === 'ai.connect')
+const retired = plugin => ['gamer-ai', 'gamer-ocr'].includes(plugin.id) || ['gamer-ai', 'gamer-ocr'].includes(plugin.execution?.builtin_id) || plugin.permissions?.some(value => typeof value === 'string' && value.trim() === 'ai.connect')
 
 function normalizedPublicPath(path) {
   if (path.length > 8192 || /[\0-\x1f\x7f]/.test(path)) return null
@@ -19,7 +19,7 @@ export function publicAssetPolicy(publicDir) {
   const registry = existsSync(registryPath) ? JSON.parse(readFileSync(registryPath, 'utf8')) : null
   const currentArchives = new Set()
   const currentIds = new Set()
-  const retiredIds = new Set(['gamer-ai'])
+  const retiredIds = new Set(['gamer-ai', 'gamer-ocr'])
   for (const plugin of registry?.plugins || []) {
     if (retired(plugin)) { retiredIds.add(plugin.id.toLowerCase()); continue }
     currentArchives.add(`${plugin.id}-${plugin.version}.gplugin`.toLowerCase())

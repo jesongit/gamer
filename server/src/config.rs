@@ -187,6 +187,10 @@ pub struct Config {
     pub live_settings: std::sync::Arc<crate::settings::LiveSettings>,
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
+    /// Original selections before launch-time runtime path binding. Never
+    /// serialized back into the user's configuration.
+    #[serde(skip)]
+    pub runtime_selections: std::collections::BTreeMap<String, String>,
     /// HTTP 监听端口
     pub port: u16,
     /// 仅本机访问：HTTP 和 WebRTC 都只监听回环地址；GAMER_LOCAL_ONLY 可覆盖。
@@ -304,6 +308,7 @@ impl Default for Config {
         Self {
             live_settings: Default::default(),
             source_path: None,
+            runtime_selections: Default::default(),
             port: 8443,
             local_only: false,
             scheduler_enabled: true,

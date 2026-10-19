@@ -900,9 +900,9 @@
     "source": "plugin"
   },
   {
-    "description": "按需识别原始截图文字；返回文字、置信度、行和单词；OCR 插件不可用时明确失败",
+    "description": "按需识别原始截图文字；返回文字、置信度、行和单词；Core OCR 或本地引擎不可用时明确失败",
     "name": "ocr",
-    "optional_extension": "gamer-ocr",
+    "optional_extension": null,
     "params": [
       {
         "default": null,
@@ -1034,7 +1034,7 @@
   {
     "description": "单次识别并查找文字；未找到返回 null，命中可直接传给 tap；等待可使用 repeat",
     "name": "find_text",
-    "optional_extension": "gamer-ocr",
+    "optional_extension": null,
     "params": [
       {
         "default": null,

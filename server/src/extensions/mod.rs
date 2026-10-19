@@ -34,8 +34,7 @@ pub(crate) mod market;
 mod model;
 #[path = "../../../plugins/gamer-notify/host/mod.rs"]
 pub(crate) mod notify;
-#[path = "../../../plugins/gamer-ocr/host/mod.rs"]
-pub(crate) mod ocr;
+
 #[path = "../../../plugins/gamer-package-publisher/host/mod.rs"]
 pub(crate) mod package_publisher;
 mod permissions;
@@ -116,7 +115,6 @@ pub(crate) fn native_call_action(
 /// invoking `native_call_action`.
 pub(crate) fn is_public_native_action(id: &ExtensionId, action: &str) -> bool {
     notify::accepts(id.as_str(), action)
-        || ocr::accepts(id.as_str(), action)
         || live::accepts(id.as_str(), action)
         || package_publisher::accepts(id.as_str(), action)
         || gamer_yaml::is_public_native_action(id.as_str(), action)
@@ -127,9 +125,6 @@ pub(crate) fn native_action_expected_caller(
     id: &ExtensionId,
     action: &str,
 ) -> Option<&'static str> {
-    if id.as_str() == ocr::ID && action == "recognize" {
-        return Some(gamer_yaml::YAML_EXTENSION_ID);
-    }
     if id.as_str() == notify::ID && action == notify::SEND {
         return Some(gamer_yaml::YAML_EXTENSION_ID);
     }
@@ -153,7 +148,6 @@ pub(crate) fn native_action_required_permissions(
     action: &str,
 ) -> Option<&'static [Permission]> {
     notify::permissions(id.as_str(), action)
-        .or_else(|| ocr::permissions(id.as_str(), action))
         .or_else(|| live::permissions(id.as_str(), action))
         .or_else(|| package_publisher::permissions(id.as_str(), action))
         .or_else(|| gamer_yaml::native_action_required_permissions(id.as_str(), action))
@@ -164,9 +158,6 @@ pub(crate) fn native_action_caller_permissions(
     id: &ExtensionId,
     action: &str,
 ) -> Option<&'static [Permission]> {
-    if id.as_str() == ocr::ID && action == "recognize" {
-        return Some(&[Permission::VisionOcr]);
-    }
     if id.as_str() == notify::ID && action == notify::SEND {
         return Some(&[Permission::NotifySend]);
     }
@@ -184,17 +175,6 @@ pub(crate) fn native_action_caller_permissions(
 /// 集合由 `service.rs::declarative_actions` 从 manifest 读出，两条目录在
 /// `service.capability_actions` 合并。
 pub(crate) fn native_public_actions(id: &ExtensionId) -> Vec<serde_json::Value> {
-    if id.as_str() == ocr::ID {
-        return ocr::ACTIONS
-            .iter()
-            .map(|action| {
-                serde_json::json!({
-                    "action": action, "version": 1, "surface": "native",
-                    "permissions": ["vision.ocr"]
-                })
-            })
-            .collect();
-    }
     if id.as_str() == video::VIDEO_EXTENSION_ID {
         return video::sample::catalog();
     }

@@ -49,10 +49,22 @@ pub(crate) fn assemble(
         devices: devices.clone(),
         packages: packages.clone(),
         runs: runs.clone(),
-        capabilities,
+        capabilities: capabilities.clone(),
         journal: Some(db.clone()),
         token_is_active: Arc::new(move |id| credentials.is_active(id)),
     });
+    if let Some(ocr) = &extensions.core_ocr {
+        mcp.register_provider(
+            "gamer.ocr",
+            Arc::new(crate::ocr::external::ExternalTools::new(
+                ocr.clone(),
+                capabilities.clone(),
+                db.clone(),
+                packages.clone(),
+                scheduler.runner_registry(),
+            )),
+        )?;
+    }
     mcp.register_provider("gamer.extensions", extensions.external_tools_provider())?;
     mcp.register_provider(
         "gamer.core",

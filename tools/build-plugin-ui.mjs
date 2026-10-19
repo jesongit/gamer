@@ -10,6 +10,7 @@ const ids = requested.length ? requested : ['gamer-yaml', 'gamer-keymap', 'gamer
 for (const id of ids) {
   if (!/^gamer-[a-z0-9-]+$/.test(id)) throw new Error('Invalid plugin id')
   if (id === 'gamer-ai') throw new Error('gamer-ai is retired; connect an external Agent to Core MCP')
+  if (id === 'gamer-ocr') throw new Error('OCR is built into Core; configure runtime dependencies in Settings')
   const plugin = resolve(repo, 'plugins', id)
   for (const args of (installOnly ? [['install', '--frozen-lockfile']] : [['install', '--frozen-lockfile'], ['build']])) {
     // pnpm is a cmd shim on Windows; arguments here are fixed, never user text.

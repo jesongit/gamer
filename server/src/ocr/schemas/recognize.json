@@ -1,0 +1,148 @@
+{
+  "type": "object",
+  "properties": {
+    "source": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "target"
+            },
+            "device_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          "required": [
+            "kind",
+            "device_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "trace"
+            },
+            "run_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "image_id": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "kind",
+            "run_id",
+            "image_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "package_png"
+            },
+            "package_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]*$",
+              "maxLength": 128
+            },
+            "plugin_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]*$",
+              "maxLength": 128
+            },
+            "resource_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "pattern": "\\.png$"
+            }
+          },
+          "required": [
+            "kind",
+            "package_id",
+            "plugin_id",
+            "resource_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "sample"
+            },
+            "sample_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "content_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "frame_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          "required": [
+            "kind",
+            "sample_id",
+            "content_sha256",
+            "frame_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "language": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9_]+(\\+[A-Za-z0-9_]+){0,3}$",
+      "default": "chi_sim+eng"
+    },
+    "mode": {
+      "enum": [
+        "line",
+        "block",
+        "sparse"
+      ],
+      "default": "block"
+    },
+    "whitelist": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 128
+    },
+    "scale": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 3,
+      "default": 2
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 15000,
+      "default": 10000
+    }
+  },
+  "required": [
+    "source"
+  ],
+  "additionalProperties": false
+}

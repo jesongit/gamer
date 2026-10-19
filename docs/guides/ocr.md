@@ -1,29 +1,16 @@
 # 自动化文字识别（OCR）
 
-安装可选插件 `gamer-ocr`（“文字识别”）后，自动化可以通过 `ocr` 读取动态文字，通过 `find_text` 查找文字位置。识别在服务电脑本地执行，使用原始截图；多画面预览的缩图和帧率不会改变 OCR 输入。
+文字识别已内置于 Core，无需安装 OCR 插件。自动化通过 `ocr` 读取动态文字，通过 `find_text` 查找文字位置。识别在服务电脑本地执行，使用原始截图；多画面预览的缩图和帧率不会改变 OCR 输入。
 
-## 安装与检测
+## 准备依赖
 
-在 Windows x64 的当前源码目录安装可选依赖，先准备 7-Zip，再运行：
+打开“设置 → 运行依赖”，查看 Tesseract 和识别语言包。启动时优先复用已有工具，缺失时自动准备；也可以选择本机程序和 tessdata 目录。Windows 无需自行安装 7-Zip，Docker 镜像已包含引擎和简体中文/英文模型。
 
-```powershell
-Set-Location D:\code\gamer
-.\plugins\gamer-ocr\fetch-deps.ps1 -RuntimeDir D:\code\gamer\server\deps\tesseract
-```
+旧 OCR 私密配置、安装版本和历史数据保留。路径失效时修正路径或留空保存，恢复自动检测；识别请求中途不会下载模型。详见[运行依赖](runtime-dependencies.md)。
 
-如果 `7z.exe` 没有加入 PATH，在上述脚本命令末尾加上 `-SevenZipPath 'C:\Program Files\7-Zip\7z.exe'`，或替换为本机实际路径。
+## 在 YAML 中使用
 
-脚本使用插件中的 `runtime.lock.json` 下载并校验固定版本 Tesseract 和 `tessdata_fast` 简体中文、英文模型。它提取依赖，不执行安装程序；已有文件不同于锁定版本时会停止，需指定另一个专用目录。识别请求本身不会下载模型。
-
-1. 在“插件”页安装并启用 **文字识别**，同时保持 **自动化** 插件启用。
-2. 在工作台打开“文字识别”面板，点击 **检测可用性**。
-3. 结果应为 `available: true`，`languages` 中应包含 `chi_sim` 和 `eng`。若失败，按 `reason` 检查程序或语言包路径。
-
-面板中的路径留空会自动检测 `server/deps/tesseract/tesseract.exe` 或 PATH 中的程序，并读取程序旁的 `tessdata/`。已有本机 Tesseract 时也可填写 **Tesseract 程序** 和 **语言包目录** 的绝对路径，点击 **保存路径** 后重新检测；**读取配置** 用于查看已保存值。插件归档不携带引擎和模型。
-
-## 在现有 YAML v2 工作流中使用
-
-以下片段插入现有 `run`，保留脚本的 `version: 2`、目标声明和原有 `finish` 完成条件。OCR 读取到文字不代表自动化目标已经完成。
+以下片段插入现有 `run`，沿用唯一的无版本字段语法、目标声明和现有完成条件。OCR 读取到文字不代表自动化目标已经完成。
 
 ```yaml
 - ocr:

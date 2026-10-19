@@ -225,6 +225,7 @@ fn select_release(releases: &Value, beta: bool) -> Result<&Value, String> {
 
 pub(crate) fn retired_catalog_entry(raw: &Value) -> bool {
     raw["id"] == "gamer-ai"
+        || raw["id"] == "gamer-ocr"
         || raw["execution"]["builtin_id"] == "gamer-ai"
         || raw["permissions"].as_array().is_some_and(|permissions| {
             permissions.iter().any(|permission| {

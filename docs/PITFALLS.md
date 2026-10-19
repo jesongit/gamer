@@ -677,3 +677,7 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 
 - Docker prod 用 HTTP 局域网 IP 登录后立即出现 401：旧版将 Cookie Secure 与 profile 绑定；v1.0.2 起支持独立 GAMER_COOKIE_SECURE=false（或 [auth].cookie_secure=false），HTTPS 使用 true，旧 v1.0.1 仍需原有访问方式。
 - Docker 恢复数据后 runc 报 unsafe procfs/openat2：旧 Chromium seccomp 缺少 close_range/openat2 及 clone3 的 ENOSYS 回退；更新随 v1.0.2 发布的安全配置，已恢复数据用 start 模式复用，勿重复覆盖恢复。
+
+- Windows 自动准备 Tesseract 时，精简版 `7za.exe` 不支持 NSIS；使用锁定的完整 7-Zip 发行包，由受校验的 `7zr` 解出完整解压器，不执行安装程序。
+- Windows PowerShell 子进程继承其它版本的模块路径时可能找不到 `Get-FileHash`；准备器固定系统模块路径，并使用 .NET SHA256 流式校验。
+- Windows 测试 EXE 运行中不能重新链接同一文件；同目标的测试与编译顺序执行。直接运行服务端测试 EXE 时工作目录使用 `server/`，否则相对 fixture 路径会误报缺失。

@@ -109,7 +109,7 @@ function Remove-RetiredAiStageArtifacts {
     if (Test-Path -LiteralPath $registryPath) {
         $registry = [IO.File]::ReadAllText($registryPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
         $retiredPlugins = @($registry.plugins | Where-Object {
-            $_.id -eq 'gamer-ai' -or ($_.PSObject.Properties['execution'] -and $_.execution.PSObject.Properties['builtin_id'] -and $_.execution.builtin_id -eq 'gamer-ai') -or ($_.PSObject.Properties['permissions'] -and @($_.permissions | Where-Object { $_ -is [string] -and $_.Trim() -eq 'ai.connect' }).Count -gt 0)
+            $_.id -in @('gamer-ai', 'gamer-ocr') -or ($_.PSObject.Properties['execution'] -and $_.execution.PSObject.Properties['builtin_id'] -and $_.execution.builtin_id -eq 'gamer-ai') -or ($_.PSObject.Properties['permissions'] -and @($_.permissions | Where-Object { $_ -is [string] -and $_.Trim() -eq 'ai.connect' }).Count -gt 0)
         })
         $publishedPlugins = @($registry.plugins | Where-Object { $_ -notin $retiredPlugins })
         $retiredNames = @($retiredPlugins | ForEach-Object { "$($_.id)-$($_.version).gplugin" })

@@ -184,6 +184,11 @@ impl ExtensionManifest {
     }
 
     pub(crate) fn ensure_supported(&self) -> ExtensionResult<()> {
+        if self.id.as_str() == "gamer-ocr" {
+            return Err(ExtensionError::CallRejected(
+                "OCR 已内置，请在设置的运行依赖中管理；旧插件与私密数据保留只读".into(),
+            ));
+        }
         if !self.retired_permissions.is_empty() {
             return Err(ExtensionError::RetiredPermissions {
                 id: self.id.to_string(),

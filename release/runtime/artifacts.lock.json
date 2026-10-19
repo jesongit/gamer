@@ -1,0 +1,36 @@
+[
+  {
+    "id": "browser",
+    "platform": "win64",
+    "version": "155.0.8059.84",
+    "url": "https://storage.googleapis.com/chrome-for-testing-public/155.0.8059.84/win64/chrome-win64.zip",
+    "executable": "chrome-win64/chrome.exe",
+    "size": 206114888,
+    "sha256": "507f2a031441d10c62b5e3d4e863f09ac1198a571c1419976cbd8387f639afde"
+  },
+  {
+    "id": "browser",
+    "platform": "linux64",
+    "version": "155.0.8059.84",
+    "url": "https://storage.googleapis.com/chrome-for-testing-public/155.0.8059.84/linux64/chrome-linux64.zip",
+    "executable": "chrome-linux64/chrome",
+    "size": 199014491,
+    "sha256": "cf0f049892dea22e6a6db26d47ed0d7776b7158edcbec4634086633df8bafcbc"
+  },
+  {
+    "id": "7zr",
+    "platform": "win64",
+    "version": "26.04",
+    "url": "https://www.7-zip.org/a/7zr.exe",
+    "size": 602624,
+    "sha256": "256feca8e274e5da655e2a284fabafd9f554365eb164862089dacd4e8276d282"
+  },
+  {
+    "id": "7z-package",
+    "platform": "win64",
+    "version": "25.01",
+    "url": "https://www.7-zip.org/a/7z2501-x64.exe",
+    "size": 1643509,
+    "sha256": "78afa2a1c773caf3cf7edf62f857d2a8a5da55fb0fff5da416074c0d28b2b55f"
+  }
+]

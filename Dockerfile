@@ -30,6 +30,8 @@ COPY plugins ./plugins
 COPY sdk ./sdk
 COPY updater ./updater
 COPY release/config.default.toml ./release/config.default.toml
+COPY release/dependencies.lock.toml ./release/dependencies.lock.toml
+COPY release/runtime ./release/runtime
 RUN --mount=type=cache,id=gamer-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=gamer-target-${TARGETARCH},target=/src/server/target,sharing=locked \
     cargo build --release --locked --manifest-path server/Cargo.toml \

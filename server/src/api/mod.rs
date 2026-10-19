@@ -34,6 +34,7 @@ mod packages;
 mod packages_rename;
 mod recording;
 mod runs;
+mod runtime_dependencies;
 mod settings;
 mod static_assets;
 pub(crate) mod system;
@@ -325,6 +326,15 @@ pub(crate) fn build_router_with_external(
         .route(
             "/api/system/settings",
             get(settings::get_settings).put(settings::save_settings),
+        )
+        .route("/api/system/dependencies", get(runtime_dependencies::list))
+        .route(
+            "/api/system/dependencies/:id",
+            put(runtime_dependencies::save),
+        )
+        .route(
+            "/api/system/dependencies/:id/prepare",
+            post(runtime_dependencies::prepare),
         )
         .route(
             "/api/devices",

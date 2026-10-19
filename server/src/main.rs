@@ -36,12 +36,14 @@ mod mcp_core;
 mod media;
 mod metrics;
 mod migrations;
+mod ocr;
 mod package_archive;
 mod package_market;
 mod recording;
 mod resources;
 mod run_journal;
 mod run_manager;
+mod runtime_deps;
 mod runtime_trace;
 mod scheduler;
 mod settings;
@@ -124,7 +126,8 @@ async fn async_main() -> anyhow::Result<()> {
     // 文件缺失时 dev 放行默认值、prod 报错；此时还没有 logger，失败原因走 stderr）。
     // 滚动日志保留天数同源于此。加载失败经 main 返回 anyhow → 非零退出码。
     let loaded = config::Config::load()?;
-    let cfg = loaded.cfg;
+    let mut cfg = loaded.cfg;
+    runtime_deps::prepare_startup(&mut cfg).await;
 
     // 日志（OPS-003）：GB_LOG 未设置/留空/="stdout" → 纯 stdout，容器部署天然处于
     // 此形态，轮转与保留交给容器日志驱动；其余值视作基准路径，按天滚动写出
@@ -424,7 +427,7 @@ impl RuntimeServices {
                 packages.clone(),
             ),
         );
-        let ocr_service = Arc::new(extensions::ocr::OcrService::new(&cfg.data_dir)?);
+        let ocr_service = Arc::new(ocr::OcrService::new(&cfg.data_dir)?);
         let live_service = Arc::new(extensions::live::LiveService::new(
             extensions::live::runtime::Runtime {
                 devices: devices.clone(),
@@ -438,7 +441,7 @@ impl RuntimeServices {
         let extensions = Arc::new(
             extensions::ExtensionService::for_data_root(cfg.data_dir.clone(), capabilities.clone())
                 .with_runner_registrar(yaml_registrar)
-                .with_builtin_service(ocr_service.clone())
+                .with_core_ocr(ocr_service.clone())
                 .with_builtin_service(generation_service.clone())
                 .with_builtin_service(Arc::new(
                     extensions::notify::NotifyService::new(&cfg.data_dir)?.with_db(db.clone()),
@@ -461,16 +464,6 @@ impl RuntimeServices {
             (
                 "gamer-keymap",
                 Arc::new(extensions::KeymapExternalTools::new(packages.clone())),
-            ),
-            (
-                "gamer-ocr",
-                Arc::new(extensions::ocr::external::ExternalTools::new(
-                    ocr_service,
-                    capabilities.clone(),
-                    db.clone(),
-                    packages.clone(),
-                    scheduler.runner_registry(),
-                )),
             ),
             (
                 "gamer-live",
