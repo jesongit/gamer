@@ -183,11 +183,14 @@ impl ExtensionManifest {
         &self.retired_permissions
     }
 
+    pub(crate) fn retirement_reason(&self) -> Option<&'static str> {
+        (self.id.as_str() == "gamer-ocr")
+            .then_some("OCR 已内置，请在设置的运行依赖中管理；旧插件与私密数据保留只读")
+    }
+
     pub(crate) fn ensure_supported(&self) -> ExtensionResult<()> {
-        if self.id.as_str() == "gamer-ocr" {
-            return Err(ExtensionError::CallRejected(
-                "OCR 已内置，请在设置的运行依赖中管理；旧插件与私密数据保留只读".into(),
-            ));
+        if let Some(reason) = self.retirement_reason() {
+            return Err(ExtensionError::CallRejected(reason.into()));
         }
         if !self.retired_permissions.is_empty() {
             return Err(ExtensionError::RetiredPermissions {

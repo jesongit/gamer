@@ -2989,6 +2989,9 @@ fn snapshot_from_versions(
 /// host features. Execution always checks both gates before creating a host
 /// permission view or entering native/guest code.
 fn ensure_runtime_manifest_supported(manifest: &ExtensionManifest) -> ExtensionResult<()> {
+    if let Some(reason) = manifest.retirement_reason() {
+        return Err(ExtensionError::CallRejected(reason.into()));
+    }
     if let Some(id) = manifest.execution().builtin_id() {
         if super::builtin::builtin_extension(id).is_none() {
             return Err(ExtensionError::HostFeatureUnavailable(id.to_owned()));
@@ -3118,6 +3121,37 @@ mod retired_installation_tests {
                 "Historical manifest/file must remain byte-for-byte unchanged"
             );
         }
+    }
+    #[tokio::test]
+    async fn retired_ocr_startup_retains_installation_and_private_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut files = seed_historical_version(directory.path(), "gamer-ocr", "0.1.1", true);
+        files[0].1 = include_bytes!("../../../plugins/gamer-ocr/manifest.toml").to_vec();
+        fs::write(&files[0].0, &files[0].1).unwrap();
+        let private = directory
+            .path()
+            .join("extension-data/gamer-ocr/private/settings.dat");
+        fs::create_dir_all(private.parent().unwrap()).unwrap();
+        fs::write(&private, b"retained encrypted settings").unwrap();
+        files.push((private, b"retained encrypted settings".to_vec()));
+        let service =
+            ExtensionService::for_data_root(directory.path(), CapabilityRegistry::default());
+        let id = ExtensionId::parse("gamer-ocr").unwrap();
+        let mut record =
+            ExtensionRecord::new(id.clone(), ExtensionVersion::parse("0.1.1").unwrap());
+        record.state = ExtensionState::Running;
+        service
+            .store
+            .write_state(&[(id.clone(), record)].into())
+            .unwrap();
+        service.reconcile_startup().await;
+        let snapshot = service.snapshot_for(&id).unwrap();
+        assert_eq!(snapshot.state(), ExtensionState::Enabled);
+        assert!(snapshot.last_error().unwrap().contains("OCR 已内置"));
+        assert!(service.start(&id).await.is_err());
+        assert!(service.ui_contributions().unwrap().is_empty());
+        assert_eq!(service.store.list_installed().unwrap().len(), 1);
+        assert_unchanged(&files);
     }
     #[tokio::test]
     async fn strict_install_rejects_retired_permissions_before_staging() {
