@@ -243,6 +243,8 @@ export const api = {
 
   // 扩展生命周期与动态 UI contribution
   getSystemSettings: () => req('GET', '/api/system/settings'),
+  getAdminAccount: () => req('GET', '/api/auth/account'),
+  updateAdminAccount: account => req('PUT', '/api/auth/account', account),
   getRuntimeDependencies: () => req('GET', '/api/system/dependencies'),
   saveRuntimeDependency: (id, path, expected_revision) => req('PUT', `/api/system/dependencies/${encodeURIComponent(id)}`, { path, expected_revision }),
   prepareRuntimeDependency: id => req('POST', `/api/system/dependencies/${encodeURIComponent(id)}/prepare`, {}),

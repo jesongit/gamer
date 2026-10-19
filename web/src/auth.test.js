@@ -36,6 +36,22 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+describe('账号修改后的重新登录', () => {
+  it('只在内存预填用户名，不允许迟到的会话探测恢复旧登录', async () => {
+    let finish
+    vi.mocked(fetch).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const pending = auth.probeSession()
+    auth.accountChanged('New.Owner')
+    finish(jsonRes(200, { authenticated: true, username: 'old-owner' }))
+    expect(await pending).toBe(false)
+    expect(auth.isAuthed()).toBe(false)
+    expect(location.hash).toBe('#/login?account_changed=1')
+    expect(auth.takeLoginUsername()).toBe('New.Owner')
+    expect(auth.takeLoginUsername()).toBe('')
+    expect([...localStorage._m.values()]).not.toContain('New.Owner')
+  })
+})
+
 describe('formatRetryCountdown（429 倒计时文案）', () => {
   it.each([
     [0, '0 秒'],

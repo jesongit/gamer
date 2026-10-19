@@ -20,6 +20,7 @@
 
     <template v-else>
       <SystemSettings />
+      <AdminAccountSettings />
       <RuntimeDependencies />
       <ExternalAccessSettings />
       <ExtensionSettings />
@@ -110,6 +111,7 @@ import { OPERATION_FEEDBACK_KEY, operationReporter } from '../workspace/operatio
 import UiIcon from './ui/UiIcon.vue'
 import SystemInfoCard from './SystemInfoCard.vue'
 import SystemSettings from './SystemSettings.vue'
+import AdminAccountSettings from './AdminAccountSettings.vue'
 import RuntimeDependencies from './RuntimeDependencies.vue'
 import ExternalAccessSettings from './ExternalAccessSettings.vue'
 import ExtensionSettings from './ExtensionSettings.vue'

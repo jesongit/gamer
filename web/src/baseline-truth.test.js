@@ -19,7 +19,7 @@ describe('清洁基线的凭据与版本展示', () => {
     const login = read('./views/Login.vue')
     const versionPattern = /v\d+\.\d+\.\d+/
 
-    expect(login).toContain("const user = ref('')")
+    expect(login).toContain('const user = ref(takeLoginUsername())')
     expect(login).toContain('当前部署配置的管理员凭据')
     expect(login).toContain('服务端会话')
     expect(login).not.toContain('placeholder="admin"')

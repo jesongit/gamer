@@ -4,6 +4,7 @@
       <div class="login-logo">🎮</div>
       <h1>Gamer</h1>
       <p class="login-sub">游戏自动化助手 · Web 控制台</p>
+      <p v-if="route.query.account_changed === '1'" class="login-hint" role="status">管理员账号已更新，请重新登录。</p>
 
       <form class="login-form" @submit.prevent="onLogin">
         <div class="form-item">
@@ -35,11 +36,11 @@
 <script setup>
 import { ref, onBeforeUnmount, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { login, getSetupStatus, setupInitialPassword, sanitizeRedirect, formatRetryCountdown } from '../auth'
+import { login, getSetupStatus, setupInitialPassword, sanitizeRedirect, formatRetryCountdown, takeLoginUsername } from '../auth'
 
 const router = useRouter()
 const route = useRoute()
-const user = ref('')
+const user = ref(takeLoginUsername())
 const pass = ref('')
 const confirmPass = ref('')
 const remember = ref(true)

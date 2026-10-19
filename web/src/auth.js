@@ -18,14 +18,18 @@ export function isAuthed() {
 // ---- 内部探测/拦截状态（模块级单例，登录/登出/401 时翻转，避免陈旧探测结果打转）----
 let _probe = null                       // 最近一次 GET /api/session 的结论（null=尚未探测）
 let _forcedUnauthed = false             // 401 拦截器判死后短路后续探测
+let _epoch = 0
+let _nextUsername = ''
 
 function markAuthed(name) {
+  _epoch++
   session.username = name || ''
   _forcedUnauthed = false
   _probe = Promise.resolve(true)
 }
 
 function markUnauthed(forced) {
+  _epoch++
   session.username = null
   _forcedUnauthed = !!forced
   _probe = Promise.resolve(false)
@@ -122,14 +126,17 @@ const PROBE_TIMEOUT_MS = 4000
 
 export function probeSession() {
   if (_probe) return _probe
+  const epoch = _epoch
   _probe = (async () => {
     if (_forcedUnauthed) return false               // 已被 401 判死，别再问
     const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null
     const timer = setTimeout(() => { if (ctl) ctl.abort() }, PROBE_TIMEOUT_MS)
     try {
       const r = await fetch('/api/session', ctl ? { signal: ctl.signal } : undefined)
+      if (epoch !== _epoch) return isAuthed()
       if (r.ok) {
         const b = await r.json().catch(() => ({}))
+        if (epoch !== _epoch) return isAuthed()
         markAuthed(b.username)
         return true
       }
@@ -140,6 +147,7 @@ export function probeSession() {
       _probe = null                                 // 5xx 等：结论未知，不缓存，下次导航重试
       return true
     } catch (e) {
+      if (epoch !== _epoch) return isAuthed()
       _probe = null                                 // 超时/网络错误：结论未知，不缓存
       return true
     } finally {
@@ -147,6 +155,20 @@ export function probeSession() {
     }
   })()
   return _probe
+}
+
+// Keep the new username only in memory for the next login; credentials never enter storage/URL.
+export function accountChanged(username) {
+  _nextUsername = username
+  clearLocalState()
+  markUnauthed(true)
+  location.hash = '#/login?account_changed=1'
+}
+
+export function takeLoginUsername() {
+  const username = _nextUsername
+  _nextUsername = ''
+  return username
 }
 
 // 退出登录：契约要求幂等；请求失败（网络断/重复调用）也必须清本地态回登录页
