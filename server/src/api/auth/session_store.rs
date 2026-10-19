@@ -7,6 +7,8 @@ const REMEMBER_SECS: u64 = 30 * 24 * 3600;
 struct SessionFile {
     schema_version: u32,
     credential: String,
+    #[serde(default)]
+    account_revision: String,
     sessions: HashMap<String, Session>,
 }
 
@@ -28,7 +30,7 @@ impl AuthState {
         self.open_session_store(root, password.as_deref())
     }
 
-    fn open_session_store(
+    pub(super) fn open_session_store(
         mut self,
         root: &Path,
         dev_password: Option<&str>,
@@ -37,7 +39,7 @@ impl AuthState {
         if path.exists() {
             let file: SessionFile = serde_json::from_slice(&fs::read(&path)?)?;
             anyhow::ensure!(file.schema_version == 1, "不支持的登录会话存储版本");
-            let same_credential = match &*self.credential.read().unwrap() {
+            let same_credential = match &self.account.read().unwrap().credential {
                 Credential::Argon2 {
                     encoded,
                     source: CredentialSource::Config,
@@ -58,7 +60,7 @@ impl AuthState {
                 }
                 Credential::Unavailable => false,
             };
-            if same_credential {
+            if same_credential && file.account_revision == self.account.read().unwrap().revision {
                 let now = session_now();
                 self.inner.get_mut().unwrap().sessions = file
                     .sessions
@@ -66,7 +68,6 @@ impl AuthState {
                     .filter(|(key, s)| {
                         key.len() == 64
                             && key.bytes().all(|v| v.is_ascii_hexdigit())
-                            && s.username == "admin"
                             && self.session_active(s, now)
                     })
                     .map(|(key, mut session)| {
@@ -88,7 +89,9 @@ impl AuthState {
         } else {
             s.idle_secs.unwrap_or(self.cfg.session_idle_secs).max(1)
         };
-        now < s.abs_expire && now.saturating_sub(s.last_seen) < idle * 1000
+        s.username == self.account.read().unwrap().username
+            && now < s.abs_expire
+            && now.saturating_sub(s.last_seen) < idle * 1000
     }
 
     pub(super) fn make_session(&self, remember: bool) -> Session {
@@ -99,7 +102,7 @@ impl AuthState {
             self.login_settings().session_abs_secs.max(1)
         };
         Session {
-            username: "admin".into(),
+            username: self.account.read().unwrap().username.clone(),
             abs_expire: now.saturating_add(ttl * 1000),
             last_seen: now,
             remember,
@@ -111,13 +114,15 @@ impl AuthState {
         let Some(path) = &self.session_path else {
             return Ok(());
         };
-        let credential = match &*self.credential.read().unwrap() {
+        let account = self.account.read().unwrap();
+        let credential = match &account.credential {
             Credential::Argon2 { encoded, .. } => encoded.clone(),
             Credential::Unavailable => String::new(),
         };
         let bytes = serde_json::to_vec(&SessionFile {
             schema_version: 1,
             credential,
+            account_revision: account.revision.clone(),
             sessions: inner.sessions.clone(),
         })?;
         crate::core::fs::atomic_write(path, &bytes)

@@ -6,6 +6,7 @@ use axum::{
         ws::{Message, WebSocket},
         Path, Query, State, WebSocketUpgrade,
     },
+    http::HeaderMap,
     response::{IntoResponse, Response},
     Json,
 };
@@ -120,6 +121,7 @@ pub(super) async fn preview(
     State(st): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<PreviewQuery>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
     CdpSession::validate_preview_mode(&query.mode)
@@ -138,11 +140,12 @@ pub(super) async fn preview(
     if !s.is_alive() {
         return Err(ApiError::conflict("浏览器已断开，请重新连接"));
     }
+    let sid = super::auth::AuthState::extract_sid(&headers);
     Ok(ws
         .max_message_size(32 * 1024)
         .on_upgrade(move |socket| async move {
             let _lease = lease;
-            serve(socket, s, st, query.mode).await;
+            serve(socket, s, st, query.mode, sid).await;
         })
         .into_response())
 }
@@ -280,7 +283,20 @@ impl PreviewDelivery {
     }
 }
 
-async fn serve(mut socket: WebSocket, s: Arc<CdpSession>, st: AppState, mode: String) {
+async fn serve(
+    mut socket: WebSocket,
+    s: Arc<CdpSession>,
+    st: AppState,
+    mode: String,
+    sid: Option<String>,
+) {
+    let mut account_changes = st.auth.subscribe_account_changes();
+    if sid
+        .as_deref()
+        .is_some_and(|sid| st.auth.validate(sid).is_none())
+    {
+        return;
+    }
     let mut events = st.devices.browsers.events.subscribe();
     let mut frames = match s.start_preview_with_mode(&mode).await {
         Ok(frames) => frames,
@@ -342,7 +358,11 @@ async fn serve(mut socket: WebSocket, s: Arc<CdpSession>, st: AppState, mode: St
             ));
         }
         let frame_due = frame_ready_after_ack;
+        if sid.is_some() && account_changes.has_changed().unwrap_or(true) {
+            break;
+        }
         let reply = tokio::select! {
+            _ = account_changes.changed(), if sid.is_some() => { break; }
             // Input remains ordered and gated, but a continuous stream of
             // pointer/log events must not starve the preview timer or its ACKs.
             message=socket.recv()=> {

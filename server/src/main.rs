@@ -190,6 +190,7 @@ async fn async_main() -> anyhow::Result<()> {
             setup_required,
         )
         .with_live_settings(cfg.live_settings.clone())
+        .with_config_path(cfg.source_path.as_deref())
         .with_session_store(&cfg.data_dir)?,
     );
     info!(

@@ -260,6 +260,10 @@ pub(crate) fn build_router_with_external(
     //      （devices::api_control）、运行分发、资源删除。
     let protected_json: Router<()> = Router::new()
         .route(
+            "/api/auth/account",
+            get(auth::get_account).put(auth::update_account),
+        )
+        .route(
             "/api/mcp/tokens",
             get(mcp::api_list_tokens).post(mcp::api_create_token),
         )

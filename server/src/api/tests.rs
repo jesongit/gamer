@@ -222,6 +222,7 @@ mod sec_tests {
         let auth = Arc::new(
             auth::AuthState::new(credential, auth_cfg, false, Some("test-token".into()))
                 .with_live_settings(cfg.live_settings.clone())
+                .with_config_path(Some(&cfg.data_dir.join("config.toml")))
                 .with_session_store(&cfg.data_dir)
                 .unwrap(),
         );

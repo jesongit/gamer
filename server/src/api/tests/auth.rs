@@ -12,6 +12,44 @@ async fn login(app: &Router) -> HttpResponse<Body> {
 }
 
 #[tokio::test]
+async fn management_account_http_requires_cookie_current_password_and_same_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let credential = test_credential(TEST_PASSWORD);
+    let cfg = Config { data_dir: dir.path().into(), auth: crate::config::AuthConfig {
+        password_hash: match &credential { auth::Credential::Argon2 {encoded,..} => encoded.clone(), _ => unreachable!() },
+        ..Default::default()
+    }, ..Default::default() };
+    std::fs::write(dir.path().join("config.toml"), toml::to_string(&cfg).unwrap()).unwrap();
+    let t = build_app_with_config(cfg.clone(), credential, cfg.auth.clone());
+    let update = serde_json::json!({"username":"owner", "current_password":TEST_PASSWORD, "expected_revision":""}).to_string();
+    assert_eq!(send(&t.app, req("GET", "/api/auth/account", None, &[], None)).await.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(send(&t.app, req("PUT", "/api/auth/account", None, &[(header::CONTENT_TYPE.to_string(), JSON_CT.into())], Some(update.clone()))).await.status(), StatusCode::UNAUTHORIZED);
+    let cookie = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    let mut headers = json_headers(cookie);
+    let view = json_body(send(&t.app, req("GET", "/api/auth/account", None, &headers, None)).await).await;
+    assert_eq!(view, serde_json::json!({"username":"admin","revision":"","password_editable":true}));
+    headers.push((header::HOST.to_string(), "localhost:8443".into()));
+    headers.push((header::ORIGIN.to_string(), "https://hostile.invalid".into()));
+    assert_eq!(send(&t.app, req("PUT", "/api/auth/account", None, &headers, Some(update.clone()))).await.status(), StatusCode::FORBIDDEN);
+    headers.pop();
+    let wrong = update.replace(TEST_PASSWORD, "wrong-password");
+    let response = send(&t.app, req("PUT", "/api/auth/account", None, &headers, Some(wrong))).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(json_body(response).await["error"], "invalid_current_password");
+    assert_eq!(send(&t.app, req("GET", "/api/session", None, &headers, None)).await.status(), StatusCode::OK);
+    let response = send(&t.app, req("PUT", "/api/auth/account", None, &headers, Some(update))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(cookie_of(&response).contains("Max-Age=0"));
+    assert_eq!(send(&t.app, req("GET", "/api/session", None, &headers, None)).await.status(), StatusCode::UNAUTHORIZED);
+    drop(t);
+    let saved: Config = toml::from_str(&std::fs::read_to_string(dir.path().join("config.toml")).unwrap()).unwrap();
+    let restarted = build_app_with_config(Config {data_dir:dir.path().into(), ..saved.clone()}, auth::parse_password_hash(&saved.auth.password_hash).unwrap(), saved.auth);
+    let response = send_json_login(&restarted.app, None, &serde_json::json!({"username":"owner","password":TEST_PASSWORD}).to_string()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["username"], "owner");
+}
+
+#[tokio::test]
 async fn login_remember_cookie_and_revocation_survive_router_restart() {
     for remember in [false, true] {
         let dir = tempfile::tempdir().unwrap();

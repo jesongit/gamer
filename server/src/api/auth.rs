@@ -44,7 +44,10 @@ use super::common::err_response;
 use super::AppState;
 use crate::config::AuthConfig;
 
+mod account;
 mod session_store;
+pub(crate) use account::valid_username;
+pub(super) use account::{get_account, update_account};
 use session_store::{session_key, session_now};
 
 // ---------- 认证（契约钉死，见 web/src/auth.js 同款口径） ----------
@@ -365,7 +368,9 @@ pub enum LoginError {
 
 pub struct AuthState {
     inner: Mutex<Inner>,
-    credential: RwLock<Credential>,
+    account: RwLock<Account>,
+    account_update_gate: tokio::sync::Mutex<()>,
+    account_changes: tokio::sync::watch::Sender<u64>,
     secure_cookies: bool,
     /// 回环管理令牌（None = 通道禁用）
     admin_token: Option<String>,
@@ -374,6 +379,12 @@ pub struct AuthState {
     setup_required: AtomicBool,
     config_path: PathBuf,
     session_path: Option<PathBuf>,
+}
+
+struct Account {
+    username: String,
+    revision: String,
+    credential: Credential,
 }
 
 struct Inner {
@@ -424,7 +435,13 @@ impl AuthState {
                 sessions: HashMap::new(),
                 fails: HashMap::new(),
             }),
-            credential: RwLock::new(credential),
+            account: RwLock::new(Account {
+                username: cfg.username.clone(),
+                revision: cfg.account_revision.clone(),
+                credential,
+            }),
+            account_update_gate: tokio::sync::Mutex::new(()),
+            account_changes: tokio::sync::watch::channel(0).0,
             secure_cookies,
             admin_token,
             cfg,
@@ -437,7 +454,7 @@ impl AuthState {
 
     /// 当前生效的凭据来源描述（启动摘要日志用，绝不含凭据内容）
     pub fn credential_source(&self) -> &'static str {
-        match &*self.credential.read().unwrap() {
+        match &self.account.read().unwrap().credential {
             Credential::Argon2 { source, .. } => source.label(),
             Credential::Unavailable => "unavailable:invalid-or-missing-credential",
         }
@@ -447,9 +464,20 @@ impl AuthState {
         self.secure_cookies
     }
 
+    pub fn with_config_path(mut self, path: Option<&Path>) -> Self {
+        if let Some(path) = path {
+            self.config_path = path.to_path_buf();
+        }
+        self
+    }
+
+    pub(crate) fn subscribe_account_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.account_changes.subscribe()
+    }
+
     /// 凭据核验：只使用固定参数 Argon2id PHC。
     pub(crate) fn verify_credentials(&self, input: &str) -> bool {
-        match &*self.credential.read().unwrap() {
+        match &self.account.read().unwrap().credential {
             Credential::Argon2 { encoded, .. } => {
                 let Ok(parsed) = parse_fixed_argon2_phc(encoded) else {
                     return false;
@@ -464,7 +492,7 @@ impl AuthState {
 
     /// 登录尝试：成功返回 (session_id, username)，失败给出契约错误分类。
     /// 限流键为 `(来源 IP, 用户名)` 组合；IP 取不到时为 "unknown"，相同用户名的
-    /// 非标准直连共享桶。用户名不做折叠，因为当前唯一合法值精确为 `admin`。
+    /// 非标准直连共享桶。用户名精确匹配，不做大小写折叠。
     #[cfg(test)]
     pub fn attempt_login(
         &self,
@@ -506,8 +534,8 @@ impl AuthState {
             }
         }
 
-        // 用户名固定单管理员；密码链路见 credential_source
-        let cred_ok = username == "admin"
+        let active_username = self.account.read().unwrap().username.clone();
+        let cred_ok = username == active_username
             && !username.is_empty()
             && !password.is_empty()
             && password.len() <= 1024
@@ -536,7 +564,7 @@ impl AuthState {
             g.sessions.remove(&key);
             return Err(LoginError::Persist);
         }
-        Ok((sid, "admin".to_string()))
+        Ok((sid, active_username))
     }
 
     pub fn setup_required(&self) -> bool {
@@ -546,7 +574,9 @@ impl AuthState {
     /// 把首次设置的明文口令立即转换为 Argon2id PHC，并原子写回 launcher 注入的配置文件。
     pub fn setup_initial_password(&self, password: &str) -> Result<(), SetupError> {
         let encoded = hash_password(password).map_err(SetupError::Persist)?;
-        let mut credential = self.credential.write().unwrap();
+        let _inner = self.inner.lock().unwrap();
+        let _config = self.live_settings.lock_config();
+        let mut account = self.account.write().unwrap();
         if !self.setup_required.load(Ordering::Acquire) {
             return Err(SetupError::AlreadyConfigured);
         }
@@ -558,7 +588,7 @@ impl AuthState {
         };
         let updated = replace_password_hash(&current, &encoded);
         write_config_atomically(&self.config_path, &updated).map_err(SetupError::Persist)?;
-        *credential = Credential::Argon2 {
+        account.credential = Credential::Argon2 {
             encoded,
             source: CredentialSource::Config,
         };
@@ -576,7 +606,7 @@ impl AuthState {
             g.sessions.remove(&key);
             return Err(LoginError::Persist);
         }
-        Ok((sid, "admin".to_string()))
+        Ok((sid, self.account.read().unwrap().username.clone()))
     }
 
     /// 令牌仅按摘要查找；绝对/空闲到期均拒绝，普通会话沿用配置期限。
@@ -778,19 +808,20 @@ fn replace_password_hash(content: &str, encoded: &str) -> String {
 }
 
 fn write_config_atomically(path: &Path, content: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {e}"))?;
-    }
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("config.toml");
-    let tmp = path.with_file_name(format!(".{file_name}.setup-{}.tmp", std::process::id()));
-    fs::write(&tmp, content.as_bytes()).map_err(|e| format!("写入临时配置失败: {e}"))?;
-    if let Err(e) = replace_file(&tmp, path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(format!("替换配置文件失败: {e}"));
-    }
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {e}"))?;
+    // NamedTempFile uses create_new and mode 0600 on Unix; never reuse a predictable path.
+    let mut tmp =
+        tempfile::NamedTempFile::new_in(parent).map_err(|e| format!("创建临时配置失败: {e}"))?;
+    tmp.write_all(content.as_bytes())
+        .and_then(|_| tmp.as_file().sync_all())
+        .map_err(|e| format!("写入临时配置失败: {e}"))?;
+    let tmp = tmp.into_temp_path();
+    replace_file(&tmp, path).map_err(|e| format!("替换配置文件失败: {e}"))?;
     Ok(())
 }
 
@@ -1200,7 +1231,7 @@ mod tests {
         let legacy = state(Credential::Unavailable, 60, 60, 10, 300);
         assert!(!legacy.verify_credentials("legacy-secret"));
         assert!(matches!(
-            &*legacy.credential.read().unwrap(),
+            &legacy.account.read().unwrap().credential,
             Credential::Unavailable
         ));
     }

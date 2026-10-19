@@ -156,7 +156,7 @@ async fn browser_rename_and_slow_reload_keep_the_same_preview_connection() {
                 let lease = session.viewer.clone().lock_owned().await;
                 ws.on_upgrade(move |socket| async move {
                     let _lease = lease;
-                    serve(socket, session, state, "grid9".into()).await;
+                    serve(socket, session, state, "grid9".into(), None).await;
                 })
             }
         }),
@@ -274,7 +274,7 @@ async fn browser_preview_retries_a_failed_navigation_restart_on_the_same_connect
                 let lease = session.viewer.clone().lock_owned().await;
                 ws.on_upgrade(move |socket| async move {
                     let _lease = lease;
-                    serve(socket, session, state, "grid9".into()).await;
+                    serve(socket, session, state, "grid9".into(), None).await;
                 })
             }
         }),
@@ -461,7 +461,7 @@ async fn dynamic_preview_recovers_missing_ack_and_survives_input_errors_and_mess
                 let lease = session.viewer.clone().lock_owned().await;
                 ws.on_upgrade(move |socket| async move {
                     let _lease = lease;
-                    serve(socket, session, state, "single".into()).await;
+                    serve(socket, session, state, "single".into(), None).await;
                 })
             }
         }),
@@ -705,7 +705,7 @@ async fn single_preview_recovers_when_a_popup_hides_its_bound_page() {
                 let lease = session.viewer.clone().lock_owned().await;
                 ws.on_upgrade(move |socket| async move {
                     let _lease = lease;
-                    serve(socket, session, state, "single".into()).await;
+                    serve(socket, session, state, "single".into(), None).await;
                 })
             }
         }),
@@ -846,7 +846,7 @@ async fn browser_preview_keeps_frames_during_input_wait_and_rejects_queued_old_t
                     let lease = session.viewer.clone().lock_owned().await;
                     ws.on_upgrade(move |socket| async move {
                         let _lease = lease;
-                        serve(socket, session, state, "single".into()).await;
+                        serve(socket, session, state, "single".into(), None).await;
                     })
                 }
             }),

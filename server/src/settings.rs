@@ -14,6 +14,10 @@ pub struct LiveSettings {
 }
 
 impl LiveSettings {
+    pub(crate) fn lock_config(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.save_lock.lock().unwrap()
+    }
+
     pub fn snapshot(&self) -> Option<SystemSettings> {
         self.values.read().unwrap().clone()
     }
@@ -157,7 +161,7 @@ impl Config {
         expected: &str,
     ) -> Result<SettingsView, SaveError> {
         values.validate().map_err(SaveError::Invalid)?;
-        let _guard = self.live_settings.save_lock.lock().unwrap();
+        let _guard = self.live_settings.lock_config();
         let path = self.settings_path();
         let old = read_file(&path).map_err(SaveError::Io)?;
         if revision(&old) != expected {

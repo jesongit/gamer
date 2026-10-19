@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
+use axum::http::HeaderMap;
 use axum::response::Response;
 use futures_util::StreamExt;
 use serde_json::json;
@@ -23,11 +24,20 @@ pub async fn ws_device(
     ws: WebSocketUpgrade,
     State(st): State<AppState>,
     Path(device_id): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_ws(socket, st, device_id))
+    let sid = super::auth::AuthState::extract_sid(&headers);
+    ws.on_upgrade(move |socket| handle_ws(socket, st, device_id, sid))
 }
 
-async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
+async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String, sid: Option<String>) {
+    let mut account_changes = st.auth.subscribe_account_changes();
+    if sid
+        .as_deref()
+        .is_some_and(|sid| st.auth.validate(sid).is_none())
+    {
+        return;
+    }
     info!(device = %device_id, "ws signaling connected");
 
     // 设备必须在线
@@ -67,7 +77,11 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
         // peer Failed/Closed 通知：立即退出 ws 循环、释放 viewer（mDNS 等资源）。
         // 浏览器 TCP 断开时 axum socket.next() 可能不返回，若不监听此通知，
         // viewer 会泄漏——泄漏的 mDNS 实例让后续连接 ICE 协商失败（黑屏）
+        if sid.is_some() && account_changes.has_changed().unwrap_or(true) {
+            break;
+        }
         tokio::select! {
+            _ = account_changes.changed(), if sid.is_some() => { break; }
             msg = socket.next() => {
                 let Some(Ok(msg)) = msg else { break };
                 match msg {

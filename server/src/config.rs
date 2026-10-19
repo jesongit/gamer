@@ -39,6 +39,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
+    /// Existing installations without this field retain their admin login.
+    pub username: String,
+    /// Durable browser-session revocation marker, rotated with account changes.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub account_revision: String,
     /// Cookie Secure 独立于运行模式；None 保留旧缺省（prod=true、dev=false）。
     /// HTTP 部署显式 false，HTTPS 部署显式 true；GAMER_COOKIE_SECURE 优先。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -59,6 +64,8 @@ pub struct AuthConfig {
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
+            username: "admin".into(),
+            account_revision: String::new(),
             cookie_secure: None,
             session_abs_secs: 12 * 3600,
             session_idle_secs: 2 * 3600,
@@ -672,6 +679,18 @@ impl Config {
                 "auth.login_window_secs = {} 超出合理区间 [1, 86400]",
                 self.auth.login_window_secs
             ));
+        }
+        if !crate::api::auth::valid_username(&self.auth.username) {
+            errs.push("auth.username 须为 1～64 位字母、数字、点、下划线或短横线".into());
+        }
+        if self.auth.account_revision.len() > 128
+            || !self
+                .auth
+                .account_revision
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        {
+            errs.push("auth.account_revision 格式非法".into());
         }
         if !self.auth.password_hash.is_empty() {
             if let Err(e) = crate::api::auth::parse_password_hash(&self.auth.password_hash) {
