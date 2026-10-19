@@ -38,14 +38,14 @@ function Resolve-PluginAssetDestinations {
 }
 function Assert-PublishedPluginSet {
     param([object[]]$Plugins, [string[]]$RequiredIds, [switch]$TestFixturesOnly)
-    if (-not $TestFixturesOnly -and 'gamer-ai' -in $Plugins.id) {
-        throw '发布锁仍包含已退休的 gamer-ai；请先发布新官方插件并更新 release/plugins.lock.json 的真实资产与 SHA256，不能将旧合集作为新发行。历史基线仅允许 -TestFixturesOnly 回归使用。'
+    if (-not $TestFixturesOnly -and @($Plugins | Where-Object { $_.id -in @('gamer-ai', 'gamer-ocr') }).Count -gt 0) {
+        throw '发布锁仍包含已退休的 gamer-ai 或 gamer-ocr；请先发布新官方插件并更新 release/plugins.lock.json 的真实资产与 SHA256，不能将旧合集作为新发行。历史基线仅允许 -TestFixturesOnly 回归使用。'
     }
     if (-not $TestFixturesOnly -and @($Plugins | Where-Object {
-        ($_.PSObject.Properties['execution'] -and $_.execution.PSObject.Properties['builtin_id'] -and $_.execution.builtin_id -eq 'gamer-ai') -or ($_.PSObject.Properties['permissions'] -and @($_.permissions | Where-Object { $_ -is [string] -and $_.Trim() -eq 'ai.connect' }).Count -gt 0)
+        ($_.PSObject.Properties['execution'] -and $_.execution.PSObject.Properties['builtin_id'] -and $_.execution.builtin_id -in @('gamer-ai', 'gamer-ocr')) -or ($_.PSObject.Properties['permissions'] -and @($_.permissions | Where-Object { $_ -is [string] -and $_.Trim() -eq 'ai.connect' }).Count -gt 0)
     }).Count -gt 0) { throw '发布锁包含已退休 ai.connect 权限；请先发布新官方插件并更新 release/plugins.lock.json，历史版本仅允许隔离 fixture 回归' }
     $allowedIds = $RequiredIds + @('gamer-package-publisher', 'gamer-live', 'gamer-notify')
-    if ($TestFixturesOnly) { $allowedIds += 'gamer-ai' }
+    if ($TestFixturesOnly) { $allowedIds += @('gamer-ai', 'gamer-ocr') }
     if (@($Plugins.id | Sort-Object -Unique).Count -ne $Plugins.Count -or
         @($RequiredIds | Where-Object { $_ -notin $Plugins.id }).Count -gt 0 -or
         @($Plugins.id | Where-Object { $_ -notin $allowedIds }).Count -gt 0) { throw '官方插件目录缺项、重复或含未知插件' }

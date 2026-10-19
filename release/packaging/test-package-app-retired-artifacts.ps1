@@ -43,16 +43,18 @@ try {
     $source = Join-Path $testRoot 'source/web-dist'
     $stage = Join-Path $testRoot 'stage'
     $keep = @('index.html', 'assets/app.js', 'plugin-ui/gamer-keymap/plugin.js', 'plugin-ui/gamer-ai-helper/plugin.js', 'plugins/gamer-keymap-0.3.21.gplugin', 'plugins/gamer-ai-1helper-1.0.gplugin')
-    foreach ($name in $keep + @('plugin-ui/gamer-ai/plugin.js', 'plugin-ui/gamer-ai/nested/style.css', 'plugin-ui/gamer-yaml/plugin.js', 'plugins/gamer-ai-0.1.0.gplugin', 'downloads/gamer-ai-0.1.0.gplugin', 'plugins/gamer-yaml-0.1.0.gplugin')) {
+    foreach ($name in $keep + @('plugin-ui/gamer-ai/plugin.js', 'plugin-ui/gamer-ai/nested/style.css', 'plugin-ui/gamer-ocr/plugin.js', 'plugins/gamer-ocr-0.1.1.gplugin', 'plugin-ui/gamer-yaml/plugin.js', 'plugins/gamer-ai-0.1.0.gplugin', 'downloads/gamer-ai-0.1.0.gplugin', 'plugins/gamer-yaml-0.1.0.gplugin')) {
         Write-Fixture (Join-Path $source $name) "unchanged fixture: $name"
     }
-    Write-Fixture (Join-Path $source 'registry.json') '{"schema_version":2,"provenance":{"keep":"original"},"plugins":[{"id":"gamer-ai","version":"0.1.0"},{"id":"gamer-yaml","version":"0.1.0","permissions":[" ai.connect "]},{"id":"gamer-keymap","version":"0.3.21","sha256":"unchanged"},{"id":"gamer-ai-1helper","version":"1.0"}]}'
+    Write-Fixture (Join-Path $source 'registry.json') '{"schema_version":2,"provenance":{"keep":"original"},"plugins":[{"id":"gamer-ai","version":"0.1.0"},{"id":"gamer-ocr","version":"0.1.1"},{"id":"gamer-yaml","version":"0.1.0","permissions":[" ai.connect "]},{"id":"gamer-keymap","version":"0.3.21","sha256":"unchanged"},{"id":"gamer-ai-1helper","version":"1.0"}]}'
     $sourceHashes = Get-FixtureHashes $source
     New-Item -ItemType Directory -Path $stage | Out-Null
     Copy-Item -LiteralPath $source -Destination $stage -Recurse
     Remove-RetiredAiStageArtifacts -StageRoot $stage
     $stagedWeb = Join-Path $stage 'web-dist'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $stagedWeb 'plugin-ui/gamer-ai'))) 'Retired UI remained'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $stagedWeb 'plugin-ui/gamer-ocr'))) 'Retired OCR UI remained'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $stagedWeb 'plugins/gamer-ocr-0.1.1.gplugin'))) 'Retired OCR archive remained'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $stagedWeb 'plugin-ui/gamer-yaml'))) 'Retired permission UI remained'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $stagedWeb 'plugins/gamer-ai-0.1.0.gplugin')) -and -not (Test-Path -LiteralPath (Join-Path $stagedWeb 'downloads/gamer-ai-0.1.0.gplugin')) -and -not (Test-Path -LiteralPath (Join-Path $stagedWeb 'plugins/gamer-yaml-0.1.0.gplugin'))) 'Retired archive remained'
     foreach ($name in $keep) {
@@ -102,11 +104,13 @@ try {
     $junction = $null
 
     $required = @('gamer-keymap', 'gamer-video', 'gamer-yaml')
-    $modern = @($required + @('gamer-live', 'gamer-notify', 'gamer-package-publisher', 'gamer-ocr') | ForEach-Object { [pscustomobject]@{id = $_} })
+    $modern = @($required + @('gamer-live', 'gamer-notify', 'gamer-package-publisher') | ForEach-Object { [pscustomobject]@{id = $_} })
     Assert-PublishedPluginSet -Plugins $modern -RequiredIds $required
-    $historical = @($modern | Where-Object id -NE 'gamer-ocr') + @([pscustomobject]@{id = 'gamer-ai'})
-    Assert-Rejected { Assert-PublishedPluginSet -Plugins $historical -RequiredIds $required } 'release/plugins\.lock\.json'
-    Assert-PublishedPluginSet -Plugins $historical -RequiredIds $required -TestFixturesOnly
+    foreach ($retiredId in @('gamer-ai', 'gamer-ocr')) {
+        $historical = $modern + @([pscustomobject]@{id = $retiredId})
+        Assert-Rejected { Assert-PublishedPluginSet -Plugins $historical -RequiredIds $required } 'release/plugins\.lock\.json'
+        Assert-PublishedPluginSet -Plugins $historical -RequiredIds $required -TestFixturesOnly
+    }
     $retiredPermission = @($modern | Where-Object id -NE 'gamer-yaml') + @([pscustomobject]@{id = 'gamer-yaml'; permissions = @(' ai.connect ')})
     Assert-Rejected { Assert-PublishedPluginSet -Plugins $retiredPermission -RequiredIds $required } 'ai.connect'
     Assert-PublishedPluginSet -Plugins $retiredPermission -RequiredIds $required -TestFixturesOnly
@@ -123,6 +127,7 @@ try {
     }
     Assert-Rejected { Resolve-PluginAssetDestinations -RepoRoot $fakeRepo -TestFixturesOnly -DistDir (Join-Path $fakeRepo 'release/dist') } '留在 fixture'
     Assert-Rejected { Assert-OfficialBuildPlugin 'gamer-ai' } '退休'
+    Assert-Rejected { Assert-OfficialBuildPlugin 'gamer-ocr' } '退休'
     Assert-OfficialBuildPlugin 'gamer-ai-1helper'
     Assert-True (Test-RetiredOfficialBuildMetadata ([pscustomobject]@{id='gamer-yaml'; permissions=@(' ai.connect ')})) 'Single-plugin registry merge keeps retired permissions'
     Assert-True (-not (Test-RetiredOfficialBuildMetadata ([pscustomobject]@{id='gamer-ai-1helper'}))) 'Unrelated plugin ID was retired by prefix'
