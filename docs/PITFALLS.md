@@ -681,3 +681,6 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - Windows 自动准备 Tesseract 时，精简版 `7za.exe` 不支持 NSIS；使用锁定的完整 7-Zip 发行包，由受校验的 `7zr` 解出完整解压器，不执行安装程序。
 - Windows PowerShell 子进程继承其它版本的模块路径时可能找不到 `Get-FileHash`；准备器固定系统模块路径，并使用 .NET SHA256 流式校验。
 - Windows 测试 EXE 运行中不能重新链接同一文件；同目标的测试与编译顺序执行。直接运行服务端测试 EXE 时工作目录使用 `server/`，否则相对 fixture 路径会误报缺失。
+- 开发密码由 `GAMER_ADMIN_PASSWORD` 注入时会优先于配置中的哈希；账号设置只允许改用户名，改密码须更新该环境变量并重启，避免网页保存后重启又恢复旧密码。
+- Windows Python 默认使用 GBK 读取日志时可能报 `UnicodeDecodeError`；辅助验证脚本须显式用 UTF-8 读取 PowerShell 输出的测试日志。
+- Chromium 初次导航尚未附着活动页时，立即请求投屏可能报 `Not attached to an active page`；待页面就绪后重连，诊断时先对照旧镜像（本次新旧镜像的 Cookie 与本机管理通道均可复现），不要把它误判为账号会话撤销。

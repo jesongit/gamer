@@ -32,7 +32,9 @@
 
 ## 认证
 
-管理员账号为 `admin`，没有预设密码。默认开发模式下，可在本机首次设置密码，或使用 `GAMER_ADMIN_PASSWORD`。
+管理员用户名默认为 `admin`，没有预设密码。默认开发模式下，可在本机首次设置密码，或使用 `GAMER_ADMIN_PASSWORD`。登录后在「设置 → 管理员账号」修改用户名或密码；修改须验证当前密码，新密码留空时只修改用户名。用户名支持 1～64 个英文字母、数字、点、下划线和短横线，区分大小写。
+
+修改即时生效并保存到配置文件的 `[auth].username` / `password_hash`，同时退出所有管理登录和投屏管理连接；后台任务继续执行，独立 MCP 令牌不受影响。开发密码由 `GAMER_ADMIN_PASSWORD` 管理时，界面只允许修改用户名；改密码须修改该环境变量并重启服务。现有配置无需迁移，缺少 `username` 时继续使用 `admin`。
 
 `[auth].password_hash` 保存 Argon2id PHC，不填写明文。生产模式不使用开发明文环境变量，必须提供有效配置；会话通过 Cookie 认证。`session_abs_secs`、`session_idle_secs` 控制普通会话时限，`login_max_fails`、`login_window_secs` 控制失败限流。
 
