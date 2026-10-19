@@ -41,4 +41,46 @@
 
 ## Docker 验证与更新
 
-待候选镜像验证通过后补充。构建单 Cargo job，使用专属 cgroup：memory.max 6 GiB、memory.high 4 GiB、swap.max 0，不与 Windows Rust 编译并行。现有 release 在此阶段保持原镜像和原卷；更新前必须冷备份并保留原镜像/容器以便回滚。
+### 退休状态补充验证
+
+恢复旧数据的候选发现：历史 OCR 安装会优先显示通用“宿主未注册，需要升级”错误。已将明确的退休原因置于通用缺失宿主提示之前；其它退休权限和缺失内置插件的原有门禁保持。
+
+- `runtime-retirement-tests.log`：4 项通过，包含新增的历史 OCR Running → Enabled、拒绝执行、安装文件及私密字节不变检查；也覆盖原 AI 退休门禁。
+- `runtime-retirement-architecture.log`：7 项架构检查通过。
+- Debug 再构建成功，六项依赖 ready，历史 OCR 明确显示“已内置，旧插件与私密数据保留只读”；`runtime-debug-retirement-acceptance.json`。
+- 最终再次核对 Debug：schema 7、任务 0、设备 1、浏览器目标 1、运行记录 160、SQLite integrity_check=ok；config.toml SHA256 与上述原值一致。`runtime-debug-final-data.json`。
+
+### Linux amd64 候选验收
+
+本地镜像 `gamer:runtime-dependencies-20261019`，镜像 ID `sha256:a174e9fda0c61fe56f727ec46bb1284fd8d69f92fb5220e0d15b7db3b8d57567`。运行代码提交 `5a2b0cd`，主实现提交 `630d852`，插件源码提交 `3ea875c`。这些是本地构建/提交，未发布新的 Docker Hub 标签或插件归档。
+
+`runtime-docker-candidate-acceptance.json` 记录隔离副本（network=none，1 GiB 内存，无 swap）检查：
+
+- prod HTTP 登录可用，Cookie 为 HttpOnly/SameSite=Strict，显式 cookie_secure=false；携带 Cookie 可访问受保护依赖接口。
+- 六项运行依赖全部 ready；Tesseract、eng/chi_sim 随镜像安装，无容器启动 apt/sudo。
+- Chromium `155.0.8059.79` 使用独立临时目录启动，沙箱保留，空白页 CDP ready。未访问游戏或账号。
+- 旧 OCR 安装仍保留但未运行；Core MCP 在授权 Package PNG 上真实识别 TEST 123。越权 Package 拒绝、撤销令牌后 HTTP 401。另有前述 Windows 无任何 OCR 插件安装的真实识别测试。
+- 数据库版本/数量与恢复前一致。候选的已知测试密码仅写入隔离副本；原 release 密码未修改。
+
+### 更新、备份及回滚
+
+本机 `gamer-release` 已切换到上述镜像，地址 `http://127.0.0.1:18443/#/console`，容器 healthy，仍挂载原 `gamer-release-data`。prod、HTTP Cookie 策略、原密码配置、端口、init、restart、stop timeout、1 GiB shm、seccomp 和日志限制均核对保持一致。
+
+最终切换前冷备份目录：`D:\Gamer\backups\runtime-dependencies-20261019-173908\release-final-update`：
+
+- `data.tar.gz`：607339 字节，99 条目，完整读取校验通过；SHA256 `b293199560adc2d792cf765d4700562425671df4bba2ca37c02e3a1a49dd8ce6`。
+- `container-inspect.json`、`container.env`、`chromium-seccomp.json`、`baseline.json`、`manifest.json` 和 `rollback.ps1` 保留在受限目录。
+- `rollback.ps1` 已做 PowerShell 语法检查；将快照恢复到新空卷，再运行旧镜像，保留升级后的原卷。该人工脚本没有再次在当前服务执行。
+- 旧镜像 `posase/gamer:v1.0.2` / `sha256:d15f0b1ac1e06e0d3bb6a9fcf9af09924072bfa5d12417a80db69ca6a4e1bbda` 保留。
+
+实际恢复证据包含：隔离恢复旧镜像成功；一次切换保护因直播队列原始文件摘要变化自动回滚到新卷并恢复旧服务成功。复核确认仅队列并发 `revision` 计数器变化，全部业务字段一致。最终备份基线改为服务停止后采集；部署校验对队列业务字段做独立摘要，并只允许 revision 单调递增。OCR 状态只允许预期的退休变化，其它插件记录严格相等。没有放宽凭据、安装版本或配置校验。
+
+最终 `runtime-release-promotion.json`：54 个受保护文件字节一致，队列业务字段摘要一致，历史 OCR 安装/私密数据保留，数据库任务/设备/浏览器目标/运行记录均为 0，schema 7、integrity_check=ok；调度仍关闭。这是本机原有数据现状，不代表远程机器的四个任务；远程机器未操作。
+
+### 资源与清理
+
+两次 Docker 构建均为单 Cargo job，专属 cgroup memory.max=6 GiB、memory.high=4 GiB、swap.max=0，与 Windows Rust 编译错开。两次合计构建组峰值 4295737344 字节（约 4.0 GiB），max/oom/oom_kill 计数均为 0。结束后仅对该空组做缓存回收，再移除自建空 cgroup；未全局 drop_caches 或重启 WSL/Docker。`runtime-docker-cgroup-final.json`、`runtime-docker-cgroup-removed.json`。
+
+临时验收容器/卷与本次失败切换留下的停止容器均已清理，原生产卷、独立恢复卷 `gamer-release-auto-rollback-20261019`、全部备份和旧镜像保留。当前仅一个 Gamer Debug 后端及一个 Gamer release 容器运行。`runtime-docker-cleanup.json`、`deploy/docker/local/release-runtime.json`（本地忽略文件）。
+
+未将本地合成测试当成真实游戏、Android 实机、远程生产或其它原生平台自动安装验收。
