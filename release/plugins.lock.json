@@ -1,17 +1,17 @@
 {
   "schema_version": 1,
-  "tag": "gamer-yaml-v0.3.22",
-  "plugin_commit": "ad5b280d613a8d604b8baa16e3d2d98d81f32427",
+  "tag": "gamer-yaml-v0.3.23",
+  "plugin_commit": "d22287b1110a47a0bd1ec4da6a72de35f3291ce8",
   "registry": {
     "name": "registry.json",
-    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-yaml-v0.3.22/registry.json",
-    "size": 10193,
-    "sha256": "d2de4aa61d30dafdd48f281d5e10ea16ca4e04252379941d28fd9bde7787a05f"
+    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-yaml-v0.3.23/registry.json",
+    "size": 7891,
+    "sha256": "541174956832eaf5629de56ea8611db3ce8075e9f8c345c6e8e8d0f5d8af3c2b"
   },
   "bundle": {
-    "name": "gamer-official-plugins-0.3.22-windows-x64.zip",
-    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-yaml-v0.3.22/gamer-official-plugins-0.3.22-windows-x64.zip",
-    "size": 653180,
-    "sha256": "80557d815674f4e58a3b1637837374e3cb89c7866dcbcdc80d24639445981bc5"
+    "name": "gamer-official-plugins-0.3.23-windows-x64.zip",
+    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-yaml-v0.3.23/gamer-official-plugins-0.3.23-windows-x64.zip",
+    "size": 652109,
+    "sha256": "68c162380010ce41e2e1eceb27437dd817b506c9acaa18371efa6b35f83f18d4"
   }
 }

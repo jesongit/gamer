@@ -685,3 +685,4 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - Windows Python 默认使用 GBK 读取日志时可能报 `UnicodeDecodeError`；辅助验证脚本须显式用 UTF-8 读取 PowerShell 输出的测试日志。
 - Chromium 初次导航尚未附着活动页时，立即请求投屏可能报 `Not attached to an active page`；流启动仅对 CDP `-32000` 的这一精确错误在同一绑定上短暂重试（5 秒重试窗口、100ms 间隔），清除旧帧，保留断连、坐标及输入代次校验；回归必须用全新资料启动后立即投屏，不能靠额外等待掩盖竞态。
 - Windows PowerShell 5 的 `ErrorActionPreference=Stop` 可能把 Docker 原生命令的预期 stderr（如不存在的卷）提升为终止错误，重定向也不能可靠规避；回滚预检用成功的 `docker volume ls` 后精确比较名称，并在实际调用的 PowerShell 版本下验证。
+- OCR 迁入 Core 后，旧发布夹具仍将 `gamer-ocr` 视为在售插件会使 CI 目录门禁失败；正式构建只接收六款活动插件，AI/OCR 历史归档仅限隔离测试，更新发行锁前逐项核验真实发布资产。
