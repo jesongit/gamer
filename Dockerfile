@@ -38,7 +38,7 @@ RUN --mount=type=cache,id=gamer-registry,target=/usr/local/cargo/registry,sharin
     && mkdir -p /out && cp server/target/release/gamer-server /out/gamer-server
 
 FROM ${RUNTIME_IMAGE} AS runtime-base
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
       ca-certificates chromium chromium-sandbox ffmpeg adb \
       tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim \
       fonts-noto-cjk tzdata python3 python3-cryptography util-linux \
@@ -46,7 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && groupadd --gid 1000 gamer && useradd --uid 1000 --gid gamer --create-home gamer
 
 FROM runtime-base AS runtime
-RUN apt-get update && apt-get install -y --no-install-recommends python3-websocket python3-argon2 gh \
+RUN apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends python3-websocket python3-argon2 gh \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=server-build /out/gamer-server /app/gamer-server
