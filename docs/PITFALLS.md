@@ -683,4 +683,5 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - Windows 测试 EXE 运行中不能重新链接同一文件；同目标的测试与编译顺序执行。直接运行服务端测试 EXE 时工作目录使用 `server/`，否则相对 fixture 路径会误报缺失。
 - 开发密码由 `GAMER_ADMIN_PASSWORD` 注入时会优先于配置中的哈希；账号设置只允许改用户名，改密码须更新该环境变量并重启，避免网页保存后重启又恢复旧密码。
 - Windows Python 默认使用 GBK 读取日志时可能报 `UnicodeDecodeError`；辅助验证脚本须显式用 UTF-8 读取 PowerShell 输出的测试日志。
-- Chromium 初次导航尚未附着活动页时，立即请求投屏可能报 `Not attached to an active page`；待页面就绪后重连，诊断时先对照旧镜像（本次新旧镜像的 Cookie 与本机管理通道均可复现），不要把它误判为账号会话撤销。
+- Chromium 初次导航尚未附着活动页时，立即请求投屏可能报 `Not attached to an active page`；流启动仅对 CDP `-32000` 的这一精确错误在同一绑定上短暂重试（5 秒重试窗口、100ms 间隔），清除旧帧，保留断连、坐标及输入代次校验；回归必须用全新资料启动后立即投屏，不能靠额外等待掩盖竞态。
+- Windows PowerShell 5 的 `ErrorActionPreference=Stop` 可能把 Docker 原生命令的预期 stderr（如不存在的卷）提升为终止错误，重定向也不能可靠规避；回滚预检用成功的 `docker volume ls` 后精确比较名称，并在实际调用的 PowerShell 版本下验证。
