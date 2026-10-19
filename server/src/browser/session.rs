@@ -557,6 +557,41 @@ impl CdpSession {
         &self,
         recording: bool,
     ) -> anyhow::Result<tokio::sync::watch::Receiver<Option<Arc<ScreencastFrame>>>> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut retries = 0;
+        loop {
+            match self.start_stream_once(recording).await {
+                Err(error)
+                    if self.is_alive()
+                        && inactive_page_during_navigation(&error)
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    // Initial navigation can temporarily retire the active document.
+                    // Retry this same binding, never another tab or a cached frame.
+                    self.transport.reset_stream(false);
+                    retries += 1;
+                    tokio::time::sleep_until(
+                        (tokio::time::Instant::now() + Duration::from_millis(100)).min(deadline),
+                    )
+                    .await;
+                }
+                result => {
+                    if retries > 0 {
+                        if result.is_ok() {
+                            tracing::debug!(target_id = %self.id, retries, "browser stream attached after initial navigation");
+                        } else {
+                            tracing::warn!(target_id = %self.id, retries, "browser stream could not attach after navigation retry");
+                        }
+                    }
+                    return result;
+                }
+            }
+        }
+    }
+    async fn start_stream_once(
+        &self,
+        recording: bool,
+    ) -> anyhow::Result<tokio::sync::watch::Receiver<Option<Arc<ScreencastFrame>>>> {
         ensure!(self.is_alive(), "浏览器目标已断开");
         // Restart requests a fresh image of static pages as well. Keep the
         // Emulation viewport untouched: preview resolution is not input size.

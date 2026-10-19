@@ -1,5 +1,67 @@
 use super::*;
 
+#[tokio::test]
+#[ignore = "requires installed browser; immediate first preview of fresh profiles"]
+async fn initial_preview_survives_navigation_without_a_settle_delay() {
+    use axum::{response::Html, routing::get, Router};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, Router::new().route("/", get(|| async {
+            Html("<!doctype html><body style='margin:0;background:#234'>initial preview fixture")
+        }))).await.unwrap();
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = crate::config::Config {
+        data_dir: dir.path().into(),
+        ..Default::default()
+    };
+    let executable = crate::browser::browser_executable(&cfg).unwrap();
+    for (index, mode) in ["single", "grid4", "grid9", "single", "grid4", "grid9"]
+        .into_iter()
+        .enumerate()
+    {
+        let target = BrowserTarget {
+            id: format!("browser-initial-preview-{index}"),
+            name: "isolated immediate preview".into(),
+            profile_id: format!("initial-preview-{index}"),
+            url: url.clone(),
+            width: 1280,
+            height: 720,
+        };
+        let session = CdpSession::launch(&target, &cfg, executable.clone())
+            .await
+            .unwrap();
+        let check = async {
+            let mut frames = session.start_preview_with_mode(mode).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let frame = next_frame(&mut frames).await;
+                    if let Ok((_, _, stamp)) = session.preview_image(&frame).await {
+                        assert_eq!(stamp, session.stamp());
+                        assert!(session.is_preview_active());
+                        break;
+                    }
+                    frames.changed().await.unwrap();
+                }
+            })
+            .await
+            .expect("first preview never reached the active document");
+            session.stop_preview().await;
+            assert!(!session.is_preview_active());
+            assert!(frames.borrow().is_none());
+        };
+        let result =
+            futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(check)).await;
+        session.close().await;
+        if let Err(panic) = result {
+            server.abort();
+            std::panic::resume_unwind(panic);
+        }
+    }
+    server.abort();
+}
+
 #[test]
 fn thumbnail_mapping_rejects_crops_and_keeps_rounding() {
     assert!(valid_preview_dimensions((960, 540), (1920, 1080)));
