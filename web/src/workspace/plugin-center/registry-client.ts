@@ -165,13 +165,13 @@ async function archiveBytes(response: Response): Promise<Uint8Array> {
 
 export async function sha256Hex(bytes: ArrayBuffer | Uint8Array): Promise<string> {
   const subtle = globalThis.crypto?.subtle
-  if (!subtle) {
-    const hint = globalThis.isSecureContext === false
-      ? '当前页面非 HTTPS/localhost 安全上下文，浏览器已禁用 WebCrypto，请改用 http://localhost 访问'
-      : '当前浏览器不支持 WebCrypto SHA-256 校验'
-    throw new RegistryError('crypto_unavailable', hint)
-  }
   const input = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+  if (!subtle) {
+    // LAN HTTP cannot use WebCrypto. Keep the same SHA-256 check locally;
+    // the implementation is bundled, so offline imports do not need a CDN.
+    const { sha256 } = await import('@noble/hashes/sha2.js')
+    return [...sha256(input)].map(byte => byte.toString(16).padStart(2, '0')).join('')
+  }
   const owned = new ArrayBuffer(input.byteLength)
   new Uint8Array(owned).set(input)
   const digest = await subtle.digest('SHA-256', owned)

@@ -1,4 +1,6 @@
-//! Public GitHub package catalogs. No credentials, plugin lifecycle or DSL knowledge.
+//! Public package catalogs from GitHub, prefix mirrors or HTTPS static directories.
+//! No credentials, plugin lifecycle or DSL knowledge.
+mod source;
 use crate::{
     package_archive::{sha256_hex, validate_and_read_manifest},
     resources::{parse_package_toml, validate_scope_id},
@@ -6,6 +8,7 @@ use crate::{
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use source::SourceLocation;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -185,6 +188,8 @@ pub(crate) struct PublishedCatalog {
     pub tag: String,
     pub digest: String,
     pub catalog: Catalog,
+    // Constructed from the configured source, never a catalog-provided download URL.
+    archive_base: String,
 }
 impl PublishedCatalog {
     pub(crate) fn fingerprint(&self) -> String {
@@ -194,10 +199,14 @@ impl PublishedCatalog {
 
 pub(crate) struct PublicClient {
     agent: ureq::Agent,
+    #[cfg(test)]
+    fetch_fixture: Option<std::sync::Arc<dyn Fn(&str, u64) -> Result<Vec<u8>> + Send + Sync>>,
 }
 impl Default for PublicClient {
     fn default() -> Self {
         Self {
+            #[cfg(test)]
+            fetch_fixture: None,
             agent: ureq::AgentBuilder::new()
                 .https_only(true)
                 .try_proxy_from_env(true)
@@ -216,17 +225,53 @@ pub(crate) fn read_limited(reader: impl Read, limit: u64) -> Result<Vec<u8>> {
 }
 impl PublicClient {
     pub(crate) fn fetch(&self, url: &str, limit: u64) -> Result<Vec<u8>> {
+        #[cfg(test)]
+        if let Some(fetch) = &self.fetch_fixture {
+            return fetch(url, limit);
+        }
         read_limited(
             self.agent
                 .get(url)
                 .call()
-                .map_err(|_| anyhow!("GitHub 请求失败，请检查网络和公开仓库权限"))?
+                .map_err(|error| match error {
+                    ureq::Error::Status(status, _) => anyhow!("配置源返回 HTTP {status}"),
+                    _ => anyhow!("配置源请求失败，请检查网络和地址"),
+                })?
                 .into_reader(),
             limit,
         )
     }
     pub(crate) fn latest(&self, repo: &str) -> Result<Option<PublishedCatalog>> {
-        let repo = repository(repo)?;
+        let location = SourceLocation::parse(repo)?;
+        let SourceLocation::Github {
+            repository: repo,
+            prefix,
+        } = &location
+        else {
+            let SourceLocation::Catalog { url } = &location else {
+                unreachable!()
+            };
+            return self.catalog_from_url(url.as_str()).map(Some);
+        };
+        if prefix.is_some() {
+            // Some prefix proxies implement only release assets, not GitHub API.
+            // Probe both through the configured source; never silently use direct GitHub.
+            let api = location.wrap(&format!(
+                "https://api.github.com/repos/{repo}/releases/latest"
+            ));
+            let release = self.fetch(&api, MAX_JSON).and_then(|bytes| {
+                serde_json::from_slice::<Value>(&bytes).context("Release 接口未返回 JSON")
+            });
+            return match release {
+                Ok(release) if release.get("tag_name").is_some() => self
+                    .catalog_from_release(&location, repo, &release)
+                    .map(Some),
+                _ => self
+                    .catalog_from_url(&location.latest_catalog(repo))
+                    .map(Some)
+                    .map_err(|error| anyhow!("镜像 Release 接口不可用，配置目录探测失败：{error}")),
+            };
+        }
         let metadata: Value = serde_json::from_slice(
             &self.fetch(&format!("https://api.github.com/repos/{repo}"), MAX_JSON)?,
         )?;
@@ -235,7 +280,7 @@ impl PublicClient {
             .as_str()
             .context("GitHub 仓库元数据缺少 full_name")?;
         ensure!(
-            repository(canonical)? == repo,
+            repository(canonical)? == *repo,
             "仓库已重命名，请重新添加规范地址"
         );
         let release = match self
@@ -251,9 +296,29 @@ impl PublicClient {
             Err(ureq::Error::Status(404, _)) => return Ok(None),
             Err(_) => bail!("读取最新 Release 失败，不能将网络错误当作空目录"),
         };
-        self.catalog_from_release(canonical, &release).map(Some)
+        self.catalog_from_release(&location, canonical, &release)
+            .map(Some)
     }
-    fn catalog_from_release(&self, repo: &str, release: &Value) -> Result<PublishedCatalog> {
+    fn catalog_from_url(&self, url: &str) -> Result<PublishedCatalog> {
+        let bytes = self.fetch(url, MAX_JSON)?;
+        let catalog: Catalog =
+            serde_json::from_slice(&bytes).context("配置目录不是有效的 packages.json")?;
+        catalog.validate()?;
+        let base = reqwest::Url::parse(url)?.join("./")?;
+        Ok(PublishedCatalog {
+            release_id: 0,
+            tag: String::new(),
+            digest: sha256_hex(&bytes),
+            catalog,
+            archive_base: base.to_string(),
+        })
+    }
+    fn catalog_from_release(
+        &self,
+        location: &SourceLocation,
+        repo: &str,
+        release: &Value,
+    ) -> Result<PublishedCatalog> {
         ensure!(
             release["draft"] == false && release["prerelease"] == false,
             "配置源必须是正式公开 Release"
@@ -269,7 +334,10 @@ impl PublicClient {
                 == 1,
             "最新 Release 缺少 packages.json，不是有效的配置仓库"
         );
-        let bytes = self.fetch(&asset_url(repo, tag, "packages.json"), MAX_JSON)?;
+        let bytes = self.fetch(
+            &location.wrap(&asset_url(repo, tag, "packages.json")),
+            MAX_JSON,
+        )?;
         let catalog: Catalog = serde_json::from_slice(&bytes).context("packages.json 格式无效")?;
         catalog.validate()?;
         for p in &catalog.packages {
@@ -278,7 +346,9 @@ impl PublicClient {
                     .iter()
                     .filter(|a| a["name"] == p.asset_name
                         && a["size"].as_u64() == Some(p.size)
-                        && a["browser_download_url"] == asset_url(repo, tag, &p.asset_name))
+                        && (a["browser_download_url"] == asset_url(repo, tag, &p.asset_name)
+                            || a["browser_download_url"]
+                                == location.wrap(&asset_url(repo, tag, &p.asset_name))))
                     .count()
                     == 1,
                 "Release 资产与配置目录不一致：{}",
@@ -290,10 +360,20 @@ impl PublicClient {
             tag: tag.into(),
             digest: sha256_hex(&bytes),
             catalog,
+            archive_base: location.release_base(repo, tag),
         })
     }
     pub(crate) fn archive(&self, repo: &str, tag: &str, entry: &PackageEntry) -> Result<Vec<u8>> {
-        let bytes = self.fetch(&asset_url(repo, tag, &entry.asset_name), MAX_ARCHIVE)?;
+        let repo = repository(repo)?;
+        validate_tag(tag)?;
+        self.archive_at(
+            &format!("https://github.com/{repo}/releases/download/{tag}/"),
+            entry,
+        )
+    }
+    fn archive_at(&self, base: &str, entry: &PackageEntry) -> Result<Vec<u8>> {
+        entry.validate()?;
+        let bytes = self.fetch(&format!("{base}{}", entry.asset_name), MAX_ARCHIVE)?;
         entry.verify(&bytes)?;
         Ok(bytes)
     }
@@ -354,7 +434,7 @@ impl PackageMarket {
         self.load()
     }
     pub(crate) fn save_source(&self, input: &str, enabled: bool) -> Result<Vec<Source>> {
-        let repo = repository(input)?;
+        let repo = SourceLocation::parse(input)?.canonical();
         let _guard = self.lock.lock().unwrap();
         let mut sources = self.load()?;
         if let Some(source) = sources.iter_mut().find(|s| s.repository == repo) {
@@ -427,7 +507,7 @@ impl PackageMarket {
     ) -> Result<Vec<u8>> {
         let source = self.source(source)?;
         self.catalog(&source.id, false)?;
-        let (tag, entry) = {
+        let (archive_base, entry) = {
             let cached = self
                 .cache
                 .lock()
@@ -443,15 +523,178 @@ impl PackageMarket {
                 .iter()
                 .find(|p| p.id == id && p.version == version && p.sha256 == hash)
                 .context("目录已变化，请刷新后重试")?;
-            (snapshot.tag.clone(), entry.clone())
+            (snapshot.archive_base.clone(), entry.clone())
         };
-        self.client.archive(&source.repository, &tag, &entry)
+        self.client.archive_at(&archive_base, &entry)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    type Requests = std::sync::Arc<Mutex<Vec<String>>>;
+    fn fixture_client(responses: BTreeMap<String, Vec<u8>>) -> (PublicClient, Requests) {
+        let requests = Requests::default();
+        let observed = requests.clone();
+        let mut client = PublicClient::default();
+        client.fetch_fixture = Some(std::sync::Arc::new(move |url, limit| {
+            observed.lock().unwrap().push(url.into());
+            let body = responses.get(url).context("fixture endpoint unavailable")?;
+            read_limited(body.as_slice(), limit)
+        }));
+        (client, requests)
+    }
+    fn catalog_fixture(bytes: &[u8]) -> (PackageEntry, Vec<u8>) {
+        let entry = PackageEntry::from_archive(bytes).unwrap();
+        let catalog = serde_json::to_vec(&Catalog {
+            schema_version: 1,
+            packages: vec![entry.clone()],
+        })
+        .unwrap();
+        (entry, catalog)
+    }
+
+    #[test]
+    fn arbitrary_prefix_mirror_probes_release_and_freezes_archive_route() {
+        let (directory, archive) = fixture();
+        let (entry, catalog) = catalog_fixture(&archive);
+        let prefix = "https://independent-proxy.example/cache/";
+        let source = format!("{prefix}https://github.com/owner/repo");
+        let release = json!({"id":1,"draft":false,"prerelease":false,"tag_name":"v1.0.0","assets":[
+            {"name":"packages.json"},
+            {"name":entry.asset_name,"size":entry.size,"browser_download_url":asset_url("owner/repo","v1.0.0",&entry.asset_name)}]});
+        let base = format!("{prefix}https://github.com/owner/repo/releases/download/v1.0.0/");
+        let (client, calls) = fixture_client(BTreeMap::from([
+            (
+                format!("{prefix}https://api.github.com/repos/owner/repo/releases/latest"),
+                serde_json::to_vec(&release).unwrap(),
+            ),
+            (format!("{base}packages.json"), catalog),
+            (format!("{base}{}", entry.asset_name), archive.clone()),
+        ]));
+        let mut market = PackageMarket::new(directory.path().into());
+        market.client = client;
+        let saved = market.save_source(&source, true).unwrap();
+        let saved = saved.iter().find(|s| s.repository == source).unwrap();
+        assert_eq!(
+            market.catalog(&saved.id, true).unwrap()["packages"][0]["id"],
+            "demo"
+        );
+        assert_eq!(
+            market
+                .archive(&saved.id, &entry.id, &entry.version, &entry.sha256)
+                .unwrap(),
+            archive
+        );
+        assert!(market
+            .archive(&saved.id, &entry.id, &entry.version, &"0".repeat(64))
+            .is_err());
+        assert_eq!(calls.lock().unwrap().len(), 3);
+        assert!(calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|url| url.starts_with(prefix)));
+        assert!(PackageMarket::new(directory.path().into())
+            .sources()
+            .unwrap()
+            .iter()
+            .any(|s| s.repository == source));
+    }
+
+    #[test]
+    fn download_only_mirror_uses_latest_asset_catalog_without_direct_bypass() {
+        let (_directory, archive) = fixture();
+        let (entry, catalog) = catalog_fixture(&archive);
+        let base =
+            "https://files-only.example/https://github.com/owner/repo/releases/latest/download/";
+        let (client, calls) = fixture_client(BTreeMap::from([
+            (format!("{base}packages.json"), catalog),
+            (format!("{base}{}", entry.asset_name), archive.clone()),
+        ]));
+        let snapshot = client
+            .latest("https://files-only.example/https://github.com/owner/repo")
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.archive_base, base);
+        assert_eq!(
+            client.archive_at(&snapshot.archive_base, &entry).unwrap(),
+            archive
+        );
+        assert_eq!(calls.lock().unwrap().len(), 3);
+        assert!(calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|url| url.starts_with("https://files-only.example/")));
+    }
+
+    #[test]
+    fn static_catalog_uses_siblings_and_keeps_hash_and_manifest_checks() {
+        let (_directory, archive) = fixture();
+        let (entry, catalog) = catalog_fixture(&archive);
+        let base = "https://static.example/configs/";
+        let (client, calls) = fixture_client(BTreeMap::from([
+            (format!("{base}packages.json"), catalog),
+            (format!("{base}{}", entry.asset_name), archive.clone()),
+        ]));
+        let snapshot = client.latest(base).unwrap().unwrap();
+        assert_eq!(
+            client.archive_at(&snapshot.archive_base, &entry).unwrap(),
+            archive
+        );
+        let mut bad = entry.clone();
+        bad.sha256 = "0".repeat(64);
+        assert!(client.archive_at(&snapshot.archive_base, &bad).is_err());
+        bad = entry;
+        bad.name = "different inner identity".into();
+        assert!(client.archive_at(&snapshot.archive_base, &bad).is_err());
+        assert!(calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|url| url.starts_with(base)));
+    }
+
+    #[test]
+    fn mirror_release_validation_errors_are_not_hidden_by_catalog_fallback() {
+        let (_directory, archive) = fixture();
+        let (entry, catalog) = catalog_fixture(&archive);
+        let release = json!({"id":1,"draft":false,"prerelease":false,"tag_name":"v1.0.0","assets":[
+            {"name":"packages.json"},{"name":entry.asset_name,"size":entry.size,"browser_download_url":"https://other.example/private"}]});
+        let (client,calls)=fixture_client(BTreeMap::from([
+            ("https://proxy.example/https://api.github.com/repos/owner/repo/releases/latest".into(),serde_json::to_vec(&release).unwrap()),
+            ("https://proxy.example/https://github.com/owner/repo/releases/download/v1.0.0/packages.json".into(),catalog),
+        ]));
+        assert!(client
+            .latest("https://proxy.example/https://github.com/owner/repo")
+            .unwrap_err()
+            .to_string()
+            .contains("资产与配置目录不一致"));
+        assert_eq!(calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    #[ignore = "Explicit public-source download acceptance; set GAMER_TEST_CONFIG_SOURCE"]
+    fn configured_source_live_acceptance() {
+        let input = std::env::var("GAMER_TEST_CONFIG_SOURCE").expect("explicit source required");
+        let directory = tempfile::tempdir().unwrap();
+        let market = PackageMarket::new(directory.path().into());
+        let canonical = SourceLocation::parse(&input).unwrap().canonical();
+        let saved = market.save_source(&input, true).unwrap();
+        let source = saved.iter().find(|s| s.repository == canonical).unwrap();
+        let catalog = market.catalog(&source.id, true).unwrap();
+        assert!(catalog["warning"].is_null(), "{catalog}");
+        let entry: PackageEntry = serde_json::from_value(catalog["packages"][0].clone()).unwrap();
+        let archive = market
+            .archive(&source.id, &entry.id, &entry.version, &entry.sha256)
+            .unwrap();
+        entry.verify(&archive).unwrap();
+        println!(
+            "{}",
+            json!({"source":canonical,"id":entry.id,"version":entry.version,"bytes":archive.len(),"sha256":sha256_hex(&archive),"imported":false})
+        );
+    }
     fn fixture() -> (tempfile::TempDir, Vec<u8>) {
         let d = tempfile::tempdir().unwrap();
         let cfg = crate::config::Config {

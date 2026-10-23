@@ -21,6 +21,17 @@ beforeEach(() => {
   mocks.api.importPackageArchive.mockResolvedValue({ id: entry.id })
 })
 describe('公开配置仓库', () => {
+  it('镜像与独立目录按原地址展示和保存，不拼接第二次 GitHub 前缀', async () => {
+    for (const repository of ['https://gh-proxy.com/https://github.com/jesongit/gamer-packages', 'https://another-mirror.example/cache/https://github.com/owner/repo', 'https://mirror.example/configs/packages.json']) {
+      mocks.api.packageSources.mockResolvedValue([{ ...source, repository }])
+      const w = mount(Market); await flushPromises()
+      expect(w.get('.source-row a').attributes('href')).toBe(repository)
+      await w.get('input[aria-label]').setValue(repository)
+      await w.get('form').trigger('submit'); await flushPromises()
+      expect(mocks.api.savePackageSource).toHaveBeenLastCalledWith(repository)
+      w.unmount()
+    }
+  })
   it('刷新强制检查源；安装只用同源下载，并传递强制哈希', async () => {
     const w = mount(Market); await flushPromises()
     expect(mocks.api.packageSourceCatalog).toHaveBeenCalledWith(source.id, false)

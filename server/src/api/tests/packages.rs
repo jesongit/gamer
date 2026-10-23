@@ -400,14 +400,44 @@ async fn package_sources_are_authenticated_persistent_settings_independent_of_pa
         .find(|s| s["repository"] == "owner/repo")
         .unwrap();
     let id = source["id"].as_str().unwrap();
-    let bad = post_json(
-        &t,
-        &sid,
-        "/api/package-sources",
-        serde_json::json!({"repository":"https://evil.invalid/o/r","enabled":true}),
-    )
-    .await;
-    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    for (address, canonical) in [
+        (
+            "https://independent-mirror.example/cache/https://github.com/Owner/Repo",
+            "https://independent-mirror.example/cache/https://github.com/owner/repo",
+        ),
+        (
+            "https://static.example/configs",
+            "https://static.example/configs/packages.json",
+        ),
+    ] {
+        let added = post_json(
+            &t,
+            &sid,
+            "/api/package-sources",
+            serde_json::json!({"repository":address,"enabled":true}),
+        )
+        .await;
+        assert_eq!(added.status(), StatusCode::OK);
+        assert!(json_body(added)
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["repository"] == canonical));
+    }
+    for address in [
+        "http://mirror.example/o/r",
+        "https://user:password@mirror.example/o/r",
+    ] {
+        let bad = post_json(
+            &t,
+            &sid,
+            "/api/package-sources",
+            serde_json::json!({"repository":address,"enabled":true}),
+        )
+        .await;
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    }
     let removed = send(
         &t.app,
         req(

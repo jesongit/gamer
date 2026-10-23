@@ -1,18 +1,24 @@
 # 配置仓库与发布
 
-Gamer 0.2.1 起支持公开 GitHub 配置仓库。官方源为 `https://github.com/jesongit/gamer-packages`；添加、停用、移除仓库不会删除已安装配置。
+Gamer 支持公开 GitHub 配置仓库、HTTPS 前缀镜像和独立配置目录。官方源为 `https://github.com/jesongit/gamer-packages`；添加、停用、移除源不会删除已安装配置。
 
 ## 下载配置
 
-在“配置包”页填写 `https://github.com/owner/repo` 并添加；也接受 `git@github.com:owner/repo.git`。软件读取最新正式 Release 的 `packages.json`，显示包版本、适用应用、依赖插件与来源，下载前后校验归档大小和 SHA256，再使用原有导入机制。
+在“配置包”页添加以下任一地址；通过实际读取 `packages.json` 校验目录格式，不限定镜像域名：
 
-下载者无需 GitHub 登录或 gh。私有仓库及其他代码托管站暂不支持。网络失败显示已校验的进程内缓存和错误提示；某个源失败不影响其他源。
+- GitHub：`https://github.com/owner/repo`、`owner/repo` 或 `git@github.com:owner/repo.git`，读取最新正式 Release。
+- 前缀镜像：`https://mirror.example/https://github.com/owner/repo`，也支持 `https://mirror.example/cache/https://github.com/owner/repo`。先探测镜像的 Release 接口；仅支持附件下载的镜像则读取 `releases/latest/download/packages.json`。请求始终经过所填镜像。
+- 独立目录：`https://mirror.example/configs/packages.json`，或目录 `https://mirror.example/configs/`（自动补 `packages.json`）。归档与目录 JSON 放在同一目录内。
+
+软件显示包版本、适用应用、依赖插件与来源；下载时核对归档大小、SHA256 和包内元数据，再使用原有导入机制。远端源地址须使用 HTTPS，不能含账号密码、查询参数或片段。下载者无需 GitHub 登录或 gh；私有仓库和其他代码托管平台的专有 API 不受支持，可改为托管相同格式的独立目录。网络失败显示已校验的进程内缓存和错误提示；某个源失败不影响其他源。
+
+离线导入直接选择本地 `.gamerpkg` 文件。通过局域网 HTTP 访问 Gamer、浏览器未开放 WebCrypto 时，前端使用随应用打包的 SHA-256 实现继续校验，无需额外联网。
 
 同 ID 配置按来源分别显示，但本地 Package ID 仍唯一。安装已有 ID 会明确提示覆盖所有本地修改，确认前可先导出备份。安装配置不会自动运行，也不会自动安装依赖插件。
 
 ## 发布配置
 
-安装并启用“配置包发布”插件。在运行 Gamer 的电脑上安装 GitHub CLI，通过 `gh auth login --hostname github.com` 登录，并创建有初始提交的公开仓库。发布账号需要仓库写权限。
+发布插件仍以 GitHub 公开仓库为目标；下载镜像不是发布目标。安装并启用“配置包发布”插件。在运行 Gamer 的电脑上安装 GitHub CLI，通过 `gh auth login --hostname github.com` 登录，并创建有初始提交的公开仓库。发布账号需要仓库写权限。
 
 1. 在插件面板选择本地配置，填写仓库 URL 与说明。已导出的 .gamerpkg 可先导入本地再选择。按需勾选包含媒体。
 2. 生成发布预览，核对账号、仓库、全部配置版本和大小。旧目录中未更新的包会自动保留。
@@ -37,6 +43,6 @@ Gamer 0.2.1 起支持公开 GitHub 配置仓库。官方源为 `https://github.c
 }
 ```
 
-该示意中的大小和摘要不是可安装值，实际由插件生成。目录最多 128 个包，总归档不超过 512 MiB；单包继承现有 100 MiB 归档限制。资源导出默认不包含媒体字节。目录不允许自定义外部下载 URL，资产只能来自所添加仓库的当前 Release。
+该示意中的大小和摘要不是可安装值，实际由插件生成。目录最多 128 个包，总归档不超过 512 MiB；单包继承现有 100 MiB 归档限制。资源导出默认不包含媒体字节。目录不允许自定义外部下载 URL；GitHub 源的资产来自当前 Release，独立目录的资产来自 JSON 的同级路径，前缀镜像沿用其代理路径。目录与下载文件的大小、摘要或包内元数据不符时拒绝安装。
 
 仓库源保存在本机 `data/package-sources.json`；发布任务和冻结归档保存在 `data/package-publisher/jobs/`。首次无源设置时展示官方源，用户显式移除后不会重新添加。发布所用 gh 账号属于运行服务的电脑，不是访问网页的电脑。

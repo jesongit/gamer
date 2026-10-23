@@ -6,12 +6,12 @@
         <div class="market-head-actions"><button class="btn btn-sm" :disabled="remoteLoading || sourceBusy" @click="loadRemoteRegistry(true)">刷新</button></div>
       </div>
       <form class="source-add" @submit.prevent="addSource">
-        <input v-model="repositoryUrl" class="input" aria-label="GitHub 配置仓库 URL" placeholder="https://github.com/owner/repo" :disabled="sourceBusy || remoteLoading" />
+        <input v-model="repositoryUrl" class="input" aria-label="配置源地址" placeholder="GitHub 仓库、镜像链接或 packages.json 地址" :disabled="sourceBusy || remoteLoading" />
         <button class="btn btn-sm" :disabled="sourceBusy || remoteLoading || !repositoryUrl.trim()">添加仓库</button>
       </form>
-      <p class="market-hint">支持公开 GitHub 仓库。最新正式 Release 需包含发布插件生成的配置目录。</p>
+      <p class="market-hint">支持公开 GitHub 仓库、HTTPS 加速镜像和独立配置目录。按实际目录格式检查，下载时核对大小与 SHA-256。</p>
       <div v-for="source in sources" :key="source.id" class="source-row">
-        <a :href="`https://github.com/${source.repository}`" target="_blank" rel="noopener noreferrer">{{ source.repository }}</a>
+        <a :href="sourceHref(source)" target="_blank" rel="noopener noreferrer">{{ source.repository }}</a>
         <span class="market-hint">{{ source.enabled ? '已启用' : '已停用' }}</span>
         <button class="btn btn-sm" :disabled="sourceBusy || remoteLoading" @click="toggleSource(source)">{{ source.enabled ? '停用' : '启用' }}</button>
         <button class="btn btn-sm" :disabled="sourceBusy || remoteLoading" @click="removeSource(source)">移除</button>
@@ -73,6 +73,7 @@ const remotePackages = ref([])
 const remoteLoading = ref(false)
 const remoteError = ref('')
 const installBusyId = ref('')
+const sourceHref = source => source.repository.startsWith('https://') ? source.repository : `https://github.com/${source.repository}`
 
 async function loadRemoteRegistry(force = true) {
   if (remoteLoading.value) return

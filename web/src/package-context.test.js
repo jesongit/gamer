@@ -47,6 +47,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   selectPackage(null)
   packageStore.packages = []
 })
@@ -66,6 +67,17 @@ describe('Package id 规整（服务端 validate_scope_id 前置口径）', () =
 })
 
 describe('usePackageContext（plan §28：导入/导出/新建/复制/删除）', () => {
+  it('局域网 HTTP 无 WebCrypto 时仍导入并传递实际 SHA-256', async () => {
+    vi.stubGlobal('crypto', {})
+    vi.stubGlobal('isSecureContext', false)
+    const { api, toast } = setup()
+    api.listPackages.mockResolvedValue({ packages: [{ id: 'hsr', version: '1.0.1' }] })
+    api.importPackageArchive.mockResolvedValue({ id: 'hsr', version: '1.0.1' })
+    const input = new TextEncoder().encode('offline archive')
+    await usePackageContext({ api, toast }).importPackage(fileLike(input))
+    expect(api.importPackageArchive).toHaveBeenCalledWith(expect.any(ArrayBuffer), { expectedSha256: sha256(input) })
+    expect(toast).toHaveBeenCalledWith('配置已导入：hsr@1.0.1', 'success')
+  })
   it('等待异步草稿确认时不切换配置，取消还原选择且阻止重复切换', async () => {
     let answer
     const beforePackageChange = vi.fn(() => new Promise(resolve => { answer = resolve }))
