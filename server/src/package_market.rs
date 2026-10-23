@@ -197,10 +197,13 @@ impl PublishedCatalog {
     }
 }
 
+#[cfg(test)]
+type FetchFixture = std::sync::Arc<dyn Fn(&str, u64) -> Result<Vec<u8>> + Send + Sync>;
+
 pub(crate) struct PublicClient {
     agent: ureq::Agent,
     #[cfg(test)]
-    fetch_fixture: Option<std::sync::Arc<dyn Fn(&str, u64) -> Result<Vec<u8>> + Send + Sync>>,
+    fetch_fixture: Option<FetchFixture>,
 }
 impl Default for PublicClient {
     fn default() -> Self {
@@ -536,12 +539,14 @@ mod tests {
     fn fixture_client(responses: BTreeMap<String, Vec<u8>>) -> (PublicClient, Requests) {
         let requests = Requests::default();
         let observed = requests.clone();
-        let mut client = PublicClient::default();
-        client.fetch_fixture = Some(std::sync::Arc::new(move |url, limit| {
-            observed.lock().unwrap().push(url.into());
-            let body = responses.get(url).context("fixture endpoint unavailable")?;
-            read_limited(body.as_slice(), limit)
-        }));
+        let client = PublicClient {
+            fetch_fixture: Some(std::sync::Arc::new(move |url, limit| {
+                observed.lock().unwrap().push(url.into());
+                let body = responses.get(url).context("fixture endpoint unavailable")?;
+                read_limited(body.as_slice(), limit)
+            })),
+            ..Default::default()
+        };
         (client, requests)
     }
     fn catalog_fixture(bytes: &[u8]) -> (PackageEntry, Vec<u8>) {
