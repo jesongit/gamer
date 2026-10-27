@@ -31,6 +31,9 @@ use std::path::{Path, PathBuf};
 use anyhow::bail;
 use serde::{Deserialize, Serialize};
 
+mod local_read;
+pub use local_read::LocalReadConfig;
+
 /// 鉴权配置（config.toml [auth] 段，阶段 2 SEC-002）
 ///
 /// 凭据来源（在 api/auth.rs 解析，非本文件）：开发模式的环境变量
@@ -203,6 +206,9 @@ pub struct Config {
     /// 仅本机访问：HTTP 和 WebRTC 都只监听回环地址；GAMER_LOCAL_ONLY 可覆盖。
     #[serde(default)]
     pub local_only: bool,
+    /// Read-only plugin source addresses and an explicit Docker bridge exception.
+    #[serde(default)]
+    pub local_read: LocalReadConfig,
     /// Production owns automatic scheduling; development and migration checks disable it.
     #[serde(default = "default_scheduler_enabled")]
     pub scheduler_enabled: bool,
@@ -318,6 +324,7 @@ impl Default for Config {
             runtime_selections: Default::default(),
             port: 8443,
             local_only: false,
+            local_read: LocalReadConfig::default(),
             scheduler_enabled: true,
             data_dir: PathBuf::from("./data"),
             app_dir: None,
@@ -565,6 +572,9 @@ impl Config {
 
     fn validate_with_password_hash(&self) -> Vec<String> {
         let mut errs = Vec::new();
+        if let Some(error) = self.local_read.validate() {
+            errs.push(error);
+        }
         if let Some(error) = self.diagnostics.validate() {
             errs.push(error);
         }

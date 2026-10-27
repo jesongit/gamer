@@ -15,7 +15,7 @@ pub(super) async fn get_resource(
     peer: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
 ) -> Response {
-    if !transport_access(&headers, peer.map(|peer| peer.0)) {
+    if !transport_access(&headers, peer.map(|peer| peer.0), &state.cfg.local_read) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let Ok(Path((raw_id, path))) = path else {
@@ -62,8 +62,22 @@ fn loopback_url(url: &reqwest::Url) -> bool {
         && url.fragment().is_none()
 }
 
-fn transport_access(headers: &HeaderMap, peer: Option<SocketAddr>) -> bool {
-    if !peer.is_some_and(|peer| is_loopback(peer.ip()))
+fn transport_access(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    config: &crate::config::LocalReadConfig,
+) -> bool {
+    let Some(peer) = peer else {
+        return false;
+    };
+    let direct = is_loopback(peer.ip());
+    // This opt-in applies only to this read route. Docker must publish the
+    // configured host port on 127.0.0.1, and its exact NAT peer must be pinned.
+    // Forwarding headers never establish identity; admin and MCP stay unchanged.
+    let docker = config.validate().is_none()
+        && config.docker_gateway.is_some_and(|ip| ip == peer.ip())
+        && config.published_port.is_some();
+    if (!direct && !docker)
         || headers.contains_key("forwarded")
         || headers.contains_key("x-forwarded-for")
         || headers.get_all(header::HOST).iter().count() != 1
@@ -77,8 +91,11 @@ fn transport_access(headers: &HeaderMap, peer: Option<SocketAddr>) -> bool {
     else {
         return false;
     };
-    if !reqwest::Url::parse(&format!("http://{host}")).is_ok_and(|url| loopback_url(&url))
-        || !super::auth::origin_allows_headers(headers)
+    if !reqwest::Url::parse(&format!("http://{host}")).is_ok_and(|url| {
+        loopback_url(&url)
+            && (direct
+                || url.port_or_known_default() == config.published_port.map(|port| port.get()))
+    }) || !super::auth::origin_allows_headers(headers)
     {
         return false;
     }

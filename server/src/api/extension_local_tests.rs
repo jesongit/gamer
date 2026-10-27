@@ -15,6 +15,10 @@ use std::{
 };
 use tower::ServiceExt;
 
+fn native_access(headers: &HeaderMap, peer: Option<SocketAddr>) -> bool {
+    super::transport_access(headers, peer, &Default::default())
+}
+
 fn headers(host: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(header::HOST, host.parse().unwrap());
@@ -30,7 +34,7 @@ fn local_http_transport_requires_real_loopback_and_single_local_host() {
         "[::ffff:127.0.0.1]:42",
     ] {
         assert!(
-            transport_access(&headers("127.0.0.1:8443"), Some(peer.parse().unwrap())),
+            native_access(&headers("127.0.0.1:8443"), Some(peer.parse().unwrap())),
             "{peer}"
         );
     }
@@ -42,7 +46,7 @@ fn local_http_transport_requires_real_loopback_and_single_local_host() {
         "[::ffff:127.0.0.1]:8443",
     ] {
         assert!(
-            transport_access(&headers(host), Some("127.0.0.1:42".parse().unwrap())),
+            native_access(&headers(host), Some("127.0.0.1:42".parse().unwrap())),
             "{host}"
         );
     }
@@ -55,12 +59,12 @@ fn local_http_transport_requires_real_loopback_and_single_local_host() {
         Some("[::ffff:192.0.2.10]:42".parse().unwrap()),
     ] {
         assert!(
-            !transport_access(&admin, peer),
+            !native_access(&admin, peer),
             "admin credentials cannot replace a real loopback peer"
         );
     }
     let local = Some("127.0.0.1:42".parse().unwrap());
-    assert!(!transport_access(&HeaderMap::new(), local));
+    assert!(!native_access(&HeaderMap::new(), local));
     for host in [
         "attacker.invalid:8443",
         "localhost.attacker.invalid",
@@ -70,15 +74,15 @@ fn local_http_transport_requires_real_loopback_and_single_local_host() {
         "127.0.0.1:8443#fragment",
         "127.0.0.1:8443, localhost:8443",
     ] {
-        assert!(!transport_access(&headers(host), local), "{host}");
+        assert!(!native_access(&headers(host), local), "{host}");
     }
     let mut duplicate = headers("127.0.0.1:8443");
     duplicate.append(header::HOST, "localhost:8443".parse().unwrap());
-    assert!(!transport_access(&duplicate, local));
+    assert!(!native_access(&duplicate, local));
     for name in ["forwarded", "x-forwarded-for"] {
         let mut forwarded = admin.clone();
         forwarded.insert(name, "127.0.0.1".parse().unwrap());
-        assert!(!transport_access(&forwarded, local));
+        assert!(!native_access(&forwarded, local));
     }
 }
 
@@ -87,7 +91,7 @@ fn local_http_origin_is_optional_but_must_be_one_same_loopback_origin() {
     let local = Some("127.0.0.1:42".parse().unwrap());
     let mut valid = headers("127.0.0.1:8443");
     valid.insert(header::ORIGIN, "http://127.0.0.1:8443".parse().unwrap());
-    assert!(transport_access(&valid, local));
+    assert!(native_access(&valid, local));
     for origin in [
         "",
         "null",
@@ -99,13 +103,76 @@ fn local_http_origin_is_optional_but_must_be_one_same_loopback_origin() {
     ] {
         let mut bad = headers("127.0.0.1:8443");
         bad.insert(header::ORIGIN, origin.parse().unwrap());
-        assert!(!transport_access(&bad, local), "{origin}");
+        assert!(!native_access(&bad, local), "{origin}");
     }
     valid.append(header::ORIGIN, "http://127.0.0.1:8443".parse().unwrap());
-    assert!(!transport_access(&valid, local));
+    assert!(!native_access(&valid, local));
 }
 
 struct NoExecutor;
+
+fn docker_read_config() -> crate::config::LocalReadConfig {
+    crate::config::LocalReadConfig {
+        published_port: std::num::NonZeroU16::new(18443),
+        docker_gateway: Some("172.17.0.1".parse().unwrap()),
+    }
+}
+
+#[test]
+fn local_http_docker_requires_pinned_peer_published_port_and_same_origin() {
+    let config = docker_read_config();
+    let peer = Some("172.17.0.1:42".parse().unwrap());
+    let access = |h: &HeaderMap, p| super::transport_access(h, p, &config);
+    let mut valid = headers("127.0.0.1:18443");
+    valid.insert(header::ORIGIN, "http://127.0.0.1:18443".parse().unwrap());
+    assert!(access(&valid, peer));
+    assert!(access(&headers("localhost:18443"), peer));
+    for p in [
+        None,
+        Some("172.17.0.2:42".parse().unwrap()),
+        Some("192.168.1.5:42".parse().unwrap()),
+    ] {
+        assert!(!access(&valid, p));
+    }
+    for host in [
+        "127.0.0.1:8443",
+        "172.17.0.1:18443",
+        "attacker.invalid:18443",
+    ] {
+        assert!(!access(&headers(host), peer), "{host}");
+    }
+    for (name, value) in [
+        ("origin", "http://127.0.0.1:8443"),
+        ("origin", "http://localhost:18443"),
+        ("origin", "https://attacker.invalid"),
+        ("forwarded", "for=127.0.0.1"),
+        ("x-forwarded-for", "127.0.0.1"),
+    ] {
+        let mut bad = valid.clone();
+        bad.insert(
+            axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            value.parse().unwrap(),
+        );
+        assert!(!access(&bad, peer), "{name}");
+    }
+    let mut duplicate = valid.clone();
+    duplicate.append(header::HOST, "127.0.0.1:18443".parse().unwrap());
+    assert!(!access(&duplicate, peer));
+    duplicate = valid.clone();
+    duplicate.append(header::ORIGIN, "http://127.0.0.1:18443".parse().unwrap());
+    assert!(!access(&duplicate, peer));
+    let incomplete = crate::config::LocalReadConfig {
+        published_port: None,
+        ..config
+    };
+    assert!(!super::transport_access(&valid, peer, &incomplete));
+    assert!(super::transport_access(
+        &headers("127.0.0.1:8443"),
+        Some("127.0.0.1:42".parse().unwrap()),
+        &incomplete
+    ));
+}
+
 impl RunExecutor for NoExecutor {
     fn prepare<'a>(
         &'a self,
@@ -176,9 +243,14 @@ impl Drop for TestServer {
 }
 
 async fn fixture() -> Fixture {
+    fixture_with_local_read(Default::default()).await
+}
+
+async fn fixture_with_local_read(local_read: crate::config::LocalReadConfig) -> Fixture {
     let root = tempfile::tempdir().unwrap();
     let cfg = crate::config::Config {
         data_dir: root.path().into(),
+        local_read,
         ..Default::default()
     };
     let db = Arc::new(crate::store::Store::open(&cfg).unwrap());
@@ -365,4 +437,42 @@ async fn local_http_router_rejects_missing_or_remote_connect_info_even_with_admi
             .is_empty());
     }
     assert_eq!(fixture.builtin.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn local_http_docker_router_does_not_grant_mcp_or_management_access() {
+    let fixture = fixture_with_local_read(docker_read_config()).await;
+    for (method, path, expected) in [
+        (
+            "GET",
+            "/local/extensions/gamer-video/fixture-read-token/page",
+            StatusCode::OK,
+        ),
+        (
+            "GET",
+            "/local/extensions/gamer-video/wrong/page",
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "POST",
+            "/local/extensions/gamer-video/fixture-read-token/page",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        ("POST", "/api/mcp", StatusCode::FORBIDDEN),
+        ("GET", "/api/extensions", StatusCode::UNAUTHORIZED),
+    ] {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::HOST, "127.0.0.1:18443")
+            .header(header::AUTHORIZATION, "Bearer fixture-read-token")
+            .header("x-admin-token", "fixture-read-token")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo("172.17.0.1:42".parse::<SocketAddr>().unwrap()));
+        let response = fixture.app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), expected, "{method} {path}");
+    }
 }
