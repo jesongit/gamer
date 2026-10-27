@@ -647,14 +647,22 @@ fn run_case(script: &syntax::Script, case: Case, roles: Roles) -> Value {
             ),
         );
         checks.insert(
-            "original_ocr_boundary_preserved".into(),
+            "power_ocr_boundary_preserved".into(),
             json!(
                 !state.battle_reached
                     || state
                         .calls
                         .last()
-                        .is_some_and(|call| call["function"] == "ocr"
+                        .is_some_and(|call| (call["function"] == "ocr"
                             && call["args"]["region"] == json!([0.83, 0.04, 0.09, 0.045]))
+                            || (call["function"] == "find_text"
+                                && call["args"]["text"] == "/"
+                                && call["args"]["whitelist"] == "0123456789/"
+                                && state.calls.iter().any(|anchor| anchor["function"] == "find"
+                                    && anchor["args"]["template"]
+                                        == "daily_power_anchor_20261023.png"
+                                    && anchor["args"]["region"]
+                                        == json!([0.82, 0.025, 0.045, 0.065]))))
             ),
         );
     }

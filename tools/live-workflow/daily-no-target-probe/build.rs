@@ -44,6 +44,7 @@ fn main() {
         "tools/live-workflow/daily-no-target-probe/src/main.rs",
         "tools/live-workflow/daily-no-target-probe/src/mock.rs",
         "tools/live-workflow/daily-no-target-probe/src/scenarios.rs",
+        "tools/live-workflow/daily-no-target-probe/src/weekly_boundary.rs",
     ] {
         let original = repo.join(source);
         println!("cargo:rerun-if-changed={}", original.display());

@@ -240,6 +240,20 @@ impl MockHost {
             (!self.case.missing_challenge
                 && (self.case.already_challenge || state.row_entered || state.legacy_entered))
                 .then_some([0.84, 0.91])
+        } else if template.contains("daily_power_anchor_20261023") {
+            (!self.case.missing_challenge
+                && (self.case.already_challenge || state.row_entered || state.legacy_entered))
+                .then_some([0.84, 0.06])
+        } else if [
+            "daily_dungeon_echo_title_20261023.png",
+            "daily_dungeon_cavern_title_20261023.png",
+            "daily_dungeon_calyx_title_20261023.png",
+            "daily_dungeon_stagnant_title_20261023.png",
+            "daily_dungeon_planar_title_20261023.png",
+        ]
+        .contains(&template)
+        {
+            None // Numeric/title matching is covered by the saved-frame OCR probe.
         } else if same(template, &self.roles.add) {
             self.case.add.then_some([0.5, 0.8])
         } else if same(template, &self.roles.cavern) {
@@ -499,7 +513,7 @@ impl HostFunctions for MockHost {
                 state.inputs.push(json!({"kind":"swipe","list":if left{"left"}else{"right"},"from":from,"to":to,"at_ms":at_ms}));
                 Ok(Value::Null)
             }
-            "ocr" => {
+            "ocr" | "find_text" => {
                 state.battle_reached = true;
                 Err(error("PROBE_STOP:BATTLE_OCR"))
             }

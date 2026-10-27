@@ -16,9 +16,11 @@ mod extensions {
 }
 include!(concat!(env!("OUT_DIR"), "/parser-modules.rs"));
 mod live_confirmation;
+mod live_login;
 mod mock;
 mod reward_boundary;
 mod scenarios;
+mod weekly_boundary;
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -46,6 +48,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if let Some(index) = args
+        .iter()
+        .position(|value| value == "--export-native-catalog")
+    {
+        let path = args.get(index + 1).ok_or("export path required")?;
+        let catalog: Vec<_> = native_funcs::native_functions()
+            .iter()
+            .map(native_funcs::native_schema_json)
+            .collect();
+        fs::write(path, serde_json::to_vec_pretty(&catalog)?)?;
+        println!("{}", json!({"exported":true,"functions":catalog.len()}));
+        return Ok(());
+    }
+    if args.iter().any(|value| value == "--live-login") {
+        return live_login::run(&args);
+    }
     if args.iter().any(|value| value == "--self-check") {
         let source = "functions:\n  helper:\n    run: [{return: {whole: true}}]\nrun: [{helper: {}, as: hit}, {return: $hit}]\n";
         let parsed =
@@ -75,6 +93,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     if args.iter().any(|value| value == "--reward-boundary") {
         return reward_boundary::run(&repo, &args, source_hashes);
+    }
+    if args.iter().any(|value| value == "--weekly-boundary") {
+        return weekly_boundary::run(&args, source_hashes);
     }
     if args.iter().any(|value| value == "--live-confirmation") {
         return live_confirmation::run(&repo, &args, source_hashes);
