@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "gamer-updater"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "crc32fast",
  "semver",
