@@ -288,7 +288,7 @@ run:
 
 要求 `runtime.sleep`、已启用且支持确认等待的直播插件，以及启用了确认流程的当前队列主运行。手动运行、缺少规则、插件不可用、连接中断或状态异常均明确失败，不自动进入游戏。主动停止抛出 `CANCELLED`，不继续执行脚本输入。观众取消和确认超时返回普通结果，队列据此选择不刷新页面的退出收尾；普通日常失败仍由原重置收尾处理。此函数不扣除次数。
 
-登录期间可调用 `live_login_state: {action: begin, timeout: 5m}` 建立扫码阶段，`action: poll` 读取状态，`action: rescan_done` 表示脚本已完成重新扫码。此普通原生函数要求 Gamer 0.5.2、自动化 0.3.25 和直播助手 0.2.19，返回对象仅含 `status`，可能为 `scanning`、`rescan`、`waiting`、`confirmed`、`cancelled` 或 `timeout`。当前队列身份由宿主绑定，脚本不能代传观众或运行 ID；它不执行截图、点击、刷新或应用操作。取消、重新扫码与确认只能由本次任务触发者决定，具体输入仍由脚本执行并服从原控制屏障。
+登录期间可调用 `live_login_state: {action: begin, timeout: 5m}` 建立扫码阶段，`action: poll` 读取状态，`action: rescan_done` 表示脚本已完成重新扫码。此普通原生函数要求 Gamer 0.5.2、自动化 0.3.26 和直播助手 0.2.19，返回对象仅含 `status`，可能为 `scanning`、`rescan`、`waiting`、`confirmed`、`cancelled` 或 `timeout`。当前队列身份由宿主绑定，脚本不能代传观众或运行 ID；它不执行截图、点击、刷新或应用操作。取消、重新扫码与确认只能由本次任务触发者决定，具体输入仍由脚本执行并服从原控制屏障。
 
 ## 按需 OCR 文字识别
 

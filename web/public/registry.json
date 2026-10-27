@@ -1,10 +1,10 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-10-17T04:36:00Z",
+  "generated_at": "2026-10-27T22:04:43Z",
   "host_api": "1.0.0",
   "provenance": {
-    "plugin_commit": "ad5b280d613a8d604b8baa16e3d2d98d81f32427",
-    "sdk_host_commit": "419efba899b0af0a99b55e974e914bb287728af1",
+    "plugin_commit": "66fae9611583305e4c7d1fc51ba47630e0b4adbf",
+    "sdk_host_commit": "ea8d1052638128ea5afcf6aea652564628fb8d16",
     "sdk_snapshot_kind": "commit"
   },
   "plugins": [
@@ -55,13 +55,13 @@
     },
     {
       "id": "gamer-live",
-      "version": "0.2.15",
+      "version": "0.2.19",
       "name": "直播助手",
       "description": "设备直播与文件夹视频自动直播，弹幕排队执行脚本并自动切换画面；支持直播姬与手动 RTMP 输出",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-live-0.2.15.gplugin",
-      "sha256": "4fe2bc07508a1b0268968d45159e7e05dc26a413b08e181b06607cde70dc0c92",
-      "size": 37631,
+      "download_url": "/plugins/gamer-live-0.2.19.gplugin",
+      "sha256": "b33db95f62516ce534f488495a432c5685368fbd6a21c662bcea2e4dc85b374e",
+      "size": 37078,
       "permissions": [
         "ui.host",
         "media.stream",
@@ -95,18 +95,18 @@
       },
       "execution": {
         "kind": "builtin",
-        "host_version": ">=0.3.0"
+        "host_version": ">=0.5.2"
       }
     },
     {
       "id": "gamer-notify",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "name": "通知助手",
       "description": "全局通知通道、任务结果通知与自动化通知",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-notify-0.1.1.gplugin",
-      "sha256": "e8b2ffba708dd8d77b41852dd5f32848571da1651722c3faf6ada79f9d72c3ef",
-      "size": 5993,
+      "download_url": "/plugins/gamer-notify-0.1.2.gplugin",
+      "sha256": "e8200e68ab4b9ce3bc2d8cf297a4105169c7730efadbf045e09653abb7482d0c",
+      "size": 6029,
       "permissions": [
         "ui.host",
         "notify.send"
@@ -132,79 +132,6 @@
       "execution": {
         "kind": "builtin",
         "host_version": ">=0.2.7"
-      }
-    },
-    {
-      "id": "gamer-ocr",
-      "version": "0.1.1",
-      "name": "文字识别",
-      "description": "按需本地 OCR，为自动化提供文字、置信度和位置",
-      "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-ocr-0.1.1.gplugin",
-      "sha256": "591df026449d40b93924195f959becf35d7efdc9064abec3e96c3c2f27dbee7a",
-      "size": 1995,
-      "permissions": [
-        "ui.host",
-        "vision.ocr",
-        "device.read",
-        "resource.read",
-        "media.read"
-      ],
-      "host_api": {
-        "device": "^1.0",
-        "media": "^1.0",
-        "resource": "^1.0",
-        "runtime": "^1.0",
-        "ui": "^1.1",
-        "vision": "^1.0"
-      },
-      "ui": {
-        "contributions": [
-          {
-            "description": "OCR 使用本机 Tesseract，识别结束即退出。路径留空使用自动检测；语言包需提前安装，不会自动下载。",
-            "fields": [
-              {
-                "default": "",
-                "label": "Tesseract 程序",
-                "name": "engine_path",
-                "placeholder": "留空自动检测 tesseract.exe",
-                "type": "text"
-              },
-              {
-                "default": "",
-                "label": "语言包目录",
-                "name": "tessdata_path",
-                "placeholder": "留空使用程序旁的 tessdata",
-                "type": "text"
-              },
-              {
-                "action": "settings.save",
-                "label": "保存路径",
-                "type": "button"
-              },
-              {
-                "action": "settings.read",
-                "label": "读取配置",
-                "type": "button"
-              },
-              {
-                "action": "status",
-                "label": "检测可用性",
-                "type": "button"
-              }
-            ],
-            "location": "console.right",
-            "order": 58,
-            "panel_id": "settings",
-            "requires_device": false,
-            "runtime": "declarative",
-            "title": "文字识别"
-          }
-        ]
-      },
-      "execution": {
-        "kind": "builtin",
-        "host_version": ">=0.3.0"
       }
     },
     {
@@ -286,13 +213,13 @@
     },
     {
       "id": "gamer-yaml",
-      "version": "0.3.22",
+      "version": "0.3.26",
       "name": "自动化",
       "description": "自动化：按用户步骤编写脚本、脚本版本管理、素材与运行验证",
       "publisher": "gamer.dev",
-      "download_url": "/plugins/gamer-yaml-0.3.22.gplugin",
-      "sha256": "4346f280d16a308c9ed57fae509b642438c61830fa91fc507d38a101e0404fb4",
-      "size": 439133,
+      "download_url": "/plugins/gamer-yaml-0.3.26.gplugin",
+      "sha256": "a53615adaab1bb6c71c9a067eb49a567f42d2b678aaf6e8077fc2c57e0695232",
+      "size": 440060,
       "permissions": [
         "ui.host",
         "device.read",
@@ -338,7 +265,7 @@
       },
       "execution": {
         "kind": "wasm",
-        "host_version": ">=0.3.0"
+        "host_version": ">=0.5.2"
       }
     }
   ]
