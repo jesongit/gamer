@@ -492,6 +492,7 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - 多轮 Rust debug 构建会保留多套依赖和增量缓存并耗尽磁盘；先统计 target/debug 占用，清理获准的可重建缓存，批量验收可设置 CARGO_INCREMENTAL=0，删除若被平台拒绝不得改包装绕过。
 
 - 直播姬的第三方推流服务器地址不等于「多媒体」素材地址：需要直播姬混音时，使用 Gamer 生成的本机 HLS 拉流地址作为素材，开播仍在直播姬完成。
+- Docker 的 `18443:8443` 不会自动改写素材地址，宿主请求在容器里也不是真实回环来源。使用本机素材/反馈时，仅发布 `127.0.0.1:18443:8443`，显式配置 `[local_read] published_port=18443` 与实际 `docker_gateway`；不能只改 URL 或放开所有内网来源。管理和 MCP 的真实来源校验不使用该例外。
 - scrcpy 静态画面可能不再出视频帧，直接封装 HLS 会停止更新分片；直播输出应持续解码并按输出时钟重复已解码画面，不重放 P 帧破坏 H.264 参考链。
 - Windows 用户目录下的 worktree 会让 Cargo 读取祖先 `.cargo/config.toml`，旧镜像可能缺少锁定的 wasmtime 版本并诱发无关降级；使用工作树实际盘符路径和独立 CARGO_HOME 连接官方索引，保留既有 Cargo.lock 版本。
 - 插件面板内容超出高度却无法滚动：CorePanelHost 使用 overflow:hidden，插件需以 flex:1/min-height:0 承接高度并为内容设置 overflow:auto，子页签放在滚动区外。
@@ -686,3 +687,15 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - Chromium 初次导航尚未附着活动页时，立即请求投屏可能报 `Not attached to an active page`；流启动仅对 CDP `-32000` 的这一精确错误在同一绑定上短暂重试（5 秒重试窗口、100ms 间隔），清除旧帧，保留断连、坐标及输入代次校验；回归必须用全新资料启动后立即投屏，不能靠额外等待掩盖竞态。
 - Windows PowerShell 5 的 `ErrorActionPreference=Stop` 可能把 Docker 原生命令的预期 stderr（如不存在的卷）提升为终止错误，重定向也不能可靠规避；回滚预检用成功的 `docker volume ls` 后精确比较名称，并在实际调用的 PowerShell 版本下验证。
 - OCR 迁入 Core 后，旧发布夹具仍将 `gamer-ocr` 视为在售插件会使 CI 目录门禁失败；正式构建只接收六款活动插件，AI/OCR 历史归档仅限隔离测试，更新发行锁前逐项核验真实发布资产。
+- B 站礼物 `price` 原始值的单位为 1000 = 1 元 = 10 电池，按单件价格乘本条 `gift_num` 合计后向上取整；不能直接当作元或电池，也不能再次乘连击累计数。
+- Docker 镜像 inspect 可省略未设置的 `Config.User`，容器 inspect 则返回空字符串；部署预检须将这两个默认值归一化再比较，不能误报为运行用户变更。
+- 云游戏副本体力 OCR 的固定框会在体力位数变化时混入居中移动的图标，位面页还会多出 `0/12`；先匹配左上标题选择布局，再按体力图标裁出纯数字并校验完整分数及双读一致，消耗/次数也须按实际控件定位，不能只扩大原识别框。
+- 禁用 ADB 的隔离配置包导入测试会使 `/health/ready` 返回 503，即使归档 API 已可用；只验证导入导出时记录该依赖限制并直接检查归档接口结果，不能把它报告为完整设备环境就绪。
+- 局域网 HTTP 页面的 `crypto.subtle` 不可用会阻断离线配置包导入；缺失时使用前端随包构建的 SHA-256 实现，继续传递并验证摘要，不能省略校验或依赖 CDN。
+- GitHub 镜像可能只转发 Release 附件、不支持仓库元数据 API；配置源按通用前缀路由和实际 `packages.json` 探测，也接受独立 HTTPS 目录，不能绑定镜像域名或在失败时悄悄改走直连。
+- `web/tsconfig.json` 的旧 `src/script-editor/**/*.ts` 已随编辑器迁移失效，单独 `tsc --noEmit` 会报 TS18003；先核对有效检查范围，不能将 Vite/Vitest 转译通过报告为完整类型检查通过。
+- 只读容器内以无主目录的非 root 用户启动 Chromium 可能报 `chrome_crashpad_handler: --database is required`；隔离验收需把 HOME、XDG_CONFIG_HOME、XDG_CACHE_HOME 指向可写临时目录，不能因此改用宿主浏览器资料。
+- 从 v1.0.3 验证 HTTP 升级时，配置中显式 `cookie_secure=true` 即使 dev 也会产生 Secure Cookie；夹具和实际部署都须显式设置 `GAMER_COOKIE_SECURE=false`，不能把夹具预期错误判作新版本登录故障。
+
+- 同步配置仓时 GitHub HTTPS 推送曾返回 `fatal error in commit_refs`，具体服务端原因未确认；先核对远端 ref，再通过已授权 SSH 推送并复核提交。
+- 本地市场构建默认移除输出目录中的旧归档；需要保留历史快照时显式使用 `tools/build-plugins.ps1 -KeepStaleArtifacts`，勿将运行数据或唯一归档存于生成物目录。
