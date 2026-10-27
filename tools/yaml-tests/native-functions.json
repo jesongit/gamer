@@ -877,7 +877,7 @@
     "source": "plugin"
   },
   {
-    "description": "登录就绪后等待当前队列任务触发者确认或取消；返回 status 为 confirmed、cancelled 或 timeout，停止时中断",
+    "description": "登录就绪后等待当前队列任务触发者确认、取消或重新扫码；返回 status 为 confirmed、cancelled、timeout 或 rescan，停止时中断",
     "name": "wait_live_confirmation",
     "optional_extension": "gamer-live",
     "params": [
@@ -890,6 +890,36 @@
       },
       {
         "default": "等待直播观众确认",
+        "desc": "可视化显示名称",
+        "name": "name",
+        "required": false,
+        "type": "string"
+      }
+    ],
+    "returns": "object",
+    "source": "plugin"
+  },
+  {
+    "description": "当前直播队列主运行的扫码阶段：begin 开始限时扫码，poll 读取状态，rescan_done 在退出并重新显示扫码页后完成重扫；不发送设备输入",
+    "name": "live_login_state",
+    "optional_extension": "gamer-live",
+    "params": [
+      {
+        "default": "poll",
+        "desc": "begin / poll / rescan_done",
+        "name": "action",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "default": "5m",
+        "desc": "首次扫码上限，1ms..5m；重复调用和重扫不延长期限",
+        "name": "timeout",
+        "required": false,
+        "type": "duration"
+      },
+      {
+        "default": "直播登录状态",
         "desc": "可视化显示名称",
         "name": "name",
         "required": false,
