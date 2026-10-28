@@ -703,3 +703,6 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - 独立插件 CI 会克隆 `sdk/lock.json.commit` 指定的整套宿主，包括原生函数目录快照；新增函数须先同步宿主快照，再将 SDK 来源锁到该提交，否则 `yaml_acceptance_export_native_catalog` 一致性检查失败。
 
 - 远程或 Docker 桥接的 MCP 请求即使携带有效令牌，默认也会在令牌校验前返回 403；需在管理设置开启 `mcp_allow_remote`，并使用网页实际主机与发布端口的 `/api/mcp`，管理员 Cookie 不能代替 MCP Bearer，`local_only=true` 仍限制本机。
+
+- `sample_list` 只列已制作素材，不能据此判断新录制视频不存在；先用 `recording_list(name)` 或 `media_list(name)` 按当前视频名称查找，再读取录制事件和真实帧定位素材范围。
+- 同一进程内初始化不同数据目录时，录制服务若复用第一次初始化的全局实例会读错录像；录制服务按数据根复用，MCP 录制发现使用只读元数据路径，不扫描全部事件或改写历史恢复状态。

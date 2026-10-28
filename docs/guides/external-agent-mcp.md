@@ -40,6 +40,21 @@ YAML 工作稿引用独立视频素材时，还需授权实际素材所属的 `g
 
 ## 编写与验证脚本
 
+### 从录像名称制作素材
+
+原始录像与已制作的素材包是两个集合。`sample_list` 只列素材包，不能用它判断录像是否存在。
+
+1. 用 `gamer.core.recording_list` 传 `name`（例如“退出云游戏”），按当前视频显示名做不区分大小写的包含搜索；也可按 `device_id`、`state` 过滤。返回录制 `id`、各段 `media_id`、真实会话时间段与显示名称。同名结果都保留，结合设备和时间选择，不擅自取另一个账号的最新录像。
+2. 用 `gamer.core.recording_get` 查看该录制；结束录制后用 `gamer.core.recording_events` 读取事件，仍在录制或收尾时会明确拒绝。`kind:"key"` 可定位 Alt+Q 等已记录快捷键，`start_us` / `end_us` 使用录制会话微秒，事件不是输入回放指令。
+3. 用 `gamer.core.media_get` / `media_frames` 查看原媒体的时长、尺寸和真实展示帧 PTS；`media_frame` 按 `index` 或 `pts_us` 二选一返回真实 PNG。事件时间先减去对应段的 `start_us`，得到该段媒体 PTS，不按固定帧率换算。
+4. 确认时间段后调用现有 `gamer.plugin.gamer-video.sample_create`：将录制 `id` 填入 `recording_id`，指定 `start_us` / `end_us`、不冲突的 `new_sample_id`、名称和 `operation_id`。随后用 `sample_read` / `sample_frames` / `sample_events` 检查保存后的独立素材，再读取原图和裁切模板。
+
+导入的视频没有录制事件时，用 `gamer.core.media_list` 按名称查找并读取帧；不能凭空补造 Alt+Q 或其他原始操作证据。发现工具只要求已有 `media.read`，按实际媒体对象过滤；录制还需实际设备和全部分段媒体都在授权内。没有生成任何分段的失败录制需明确授权全部媒体，避免空分段绕过媒体范围。已有令牌包含该 scope 和全部对象时无需重建。
+
+列表与事件默认每页 20、最多 100 条，用 `next_offset` 继续；总数仅统计有权读取且符合过滤条件的记录。事件流单次读取预算为 16 MiB / 100000 条，缺失、损坏或超出预算明确报错，不将截断结果称为完整素材。录像名称搜索不加载事件文件，读取历史不会触发录制恢复写入。媒体引用只返回有权读取的配置包/插件信息；不返回服务端路径或原始工具 stderr。
+
+### 保存脚本工作稿
+
 1. 用 YAML 插件的 `grammar` 和 `functions` 读取当前语法、原生函数 Schema 与当前配置包函数源码。不要从旧脚本猜语法版本。
 2. 用 `draft_list` / `draft_get` 读取版本；新建用 `draft_create`，修改已有正式脚本先用 `draft_import`。
 3. 读取必要的独立素材 manifest、事件和实际 PNG。素材用于判断和编写，不用于回放输入。按需通过 `draft_crop` 从原始像素裁切模板。
@@ -49,6 +64,15 @@ YAML 工作稿引用独立视频素材时，还需授权实际素材所属的 `g
 7. Agent 可以继续保存修改后的版本。用户在 Gamer 查看差异、测试并发布大版本；MCP 没有正式发布、回退或删除工具。
 
 工具全名采用 `gamer.plugin.<插件ID>.<tool_id>`，例如 `gamer.plugin.gamer-yaml.draft_get`。参数名称、必填项和上限从当前 Schema 读取。
+
+### 调度、原录像 OCR 与键盘映射
+
+- 保存定时任务前，用 `gamer.core.schedule_preview` 传 `schedule:{provider_id,config}`，可选带时区偏移的 `after` 和 `count`（1..10）。它通过当前注册的 provider 校验并计算触发时间，不创建或启用任务。返回 UTC `next_times` 与服务器时区的 `next_times_local`；未知 provider 返回 `provider_available:false`，不能把“允许先保存未知 provider”误当作校验通过。没有未来触发时间时 `valid:true, exhausted:true`。
+- `gamer.core.ocr_recognize` 可用 `source:{kind:"media_frame",media_id,index}` 识别原录像帧，无需先制作素材包。需要 `ocr.recognize`、`media.read` 与实际媒体授权；输入仍只接受宿主解析的证据 ID。返回帧的原始/工作尺寸和 PTS，工作图宽度最多 1920，文字坐标对应工作图。原媒体帧提取并不等于已经完成文字识别，OCR 引擎可用性另查 `ocr_status`。
+- 已制作素材可用 `gamer.plugin.gamer-video.sample_list` 的 `name` 搜索；名称过滤与对象授权都在分页前完成。
+- 从空白编写映射前，先读取 `gamer.plugin.gamer-keymap.grammar`，再用 `profiles_validate` / `profiles_write`。映射仍是独立的 `version:1` 语法，与无版本字段的自动化 YAML 不同；保存不会自动选用方案或发送输入。语法工具只需插件的 profiles.read scope，不要求任意配置包权限。
+
+录像发现、调度预览和原录像 OCR 需要包含这些实现的新宿主；素材名称搜索与映射语法还需要对应新版插件声明和 Schema。只更新插件不能更新其原生 host 代码，源码版本不代表已公开发行。
 
 ## 直接控制与生命周期
 
@@ -83,7 +107,7 @@ Agent 先读取 `control_status`，再用带当前 session_id、generation 的 `
 
 安装并启用带 `[[tools]]` 声明的新插件版本。宿主读取插件明确声明的 tool_id、action、Schema、scope、权限、effect 与上下文字段，再统一通过 `/api/mcp` 发现和调用。禁用、卸载、更新或缺失实现时不可继续调用旧工具。仅安装旧 UI 或声明权限不会自动生成工具。
 
-官方接入包括 YAML 18、视频素材 8、键盘映射 4、OCR 2、直播 7 项工具。通知和配置发布不开放 MCP 发送、凭据或发布动作。键盘映射工具保存资源，不自动热切换；用户在 Gamer 选用。
+官方插件接入包括 YAML 18、视频素材 8、键盘映射 5、直播 7 项工具。OCR 的 2 项工具已经属于 Core，历史 gamer-ocr 插件不再是安装前提。通知和配置发布不开放 MCP 发送、凭据或发布动作。键盘映射工具保存资源，不自动热切换；用户在 Gamer 选用。
 
 第三方 WASM 使用每调用独立 guest/Store、上下文和句柄表，复用编译缓存。当前支持安全的读取和资源处理；没有专用受控租约适配的低层 input/touch/app/run imports 隐藏并拒绝。无需因此放宽原输入屏障。开发契约见 [插件 API](https://github.com/jesongit/gamer/blob/main/docs/reference/PLUGIN_API.md)。
 
