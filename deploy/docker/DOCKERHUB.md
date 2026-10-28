@@ -7,25 +7,26 @@ Simplified Chinese OCR. A separate browser or VNC container is not required.
 ## Release
 
 ```sh
-docker pull --platform linux/amd64 posase/gamer:v1.0.7
+docker pull --platform linux/amd64 posase/gamer:v1.0.8
 ```
 
-Docker release **v1.0.7** packages application **0.5.6**. MCP settings now provide
-only the connection URL and access-token management. Set lifetime to 0 for no
-expiry; newly created tokens can be viewed, copied and deleted. Secrets are
-protected at rest, while authentication still checks their digests. Older
-hash-only tokens remain usable but cannot be revealed. Removing a plugin now
-uninstalls all its installed versions, keeping private data by default.
+Docker release **v1.0.8** packages application **0.5.7**. Enable "Allow remote MCP
+connections" in Settings to connect an Agent from another computer or container.
+The switch is saved immediately; copied endpoints retain the actual web host,
+protocol and published port. Independent Bearer authentication, token revocation,
+object permissions and control barriers remain enforced. Remote access is off by
+default (`mcp_allow_remote = false`); an installation using `local_only = true`
+still accepts local connections only.
 Plugin and configuration sources still support GitHub, LAN and custom presets.
 The official companion catalog provides YAML 0.3.26, Live 0.2.19 and Notify 0.1.2;
 install or update plugins separately through the plugin page. Configuration
 packages are separate; the latest HSR package is 1.0.2. Database schema remains 7.
 The `latest` image tag follows this stable release; versioned tags stay immutable.
 The published architecture is **linux/amd64**, for Intel/AMD x86_64 hosts.
-The previous `v1.0`, `v1.0.1`, `v1.0.2`, `v1.0.3`, `v1.0.4`, `v1.0.5` and `v1.0.6` tags remain unchanged. No ARM64 release is claimed.
+The previous `v1.0`, `v1.0.1`, `v1.0.2`, `v1.0.3`, `v1.0.4`, `v1.0.5`, `v1.0.6` and `v1.0.7` tags remain unchanged. No ARM64 release is claimed.
 
-The v1.0.7 deployment bundle includes the unchanged Chromium seccomp file:
-https://github.com/jesongit/gamer/releases/tag/docker-v1.0.7
+The v1.0.8 deployment bundle includes the unchanged Chromium seccomp file:
+https://github.com/jesongit/gamer/releases/tag/docker-v1.0.8
 
 ## Fresh installation with docker run
 
@@ -36,7 +37,7 @@ Download and extract the deployment bundle from the release above. It includes
 docker volume create gamer-production-data
 docker run --rm -it --memory 512m --memory-swap 512m --entrypoint python3 \
   --mount type=volume,src=gamer-production-data,dst=/data \
-  posase/gamer:v1.0.7 /app/tools/gamer_docker.py init
+  posase/gamer:v1.0.8 /app/tools/gamer_docker.py init
 
 docker run -d --name gamer --init --restart unless-stopped \
   --stop-timeout 90 --shm-size 1g \
@@ -45,7 +46,7 @@ docker run -d --name gamer --init --restart unless-stopped \
   -e GAMER_PROFILE=prod -e GAMER_COOKIE_SECURE=false \
   --mount type=volume,src=gamer-production-data,dst=/data \
   --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 \
-  posase/gamer:v1.0.7
+  posase/gamer:v1.0.8
 ```
 
 Open `http://localhost:18443` using your configured password. There is no default
@@ -67,17 +68,17 @@ backup, retains the previous container, and inherits its exact volume and bind m
 Keep any additional custom ports or environment settings from your original command.
 
 ```bash
-image=posase/gamer:v1.0.7
+image=posase/gamer:v1.0.8
 docker pull "$image" &&
-docker run --rm --entrypoint cat "$image" /app/chromium-seccomp.json > gamer-seccomp-v106.json &&
+docker run --rm --entrypoint cat "$image" /app/chromium-seccomp.json > gamer-seccomp-v108.json &&
 docker stop -t 90 gamer &&
 (umask 077; docker run --rm --memory 512m --memory-swap 512m \
   --volumes-from gamer:ro --entrypoint python3 "$image" \
-  /app/tools/volume-transfer.py export --gzip > "gamer-before-v106-$(date +%s).tar.gz") &&
-docker rename gamer gamer-before-v106 &&
-docker update --restart=no gamer-before-v106 &&
+  /app/tools/volume-transfer.py export --gzip > "gamer-before-v108-$(date +%s).tar.gz") &&
+docker rename gamer gamer-before-v108 &&
+docker update --restart=no gamer-before-v108 &&
 docker run -d --name gamer --init --restart unless-stopped --stop-timeout 90 --shm-size 1g \
-  --volumes-from gamer-before-v106 --security-opt "seccomp=$PWD/gamer-seccomp-v106.json" \
+  --volumes-from gamer-before-v108 --security-opt "seccomp=$PWD/gamer-seccomp-v108.json" \
   -p 18443:8443 -e GAMER_PROFILE=prod -e GAMER_COOKIE_SECURE=false \
   --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 "$image"
 ```
@@ -98,7 +99,7 @@ bundle's `restore.sh` validates the data and starts Gamer with scheduling disabl
 Verify account login and the task list, stop the old production instance, then run
 `bash restore.sh activate`. Only one machine should schedule the same accounts.
 That legacy migration bundle targets v1.0.2; after migration, use the update
-instructions above to switch the existing installation to v1.0.7.
+instructions above to switch the existing installation to v1.0.8.
 
 Detailed steps: https://github.com/jesongit/gamer/blob/docker-v1.0.2/deploy/docker/MIGRATION.md
 

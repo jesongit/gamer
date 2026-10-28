@@ -1,5 +1,6 @@
 port = 8443
 local_only = false
+mcp_allow_remote = false
 scheduler_enabled = false
 data_dir = "/data"
 adb_path = "/usr/bin/adb"
