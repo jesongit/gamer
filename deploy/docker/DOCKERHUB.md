@@ -10,7 +10,7 @@ Simplified Chinese OCR. A separate browser or VNC container is not required.
 docker pull --platform linux/amd64 posase/gamer:v1.0.7
 ```
 
-Docker release **v1.0.7** packages application **0.5.5**. MCP settings now provide
+Docker release **v1.0.7** packages application **0.5.6**. MCP settings now provide
 only the connection URL and access-token management. Set lifetime to 0 for no
 expiry; newly created tokens can be viewed, copied and deleted. Secrets are
 protected at rest, while authentication still checks their digests. Older
