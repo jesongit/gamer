@@ -2,6 +2,59 @@ use super::*;
 use crate::mcp::{AllowedObjects, CreateTokenRequest, McpService};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+include!("mcp_core_media_tests.rs");
+
+#[tokio::test]
+async fn mcp_schedule_preview_uses_the_registered_provider_without_saving_or_running() {
+    let f = fixture().await;
+    let p = principal(&f, &["task.read"]);
+    let args = json!({"schedule":{"provider_id":"cron","config":{"expression":"*/10 * * * * * *"}},"after":"2026-10-28T00:00:01Z","count":2});
+    let preview = data(media_call(&f, &p, "gamer.core.schedule_preview", args.clone()).await);
+    assert_eq!(preview["valid"], true);
+    assert_eq!(
+        preview["next_times"],
+        json!(["2026-10-28T00:00:10+00:00", "2026-10-28T00:00:20+00:00"])
+    );
+    assert_eq!(preview["next_times_local"].as_array().unwrap().len(), 2);
+    for (expression, provider, expected) in [
+        ("invalid", "cron", "invalid_schedule"),
+        ("*", "missing", "schedule_provider_unavailable"),
+    ] {
+        let preview = data(
+            media_call(
+                &f,
+                &p,
+                "gamer.core.schedule_preview",
+                json!({"schedule":{"provider_id":provider,"config":{"expression":expression}}}),
+            )
+            .await,
+        );
+        assert_eq!(preview["valid"], false);
+        assert_eq!(preview["error"], expected);
+        assert_eq!(preview["next_times"], json!([]));
+    }
+    for (field, value) in [
+        ("count", json!(11)),
+        ("after", json!("2026-10-28T08:00:00")),
+    ] {
+        let mut invalid = args.clone();
+        invalid[field] = value;
+        assert!(
+            media_call(&f, &p, "gamer.core.schedule_preview", invalid)
+                .await
+                .is_error
+        );
+    }
+    let denied = principal(&f, &["observe"]);
+    assert!(
+        media_call(&f, &denied, "gamer.core.schedule_preview", args)
+            .await
+            .is_error
+    );
+    assert!(f.core.db.list_timer_tasks_async().await.unwrap().is_empty());
+    assert_eq!(f.accepted.0.load(Ordering::SeqCst), 0);
+}
+
 struct NoIo;
 impl crate::run_manager::RunExecutor for NoIo {
     fn prepare<'a>(
@@ -121,6 +174,8 @@ async fn fixture() -> Fixture {
             scheduler,
             extensions,
             control,
+            media: crate::media::service(&cfg),
+            recordings: crate::recording::service(&cfg),
         },
     }
 }

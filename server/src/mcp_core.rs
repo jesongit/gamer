@@ -22,6 +22,8 @@ pub(crate) struct CoreTools {
     pub scheduler: Arc<crate::scheduler::Scheduler>,
     pub extensions: Arc<crate::extensions::ExtensionService>,
     pub control: Arc<ExternalControlService>,
+    pub media: Arc<crate::media::MediaService>,
+    pub recordings: Arc<crate::recording::RecordingService>,
 }
 
 /// Pure construction: creates only the independent MCP metadata directory and
@@ -62,6 +64,7 @@ pub(crate) fn assemble(
                 db.clone(),
                 packages.clone(),
                 scheduler.runner_registry(),
+                crate::media::service(cfg),
             )),
         )?;
     }
@@ -76,6 +79,8 @@ pub(crate) fn assemble(
             scheduler,
             extensions,
             control: control.clone(),
+            media: crate::media::service(cfg),
+            recordings: crate::recording::service(cfg),
         }),
     )?;
     Ok((mcp, control))
@@ -177,6 +182,7 @@ impl ToolProvider for CoreTools {
                 input_schema("app_launch",json!({}),&[]),input_schema("app_stop",json!({}),&[])
             ]}}),&["session_id","generation","frame_id","input"],session_context()));
         tools.extend(self.task_tools());
+        tools.extend(self.media_tools());
         tools
     }
 
@@ -227,9 +233,13 @@ impl ToolProvider for CoreTools {
         args: Value,
     ) -> Result<ToolResult, McpError> {
         ctx.check_active()?;
+        if self.is_media_tool(name) {
+            return self.call_media(ctx, name, args).await;
+        }
         let value = match name {
             "gamer.core.guide" => json!({"version":1,"protocol":"2025-11-25","workflow":[
                 "Discover authorized capabilities and read Package resources.",
+                "Find recorded videos by name with recording_list; inspect recording_get/recording_events and exact media_frame evidence, then use the available video plugin's sample_create with the chosen recording ID and session timeline range.",
                 "Edit YAML through the YAML work-draft tools; saves create a new version. Publication and rollback require the management UI.",
                 "For direct control, the user starts a token-bound session in Gamer; observe status, capture a frame, act once, then capture again.",
                 "Keepalive extends only your running session. TTL expiry pauses input; the user resumes in Gamer. Release and wait before submitting scripts.",
@@ -520,7 +530,9 @@ impl ToolProvider for CoreTools {
                     }
                 }
             }
-            n if n.starts_with("gamer.core.task_") => self.call_task(&ctx, n, &args).await?,
+            n if n.starts_with("gamer.core.task_") || n == "gamer.core.schedule_preview" => {
+                self.call_task(&ctx, n, &args).await?
+            }
             _ => return Err(not_found("tool_not_found")),
         };
         Ok(ToolResult::json(value))
@@ -715,6 +727,9 @@ fn png(bytes: Vec<u8>) -> Value {
 
 #[path = "mcp_core_tasks.rs"]
 mod tasks;
+
+#[path = "mcp_core_media.rs"]
+mod media;
 
 #[cfg(test)]
 #[path = "mcp_core_tests.rs"]

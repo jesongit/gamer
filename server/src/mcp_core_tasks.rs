@@ -8,6 +8,8 @@ impl CoreTools {
             ..Default::default()
         };
         vec![
+            tool("gamer.core.schedule_preview","Validate a schedule with its registered provider and preview up to ten future triggers. Does not save, enable or execute a task. Local times use the Gamer server timezone.","task.read",ToolEffect::Read,
+                json!({"schedule":{"type":"object","properties":{"provider_id":string(),"config":{"type":"object"}},"required":["provider_id","config"],"additionalProperties":false},"after":{"type":"string","format":"date-time"},"count":{"type":"integer","minimum":1,"maximum":10}}),&["schedule"],Default::default()),
             tool("gamer.core.task_list","List tasks allowed by this token, filtered by their actual nested execution scope.","task.read",ToolEffect::Read,json!({}),&[],Default::default()),
             tool("gamer.core.task_get","Read one authorized task including its schedule, runner and current state.","task.read",ToolEffect::Read,json!({"task_id":string()}),&["task_id"],context.clone()),
             tool("gamer.core.task_save","Create a disabled task or update an explicitly authorized task. Enabled tasks additionally require run.submit. Omit task_id for creation; updates require expected_updated_at.","task.write",ToolEffect::TaskWrite,
@@ -160,6 +162,58 @@ impl CoreTools {
         args: &Value,
     ) -> Result<Value, McpError> {
         match name {
+            "gamer.core.schedule_preview" => {
+                let schedule: TaskSchedule = serde_json::from_value(args["schedule"].clone())
+                    .map_err(|_| McpError::invalid("Invalid schedule"))?;
+                if serde_json::to_vec(&schedule.config)
+                    .map_err(business)?
+                    .len()
+                    > 16 * 1024
+                {
+                    return Err(McpError::invalid("Schedule config exceeds 16 KiB"));
+                }
+                let now = chrono::Utc::now();
+                let mut cursor = match args["after"].as_str() {
+                    Some(value) => chrono::DateTime::parse_from_rfc3339(value)
+                        .map_err(|_| McpError::invalid("after must include a UTC offset"))?
+                        .with_timezone(&chrono::Utc),
+                    None => now,
+                };
+                let registry = self.scheduler.schedules();
+                if !registry.list().contains(&schedule.provider_id) {
+                    return Ok(
+                        json!({"valid":false,"provider_available":false,"error":"schedule_provider_unavailable","next_times":[],"next_times_local":[]}),
+                    );
+                }
+                let count = args["count"].as_u64().unwrap_or(3);
+                let mut times = Vec::new();
+                let mut local = Vec::new();
+                for _ in 0..count {
+                    let next = match registry.next_after(&schedule, cursor) {
+                        Ok(next) => next,
+                        Err(_) => {
+                            return Ok(
+                                json!({"valid":false,"provider_available":true,"error":"invalid_schedule","next_times":[],"next_times_local":[]}),
+                            )
+                        }
+                    };
+                    let Some(next) = next else { break };
+                    if next <= cursor {
+                        return Err(McpError::new(
+                            ErrorKind::Unavailable,
+                            "schedule_not_advancing",
+                            "Schedule provider did not return a later instant",
+                        ));
+                    }
+                    times.push(next.to_rfc3339());
+                    local.push(next.with_timezone(&chrono::Local).to_rfc3339());
+                    cursor = next;
+                }
+                ctx.check_active()?;
+                Ok(
+                    json!({"valid":true,"provider_available":true,"provider_id":schedule.provider_id,"server_now":now.to_rfc3339(),"server_now_local":now.with_timezone(&chrono::Local).to_rfc3339(),"exhausted":times.len() < count as usize,"next_times":times,"next_times_local":local}),
+                )
+            }
             "gamer.core.task_list" => {
                 let tasks = self.db.list_timer_tasks_async().await.map_err(business)?;
                 Ok(

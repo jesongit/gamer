@@ -17,12 +17,14 @@ use crate::{
     timer_core::TimerRunnerRegistry,
 };
 
+#[derive(Clone)]
 pub(crate) struct ExternalTools {
     service: Arc<super::OcrService>,
     capabilities: CapabilityRegistry,
     db: Db,
     packages: Arc<PackageStore>,
     runners: Arc<TimerRunnerRegistry>,
+    media: Arc<crate::media::MediaService>,
 }
 impl ExternalTools {
     pub(crate) fn new(
@@ -31,6 +33,7 @@ impl ExternalTools {
         db: Db,
         packages: Arc<PackageStore>,
         runners: Arc<TimerRunnerRegistry>,
+        media: Arc<crate::media::MediaService>,
     ) -> Self {
         Self {
             service,
@@ -38,6 +41,7 @@ impl ExternalTools {
             db,
             packages,
             runners,
+            media,
         }
     }
     async fn authorize_source(
@@ -46,6 +50,10 @@ impl ExternalTools {
         source: &Source,
     ) -> Result<(), McpError> {
         match source {
+            Source::MediaFrame { media_id, .. } => {
+                context.require_scope("media.read")?;
+                context.authorize_media(media_id)?;
+            }
             Source::Target { device_id } => {
                 context.require_scope("observe")?;
                 context.authorize_device(device_id)?;
@@ -93,6 +101,29 @@ impl ExternalTools {
     ) -> Result<(Vec<u8>, Value), McpError> {
         self.authorize_source(context, source).await?;
         let (png, metadata) = match source {
+            Source::MediaFrame { media_id, index } => {
+                let media = self.media.clone();
+                let id = crate::media::MediaId(media_id.clone());
+                let index = *index;
+                let frame = tokio::task::spawn_blocking(move || {
+                    media.extract_frame(
+                        &id,
+                        &crate::media::FrameRequest {
+                            index: Some(index),
+                            pts_us: None,
+                            max_width: Some(1920),
+                        },
+                    )
+                })
+                .await
+                .map_err(unavailable)?
+                .map_err(unavailable)?;
+                let metadata = serde_json::to_value(frame.descriptor).map_err(unavailable)?;
+                (
+                    frame.png,
+                    json!({"kind":"media_frame","media_id":media_id,"index":index,"frame":metadata}),
+                )
+            }
             Source::Target { device_id } => {
                 let frames = self.capabilities.frame().ok_or_else(|| {
                     McpError::new(
@@ -245,6 +276,10 @@ fn authorize_trace_record(
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Source {
+    MediaFrame {
+        media_id: String,
+        index: u32,
+    },
     Target {
         device_id: String,
     },
@@ -327,7 +362,7 @@ impl TemporaryWork for OcrWork {
 impl ToolProvider for ExternalTools {
     fn tools(&self) -> Vec<ToolDescriptor> {
         vec![crate::mcp_core::tool("gamer.core.ocr_status", "Read OCR availability and languages without local paths.", "ocr.read", ToolEffect::Read, json!({}), &[], Default::default()),
-            ToolDescriptor {name:"gamer.core.ocr_recognize".into(), description:"Recognize an authorized target, trace image, Package PNG or sample frame. No paths or arbitrary image bytes.".into(), input_schema:serde_json::from_str(include_str!("schemas/recognize.json")).expect("OCR schema"), output_schema:None, required_scopes:["ocr.recognize".into()].into(),effect:ToolEffect::Read,context:Default::default()}]
+            ToolDescriptor {name:"gamer.core.ocr_recognize".into(), description:"Recognize an authorized target, trace image, Package PNG, sample frame or original media frame by index. No paths or arbitrary image bytes.".into(), input_schema:serde_json::from_str(include_str!("schemas/recognize.json")).expect("OCR schema"), output_schema:None, required_scopes:["ocr.recognize".into()].into(),effect:ToolEffect::Read,context:Default::default()}]
     }
     async fn authorize(
         &self,
@@ -373,17 +408,25 @@ impl ToolProvider for ExternalTools {
         }
         let request: Request = serde_json::from_value(arguments)
             .map_err(|_| McpError::invalid("Invalid controlled OCR arguments"))?;
-        let (png, source) = self.resolve(&context, &request.source).await?;
-        let values = json!({"png_base64":base64::engine::general_purpose::STANDARD.encode(png),"language":request.language,"mode":request.mode,"whitelist":request.whitelist,"scale":request.scale,"timeout_ms":request.timeout_ms});
         let (cancel, cancelled) = watch::channel(false);
         let (done, _) = watch::channel(false);
         let work = Arc::new(OcrWork { cancel, done });
         let lease = context
             .register_temporary_work(&format!("ocr:{}", uuid::Uuid::new_v4()), work.clone())?;
         let service = self.service.clone();
+        let sources = self.clone();
         let result=tokio::spawn(async move {
             let _completion=WorkCompletion(work.clone());
             let _lease=lease;
+            // Evidence preparation may spawn ffmpeg too. Keep it inside the
+            // owned task so revocation or a dropped HTTP request cannot release
+            // the work lease while the media worker is still running.
+            let (png, source) = sources.resolve(&context, &request.source).await?;
+            context.check_active()?;
+            if *cancelled.borrow() {
+                return Err(unavailable("OCR preparation cancelled"));
+            }
+            let values = json!({"png_base64":base64::engine::general_purpose::STANDARD.encode(png),"language":request.language,"mode":request.mode,"whitelist":request.whitelist,"scale":request.scale,"timeout_ms":request.timeout_ms});
             let result={
                 let recognition=service.recognize_cancellable(values,Some(cancelled));tokio::pin!(recognition);
                 loop {tokio::select!{
@@ -404,6 +447,232 @@ impl ToolProvider for ExternalTools {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct PendingCapture {
+        entered: tokio::sync::Notify,
+        proceed: tokio::sync::Notify,
+        finished: std::sync::atomic::AtomicBool,
+    }
+    #[async_trait]
+    impl FrameService for PendingCapture {
+        async fn device_size(
+            &self,
+            _: &DeviceHandle,
+        ) -> crate::capabilities::CapabilityResult<crate::capabilities::FrameSize> {
+            panic!("No device I/O in the source-lifetime fixture")
+        }
+        async fn latest(
+            &self,
+            _: &DeviceHandle,
+        ) -> crate::capabilities::CapabilityResult<Option<FrameHandle>> {
+            panic!("No latest-frame fallback")
+        }
+        async fn size(
+            &self,
+            _: FrameHandle,
+        ) -> crate::capabilities::CapabilityResult<crate::capabilities::FrameSize> {
+            panic!("Capture fails before allocating pixels")
+        }
+        async fn capture(
+            &self,
+            _: &DeviceHandle,
+        ) -> crate::capabilities::CapabilityResult<FrameHandle> {
+            self.entered.notify_one();
+            self.proceed.notified().await;
+            self.finished
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Err(crate::capabilities::CapabilityError::Unavailable(
+                "synthetic source completed",
+            ))
+        }
+    }
+    #[tokio::test]
+    async fn mcp_ocr_source_preparation_survives_http_drop_and_revocation_waits_for_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config {
+            data_dir: root.path().into(),
+            ..Default::default()
+        };
+        let frames = Arc::new(PendingCapture {
+            entered: tokio::sync::Notify::new(),
+            proceed: tokio::sync::Notify::new(),
+            finished: std::sync::atomic::AtomicBool::new(false),
+        });
+        let tools = ExternalTools::new(
+            Arc::new(super::super::OcrService::new(root.path()).unwrap()),
+            CapabilityRegistry::builder()
+                .with_frame_service(frames.clone())
+                .build(),
+            Arc::new(crate::store::Store::open(&cfg).unwrap()),
+            Arc::new(PackageStore::open(&cfg).unwrap()),
+            Arc::new(TimerRunnerRegistry::new()),
+            crate::media::service(&cfg),
+        );
+        let mcp = Arc::new(
+            crate::mcp::McpService::open(
+                root.path(),
+                crate::mcp::ServerInfo {
+                    name: "test".into(),
+                    version: "1".into(),
+                },
+            )
+            .unwrap(),
+        );
+        mcp.register_provider("gamer.ocr", Arc::new(tools)).unwrap();
+        let token = mcp
+            .credentials()
+            .create(crate::mcp::CreateTokenRequest {
+                label: "source cleanup".into(),
+                scopes: ["observe".into(), "ocr.recognize".into()].into(),
+                allowed: crate::mcp::AllowedObjects {
+                    devices: ["synthetic".into()].into(),
+                    ..Default::default()
+                },
+                expires_in_seconds: 60,
+            })
+            .unwrap();
+        let principal = mcp.credentials().authenticate(&token.token).unwrap();
+        let request = tokio::spawn({
+            let mcp = mcp.clone();
+            async move {
+                mcp.call_tool(
+                    principal,
+                    "gamer.core.ocr_recognize",
+                    json!({"source":{"kind":"target","device_id":"synthetic"}}),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), frames.entered.notified())
+            .await
+            .unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        mcp.credentials().revoke(&token.metadata.token_id).unwrap();
+        let draining = tokio::spawn({
+            let mcp = mcp.clone();
+            async move {
+                mcp.drain_token_work(&token.metadata.token_id).await;
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(!draining.is_finished());
+        assert!(!frames.finished.load(std::sync::atomic::Ordering::SeqCst));
+        frames.proceed.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), draining)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(frames.finished.load(std::sync::atomic::Ordering::SeqCst));
+    }
+    #[tokio::test]
+    async fn mcp_ocr_media_frame_resolves_authorized_real_pixels_without_device_or_ocr_execution() {
+        let root = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config {
+            data_dir: root.path().into(),
+            ..Default::default()
+        };
+        let media = crate::media::service(&cfg);
+        let clip = root.path().join("clip.mp4");
+        let encoded = crate::background_process::command("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=white:s=64x64:r=2:d=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-y",
+            ])
+            .arg(&clip)
+            .output()
+            .unwrap();
+        assert!(
+            encoded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&encoded.stderr)
+        );
+        let item = media
+            .import_bytes("recording.mp4", &std::fs::read(clip).unwrap())
+            .unwrap();
+        let tools = ExternalTools::new(
+            Arc::new(super::super::OcrService::new(root.path()).unwrap()),
+            CapabilityRegistry::default(),
+            Arc::new(crate::store::Store::open(&cfg).unwrap()),
+            Arc::new(PackageStore::open(&cfg).unwrap()),
+            Arc::new(TimerRunnerRegistry::new()),
+            media,
+        );
+        let credentials =
+            Arc::new(crate::mcp::CredentialStore::open(&root.path().join("mcp")).unwrap());
+        let mut contexts = Vec::new();
+        for (id, scope) in [
+            (item.id.0.as_str(), true),
+            ("ungranted", true),
+            (item.id.0.as_str(), false),
+        ] {
+            let token = credentials
+                .create(crate::mcp::CreateTokenRequest {
+                    label: "media OCR fixture".into(),
+                    scopes: if scope {
+                        ["media.read".into(), "ocr.recognize".into()].into()
+                    } else {
+                        ["ocr.recognize".into()].into()
+                    },
+                    allowed: crate::mcp::AllowedObjects {
+                        media: [id.into()].into(),
+                        ..Default::default()
+                    },
+                    expires_in_seconds: 60,
+                })
+                .unwrap();
+            contexts.push(InvocationContext::new(
+                credentials.authenticate(&token.token).unwrap(),
+                "media OCR".into(),
+                None,
+                credentials.clone(),
+                Arc::new(crate::mcp::ReceiptStore::open(&root.path().join("mcp")).unwrap()),
+            ));
+        }
+        let source = Source::MediaFrame {
+            media_id: item.id.0.clone(),
+            index: 1,
+        };
+        let (png, metadata) = tools.resolve(&contexts[0], &source).await.unwrap();
+        let image = image::load_from_memory(&png).unwrap();
+        assert_eq!((image.width(), image.height()), (64, 64));
+        assert_eq!(metadata["index"], 1);
+        assert_eq!(metadata["kind"], "media_frame");
+        for denied in &contexts[1..] {
+            assert!(tools.resolve(denied, &source).await.is_err());
+        }
+        assert!(tools
+            .resolve(
+                &contexts[0],
+                &Source::MediaFrame {
+                    media_id: item.id.0,
+                    index: 100
+                }
+            )
+            .await
+            .is_err());
+        let schema: Value = serde_json::from_str(include_str!("schemas/recognize.json")).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(
+            validator.is_valid(&json!({"source":{"kind":"media_frame","media_id":"id","index":1}}))
+        );
+        for source in [
+            json!({"kind":"media_frame","media_id":"id","index":1,"path":"secret"}),
+            json!({"kind":"media_frame","media_id":"id","index":-1}),
+            json!({"kind":"media_frame","media_id":"id","index":4294967296u64}),
+        ] {
+            assert!(!validator.is_valid(&json!({"source":source})));
+        }
+    }
     fn trace_context(root: &std::path::Path, plugin: &str) -> InvocationContext {
         let credentials = Arc::new(crate::mcp::CredentialStore::open(root).unwrap());
         let token = credentials

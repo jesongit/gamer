@@ -6,6 +6,16 @@
         {
           "type": "object",
           "properties": {
+            "kind": { "const": "media_frame" },
+            "media_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "index": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+          },
+          "required": ["kind", "media_id", "index"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
             "kind": {
               "const": "target"
             },

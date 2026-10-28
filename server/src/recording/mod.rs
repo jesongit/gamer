@@ -1060,6 +1060,14 @@ fn read_events_dir(media_dir: &Path) -> Vec<InputEventRecord> {
 }
 
 fn read_events_checked(media_dir: &Path) -> anyhow::Result<Vec<InputEventRecord>> {
+    read_events_checked_bounded(media_dir, usize::MAX, u64::MAX)
+}
+
+fn read_events_checked_bounded(
+    media_dir: &Path,
+    max_events: usize,
+    max_bytes: u64,
+) -> anyhow::Result<Vec<InputEventRecord>> {
     let recording_dir = media_dir.join("recording");
     let entries = match std::fs::read_dir(&recording_dir) {
         Ok(entries) => entries,
@@ -1077,10 +1085,23 @@ fn read_events_checked(media_dir: &Path) -> anyhow::Result<Vec<InputEventRecord>
     files.sort();
     let mut out = Vec::new();
     let mut ids = std::collections::HashSet::new();
+    let mut bytes = 0u64;
     for path in files {
         anyhow::ensure!(!path.is_symlink(), "recording_events_corrupt: symlink");
-        let text = std::fs::read_to_string(&path)?;
+        let remaining = max_bytes.saturating_sub(bytes);
+        anyhow::ensure!(
+            std::fs::metadata(&path)?.len() <= remaining,
+            "recording_events_too_large"
+        );
+        let mut text = String::new();
+        use std::io::Read as _;
+        std::fs::File::open(&path)?
+            .take(remaining.saturating_add(1))
+            .read_to_string(&mut text)?;
+        anyhow::ensure!(text.len() as u64 <= remaining, "recording_events_too_large");
+        bytes = bytes.saturating_add(text.len() as u64);
         for (line_no, line) in text.lines().enumerate() {
+            anyhow::ensure!(out.len() < max_events, "recording_events_too_large");
             let record: InputEventRecord = serde_json::from_str(line).map_err(|e| {
                 anyhow::anyhow!(
                     "recording_events_corrupt: {}:{}: {e}",
@@ -1103,7 +1124,7 @@ fn read_events_checked(media_dir: &Path) -> anyhow::Result<Vec<InputEventRecord>
 // 服务
 // ---------------------------------------------------------------------------
 
-/// Core 录制服务。进程级单例（[`service`]），零组合根接线。
+/// Core 录制服务。每个数据根共享实例（[`service`]），零组合根接线。
 pub struct RecordingService {
     inner: Arc<Inner>,
 }
@@ -1427,10 +1448,22 @@ impl RecordingService {
     }
 
     pub fn status(&self, id: &RecordingId) -> anyhow::Result<RecordingSessionMeta> {
+        self.status_inner(id, true)
+    }
+
+    pub(crate) fn status_readonly(&self, id: &RecordingId) -> anyhow::Result<RecordingSessionMeta> {
+        self.status_inner(id, false)
+    }
+
+    fn status_inner(
+        &self,
+        id: &RecordingId,
+        persist_recovery: bool,
+    ) -> anyhow::Result<RecordingSessionMeta> {
         if let Some(shared) = self.inner.get(id) {
             return Ok(shared.meta_snapshot());
         }
-        self.load_from_disk(id)
+        self.load_from_disk_inner(id, persist_recovery)
             .map(|(meta, _)| meta)
             .ok_or_else(|| {
                 anyhow::Error::from(RecordingFailure::new(
@@ -1442,6 +1475,15 @@ impl RecordingService {
 
     /// 真实会话目录，包含未生成素材的失败/取消记录；最新优先。
     pub fn history(&self) -> anyhow::Result<Vec<serde_json::Value>> {
+        self.history_inner(true)
+    }
+
+    /// Discovery must not load every recording's event stream into memory.
+    pub(crate) fn history_metadata(&self) -> anyhow::Result<Vec<serde_json::Value>> {
+        self.history_inner(false)
+    }
+
+    fn history_inner(&self, validate_events: bool) -> anyhow::Result<Vec<serde_json::Value>> {
         let mut ids: std::collections::BTreeSet<String> =
             self.inner.sessions.lock().keys().cloned().collect();
         for (root, nested) in [
@@ -1468,7 +1510,7 @@ impl RecordingService {
         }
         let mut sessions = Vec::new();
         for id in ids {
-            if let Ok(meta) = self.status(&RecordingId(id)) {
+            if let Ok(meta) = self.status_inner(&RecordingId(id), validate_events) {
                 let missing: Vec<_> = meta
                     .segments
                     .iter()
@@ -1482,12 +1524,16 @@ impl RecordingService {
                     })
                     .map(|segment| segment.media_id.0.clone())
                     .collect();
-                let source = self
-                    .inner
-                    .get(&meta.id)
-                    .map(|shared| shared.dir.clone())
-                    .or_else(|| self.load_from_disk(&meta.id).map(|(_, dir)| dir));
-                let events_available = meta.event_count > 0
+                let source = validate_events
+                    .then(|| {
+                        self.inner
+                            .get(&meta.id)
+                            .map(|shared| shared.dir.clone())
+                            .or_else(|| self.load_from_disk(&meta.id).map(|(_, dir)| dir))
+                    })
+                    .flatten();
+                let events_available = validate_events
+                    && meta.event_count > 0
                     && source.is_some_and(|dir| {
                         read_events_checked(&dir)
                             .is_ok_and(|events| events.len() >= meta.event_count as usize)
@@ -1498,7 +1544,11 @@ impl RecordingService {
                         .any(|issue| issue.starts_with("event_write_failed"));
                 let mut value = serde_json::to_value(meta)?;
                 value["missing_media"] = json!(missing);
-                value["events_available"] = json!(events_available);
+                value["events_available"] = if validate_events {
+                    json!(events_available)
+                } else {
+                    serde_json::Value::Null
+                };
                 sessions.push(value);
             }
         }
@@ -1620,14 +1670,38 @@ impl RecordingService {
 
     /// 读取会话的操作事件（时间轴升序；来自 recording/events-*.jsonl）。
     pub fn events(&self, id: &RecordingId) -> anyhow::Result<Vec<InputEventRecord>> {
+        self.read_events_snapshot(id, usize::MAX, u64::MAX, true)
+            .map(|(_, events)| events)
+    }
+
+    pub(crate) fn events_snapshot_bounded(
+        &self,
+        id: &RecordingId,
+        max_events: usize,
+        max_bytes: u64,
+    ) -> anyhow::Result<(RecordingSessionMeta, Vec<InputEventRecord>)> {
+        self.read_events_snapshot(id, max_events, max_bytes, false)
+    }
+
+    fn read_events_snapshot(
+        &self,
+        id: &RecordingId,
+        max_events: usize,
+        max_bytes: u64,
+        persist_recovery: bool,
+    ) -> anyhow::Result<(RecordingSessionMeta, Vec<InputEventRecord>)> {
         let source = self
             .inner
             .get(id)
             .map(|shared| (shared.meta_snapshot(), shared.dir.clone()))
-            .or_else(|| self.load_from_disk(id));
+            .or_else(|| self.load_from_disk_inner(id, persist_recovery));
         source
             .map(|(meta, dir)| {
-                let events = read_events_checked(&dir)?;
+                anyhow::ensure!(
+                    meta.event_count <= max_events as u64,
+                    "recording_events_too_large"
+                );
+                let events = read_events_checked_bounded(&dir, max_events, max_bytes)?;
                 if events.len() < meta.event_count as usize {
                     return Err(anyhow::anyhow!(
                         "recording_events_missing: 录制事件缺失或写入失败"
@@ -1639,7 +1713,7 @@ impl RecordingService {
                         .all(|issue| !issue.starts_with("event_write_failed")),
                     "recording_events_missing: 事件写入失败"
                 );
-                Ok(events)
+                Ok((meta, events))
             })
             .ok_or_else(|| {
                 anyhow::Error::from(RecordingFailure::new(
@@ -1672,6 +1746,14 @@ impl RecordingService {
     /// 崩溃/重启遗留的活动态会话标记为 interrupted（帧订阅随进程消失，无法
     /// 续录；已收口段完好，当前段素材停留在 importing 不可见）。
     fn load_from_disk(&self, id: &RecordingId) -> Option<(RecordingSessionMeta, PathBuf)> {
+        self.load_from_disk_inner(id, true)
+    }
+
+    fn load_from_disk_inner(
+        &self,
+        id: &RecordingId,
+        persist_recovery: bool,
+    ) -> Option<(RecordingSessionMeta, PathBuf)> {
         // 归档 id 来自路由，不能允许路径穿越。
         if id.0.is_empty()
             || !id
@@ -1690,13 +1772,17 @@ impl RecordingService {
                         RecordingState::Recording | RecordingState::Finalizing
                     ) {
                         meta.state = RecordingState::Interrupted;
-                        meta.ended_at = Some(now_rfc3339());
+                        if persist_recovery {
+                            meta.ended_at = Some(now_rfc3339());
+                        }
                         meta.error = Some("服务重启导致录制中断（已收口部分保留）".into());
-                        if let Ok(text) = serde_json::to_string_pretty(&meta) {
-                            let _ = crate::core::fs::atomic_write(
-                                &archive.join("session.json"),
-                                text.as_bytes(),
-                            );
+                        if persist_recovery {
+                            if let Ok(text) = serde_json::to_string_pretty(&meta) {
+                                let _ = crate::core::fs::atomic_write(
+                                    &archive.join("session.json"),
+                                    text.as_bytes(),
+                                );
+                            }
                         }
                     }
                     let source = std::fs::read_to_string(archive.join("event-source.txt"))
@@ -1732,10 +1818,14 @@ impl RecordingService {
                 RecordingState::Recording | RecordingState::Finalizing
             ) {
                 meta.state = RecordingState::Interrupted;
-                meta.ended_at = Some(now_rfc3339());
+                if persist_recovery {
+                    meta.ended_at = Some(now_rfc3339());
+                }
                 meta.error = Some("服务重启导致录制中断（已收口部分保留）".to_string());
-                if let Ok(s) = serde_json::to_string_pretty(&meta) {
-                    let _ = crate::core::fs::atomic_write(&session_path, s.as_bytes());
+                if persist_recovery {
+                    if let Ok(s) = serde_json::to_string_pretty(&meta) {
+                        let _ = crate::core::fs::atomic_write(&session_path, s.as_bytes());
+                    }
                 }
             }
             return Some((meta, dir));
@@ -1744,8 +1834,8 @@ impl RecordingService {
     }
 }
 
-/// 进程级录制服务（惰性装配；不加 AppState 字段）。
-static RECORDING: OnceLock<Arc<RecordingService>> = OnceLock::new();
+/// 按数据根隔离的录制服务（惰性装配；不加 AppState 字段）。
+static RECORDING: OnceLock<Mutex<HashMap<PathBuf, Arc<RecordingService>>>> = OnceLock::new();
 
 /// 输入观察注册表（进程级；由 [`service`] 首次装配时播种）。
 /// scrcpy 注入原语经 [`observe_touch`] / [`observe_key`] / [`observe_text`]
@@ -1753,11 +1843,11 @@ static RECORDING: OnceLock<Arc<RecordingService>> = OnceLock::new();
 static OBSERVER: OnceLock<Arc<Inner>> = OnceLock::new();
 
 pub fn service(cfg: &Config) -> Arc<RecordingService> {
-    let svc = RECORDING
-        .get_or_init(|| {
-            let root = cfg.data_dir.join("media");
-            Arc::new(RecordingService::open(root).expect("recording service init"))
-        })
+    let root = std::path::absolute(cfg.data_dir.join("media")).expect("recording data root");
+    let mut services = RECORDING.get_or_init(|| Mutex::new(HashMap::new())).lock();
+    let svc = services
+        .entry(root.clone())
+        .or_insert_with(|| Arc::new(RecordingService::open(root).expect("recording service init")))
         .clone();
     let _ = OBSERVER.set(svc.inner.clone());
     svc
