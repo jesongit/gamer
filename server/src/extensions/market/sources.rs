@@ -203,6 +203,41 @@ impl PluginMarket {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "Explicit public-source read acceptance; set GAMER_TEST_PLUGIN_SOURCE"]
+    fn configured_plugin_source_live_acceptance() {
+        let input = std::env::var("GAMER_TEST_PLUGIN_SOURCE").expect("explicit source required");
+        let directory = tempfile::tempdir().unwrap();
+        let market =
+            PluginMarket::with_data(directory.path().join("web"), directory.path().join("data"));
+        let canonical = SourceLocation::parse_for(&input, "registry.json")
+            .unwrap()
+            .canonical();
+        let sources = market.save_source(&input, true, None, None).unwrap();
+        let source = sources.iter().find(|s| s.repository == canonical).unwrap();
+        let catalog = market.registry_for(Some(&source.id), true).unwrap();
+        let entries = catalog["plugins"].as_array().unwrap();
+        assert!(!entries.is_empty());
+        for entry in entries {
+            let bytes = market
+                .archive_for(
+                    Some(&source.id),
+                    entry["id"].as_str().unwrap(),
+                    entry["version"].as_str().unwrap(),
+                )
+                .unwrap();
+            verify_archive(
+                &bytes,
+                entry["size"].as_u64().unwrap(),
+                entry["sha256"].as_str().unwrap(),
+            )
+            .unwrap();
+        }
+        println!(
+            "{}",
+            json!({"source":canonical,"verified_archives":entries.len(),"installed":false,"production_modified":false})
+        );
+    }
+    #[test]
     fn gitea_preset_downloads_through_host_and_does_not_follow_upstream_registry_urls() {
         let server = crate::package_market::source::test_http::TestServer::new();
         let directory = tempfile::tempdir().unwrap();

@@ -115,6 +115,14 @@ impl SourceStore {
         );
         let _guard = self.lock.lock().unwrap();
         let mut sources = self.load()?;
+        if let Some(name) = name {
+            ensure!(
+                !sources.iter().any(|s| s.name == name
+                    && Some(s.id.as_str()) != id
+                    && s.repository != repository),
+                "同名预设已存在，请使用不同名称"
+            );
+        }
         if let Some(id) = id {
             let index = sources
                 .iter()
@@ -204,6 +212,14 @@ mod tests {
             .unwrap()
             .id
             .clone();
+        assert!(store
+            .save(
+                "https://different.example/plugins.json".into(),
+                true,
+                Some("我的目录"),
+                None
+            )
+            .is_err());
         let restarted = SourceStore::new(dir.path().into(), "package");
         restarted
             .save(

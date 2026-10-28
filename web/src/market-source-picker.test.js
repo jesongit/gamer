@@ -23,6 +23,29 @@ const button = (w, text) => w.findAll('button').find(b => b.text() === text)
 beforeEach(() => localStorage.clear())
 
 describe('来源预设', () => {
+  it('其他浏览器并发新增预设后，仍选中本次保存的预设', async () => {
+    const api=client()
+    api.savePluginSource.mockResolvedValue([...defaults,
+      {id:'concurrent',name:'其他浏览器的预设',repository:'https://other.example/catalog.json',enabled:true},
+      {id:'mine',name:'我的预设',repository:'https://mine.example/registry.json',enabled:true},
+    ])
+    const w=mount(Picker,{props:{kind:'plugin',apiClient:api}});await flushPromises()
+    await button(w,'管理预设').trigger('click')
+    await w.get('[aria-label="预设名称"]').setValue('我的预设')
+    await w.get('[aria-label="来源 URL"]').setValue('https://mine.example/registry.json')
+    await w.get('form').trigger('submit');await flushPromises()
+    expect(w.get('select').element.value).toBe('mine')
+    expect(w.emitted('change').at(-1)[0].repository).toBe('https://mine.example/registry.json')
+    w.unmount()
+  })
+  it('预设读取失败时锁定管理，重试成功后恢复', async () => {
+    const api=client();api.pluginSources.mockRejectedValueOnce(new Error('HTTP 503'))
+    const w=mount(Picker,{props:{kind:'plugin',apiClient:api}});await flushPromises()
+    expect(button(w,'管理预设').element.disabled).toBe(true)
+    await button(w,'重试').trigger('click');await flushPromises()
+    expect(button(w,'管理预设').element.disabled).toBe(false)
+    w.unmount()
+  })
   it('内置下拉来源与浏览器独立记忆；不需要修改服务端默认源', async () => {
     const api = client(), w = mount(Picker, { props: { kind: 'plugin', apiClient: api } }); await flushPromises()
     expect(w.emitted('change')[0][0].id).toBe('github')

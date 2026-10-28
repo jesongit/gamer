@@ -6,7 +6,7 @@
         <option v-if="!sources.length" value="">{{ initialLoading ? '正在读取来源…' : '来源暂不可用' }}</option>
         <option v-for="source in sources" :key="source.id" :value="source.id">{{ source.name || source.repository }}</option>
       </select>
-      <button class="btn btn-sm" :aria-expanded="manageOpen" :disabled="disabled || saving || initialLoading" @click="manageOpen = !manageOpen">管理预设</button>
+      <button class="btn btn-sm" :aria-expanded="manageOpen" :disabled="disabled || saving || initialLoading || !sources.length" @click="manageOpen = !manageOpen">管理预设</button>
       <a v-if="selectedSource" class="source-address" :href="sourceHref(selectedSource.repository)" target="_blank" rel="noopener noreferrer">{{ selectedSource.repository }}</a>
     </div>
     <div v-if="error" class="source-error" role="alert">{{ error }} <button v-if="!sources.length" class="btn btn-sm" :disabled="initialLoading" @click="load">重试</button></div>
@@ -83,10 +83,9 @@ function editSelected() {
 async function save() {
   if (saving.value || props.disabled || !name.value.trim() || !url.value.trim()) return
   saving.value = true; error.value = ''; notice.value = ''
-  const oldIds = new Set(sources.value.map(s => s.id))
   try {
     const result = await methods().save(url.value.trim(), true, { name: name.value.trim(), ...(editingId.value ? { id: editingId.value } : {}) })
-    const saved = result.find(s => s.id === editingId.value) || result.find(s => !oldIds.has(s.id)) || result.find(s => s.name === name.value.trim())
+    const saved = result.find(s => s.id === editingId.value) || result.find(s => s.name === name.value.trim())
     if (!saved) throw new Error('预设保存结果未确认，请刷新检查')
     sources.value = result; select(saved.id); resetForm(); notice.value = '预设已保存，其他浏览器重新读取后也可使用。'
   } catch (e) { error.value = e.message }
