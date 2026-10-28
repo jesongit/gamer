@@ -103,11 +103,14 @@ export function isDownloadUrl(value: string): boolean {
 export async function fetchRegistry(
   fetchImpl: typeof fetch = globalThis.fetch,
   url = DEFAULT_REGISTRY_URL,
-  options: { refresh?: boolean } = {},
+  options: { refresh?: boolean; sourceId?: string } = {},
 ): Promise<PluginRegistryDocument> {
   let response: Response
   try {
-    const requestUrl = options.refresh && url === DEFAULT_REGISTRY_URL ? `${url}?refresh=true` : url
+    const query = new URLSearchParams()
+    if (options.refresh) query.set('refresh', 'true')
+    if (options.sourceId) query.set('source_id', options.sourceId)
+    const requestUrl = url === DEFAULT_REGISTRY_URL && query.size ? `${url}?${query}` : url
     response = await fetchImpl(requestUrl, { headers: { Accept: 'application/json' } })
   } catch (error) {
     throw new RegistryError('registry_network_error', `插件市场不可用：${String((error as Error)?.message || error)}`)

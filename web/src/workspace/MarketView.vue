@@ -3,24 +3,13 @@
     <section class="market-section" aria-label="配置市场">
       <div class="market-section-head">
         <h3>发现配置 <span class="market-hint">{{ remotePackages.length }} 个</span></h3>
-        <div class="market-head-actions"><button class="btn btn-sm" :disabled="remoteLoading || sourceBusy" @click="loadRemoteRegistry(true)">刷新</button></div>
+        <div class="market-head-actions"><button class="btn btn-sm" :disabled="remoteLoading || !!installBusyId" @click="loadRemoteRegistry(true)">刷新</button></div>
       </div>
-      <form class="source-add" @submit.prevent="addSource">
-        <input v-model="repositoryUrl" class="input" aria-label="配置源地址" placeholder="GitHub 仓库、镜像链接或 packages.json 地址" :disabled="sourceBusy || remoteLoading" />
-        <button class="btn btn-sm" :disabled="sourceBusy || remoteLoading || !repositoryUrl.trim()">添加仓库</button>
-      </form>
-      <p class="market-hint">支持公开 GitHub 仓库、HTTPS 加速镜像和独立配置目录。按实际目录格式检查，下载时核对大小与 SHA-256。</p>
-      <div v-for="source in sources" :key="source.id" class="source-row">
-        <a :href="sourceHref(source)" target="_blank" rel="noopener noreferrer">{{ source.repository }}</a>
-        <span class="market-hint">{{ source.enabled ? '已启用' : '已停用' }}</span>
-        <button class="btn btn-sm" :disabled="sourceBusy || remoteLoading" @click="toggleSource(source)">{{ source.enabled ? '停用' : '启用' }}</button>
-        <button class="btn btn-sm" :disabled="sourceBusy || remoteLoading" @click="removeSource(source)">移除</button>
-        <span v-if="sourceWarnings[source.id]" class="market-error">{{ sourceWarnings[source.id] }}</span>
-      </div>
+      <MarketSourcePicker kind="package" :disabled="!!installBusyId" @change="changeSource" @error="sourcePresetsError" />
       <p v-if="remoteLoading" class="market-hint">正在读取远端源…</p>
-      <p v-else-if="remoteError" class="market-error">配置市场读取失败：{{ remoteError }}</p>
-      <p v-else-if="!remotePackages.length" class="market-hint">市场暂无可用配置包。</p>
-      <div v-else class="market-remote-list">
+      <p v-if="remoteError" class="market-error" role="alert">{{ remoteError }}</p>
+      <p v-if="selectedSource && !remoteLoading && !remoteError && !remotePackages.length" class="market-hint">市场暂无可用配置包。</p>
+      <div v-if="remotePackages.length" class="market-remote-list">
         <article v-for="entry in remotePackages" :key="`${entry.source_id}:${entry.id}`" class="market-remote-card">
           <div class="market-remote-main">
             <div class="market-remote-title">
@@ -60,54 +49,40 @@ import { OPERATION_FEEDBACK_KEY, operationReporter } from './operation-feedback'
 import { api } from '../api'
 import { useToast } from '../store'
 import { loadPackages, packageStore, refreshPackages } from '../package-store'
+import MarketSourcePicker from './MarketSourcePicker.vue'
 
 const toast = useToast()
 const beginReport = operationReporter(inject(OPERATION_FEEDBACK_KEY, null), '', toast)
 const packages = computed(() => packageStore.packages)
 
-const sources = ref([])
-const sourceWarnings = ref({})
-const repositoryUrl = ref('')
-const sourceBusy = ref(false)
+const selectedSource = ref(null)
 const remotePackages = ref([])
 const remoteLoading = ref(false)
 const remoteError = ref('')
 const installBusyId = ref('')
-const sourceHref = source => source.repository.startsWith('https://') ? source.repository : `https://github.com/${source.repository}`
+let sourceSerial = 0
+function changeSource(source) { selectedSource.value = source; remotePackages.value = []; void loadRemoteRegistry(false) }
+function sourcePresetsError() { ++sourceSerial; selectedSource.value = null; remotePackages.value = []; remoteLoading.value = false; remoteError.value = '' }
 
 async function loadRemoteRegistry(force = true) {
-  if (remoteLoading.value) return
+  if (!selectedSource.value) return
+  const serial = ++sourceSerial
+  const source = { ...selectedSource.value }
   remoteLoading.value = true
   remoteError.value = ''
   try {
-    sources.value = await api.packageSources()
-    sourceWarnings.value = {}
-    const catalogs = await Promise.all(sources.value.filter(s => s.enabled).map(async source => {
-      try {
-        const data = await api.packageSourceCatalog(source.id, force === true)
-        if (data.warning) sourceWarnings.value[source.id] = `${data.cached ? '显示缓存：' : ''}${data.warning}`
-        return (data.packages || []).map(p => ({ ...p, source_id: source.id, repository: source.repository }))
-      } catch (e) { sourceWarnings.value[source.id] = e.message; return [] }
-    }))
-    remotePackages.value = catalogs.flat()
+    const data = await api.packageSourceCatalog(source.id, force === true)
+    if (serial !== sourceSerial) return
+    if (data.warning) remoteError.value = `${data.cached ? '显示缓存：' : ''}${data.warning}`
+    remotePackages.value = (data.packages || []).map(p => ({ ...p, source_id: source.id, repository: source.repository }))
   } catch (e) {
+    if (serial !== sourceSerial) return
     remotePackages.value = []
     remoteError.value = e?.message || '请重试'
   } finally {
-    remoteLoading.value = false
+    if (serial === sourceSerial) remoteLoading.value = false
   }
 }
-
-async function changeSources(change) {
-  if (sourceBusy.value || remoteLoading.value) return
-  sourceBusy.value = true
-  try { await change(); await loadRemoteRegistry(false) }
-  catch (e) { toast(e.message, 'error') }
-  finally { sourceBusy.value = false }
-}
-const addSource = () => changeSources(async () => { await api.savePackageSource(repositoryUrl.value); repositoryUrl.value = '' })
-const toggleSource = source => changeSources(() => api.savePackageSource(source.repository, !source.enabled))
-const removeSource = source => changeSources(() => api.removePackageSource(source.id))
 
 /** 已装同 id 包版本（卡片上的「已装 vX」标记 + 安装按钮文案切换） */
 function installedPackageVersion(id) {
@@ -146,14 +121,11 @@ async function installRemotePackage(entry) {
   }
 }
 
-onMounted(() => { loadPackages(); loadRemoteRegistry(false) })
+onMounted(() => { loadPackages() })
 </script>
 
 <style scoped>
 .market-section { display:flex; flex-direction:column; gap:10px; }
-.source-add,.source-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-.source-add .input { flex:1; min-width:220px; }
-.source-row a { overflow-wrap:anywhere; }
 .market-section-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
 .market-section-head h3 { margin:0; font-size:13px; font-weight:600; }.market-section-head h3 span { margin-left:10px; font-weight:400; }.market-head-actions { display:flex; gap:6px; }
 .market-hint { font-size:12px; color:var(--text-2); }.market-error { font-size:12px; color:var(--danger); }

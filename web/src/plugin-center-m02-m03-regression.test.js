@@ -92,6 +92,35 @@ describe('P2-UI M02/M03 插件中心回归', () => {
     vi.unstubAllGlobals()
   })
 
+  it('来源切换忽略旧目录响应，安装固定到当前来源且自定义源不冒充官方来源', async () => {
+    localStorage.clear()
+    const { sha256Hex } = await import('./workspace/plugin-center/registry-client')
+    const bytes = new Uint8Array([1,2,3])
+    const digest = await sha256Hex(bytes)
+    const current = { ...entry('custom.plugin','2.0.0'), sha256:digest, download_url:'/api/extensions/market/custom.plugin/2.0.0/archive?source_id=lan' }
+    let resolveOld
+    vi.stubGlobal('fetch', vi.fn(url => {
+      if (String(url).includes('/archive')) return Promise.resolve({ ok:true,status:200,headers:{get:()=>null},arrayBuffer:async()=>bytes.buffer })
+      if (String(url).includes('source_id=lan')) return Promise.resolve({ ok:true,status:200,json:async()=>({ schema_version:2,plugins:[current] }) })
+      return new Promise(resolve => { resolveOld = resolve })
+    }))
+    const { client } = makeClient([])
+    client.pluginSources = vi.fn(async()=>[
+      {id:'github',name:'GitHub',repository:'jesongit/gamer-plugins',enabled:true,builtin:true},
+      {id:'lan',name:'内网',repository:'http://192.168.31.10:13000/posase/gamer-plugins',enabled:true,builtin:true},
+    ])
+    client.inspectExtension.mockResolvedValue({ ...current, permissions:[] })
+    client.installExtension.mockResolvedValue({ ...current, state:'disabled' })
+    const wrapper = mount(PluginCenter,{props:{apiClient:client}}); await flushPromises()
+    await wrapper.get('select[aria-label="插件来源"]').setValue('lan'); await flushPromises()
+    resolveOld({ok:true,status:200,json:async()=>({schema_version:2,plugins:[entry('old.plugin','1.0.0')]})}); await flushPromises()
+    expect(wrapper.text()).toContain('custom.plugin'); expect(wrapper.text()).not.toContain('old.plugin')
+    await wrapper.findAll('button').find(b=>b.text()==='安装').trigger('click'); await flushPromises()
+    expect(globalThis.fetch.mock.calls.some(([url])=>url===current.download_url)).toBe(true)
+    await vi.waitFor(() => expect(client.installExtension, wrapper.text()).toHaveBeenCalledWith(expect.any(Blob),{permissionConfirmed:true}))
+    wrapper.unmount(); localStorage.clear()
+  })
+
   it('刷新读取插件仓新版本并显示更新，离线提示不遮住已安装列表', async () => {
     const { wrapper } = await mountCenter([entry('demo.beta', '0.1.0-beta.2')], [installed('demo.beta', '0.1.0-beta.2')])
     try {

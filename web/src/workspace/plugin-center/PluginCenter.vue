@@ -1,5 +1,6 @@
 <template>
   <section class="plugin-center" aria-label="插件">
+    <MarketSourcePicker v-if="hasSourcePresets" kind="plugin" :api-client="apiClient" :disabled="busy" @change="changeMarketSource" @error="sourcePresetError" />
     <div class="plugin-toolbar">
       <input v-model="query" class="input plugin-search" type="search" aria-label="搜索插件" placeholder="搜索插件名称、ID 或描述" />
       <span class="muted plugin-count">{{ filteredPlugins.length }} 个插件</span>
@@ -11,7 +12,7 @@
     </div>
     <div v-if="urlOpen" class="url-import">
       <div class="url-row"><input v-model.trim="url" class="input" type="url" aria-label="插件归档地址" placeholder="https://example.com/plugin.gplugin" @keyup.enter="onUrlImport" /><button class="btn" :disabled="busy || !url" @click="onUrlImport">下载并安装</button></div>
-      <p class="muted">下载后核对来源与权限。</p>
+      <p class="muted">填写单个 .gplugin 安装包的下载地址。切换仓库请使用上方的来源预设。</p>
     </div>
         <div class="plugin-center-body">
           <div v-if="error" class="plugin-alert error" role="alert">{{ error }}</div>
@@ -55,7 +56,7 @@
                   <div v-if="item.relation?.kind === 'incompatible'" class="dependency-line warn-text">{{ item.relation.reason }}</div>
                   <div v-if="item.entry && ['install','update'].includes(item.relation?.kind) && !canInstallMarket(item.entry)" class="dependency-line warn-text">缺少固定 SHA-256，无法安全下载</div>
                   <details class="plugin-details"><summary>详情 <UiIcon name="down" /></summary>
-                  <div class="plugin-meta"><code>{{ item.id }}</code><span>来源：{{ item.installed ? sourceLabel(item.installed.source) : '官方市场' }}</span><span>{{ item.info.publisher || item.entry?.publisher || '发布者未声明' }}</span></div>
+                  <div class="plugin-meta"><code>{{ item.id }}</code><span>来源：{{ item.installed ? sourceLabel(item.installed.source) : selectedSource?.name || '官方市场' }}</span><span>{{ item.info.publisher || item.entry?.publisher || '发布者未声明' }}</span></div>
                   <div class="plugin-facts">
                     <span>执行形态：{{ executionLabel(item.info.execution) }}</span>
                     <span>权限：{{ item.info.permissions?.length ? item.info.permissions.join('、') : '无' }}</span>
@@ -95,6 +96,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../../api'
 import UiIcon from '../../components/ui/UiIcon.vue'
+import MarketSourcePicker from '../MarketSourcePicker.vue'
 import { useConfirmDialog } from '../../components/ui/useConfirmDialog'
 import { DEFAULT_REGISTRY_URL, downloadDirectUrl, downloadFixedVersion, fetchRegistry, findRegistryPlugin } from './registry-client'
 import {
@@ -140,6 +142,14 @@ const operationResult = ref(null)
 const sourceMetadata = ref(readPluginSourceMetadata())
 const url = ref('')
 const fileInput = ref(null)
+const selectedSource = ref(null)
+const hasSourcePresets = computed(() => props.registryUrl === DEFAULT_REGISTRY_URL && typeof props.apiClient.pluginSources === 'function')
+function changeMarketSource(source) { selectedSource.value = source; registry.value = { schema_version: 2, plugins: [] }; void refresh() }
+function sourcePresetError() { ++refreshSerial; registry.value = { schema_version: 2, plugins: [] }; loading.value = false; void loadInstalled().catch(e => { error.value = messageFor(e) }) }
+function marketSource(entry) {
+  const official = !selectedSource.value || selectedSource.value.repository === 'jesongit/gamer-plugins'
+  return { kind: official ? 'official' : 'url', label: selectedSource.value?.name || '官方市场', url: selectedSource.value?.repository, publisher: entry.publisher, execution: entry.execution, registryEntry: entry }
+}
 
 const market = computed(() => registry.value.plugins || [])
 // ID 是唯一身份；市场有多个版本时只呈现最新条目，运行状态与权限以已安装快照为准。
@@ -193,12 +203,13 @@ function showMutationResult(description, refreshResult) {
   notice.value = ''
 }
 
-async function loadInstalled() {
+async function loadInstalled(requestSerial = 0) {
   const client = props.apiClient
   // The management endpoint is the current contract: its outer dependencies
   // map describes dependents, while each extension entry is the authoritative
   // lifecycle snapshot. Do not silently downgrade to the base list response.
   const response = await client.getExtensionManagement()
+  if (requestSerial && requestSerial !== refreshSerial) return
   installed.value = mergeManagementResponse(response, market.value, sourceMetadata.value)
   installedKnown.value = true
 }
@@ -211,13 +222,15 @@ async function refresh(force = false) {
   error.value = ''
   const failures = []
   try {
-    registry.value = await fetchRegistry(globalThis.fetch, props.registryUrl, { refresh: force })
+    const next = await fetchRegistry(globalThis.fetch, props.registryUrl, { refresh: force, sourceId: selectedSource.value?.id })
+    if (serial !== refreshSerial) return { ok: false, stale: true, error: '刷新请求已过期' }
+    registry.value = next
   } catch (errorValue) {
     failures.push(messageFor(errorValue))
   }
   if (serial !== refreshSerial) return { ok: false, stale: true, error: '刷新请求已过期' }
   try {
-    await loadInstalled()
+    await loadInstalled(serial)
   } catch (errorValue) {
     failures.push(messageFor(errorValue))
   }
@@ -227,7 +240,7 @@ async function refresh(force = false) {
   return failures.length ? { ok: false, error: failures.join('\n') } : { ok: true }
 }
 
-onMounted(() => { void refresh() })
+onMounted(() => { if (!hasSourcePresets.value) void refresh() })
 
 function installedPlugin(id) { return installed.value.find(item => item.id === id) }
 function marketRelation(entry) { return marketVersionRelation(entry, installedPlugin(entry.id)) }
@@ -367,8 +380,8 @@ async function updateAll() {
       try {
         if (!canInstallMarket(item.entry)) throw new Error('该市场条目缺少固定版本 SHA-256，无法校验完整性，已阻止下载。')
         const { file } = await downloadFixedVersion(item.entry)
-        const source = { kind: 'official', label: '官方市场', publisher: item.entry.publisher, execution: item.entry.execution, registryEntry: item.entry }
-        const inspection = await props.apiClient.inspectExtension(file, { source: 'official' })
+        const source = marketSource(item.entry)
+        const inspection = await props.apiClient.inspectExtension(file, source.kind === 'official' ? { source: 'official' } : {})
         const confirmation = inspectionConfirmation(inspection, source, item.installed)
         prepared.push({ file, source, inspection, confirmation, current: item.installed })
       } catch (errorValue) {
@@ -434,9 +447,7 @@ async function installMarket(entry, current = installedPlugin(entry.id)) {
   clearMessages()
   try {
     const downloaded = await downloadFixedVersion(entry)
-    await installArchive(downloaded.file, {
-      kind: 'official', label: '官方市场', publisher: entry.publisher, execution: entry.execution, registryEntry: entry,
-    }, current)
+    await installArchive(downloaded.file, marketSource(entry), current)
   } catch (errorValue) { error.value = installErrorText(errorValue) } finally { endOperation(operationKey) }
 }
 

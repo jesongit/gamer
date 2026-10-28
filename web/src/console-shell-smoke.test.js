@@ -11,7 +11,7 @@ vi.mock('./api', () => {
     listDevices: [],
     listScripts: [],
     listTemplates: [],
-    packageSources: [],
+    packageSources: [{ id:'github', name:'GitHub', repository:'jesongit/gamer-packages', enabled:true, builtin:true }],
   }
   return {
     api: new Proxy({}, {
@@ -119,13 +119,14 @@ describe('Console 壳挂载冒烟（拆分后装配接线）', () => {
 })
 
 describe('配置市场挂载冒烟', () => {
-  it('未添加仓库时显示空态和添加入口', async () => {
+  it('未安装配置时显示内置来源、市场空态和预设管理入口', async () => {
     const { default: MarketView } = await import('./workspace/MarketView.vue')
     const { flushPromises } = await import('@vue/test-utils')
     const wrapper = mount(MarketView)
     await flushPromises()
     expect(wrapper.text()).toContain('市场暂无可用配置包')
-    expect(wrapper.text()).toContain('添加仓库')
+    expect(wrapper.text()).toContain('管理预设')
+    expect(wrapper.get('select[aria-label="配置来源"]').text()).toContain('GitHub')
     wrapper.unmount()
   })
 })
