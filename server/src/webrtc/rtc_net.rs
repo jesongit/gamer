@@ -22,7 +22,7 @@
 //! # 将外网 50000/udp 映射到服务端 3478/udp
 //! ```
 //!
-//! 实现注记（webrtc-rs 0.13 / webrtc-ice 0.13）：`set_nat_1to1_ips` 只重写
+//! 实现注记（webrtc-rs Tokio API）：`set_nat_1to1_ips` 只重写
 //! 候选 **IP**，候选**地址/端口**的另一来源是 mux conn 的 `local_addr()`
 //! （UDPMuxDefault::create_muxed_conn 缓存，muxed gather 直接消费）。「绑 A
 //! 宣 B」因此经自定义 [`AdvertisedAddrConn`] 实现：tokio UdpSocket 包一层、

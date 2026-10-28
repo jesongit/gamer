@@ -185,13 +185,13 @@ pub(super) fn extract_zip(source: &Path, target: &Path, files: &[RequiredFile]) 
         ensure!(entry.size() <= 512 * 1024 * 1024, "单个依赖文件过大");
         ensure!(
             !entry
-                .name()
+                .name()?
                 .split('/')
                 .any(|part| part.contains(':') || part.ends_with(['.', ' '])),
             "依赖归档含不安全文件名"
         );
         ensure!(
-            !entry.name().contains('\\')
+            !entry.name()?.contains('\\')
                 && entry.unix_mode().is_none_or(|m| m & 0o170000 != 0o120000),
             "依赖归档包含链接或非法路径"
         );

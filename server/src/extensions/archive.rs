@@ -183,11 +183,12 @@ fn scan_archive(bytes: &[u8]) -> ExtensionResult<(Vec<ArchiveEntry>, Vec<u8>)> {
         if entry.encrypted() || entry.is_symlink() {
             return Err(ExtensionError::InvalidArchive(format!(
                 "不允许加密或符号链接条目: {}",
-                entry.name()
+                entry.name()?
             )));
         }
-        let is_dir = entry.is_dir() || entry.name().ends_with('/');
-        let name = normalize_archive_path(entry.name(), is_dir)?;
+        let raw_name = entry.name()?.into_owned();
+        let is_dir = entry.is_dir() || raw_name.ends_with('/');
+        let name = normalize_archive_path(&raw_name, is_dir)?;
         if !seen.insert(name.clone()) {
             return Err(ExtensionError::InvalidArchive(format!(
                 "归档存在重复路径: {name}"

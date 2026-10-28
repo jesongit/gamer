@@ -105,10 +105,10 @@ pub fn validate_and_read_manifest(bytes: &[u8]) -> Result<Vec<u8>, ArchiveError>
         if entry.encrypted() {
             return Err(ArchiveError::Invalid(format!(
                 "不允许加密条目: {}",
-                entry.name()
+                entry.name()?
             )));
         }
-        if entry.name() == archive_limits::MANIFEST_NAME {
+        if entry.name()? == archive_limits::MANIFEST_NAME {
             if entry.is_dir() {
                 return Err(ArchiveError::Invalid("package.toml 必须是文件".to_string()));
             }
@@ -145,11 +145,11 @@ pub fn extract_archive(bytes: &[u8], staging: &Path) -> Result<PackageManifest, 
         if entry.encrypted() || entry.is_symlink() {
             return Err(ArchiveError::Invalid(format!(
                 "不允许加密或符号链接条目: {}",
-                entry.name()
+                entry.name()?
             )));
         }
         let is_dir = entry.is_dir();
-        let relative = archive_relative_path(entry.name(), is_dir)?;
+        let relative = archive_relative_path(entry.name()?.as_ref(), is_dir)?;
         let destination = append_relative_path(staging, &relative);
         if is_dir {
             fs::create_dir_all(destination)?;
@@ -159,7 +159,7 @@ pub fn extract_archive(bytes: &[u8], staging: &Path) -> Result<PackageManifest, 
         if entry.size() > limit as u64 {
             return Err(ArchiveError::Invalid(format!(
                 "文件 {} 超过单文件上限 {limit} 字节",
-                entry.name()
+                entry.name()?
             )));
         }
         if let Some(parent) = destination.parent() {
@@ -1286,7 +1286,7 @@ mod tests {
         let mut reader = zip::ZipArchive::new(std::io::Cursor::new(archive)).unwrap();
         for i in 0..reader.len() {
             let mut entry = reader.by_index(i).unwrap();
-            if entry.name().starts_with(prefix) {
+            if entry.name().unwrap().starts_with(prefix) {
                 let mut out = Vec::new();
                 std::io::Read::read_to_end(&mut entry, &mut out).unwrap();
                 return Some(out);

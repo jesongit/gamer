@@ -41,7 +41,10 @@ pub fn record(layout: &InstallLayout, app: &AppInstallSpec, zip_path: &Path) -> 
             hasher.update(&buf[..n]);
         }
         files.push(Entry {
-            path: entry.name().to_string(),
+            path: entry
+                .name()
+                .map_err(|error| error.to_string())?
+                .into_owned(),
             size: entry.size(),
             hash: crate::digest::to_hex(&hasher.finalize()),
         });

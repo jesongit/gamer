@@ -8,9 +8,9 @@
     It does not build images or run a real deployment.
     It verifies:
       1. PowerShell syntax for tools/*.ps1;
-      3. cargo metadata --locked --no-deps;
-      4. strict cargo audit (warnings denied) for the server and updater
-         lockfiles; missing cargo-audit is a hard failure.
+      2. cargo metadata --locked --no-deps;
+      3. strict cargo audit (warnings denied) for all six active host, packer,
+         and plugin guest lockfiles; missing cargo-audit is a hard failure.
     An optional benchmark smoke check can call tools\run-perf-benchmark.ps1.
 
 .EXAMPLE
@@ -95,27 +95,17 @@ foreach ($cargoDir in @('server', 'updater')) {
     Write-Host ("[metadata] {0}: cargo metadata passed" -f $cargoDir) -ForegroundColor Green
 }
 
-Write-Step 'cargo audit (server + updater lockfiles, warnings denied)'
+Write-Step 'cargo audit (application, packer and active guest lockfiles, warnings denied)'
 if (-not (Get-Command cargo-audit -ErrorAction SilentlyContinue)) {
     throw 'cargo-audit not found; release audit gate cannot run. Install with: cargo install cargo-audit --locked'
 }
-# Strict audit gate: any vulnerability or warning fails the release check.
-# Documented exemption (re-evaluate on each webrtc upgrade):
-#   RUSTSEC-2025-0141 — bincode 1.x unmaintained. bincode 1.3.3 is only a
-#   transitive dep here: webrtc 0.13 -> webrtc-dtls 0.12 (bincode ^1), and the
-#   latest webrtc-dtls 0.12.x still requires bincode ^1, so no fixed version
-#   exists within the webrtc 0.13 line. webrtc >= 0.20 (rtc-dtls) drops bincode
-#   but is a cross-version API migration; drop this ignore after that upgrade.
-$auditIgnoreIds = @('RUSTSEC-2025-0141')
-foreach ($auditDir in @('server', 'updater')) {
+# Strict audit gate: any vulnerability or warning fails, without exemptions.
+foreach ($auditDir in @('server', 'updater', 'tools/plugin-packer', 'plugins/gamer-keymap/guest', 'plugins/gamer-yaml/guest', 'plugins/gamer-yaml/interpreter')) {
     Push-Location (Join-Path $RepoRoot $auditDir)
     try {
         $auditArgs = @('audit', '--color', 'never', '-D', 'warnings')
         if ($CargoAuditNoFetch) {
             $auditArgs += '--no-fetch'
-        }
-        foreach ($advisoryId in $auditIgnoreIds) {
-            $auditArgs += @('--ignore', $advisoryId)
         }
         & cargo @auditArgs
         $auditExit = $LASTEXITCODE
@@ -126,7 +116,7 @@ foreach ($auditDir in @('server', 'updater')) {
         Pop-Location
     }
     $auditMode = if ($CargoAuditNoFetch) { 'offline advisory DB (--no-fetch)' } else { 'fresh advisory DB fetch' }
-    Write-Host ("[audit] {0}: cargo audit passed (strict; {1}; ignored: {2})" -f $auditDir, $auditMode, ($auditIgnoreIds -join ', ')) -ForegroundColor Green
+    Write-Host ("[audit] {0}: cargo audit passed (strict; {1}; no exemptions)" -f $auditDir, $auditMode) -ForegroundColor Green
 }
 
 if ($Benchmark) {

@@ -84,7 +84,7 @@ async fn diagnostic_zip_is_run_scoped_redacted_and_preserves_original_pixels() {
         let mut entry = zip.by_index(index).unwrap();
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes).unwrap();
-        if entry.name().ends_with(".png") {
+        if entry.name().unwrap().ends_with(".png") {
             assert_eq!(
                 image::load_from_memory(&bytes)
                     .unwrap()

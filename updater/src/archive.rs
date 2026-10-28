@@ -246,7 +246,7 @@ fn extract_zip_checked(
     let mut declared_total: u64 = 0;
     for i in 0..archive.len() {
         let entry = archive.by_index(i).map_err(zip_err)?;
-        let name = entry.name().to_string();
+        let name = entry.name().map_err(zip_err)?.into_owned();
         let clean = name.trim_end_matches('/');
         if let Some(reason) = pathsafe::check_single_path(clean) {
             return Err(ArchiveError::DangerousEntry {
@@ -323,7 +323,7 @@ fn extract_zip_checked(
     let mut actual_total: u64 = 0;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(zip_err)?;
-        let name = entry.name().to_string();
+        let name = entry.name().map_err(zip_err)?.into_owned();
         if entry.is_dir() {
             fs::create_dir_all(staging_dir.join(name.trim_end_matches('/')))
                 .map_err(ArchiveError::Io)?;

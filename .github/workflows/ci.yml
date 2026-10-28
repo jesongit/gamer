@@ -95,6 +95,15 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2
+
+      - name: Rust dependency security audit (warnings denied)
+        shell: pwsh
+        run: ../tools/verify-release.ps1
+
       - name: cargo clippy (-D warnings)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
@@ -120,6 +129,9 @@ jobs:
 
       - name: cargo test
         run: cargo test
+
+      - name: Patched DTLS protocol and curve regressions
+        run: cargo test --locked -p dtls --lib
 
       - name: Phase 0 fixture compatibility guard
         run: cargo test phase0_ -- --nocapture

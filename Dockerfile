@@ -24,6 +24,7 @@ WORKDIR /src
 COPY server/Cargo.toml server/Cargo.lock server/build.rs ./server/
 COPY server/src ./server/src
 COPY server/wit ./server/wit
+COPY third_party ./third_party
 COPY docs/reference/YAML.md ./docs/reference/YAML.md
 COPY server/assets/scrcpy-server.jar ./server/assets/scrcpy-server.jar
 COPY plugins ./plugins

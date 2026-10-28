@@ -565,7 +565,11 @@ fn verify(flags: &Flags) -> Result<(), String> {
 fn verify_archive_bytes(bytes: &[u8]) -> Result<Value, String> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes))
         .map_err(|error| format!("zip 中央目录校验失败: {error}"))?;
-    let names: Vec<String> = archive.file_names().map(|name| name.to_string()).collect();
+    let names: Vec<String> = archive
+        .file_names()
+        .map(|name| name.map(|name| name.into_owned()))
+        .collect::<Result<_, _>>()
+        .map_err(|error| format!("zip 文件名解码失败: {error}"))?;
     let mut seen = std::collections::BTreeSet::new();
     for name in &names {
         validate_archive_path(name)?;

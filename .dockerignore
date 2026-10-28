@@ -36,6 +36,8 @@
 !updater/Cargo.lock
 !updater/src/
 !updater/src/**
+!third_party/
+!third_party/**
 !release/
 !release/config.default.toml
 !release/dependencies.lock.toml
