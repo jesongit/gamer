@@ -46,6 +46,8 @@ impl From<&crate::config::AuthConfig> for LoginSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SystemSettings {
+    #[serde(default)]
+    pub mcp_allow_remote: bool,
     pub idle_power_secs: u64,
     #[serde(default)]
     pub browser_idle_secs: u64,
@@ -57,6 +59,7 @@ pub struct SystemSettings {
 impl SystemSettings {
     pub fn from_config(cfg: &Config) -> Self {
         Self {
+            mcp_allow_remote: cfg.mcp_allow_remote,
             idle_power_secs: cfg.idle_power_secs,
             browser_idle_secs: cfg.browser_idle_secs,
             log_retain_days: cfg.log_retain_days,
@@ -175,6 +178,7 @@ impl Config {
         let mut doc = initial
             .parse::<toml_edit::DocumentMut>()
             .map_err(|e| SaveError::Io(e.into()))?;
+        doc["mcp_allow_remote"] = toml_edit::value(values.mcp_allow_remote);
         for (key, number) in [
             ("idle_power_secs", values.idle_power_secs),
             ("browser_idle_secs", values.browser_idle_secs),
@@ -231,6 +235,7 @@ mod tests {
         let mut updated = before.saved.clone();
         updated.idle_power_secs = 90;
         updated.browser_idle_secs = 120;
+        updated.mcp_allow_remote = true;
         updated.log_retain_days = 0;
         updated.compute_max_concurrency = 2;
         let result = cfg
@@ -238,6 +243,7 @@ mod tests {
             .unwrap();
         assert_eq!(consumer.current_settings().idle_power_secs, 90);
         assert_eq!(consumer.current_settings().browser_idle_secs, 120);
+        assert!(consumer.current_settings().mcp_allow_remote);
         assert_eq!(consumer.current_settings().log_retain_days, 0);
         assert_eq!(result.active.compute_max_concurrency, 0);
         assert!(result.restart_required);

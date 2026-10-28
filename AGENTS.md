@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## 2026-10-28 显式远程 MCP（覆盖下文仅回环接入要求）
+
+用户要求支持其他电脑上的外部 Agent。`/api/mcp` 默认仅允许真实回环连接；管理设置 `mcp_allow_remote`（默认 false）允许显式开启远程来源，持久保存并即时生效，上传结束后再次检查。`local_only=true` 仍只允许回环。远程模式保留独立 Bearer、Host/Origin 同源检查、显式 scope/对象授权和全部控制屏障；管理员 Cookie/本机管理令牌不能替代 MCP 认证，不信任或接受 `Forwarded`/`X-Forwarded-For`。设置页远程连接地址沿用实际网页协议、主机与映射端口。此变更不放开本机管理通道、素材读取或浏览器 CDP。源码和隔离测试授权不代表部署或操作真实设备授权。
+
 ## 2026-10-16 外部 Agent 与统一 MCP（覆盖下文 AI 相关要求）
 
 已确认计划见 `docs/plans/gamer_external_agent_mcp_refactor_plan.md`，阶段证据见 `docs/evidence/EXTERNAL_AGENT_MCP_REFACTOR_PROGRESS.md`。Gamer 不再内置模型请求、聊天、Agent 循环、提示词或自动记忆加工；这些由用户自行选择的外部 Agent 承担。下文旧 AI 插件/自动生成/模型权限约定仅作历史，不可恢复为活动能力。

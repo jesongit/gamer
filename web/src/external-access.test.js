@@ -5,15 +5,16 @@ const { decision } = vi.hoisted(() => ({ decision: vi.fn(async () => true) }))
 vi.mock('./components/ui/useConfirmDialog', () => ({ useConfirmDialog: () => decision }))
 import ExternalAccessSettings from './components/ExternalAccessSettings.vue'
 import { api } from './api'
-vi.mock('./api', () => ({ api: Object.fromEntries(['listMcpTokens','getMcpCatalog','createMcpToken','viewMcpToken','revokeMcpToken'].map(name => [name,vi.fn()])) }))
+vi.mock('./api', () => ({ api: Object.fromEntries(['listMcpTokens','getMcpCatalog','createMcpToken','viewMcpToken','revokeMcpToken','getSystemSettings','saveSystemSettings'].map(name => [name,vi.fn()])) }))
 const wrappers=[]
-afterEach(() => { wrappers.splice(0).forEach(w=>w.unmount());vi.resetAllMocks() })
+afterEach(() => { wrappers.splice(0).forEach(w=>w.unmount());vi.restoreAllMocks();vi.resetAllMocks() })
 const token={token_id:'one',label:'我的 Agent',expires_at:0,revoked:false,can_view:true}
 function setup(tokens=[token], failRead=false) {
   decision.mockResolvedValue(true)
   api.listMcpTokens.mockResolvedValue({tokens})
   if (failRead) api.listMcpTokens.mockRejectedValueOnce(new Error('连接中断'))
   api.getMcpCatalog.mockResolvedValue({endpoint:'http://127.0.0.1:8443/api/mcp',tools:[]})
+  api.getSystemSettings.mockResolvedValue({saved:{mcp_allow_remote:false,idle_power_secs:120},active:{mcp_allow_remote:false},revision:'r1'})
   const wrapper=mount(ExternalAccessSettings);wrappers.push(wrapper);return wrapper
 }
 function button(w,text) { return w.findAll('button').find(b=>b.text()===text) }
@@ -24,7 +25,7 @@ describe('simple MCP access settings',()=>{
     expect(w.text()).toContain('http://127.0.0.1:8443/api/mcp')
     expect(w.text()).toContain('不过期')
     expect(w.find('select').exists()).toBe(false)
-    expect(w.find('input[type="checkbox"]').exists()).toBe(false)
+    expect(w.get('input[type="checkbox"]').element.checked).toBe(false)
     expect(w.find('.control-form').exists()).toBe(false)
     expect(api.viewMcpToken).not.toHaveBeenCalled()
   })
@@ -79,5 +80,34 @@ describe('simple MCP access settings',()=>{
     expect(w.text()).toContain('连接中断')
     await button(w,'重试读取').trigger('click');await flushPromises()
     expect(w.find('[role="alert"]').exists()).toBe(false)
+  })
+  it('enables remote access using fresh settings and preserves the public scheme and port',async()=>{
+    const w=setup();await flushPromises()
+    vi.spyOn(window.location, 'href', 'get').mockReturnValue('https://gamer.example:18443/#/console')
+    api.getSystemSettings.mockResolvedValue({saved:{mcp_allow_remote:false,idle_power_secs:90},revision:'r2'})
+    api.saveSystemSettings.mockResolvedValue({active:{mcp_allow_remote:true}})
+    await w.get('input[type="checkbox"]').setValue(true);await flushPromises()
+    expect(api.saveSystemSettings).toHaveBeenCalledExactlyOnceWith({mcp_allow_remote:true,idle_power_secs:90},'r2')
+    expect(w.text()).toContain('https://gamer.example:18443/api/mcp')
+    expect(w.get('input[type="checkbox"]').element.checked).toBe(true)
+    expect(w.text()).toContain('已允许远程 MCP 连接')
+  })
+  it('keeps remote access disabled when the save fails and allows retry',async()=>{
+    const w=setup();await flushPromises()
+    api.saveSystemSettings.mockRejectedValueOnce(new Error('配置已发生变化，请重新读取后再保存'))
+    await w.get('input[type="checkbox"]').setValue(true);await flushPromises()
+    expect(w.get('input[type="checkbox"]').element.checked).toBe(false)
+    expect(w.get('[role="alert"]').text()).toContain('配置已发生变化')
+    api.saveSystemSettings.mockResolvedValue({active:{mcp_allow_remote:true}})
+    await w.get('input[type="checkbox"]').setValue(true);await flushPromises()
+    expect(w.get('input[type="checkbox"]').element.checked).toBe(true)
+  })
+  it('shows the listener restriction even if the remote setting is enabled',async()=>{
+    const w=setup();await flushPromises()
+    api.getMcpCatalog.mockResolvedValue({endpoint:'http://127.0.0.1:8443/api/mcp',local_only:true})
+    api.getSystemSettings.mockResolvedValue({active:{mcp_allow_remote:true}})
+    await button(w,'刷新').trigger('click');await flushPromises()
+    expect(w.text()).toContain('关闭 local_only 并重启服务')
+    expect(w.text()).toContain('http://127.0.0.1:8443/api/mcp')
   })
 })

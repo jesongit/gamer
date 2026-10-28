@@ -7,11 +7,14 @@ const { devices } = vi.hoisted(() => ({ devices: Array.from({ length: 9 }, (_, i
 vi.mock('./api', () => ({ api: new Proxy({}, {
   get(target, key) {
     if (target[key]) return target[key]
+    const settings = { mcp_allow_remote: false, idle_power_secs: 300, browser_idle_secs: 0, log_retain_days: 14,
+      compute_max_concurrency: 0, auth: { session_abs_secs: 43200, session_idle_secs: 7200, login_max_fails: 10, login_window_secs: 300 } }
     const responses = {
       listDevices: devices, getInputControl: { phase: 'idle', manual_allowed: true, generation: 0 },
       listPackages: { packages: [{ id: 'daily' }, { id: 'other' }] },
       listExtensions: { extensions: [], ui_contributions: [] },
       deviceRun: { active: false }, listScripts: [], listTemplates: [], packageSources: [],
+      getSystemSettings: { saved: settings, active: settings, revision: 'fixture', restart_required: false },
       getMedia: { id: 'clip', name: 'clip.mp4', width: 1920, height: 1080, duration_us: 1000000 },
     }
     return target[key] = vi.fn(async () => responses[key] ?? {})

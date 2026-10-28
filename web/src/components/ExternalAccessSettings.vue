@@ -1,10 +1,13 @@
 <script setup>
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../api'
 import { useConfirmDialog } from './ui/useConfirmDialog'
 
 const confirm = useConfirmDialog()
-const tokens = ref([]), endpoint = ref(''), secrets = ref({})
+const tokens = ref([]), localEndpoint = ref(''), secrets = ref({})
+const remoteAllowed = ref(false), localOnly = ref(false), settingsReady = ref(false)
+const endpoint = computed(() => remoteAllowed.value && !localOnly.value
+  ? new URL('/api/mcp', window.location.href).href : localEndpoint.value)
 const label = ref('外部 Agent'), lifetime = ref(0)
 const loading = ref(false), busy = ref(false), error = ref(''), note = ref(''), readFailed = ref(false)
 let disposed = false
@@ -12,19 +15,36 @@ let disposed = false
 async function refresh() {
   if (loading.value) return
   loading.value = true
-  const results = await Promise.allSettled([api.listMcpTokens(), api.getMcpCatalog()])
+  const results = await Promise.allSettled([api.listMcpTokens(), api.getMcpCatalog(), api.getSystemSettings()])
   if (!disposed) {
     if (results[0].status === 'fulfilled') {
       tokens.value = results[0].value.tokens || []
       const ids = new Set(tokens.value.map(token => token.token_id))
       secrets.value = Object.fromEntries(Object.entries(secrets.value).filter(([id]) => ids.has(id)))
     }
-    if (results[1].status === 'fulfilled') endpoint.value = results[1].value.endpoint || ''
+    if (results[1].status === 'fulfilled') {
+      localEndpoint.value = results[1].value.endpoint || ''
+      localOnly.value = !!results[1].value.local_only
+    }
+    settingsReady.value = results[2].status === 'fulfilled'
+    if (settingsReady.value) remoteAllowed.value = !!results[2].value.active.mcp_allow_remote
     const failed = results.find(result => result.status === 'rejected')
     readFailed.value = !!failed
     error.value = failed ? `读取失败：${failed.reason?.message || '请重试'}` : ''
   }
   loading.value = false
+}
+async function setRemote(event) {
+  const allow = event.target.checked
+  event.target.checked = remoteAllowed.value
+  await operation(async () => {
+    // Merge into the latest saved settings; never overwrite another settings form.
+    const current = await api.getSystemSettings()
+    const saved = await api.saveSystemSettings({ ...current.saved, mcp_allow_remote: allow }, current.revision)
+    if (disposed) return
+    remoteAllowed.value = !!saved.active.mcp_allow_remote
+    note.value = remoteAllowed.value ? '已允许远程 MCP 连接。' : '已关闭远程 MCP 连接，本机仍可使用。'
+  })
 }
 async function operation(action) {
   if (busy.value) return
@@ -90,8 +110,11 @@ onBeforeUnmount(() => { disposed = true; secrets.value = {} })
 <template>
   <section class="card external-access" aria-label="MCP 与外部控制">
     <div class="section-head"><h3>MCP 与外部控制</h3><button class="btn btn-sm" :disabled="loading || busy" @click="refresh">{{ loading ? '读取中…' : '刷新' }}</button></div>
+    <label class="remote-access"><input type="checkbox" :checked="remoteAllowed" :disabled="loading || busy || !settingsReady" aria-describedby="remote-access-help" @change="setRemote" />允许远程 MCP 连接</label>
+    <p id="remote-access-help" class="hint">开启后，其他电脑上的 Agent 可通过 Gamer 的网页地址连接，仍须提供有效令牌。保存后即时生效；跨公网请使用 HTTPS。</p>
+    <p v-if="localOnly" class="hint">服务当前仅监听本机。远程连接还需在配置中关闭 local_only 并重启服务。</p>
     <div class="endpoint"><span>连接地址</span><code>{{ endpoint || '正在读取…' }}</code><button class="btn btn-sm" :disabled="!endpoint" @click="copy(endpoint)">复制地址</button></div>
-    <p class="hint">令牌可使用当前 MCP 开放功能。使用 Streamable HTTP，认证为 Authorization: Bearer &lt;令牌&gt;。客户端须运行在 Gamer 所在主机。</p>
+    <p class="hint">令牌可使用当前 MCP 开放功能。使用 Streamable HTTP，认证为 Authorization: Bearer &lt;令牌&gt;。{{ remoteAllowed && !localOnly ? '远程连接时，请从其他电脑可访问的 Gamer 网页复制地址。' : '当前连接仅允许 Gamer 服务本机访问。' }}</p>
     <form class="token-form" @submit.prevent="create">
       <fieldset :disabled="busy">
         <label>名称<input v-model="label" class="input" maxlength="80" required autocomplete="off" /></label>
@@ -115,5 +138,6 @@ onBeforeUnmount(() => { disposed = true; secrets.value = {} })
 </template>
 
 <style scoped>
+.remote-access{display:flex;flex-direction:row;align-items:center;gap:8px;margin-top:16px;min-height:32px}.remote-access input{margin:0;accent-color:var(--accent)}
 .external-access{padding:16px;margin-bottom:16px}.section-head,.endpoint,.actions{display:flex;align-items:center;gap:10px}.section-head{justify-content:space-between}.section-head h3{font-size:14px;margin:0}.endpoint{flex-wrap:wrap;margin-top:18px;font-size:13px}.endpoint code{min-width:0;overflow-wrap:anywhere;user-select:all}.hint{font-size:12px;color:var(--text-2);line-height:1.6}.token-form{margin:18px 0 6px;padding:16px 0;border-top:1px solid var(--border)}fieldset{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;border:0;margin:0;padding:0;min-width:0}label{display:flex;flex-direction:column;gap:6px;font-size:13px;flex:1;min-width:160px}fieldset>.btn{margin-top:24px;min-height:32px}.tokens{list-style:none;padding:0;margin:0}.tokens>li{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:14px 0;border-top:1px solid var(--border)}.token-info{min-width:0;flex:1}.token-info>b,.token-info>.hint{display:block;overflow-wrap:anywhere}.token-info>b{font-size:13px;line-height:1.6}.token-secret{width:100%;margin-top:8px;font-family:var(--mono);user-select:all}.actions{flex-wrap:wrap;justify-content:flex-end}.error,.note{font-size:13px;line-height:1.6;overflow-wrap:anywhere}.error{color:var(--danger)}.error .btn{margin-left:8px}.note{color:var(--ok)}@media(max-width:600px){fieldset>label{flex-basis:100%}fieldset>.btn{margin-top:0}.tokens>li{flex-direction:column}.token-info{width:100%}.actions{justify-content:flex-start}.endpoint{align-items:flex-start}}
 </style>

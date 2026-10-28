@@ -19,16 +19,21 @@ pub(super) async fn post_message(
     peer: Option<ConnectInfo<SocketAddr>>,
     request: axum::extract::Request,
 ) -> Response {
-    process_request(&state.mcp, peer.map(|peer| peer.0), request).await
+    process_request(&state.mcp, &state.cfg, peer.map(|peer| peer.0), request).await
 }
 
 async fn process_request(
     service: &McpService,
+    cfg: &crate::config::Config,
     peer: Option<SocketAddr>,
     request: axum::extract::Request,
 ) -> Response {
-    // Reject remote/unauthenticated clients before polling or buffering a body.
-    let bearer = match crate::mcp::transport::access(request.headers(), peer) {
+    // Reject disallowed/unauthenticated clients before polling or buffering a body.
+    let bearer = match crate::mcp::transport::access(
+        request.headers(),
+        peer,
+        cfg.current_settings().mcp_allow_remote && !cfg.local_only,
+    ) {
         Ok(bearer) => bearer,
         Err((status, message)) => return transport_error(status, message),
     };
@@ -43,16 +48,21 @@ async fn process_request(
         }
     };
     // Authenticate again after the await, including revocation during upload.
-    process_message(service, peer, &parts.headers, &bytes).await
+    process_message(service, cfg, peer, &parts.headers, &bytes).await
 }
 
 async fn process_message(
     service: &McpService,
+    cfg: &crate::config::Config,
     peer: Option<SocketAddr>,
     headers: &HeaderMap,
     bytes: &[u8],
 ) -> Response {
-    let bearer = match crate::mcp::transport::access(headers, peer) {
+    let bearer = match crate::mcp::transport::access(
+        headers,
+        peer,
+        cfg.current_settings().mcp_allow_remote && !cfg.local_only,
+    ) {
         Ok(bearer) => bearer,
         Err((status, message)) => return transport_error(status, message),
     };
@@ -177,7 +187,16 @@ pub(super) async fn api_catalog(State(state): State<AppState>) -> Response {
                 .iter()
                 .flat_map(|tool| tool.required_scopes.iter().cloned())
                 .collect();
-            Json(json!({"endpoint":format!("http://127.0.0.1:{}/api/mcp",state.cfg.port),"protocol_version":crate::mcp::PROTOCOL_VERSION,"tools":tools,"scopes":scopes})).into_response()
+            Json(json!({
+                "endpoint": format!("http://127.0.0.1:{}/api/mcp", state.cfg.port),
+                "endpoint_path": "/api/mcp",
+                "remote_allowed": state.cfg.current_settings().mcp_allow_remote,
+                "local_only": state.cfg.local_only,
+                "protocol_version": crate::mcp::PROTOCOL_VERSION,
+                "tools": tools,
+                "scopes": scopes,
+            }))
+            .into_response()
         }
         Err(error) => mcp_error(error),
     }
@@ -232,7 +251,13 @@ mod tests {
         peer: Option<ConnectInfo<SocketAddr>>,
         request: axum::extract::Request,
     ) -> Response {
-        process_request(&service, peer.map(|peer| peer.0), request).await
+        process_request(
+            &service,
+            &Default::default(),
+            peer.map(|peer| peer.0),
+            request,
+        )
+        .await
     }
     fn request(method: &str, bearer: Option<&str>, body: Value) -> Request<Body> {
         let mut request = Request::builder()
@@ -359,6 +384,73 @@ mod tests {
             .unwrap();
             assert_eq!(response.status(), expected);
         }
+    }
+
+    #[tokio::test]
+    async fn disabling_remote_access_during_upload_rejects_before_dispatch() {
+        let root = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config {
+            source_path: Some(root.path().join("config.toml")),
+            mcp_allow_remote: true,
+            ..Default::default()
+        };
+        std::fs::write(
+            cfg.source_path.as_ref().unwrap(),
+            toml::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
+        let service = Arc::new(
+            McpService::open(
+                root.path(),
+                ServerInfo {
+                    name: "fixture".into(),
+                    version: "1".into(),
+                },
+            )
+            .unwrap(),
+        );
+        let token = service
+            .credentials()
+            .create(CreateTokenRequest {
+                label: "upload fixture".into(),
+                scopes: ["observe".into()].into(),
+                allowed: Default::default(),
+                expires_in_seconds: 60,
+            })
+            .unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (continue_tx, continue_rx) = tokio::sync::oneshot::channel();
+        let mut request = request("POST", Some(&token.token), json!({}));
+        request
+            .headers_mut()
+            .insert(header::HOST, "192.0.2.10:18443".parse().unwrap());
+        *request.body_mut() = Body::from_stream(futures_util::stream::once(async move {
+            started_tx.send(()).unwrap();
+            continue_rx.await.unwrap();
+            Ok::<_, std::io::Error>(Bytes::from_static(
+                br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
+            ))
+        }));
+        let consumer = cfg.clone();
+        let handling = tokio::spawn(async move {
+            process_request(
+                &service,
+                &consumer,
+                Some("192.0.2.20:1234".parse().unwrap()),
+                request,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let before = cfg.settings_view().unwrap();
+        let mut settings = before.saved;
+        settings.mcp_allow_remote = false;
+        cfg.save_settings(settings, &before.revision).unwrap();
+        continue_tx.send(()).unwrap();
+        assert_eq!(handling.await.unwrap().status(), StatusCode::FORBIDDEN);
     }
 
     struct ImageFixture;

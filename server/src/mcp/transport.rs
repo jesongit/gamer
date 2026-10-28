@@ -1,4 +1,4 @@
-//! Independent loopback Streamable HTTP admission. No admin session or proxy
+//! Independent Streamable HTTP admission, local by default. No admin session or proxy
 //! header is accepted as an external MCP identity.
 use axum::http::{header, HeaderMap, StatusCode};
 use std::net::{IpAddr, SocketAddr};
@@ -20,8 +20,9 @@ fn local_host(url: &reqwest::Url) -> bool {
 pub(crate) fn access(
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
+    allow_remote: bool,
 ) -> Result<&str, (StatusCode, &'static str)> {
-    if !peer.is_some_and(|peer| is_loopback(peer.ip())) {
+    if !peer.is_some_and(|peer| allow_remote || is_loopback(peer.ip())) {
         return Err((
             StatusCode::FORBIDDEN,
             "MCP connections must originate from loopback",
@@ -44,15 +45,21 @@ pub(crate) fn access(
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !reqwest::Url::parse(&format!("http://{host}")).is_ok_and(|url| {
-        local_host(&url)
-            && url.username().is_empty()
-            && url.password().is_none()
-            && url.path() == "/"
-            && url.query().is_none()
-            && url.fragment().is_none()
-    }) {
-        return Err((StatusCode::FORBIDDEN, "MCP Host must be a loopback address"));
+    if host.parse::<axum::http::uri::Authority>().is_err()
+        || !reqwest::Url::parse(&format!("http://{host}")).is_ok_and(|url| {
+            (allow_remote || local_host(&url))
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none()
+        })
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Invalid MCP Host or remote MCP access is disabled",
+        ));
     }
     // This also rejects mismatched ports and duplicate/opaque origins. Keep
     // the normal same-origin policy shared with management input endpoints.
@@ -65,7 +72,7 @@ pub(crate) fn access(
             .ok()
             .and_then(|origin| reqwest::Url::parse(origin).ok());
         if !parsed.is_some_and(|url| {
-            local_host(&url)
+            (allow_remote || local_host(&url))
                 && matches!(url.scheme(), "http" | "https")
                 && url.username().is_empty()
                 && url.password().is_none()
@@ -75,7 +82,7 @@ pub(crate) fn access(
         }) {
             return Err((
                 StatusCode::FORBIDDEN,
-                "MCP Origin must be a loopback origin",
+                "Invalid MCP Origin or remote MCP access is disabled",
             ));
         }
     }
@@ -158,9 +165,9 @@ mod tests {
     fn requires_real_loopback_bearer_same_origin_and_the_declared_protocol() {
         let peer = Some("127.0.0.1:1234".parse().unwrap());
         let valid = headers();
-        assert_eq!(access(&valid, peer).unwrap(), "test");
-        assert!(access(&valid, None).is_err());
-        assert!(access(&valid, Some("192.0.2.1:1".parse().unwrap())).is_err());
+        assert_eq!(access(&valid, peer, false).unwrap(), "test");
+        assert!(access(&valid, None, false).is_err());
+        assert!(access(&valid, Some("192.0.2.1:1".parse().unwrap()), false).is_err());
         for (name, value) in [
             ("forwarded", "for=127.0.0.1"),
             ("origin", "https://attacker.invalid"),
@@ -172,15 +179,72 @@ mod tests {
                 axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
                 value.parse().unwrap(),
             );
-            assert!(access(&changed, peer).is_err(), "{name}");
+            assert!(access(&changed, peer, false).is_err(), "{name}");
         }
         let mut cookie = headers();
         cookie.remove(header::AUTHORIZATION);
         cookie.insert(header::COOKIE, "gb_sid=admin".parse().unwrap());
         cookie.insert("x-admin-token", "admin".parse().unwrap());
         assert_eq!(
-            access(&cookie, peer).unwrap_err().0,
+            access(&cookie, peer, false).unwrap_err().0,
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    #[test]
+    fn remote_opt_in_keeps_bearer_host_origin_and_proxy_checks() {
+        for (peer, host) in [
+            ("192.0.2.20:1234", "192.0.2.10:18443"),
+            ("[2001:db8::20]:1234", "[2001:db8::10]:18443"),
+            ("127.0.0.1:1234", "gamer.example:18443"),
+        ] {
+            let peer = Some(peer.parse().unwrap());
+            let mut valid = headers();
+            valid.insert(header::HOST, host.parse().unwrap());
+            assert!(access(&valid, peer, false).is_err());
+            assert_eq!(access(&valid, peer, true).unwrap(), "test");
+            assert!(access(&valid, None, true).is_err());
+            valid.insert(header::ORIGIN, format!("https://{host}").parse().unwrap());
+            assert_eq!(access(&valid, peer, true).unwrap(), "test");
+            for (name, value) in [
+                ("origin", "https://attacker.invalid"),
+                ("origin", "null"),
+                ("origin", "https://gamer.example:9999"),
+                ("origin", "https://user:pass@gamer.example:18443"),
+                ("forwarded", "for=127.0.0.1"),
+                ("x-forwarded-for", "127.0.0.1"),
+            ] {
+                let mut changed = valid.clone();
+                changed.insert(
+                    axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                    value.parse().unwrap(),
+                );
+                assert!(access(&changed, peer, true).is_err(), "{name}: {value}");
+            }
+            valid.remove(header::ORIGIN);
+            valid.remove(header::AUTHORIZATION);
+            valid.insert(header::COOKIE, "gb_session=admin".parse().unwrap());
+            valid.insert("x-admin-token", "admin".parse().unwrap());
+            assert_eq!(
+                access(&valid, peer, true).unwrap_err().0,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        let peer = Some("192.0.2.20:1234".parse().unwrap());
+        for host in [
+            "",
+            "user:pass@gamer.example",
+            "gamer.example/path",
+            "gamer.example?x=1",
+            "gamer.example#x",
+            "gamer.example:invalid",
+        ] {
+            let mut invalid = headers();
+            invalid.insert(header::HOST, host.parse().unwrap());
+            assert!(access(&invalid, peer, true).is_err(), "{host}");
+        }
+        let mut duplicate = headers();
+        duplicate.append(header::HOST, "gamer.example".parse().unwrap());
+        assert!(access(&duplicate, peer, true).is_err());
     }
 }

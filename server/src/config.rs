@@ -206,6 +206,9 @@ pub struct Config {
     /// 仅本机访问：HTTP 和 WebRTC 都只监听回环地址；GAMER_LOCAL_ONLY 可覆盖。
     #[serde(default)]
     pub local_only: bool,
+    /// Opt-in remote MCP access; independent Bearer authentication still applies.
+    #[serde(default)]
+    pub mcp_allow_remote: bool,
     /// Read-only plugin source addresses and an explicit Docker bridge exception.
     #[serde(default)]
     pub local_read: LocalReadConfig,
@@ -324,6 +327,7 @@ impl Default for Config {
             runtime_selections: Default::default(),
             port: 8443,
             local_only: false,
+            mcp_allow_remote: false,
             local_read: LocalReadConfig::default(),
             scheduler_enabled: true,
             data_dir: PathBuf::from("./data"),

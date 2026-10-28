@@ -36,6 +36,7 @@ async fn system_settings_require_auth_preserve_secrets_and_apply_only_valid_save
     let mut values = original["saved"].clone();
     values["idle_power_secs"] = serde_json::json!(60);
     values["compute_max_concurrency"] = serde_json::json!(2);
+    values["mcp_allow_remote"] = serde_json::json!(true);
     let body =
         serde_json::json!({"settings":values,"expected_revision":original["revision"]}).to_string();
     let result = send(
@@ -53,6 +54,7 @@ async fn system_settings_require_auth_preserve_secrets_and_apply_only_valid_save
     let saved = json_body(result).await;
     assert_eq!(saved["restart_required"], true);
     assert_eq!(cfg.current_settings().idle_power_secs, 60);
+    assert!(cfg.current_settings().mcp_allow_remote);
     assert_eq!(
         send(
             &t.app,
