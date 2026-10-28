@@ -1,0 +1,73 @@
+{
+  "source_commit": "6fff7412272a1511d62e4fc6d68a501e137aa0a5",
+  "plugin_commit": "66fae9611583305e4c7d1fc51ba47630e0b4adbf",
+  "application_version": "0.5.6",
+  "image": "posase/gamer:v1.0.7",
+  "release_tag": "v0.5.6",
+  "clean_git_archives": true,
+  "digest": "sha256:fda16f9591e7f79be55133a4c8b6bf826b086147f2449bc3a6c33af650292a77",
+  "platform": "linux/amd64",
+  "verified_at_utc": "2026-10-28T12:02:54.488790+00:00",
+  "public": true,
+  "anonymous_pull_verified": true,
+  "pull_layers_already_cached": true,
+  "user_data_included": false,
+  "production_updated": false,
+  "real_accounts_tested": false,
+  "schema": 7,
+  "runtime_acceptance": "passed",
+  "prod_http_login": "passed",
+  "https_cookie_override": "passed",
+  "enabled_synthetic_tasks_preserved": 4,
+  "scheduler_enabled_preserved": true,
+  "cold_backup_restore_and_v106_rollback": "passed",
+  "package_import": {
+    "actual_core_import": 201,
+    "bad_hash": 400,
+    "overwrite_confirmation": 409,
+    "id": "hsr",
+    "version": "1.0.2",
+    "sha256": "a4197383f1626f4a3d3977b7340e0c08aadb4dd966a294e710e1406ee0342353"
+  },
+  "official_plugins": {
+    "gamer-keymap": "0.1.6",
+    "gamer-live": "0.2.19",
+    "gamer-notify": "0.1.2",
+    "gamer-package-publisher": "0.1.0",
+    "gamer-video": "0.2.6",
+    "gamer-yaml": "0.3.26"
+  },
+  "official_plugin_installation": "passed",
+  "new_login_function_registered": true,
+  "latest_alias": "posase/gamer:latest",
+  "market_source_acceptance": {
+    "real_core_gitea_downloads": true,
+    "plugin_archives": 6,
+    "bad_plugin_archive": 502,
+    "package_import": 201,
+    "presets_persisted_after_restart": true,
+    "request_count": 12,
+    "no_upstream_network": true
+  },
+  "simple_mcp_acceptance": {
+    "permanent_token": true,
+    "encrypted_at_rest": true,
+    "view_after_restart": true,
+    "delete_revokes": true
+  },
+  "retired_plugin_uninstall": {
+    "versions": 2,
+    "remaining": 0,
+    "private_data_preserved": true
+  },
+  "legacy_mcp_credentials_preserved": true,
+  "previous_tags_unchanged": {
+    "v1.0": "sha256:d7e51ce9ca289e88ec57330538d97496c10d66bd2a8e7d93f0b4b3580acb0bb5",
+    "v1.0.1": "sha256:64c01ab78b3693b1694e689ac0c257b574083f51f0459784b135329ca266511c",
+    "v1.0.2": "sha256:d15f0b1ac1e06e0d3bb6a9fcf9af09924072bfa5d12417a80db69ca6a4e1bbda",
+    "v1.0.3": "sha256:c8b537b3e904a3c684884cc3af2569322239cafc8272d1c648f26c1a947aec0a",
+    "v1.0.4": "sha256:91ee6e7e7ce73d6e1279af82c7344770062f907dae7352ee7f318658aeae468e",
+    "v1.0.5": "sha256:9cd5a768085521526c88350b884165f6ccc276b0f237e8c8a13686c9646cc57e",
+    "v1.0.6": "sha256:2eaf7cdde25c4443f547e809f6b6987a81c9e8b83ba66d01a5037966fb3cada4"
+  }
+}
