@@ -10,7 +10,7 @@ Simplified Chinese OCR. A separate browser or VNC container is not required.
 docker pull --platform linux/amd64 posase/gamer:v1.0.6
 ```
 
-Docker release **v1.0.6** packages application **0.5.3**. Plugin and configuration
+Docker release **v1.0.6** packages application **0.5.4**. Plugin and configuration
 pages now offer a source dropdown for GitHub, LAN Gitea / Forgejo and custom URL
 presets. Presets are shared on the server; each browser remembers its own choice.
 Catalogs and archives are fetched by the server, with fixed size and SHA-256
