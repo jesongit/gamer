@@ -1,20 +1,21 @@
 # 配置仓库与发布
 
-Gamer 支持公开 GitHub 配置仓库、HTTPS 前缀镜像和独立配置目录。官方源为 `https://github.com/jesongit/gamer-packages`；添加、停用、移除源不会删除已安装配置。
+Gamer 支持公开 GitHub、Gitea / Forgejo 配置仓库、HTTPS 前缀镜像和独立配置目录。官方源为 `https://github.com/jesongit/gamer-packages`；来源预设的更改不会删除已安装配置。
 
 ## 下载配置
 
-在“配置包”页添加以下任一地址；通过实际读取 `packages.json` 校验目录格式，不限定镜像域名：
+在“配置包”页的“配置来源”下拉框选择 GitHub、内网或自己的预设。点击“管理预设”可添加、编辑或删除自定义来源；预设保存在服务端，当前选择由各浏览器分别记住。插件页使用相同方式，详情见 [来源预设](market-sources.md)。支持以下地址，通过实际读取 `packages.json` 校验目录格式：
 
 - GitHub：`https://github.com/owner/repo`、`owner/repo` 或 `git@github.com:owner/repo.git`，读取最新正式 Release。
+- Gitea / Forgejo：例如 `http://192.168.31.10:13000/posase/gamer-packages`，可带 `.git` 后缀。读取包含 `packages.json` 的最近正式 Release，并从该 Release 的实际附件地址下载。
 - 前缀镜像：`https://mirror.example/https://github.com/owner/repo`，也支持 `https://mirror.example/cache/https://github.com/owner/repo`。先探测镜像的 Release 接口；仅支持附件下载的镜像则读取 `releases/latest/download/packages.json`。请求始终经过所填镜像。
 - 独立目录：`https://mirror.example/configs/packages.json`，或目录 `https://mirror.example/configs/`（自动补 `packages.json`）。归档与目录 JSON 放在同一目录内。
 
-软件显示包版本、适用应用、依赖插件与来源；下载时核对归档大小、SHA256 和包内元数据，再使用原有导入机制。远端源地址须使用 HTTPS，不能含账号密码、查询参数或片段。下载者无需 GitHub 登录或 gh；私有仓库和其他代码托管平台的专有 API 不受支持，可改为托管相同格式的独立目录。网络失败显示已校验的进程内缓存和错误提示；某个源失败不影响其他源。
+软件显示包版本、适用应用、依赖插件与来源；下载时核对归档大小、SHA256 和包内元数据，再使用原有导入机制。来源须使用 HTTPS；私有或回环 IP 地址可使用 HTTP，不能含账号密码、查询参数或片段。下载者无需登录或 gh；首版不保存私有仓库凭据。网络失败显示当前来源的已校验缓存和错误提示，不会改用另一来源。
 
 离线导入直接选择本地 `.gamerpkg` 文件。通过局域网 HTTP 访问 Gamer、浏览器未开放 WebCrypto 时，前端使用随应用打包的 SHA-256 实现继续校验，无需额外联网。
 
-同 ID 配置按来源分别显示，但本地 Package ID 仍唯一。安装已有 ID 会明确提示覆盖所有本地修改，确认前可先导出备份。安装配置不会自动运行，也不会自动安装依赖插件。
+市场一次显示一个所选来源，本地 Package ID 仍唯一。安装已有 ID 会明确提示覆盖所有本地修改，确认前可先导出备份。安装配置不会自动运行，也不会自动安装依赖插件。
 
 ## 发布配置
 
