@@ -1,17 +1,17 @@
 {
   "schema_version": 1,
-  "tag": "gamer-yaml-v0.3.26",
-  "plugin_commit": "66fae9611583305e4c7d1fc51ba47630e0b4adbf",
+  "tag": "gamer-video-v0.2.9",
+  "plugin_commit": "e5cc8f1e274543beb9efcc00e84e8f55785e0811",
   "registry": {
     "name": "registry.json",
-    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-yaml-v0.3.26/registry.json",
+    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-video-v0.2.9/registry.json",
     "size": 7891,
-    "sha256": "374c88d26120dba6d9b084350a723cd1c769a8d4513985b593814b7cdd77abb6"
+    "sha256": "c641aa49c165fc4eb123e587978349c6ae5b2332d34e76b4ca79ce408f077b4e"
   },
   "bundle": {
-    "name": "gamer-official-plugins-0.3.26-windows-x64.zip",
-    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-yaml-v0.3.26/gamer-official-plugins-0.3.26-windows-x64.zip",
-    "size": 651604,
-    "sha256": "9690156ba1b65d6fc269c73da2dac6a797634cdecd69f969ba2b0adeebd3e2ef"
+    "name": "gamer-official-plugins-0.2.9-windows-x64.zip",
+    "url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-video-v0.2.9/gamer-official-plugins-0.2.9-windows-x64.zip",
+    "size": 651440,
+    "sha256": "dae141111b341c3518854b6edef7a557b30b4f24fddf31a062d3a0d3bdb67252"
   }
 }
