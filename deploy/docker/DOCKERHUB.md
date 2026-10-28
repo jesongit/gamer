@@ -17,13 +17,22 @@ protocol and published port. Independent Bearer authentication, token revocation
 object permissions and control barriers remain enforced. Remote access is off by
 default (`mcp_allow_remote = false`); an installation using `local_only = true`
 still accepts local connections only.
+Core MCP can now find original recordings and media by name, read recorded events
+and exact frames, preview schedule triggers, and recognize original media frames
+with OCR. These are scoped evidence tools and do not replay recorded input.
 Plugin and configuration sources still support GitHub, LAN and custom presets.
-The official companion catalog provides YAML 0.3.26, Live 0.2.19 and Notify 0.1.2;
-install or update plugins separately through the plugin page. Configuration
-packages are separate; the latest HSR package is 1.0.2. Database schema remains 7.
+The official companion catalog provides Video 0.2.9, Keymap 0.1.9, YAML 0.3.27,
+Live 0.2.20, Notify 0.1.3 and Package Publisher 0.1.1. Video adds sample-name search and Keymap provides an
+authoring grammar tool; both require application 0.5.8. Update the application
+first, then install or update plugins through the plugin page. Configuration
+packages are separate from plugin updates. Database schema remains 7.
+Rust and frontend dependencies have been upgraded, with strict security audits
+covering six Rust and seven npm lockfiles without advisory exemptions. The release
+includes a dependency inventory and audit receipt. ZIP imports support Store and
+Deflate, the formats used by the official packaging tools.
 The `latest` image tag follows this stable release; versioned tags stay immutable.
 The published architecture is **linux/amd64**, for Intel/AMD x86_64 hosts.
-The previous `v1.0`, `v1.0.1`, `v1.0.2`, `v1.0.3`, `v1.0.4`, `v1.0.5`, `v1.0.6` and `v1.0.7` tags remain unchanged. No ARM64 release is claimed.
+The previous `v1.0`, `v1.0.1`, `v1.0.2`, `v1.0.3`, `v1.0.4`, `v1.0.5`, `v1.0.6`, `v1.0.7` and `v1.0.8` tags remain unchanged. No ARM64 release is claimed.
 
 The v1.0.9 deployment bundle includes the unchanged Chromium seccomp file:
 https://github.com/jesongit/gamer/releases/tag/docker-v1.0.9
@@ -70,15 +79,15 @@ Keep any additional custom ports or environment settings from your original comm
 ```bash
 image=posase/gamer:v1.0.9
 docker pull "$image" &&
-docker run --rm --entrypoint cat "$image" /app/chromium-seccomp.json > gamer-seccomp-v108.json &&
+docker run --rm --entrypoint cat "$image" /app/chromium-seccomp.json > gamer-seccomp-v109.json &&
 docker stop -t 90 gamer &&
 (umask 077; docker run --rm --memory 512m --memory-swap 512m \
   --volumes-from gamer:ro --entrypoint python3 "$image" \
-  /app/tools/volume-transfer.py export --gzip > "gamer-before-v108-$(date +%s).tar.gz") &&
-docker rename gamer gamer-before-v108 &&
-docker update --restart=no gamer-before-v108 &&
+  /app/tools/volume-transfer.py export --gzip > "gamer-before-v109-$(date +%s).tar.gz") &&
+docker rename gamer gamer-before-v109 &&
+docker update --restart=no gamer-before-v109 &&
 docker run -d --name gamer --init --restart unless-stopped --stop-timeout 90 --shm-size 1g \
-  --volumes-from gamer-before-v108 --security-opt "seccomp=$PWD/gamer-seccomp-v108.json" \
+  --volumes-from gamer-before-v109 --security-opt "seccomp=$PWD/gamer-seccomp-v109.json" \
   -p 18443:8443 -e GAMER_PROFILE=prod -e GAMER_COOKIE_SECURE=false \
   --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 "$image"
 ```
