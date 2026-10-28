@@ -656,6 +656,34 @@ mod tests {
         assert_eq!(*runtime.stops.lock().unwrap(), 2);
     }
 
+    #[tokio::test]
+    async fn uninstall_all_running_versions_stops_once_without_starting_old_version() {
+        let temp = TempDir::new().unwrap();
+        let runtime = Arc::new(CountingRuntime::accepting_versions(["1.0.0", "1.1.0"]));
+        let service = ExtensionService::new(
+            ExtensionStore::new(temp.path()),
+            runtime.clone(),
+            CapabilityRegistry::default(),
+        );
+        let first = archive(
+            &manifest("com.example.extension", "1.0.0", &[], "^1.0"),
+            VALID_WASM,
+        );
+        let installed = service.install(&first).await.unwrap();
+        service.enable(installed.id()).await.unwrap();
+        service.start(installed.id()).await.unwrap();
+        let second = archive(
+            &manifest("com.example.extension", "1.1.0", &[], "^1.0"),
+            VALID_WASM,
+        );
+        service.update(&second).await.unwrap();
+        assert!(service.uninstall_all(installed.id()).await.unwrap());
+        assert_eq!(*runtime.starts.lock().unwrap(), 2);
+        assert_eq!(*runtime.stops.lock().unwrap(), 2);
+        assert!(service.list().unwrap().is_empty());
+        assert!(service.ui_contributions().unwrap().is_empty());
+    }
+
     /// UI 贡献只在 Running 可见（Phase 1 语义收紧）：Enabled 不再出现面板、
     /// 不再服务 ui 资产；stop/disable/uninstall 全部撤销贡献。
     #[tokio::test]

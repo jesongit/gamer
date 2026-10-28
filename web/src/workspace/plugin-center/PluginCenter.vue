@@ -505,9 +505,12 @@ async function uninstall(plugin, deleteData) {
   if (!beginOperation(operationKey)) return
   clearMessages()
   try {
-    const response = await props.apiClient.uninstallExtension(plugin.id, plugin.active_version || plugin.version, { deleteData })
+    const response = await props.apiClient.uninstallPlugin(plugin.id, { deleteData })
     emit('changed')
     const refreshResult = await refresh()
+    if (refreshResult.ok && installedPlugin(plugin.id)) {
+      throw new Error('卸载后插件仍处于已安装状态，请刷新后重试。')
+    }
     showMutationResult(describeExtensionMutation('uninstall', response, { plugin, deleteData }), refreshResult)
   } catch (errorValue) { error.value = messageFor(errorValue) } finally { endOperation(operationKey) }
 }

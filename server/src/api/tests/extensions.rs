@@ -1,5 +1,34 @@
 use super::*;
 
+#[tokio::test]
+async fn uninstall_all_installations_http_removes_retired_versions_and_preserves_private_data() {
+    let t = build_app("uninstall-all-http", test_credential("admin123"), Default::default());
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    // Include an ID that is also a static management route. Plugin-level
+    // removal must work for every valid ID, without routing it to /extensions/ui.
+    for id in ["gamer-ai", "ui"] {
+        for version in ["1.0.0", "2.0.0"] {
+            let root = t.dir.join("extensions").join(id).join(version);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("manifest.toml"), format!(
+                "manifest_version=2\nid='{id}'\nversion='{version}'\nname='Historical plugin'\nentry='plugin.wasm'\npermissions=['ai.connect']\n"
+            )).unwrap();
+            std::fs::write(root.join("plugin.wasm"), b"\0asm\x01\0\0\0").unwrap();
+        }
+        let private = t.dir.join("extension-data").join(id).join("settings.dat");
+        std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+        std::fs::write(&private, b"private fixture bytes").unwrap();
+        let url = format!("/api/extensions/{id}/installations?delete_data=0");
+        assert_eq!(send(&t.app, req("DELETE", &url, None, &[], None)).await.status(), StatusCode::UNAUTHORIZED);
+        let response = send(&t.app, req("DELETE", &url, None, &json_headers(sid.clone()), None)).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let listed = json_body(get_json(&t, &sid, "/api/extensions/management").await).await;
+        assert!(!listed["extensions"].as_array().unwrap().iter().any(|plugin| plugin["id"] == id));
+        assert!(!t.dir.join("extensions").join(id).exists());
+        assert_eq!(std::fs::read(&private).unwrap(), b"private fixture bytes");
+    }
+}
+
 /// 把扩展生命周期状态直写 state.json（模拟 guest 成功启动后的 Running——
 /// 桩 wasm 走不到 Running，但 UI 注册表按 store 状态刷新，语义等价）。
 fn mark_extension_state(test_app: &TestApp, id: &str, state: &str) {

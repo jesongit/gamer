@@ -1,46 +1,83 @@
 // @vitest-environment happy-dom
 import { mount, flushPromises } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+const { decision } = vi.hoisted(() => ({ decision: vi.fn(async () => true) }))
+vi.mock('./components/ui/useConfirmDialog', () => ({ useConfirmDialog: () => decision }))
 import ExternalAccessSettings from './components/ExternalAccessSettings.vue'
 import { api } from './api'
-vi.mock('./api', () => ({ api: Object.fromEntries(['listMcpTokens','listExternalControl','listDevices','listPackages','listExtensions','listRunners','getMcpCatalog','createMcpToken','revokeMcpToken','startExternalControl','externalControlAction'].map(name => [name,vi.fn()])) }))
+vi.mock('./api', () => ({ api: Object.fromEntries(['listMcpTokens','getMcpCatalog','createMcpToken','viewMcpToken','revokeMcpToken'].map(name => [name,vi.fn()])) }))
 const wrappers=[]
-afterEach(() => { wrappers.splice(0).forEach(w=>w.unmount());vi.clearAllMocks() })
-function setup() {
-  api.listMcpTokens.mockResolvedValue({tokens:[{token_id:'one',label:'Selected Agent',expires_at:Math.floor(Date.now()/1000)+3600,revoked:false,scopes:['control','observe'],allowed:{devices:['device-one'],packages:['default'],plugins:[],runners:[],runs:[],tasks:[],media:[]}}]})
-  api.listExternalControl.mockResolvedValue({sessions:[]})
-  api.listDevices.mockResolvedValue([{id:'device-one',name:'Allowed target'},{id:'device-two',name:'Other target'}])
-  api.listPackages.mockResolvedValue({packages:[{id:'default',name:'Default'}]})
-  api.listExtensions.mockResolvedValue({extensions:[]});api.listRunners.mockResolvedValue([])
+afterEach(() => { wrappers.splice(0).forEach(w=>w.unmount());vi.resetAllMocks() })
+const token={token_id:'one',label:'我的 Agent',expires_at:0,revoked:false,can_view:true}
+function setup(tokens=[token], failRead=false) {
+  decision.mockResolvedValue(true)
+  api.listMcpTokens.mockResolvedValue({tokens})
+  if (failRead) api.listMcpTokens.mockRejectedValueOnce(new Error('连接中断'))
   api.getMcpCatalog.mockResolvedValue({endpoint:'http://127.0.0.1:8443/api/mcp',tools:[]})
   const wrapper=mount(ExternalAccessSettings);wrappers.push(wrapper);return wrapper
 }
-describe('external Agent management',()=>{
-  it('loads only metadata until the user selects an authorized target and starts control',async()=>{
+function button(w,text) { return w.findAll('button').find(b=>b.text()===text) }
+
+describe('simple MCP access settings',()=>{
+  it('shows connection and expiry without permission selectors or control forms',async()=>{
     const w=setup();await flushPromises()
-    expect(api.startExternalControl).not.toHaveBeenCalled()
-    expect(api.createMcpToken).not.toHaveBeenCalled()
-    const start=w.findAll('button').find(b=>b.text()==='开始外部控制')
-    expect(start.attributes('disabled')).toBeDefined()
-    const selectors=w.findAll('select')
-    await selectors[0].setValue('one');await flushPromises()
-    expect(selectors[1].text()).toContain('Allowed target')
-    expect(selectors[1].text()).not.toContain('Other target')
-    await selectors[1].setValue('device-one')
-    api.startExternalControl.mockResolvedValue({session:{state:'starting'}})
-    await w.get('.control-form').trigger('submit');await flushPromises()
-    expect(api.startExternalControl).toHaveBeenCalledExactlyOnceWith({token_id:'one',device_id:'device-one',content_package:null,ttl_seconds:300})
+    expect(w.text()).toContain('http://127.0.0.1:8443/api/mcp')
+    expect(w.text()).toContain('不过期')
+    expect(w.find('select').exists()).toBe(false)
+    expect(w.find('input[type="checkbox"]').exists()).toBe(false)
+    expect(w.find('.control-form').exists()).toBe(false)
+    expect(api.viewMcpToken).not.toHaveBeenCalled()
   })
-  it('creates a token with explicit empty object ranges and hides its secret on request',async()=>{
-    const w=setup();await flushPromises()
-    await w.findAll('button').find(b=>b.text()==='创建令牌').trigger('click')
-    await w.get('input[placeholder="例如：我的自动化 Agent"]').setValue('Read only Agent')
-    api.createMcpToken.mockResolvedValue({token:'one-time-secret',metadata:{token_id:'new'}})
+  it('creates a permanent token with only name and lifetime',async()=>{
+    const w=setup([]);await flushPromises()
+    api.createMcpToken.mockResolvedValue({token:'synthetic-secret',metadata:{token_id:'new'}})
+    api.listMcpTokens.mockResolvedValue({tokens:[{...token,token_id:'new'}]})
+    await w.find('input:not([type])').setValue('我的 Agent')
     await w.get('.token-form').trigger('submit');await flushPromises()
-    expect(api.createMcpToken).toHaveBeenCalledExactlyOnceWith({label:'Read only Agent',scopes:['observe'],allowed:{devices:[],packages:[],plugins:[],runners:[],runs:[],tasks:[],media:[]},expires_in_seconds:86400})
-    expect(w.get('[aria-label="新建 MCP 令牌"]').element.value).toBe('one-time-secret')
-    await w.findAll('button').find(b=>b.text()==='我已保存，隐藏令牌').trigger('click')
-    expect(w.find('[aria-label="新建 MCP 令牌"]').exists()).toBe(false)
-    expect(api.startExternalControl).not.toHaveBeenCalled()
+    expect(api.createMcpToken).toHaveBeenCalledExactlyOnceWith({label:'我的 Agent',expires_in_seconds:0})
+    expect(w.get('.token-secret').element.value).toBe('synthetic-secret')
+  })
+  it('converts finite hours and rejects negative lifetime',async()=>{
+    const w=setup([]);await flushPromises()
+    api.createMcpToken.mockResolvedValue({token:'synthetic',metadata:{token_id:'new'}})
+    await w.get('input[type="number"]').setValue(48)
+    await w.get('form').trigger('submit');await flushPromises()
+    expect(api.createMcpToken).toHaveBeenCalledWith({label:'外部 Agent',expires_in_seconds:172800})
+    await w.get('input[type="number"]').setValue(-1)
+    await w.get('form').trigger('submit');await flushPromises()
+    expect(api.createMcpToken).toHaveBeenCalledTimes(1)
+    expect(w.get('[role="alert"]').text()).toContain('0～8784')
+  })
+  it('views an existing secret on demand and hides it again',async()=>{
+    const w=setup();await flushPromises()
+    api.viewMcpToken.mockResolvedValue({token:'returned-secret'})
+    await button(w,'查看').trigger('click');await flushPromises()
+    expect(api.viewMcpToken).toHaveBeenCalledExactlyOnceWith('one')
+    expect(w.get('.token-secret').element.value).toBe('returned-secret')
+    await button(w,'隐藏').trigger('click');await flushPromises()
+    expect(w.find('.token-secret').exists()).toBe(false)
+  })
+  it('deletes the record after success and keeps it when deletion fails',async()=>{
+    const w=setup();await flushPromises()
+    api.revokeMcpToken.mockRejectedValueOnce(new Error('写入失败'))
+    await button(w,'删除').trigger('click');await flushPromises()
+    expect(w.findAll('.tokens>li')).toHaveLength(1)
+    expect(w.text()).toContain('写入失败')
+    api.revokeMcpToken.mockResolvedValue({deleted:true})
+    await button(w,'删除').trigger('click');await flushPromises()
+    expect(api.revokeMcpToken).toHaveBeenCalledWith('one')
+    expect(w.findAll('.tokens>li')).toHaveLength(0)
+  })
+  it('preserves an old hash-only credential with a clear unavailable-view state',async()=>{
+    const w=setup([{...token,can_view:false}]);await flushPromises()
+    expect(button(w,'查看').attributes('disabled')).toBeDefined()
+    expect(button(w,'删除').attributes('disabled')).toBeUndefined()
+    expect(w.text()).toContain('旧令牌无法查看原文')
+  })
+  it('retries a failed initial read',async()=>{
+    const w=setup([token],true);await flushPromises()
+    expect(w.text()).toContain('连接中断')
+    await button(w,'重试读取').trigger('click');await flushPromises()
+    expect(w.find('[role="alert"]').exists()).toBe(false)
   })
 })

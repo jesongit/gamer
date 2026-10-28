@@ -7,24 +7,25 @@ Simplified Chinese OCR. A separate browser or VNC container is not required.
 ## Release
 
 ```sh
-docker pull --platform linux/amd64 posase/gamer:v1.0.6
+docker pull --platform linux/amd64 posase/gamer:v1.0.7
 ```
 
-Docker release **v1.0.6** packages application **0.5.4**. Plugin and configuration
-pages now offer a source dropdown for GitHub, LAN Gitea / Forgejo and custom URL
-presets. Presets are shared on the server; each browser remembers its own choice.
-Catalogs and archives are fetched by the server, with fixed size and SHA-256
-checks, so LAN downloads do not depend on browser CORS. Public sources use HTTPS;
-private or loopback IPs may use HTTP. A Git repository needs actual Release assets.
+Docker release **v1.0.7** packages application **0.5.5**. MCP settings now provide
+only the connection URL and access-token management. Set lifetime to 0 for no
+expiry; newly created tokens can be viewed, copied and deleted. Secrets are
+protected at rest, while authentication still checks their digests. Older
+hash-only tokens remain usable but cannot be revealed. Removing a plugin now
+uninstalls all its installed versions, keeping private data by default.
+Plugin and configuration sources still support GitHub, LAN and custom presets.
 The official companion catalog provides YAML 0.3.26, Live 0.2.19 and Notify 0.1.2;
 install or update plugins separately through the plugin page. Configuration
 packages are separate; the latest HSR package is 1.0.2. Database schema remains 7.
 The `latest` image tag follows this stable release; versioned tags stay immutable.
 The published architecture is **linux/amd64**, for Intel/AMD x86_64 hosts.
-The previous `v1.0`, `v1.0.1`, `v1.0.2`, `v1.0.3`, `v1.0.4` and `v1.0.5` tags remain unchanged. No ARM64 release is claimed.
+The previous `v1.0`, `v1.0.1`, `v1.0.2`, `v1.0.3`, `v1.0.4`, `v1.0.5` and `v1.0.6` tags remain unchanged. No ARM64 release is claimed.
 
-The v1.0.6 deployment bundle includes the unchanged Chromium seccomp file:
-https://github.com/jesongit/gamer/releases/tag/docker-v1.0.6
+The v1.0.7 deployment bundle includes the unchanged Chromium seccomp file:
+https://github.com/jesongit/gamer/releases/tag/docker-v1.0.7
 
 ## Fresh installation with docker run
 
@@ -35,7 +36,7 @@ Download and extract the deployment bundle from the release above. It includes
 docker volume create gamer-production-data
 docker run --rm -it --memory 512m --memory-swap 512m --entrypoint python3 \
   --mount type=volume,src=gamer-production-data,dst=/data \
-  posase/gamer:v1.0.6 /app/tools/gamer_docker.py init
+  posase/gamer:v1.0.7 /app/tools/gamer_docker.py init
 
 docker run -d --name gamer --init --restart unless-stopped \
   --stop-timeout 90 --shm-size 1g \
@@ -44,7 +45,7 @@ docker run -d --name gamer --init --restart unless-stopped \
   -e GAMER_PROFILE=prod -e GAMER_COOKIE_SECURE=false \
   --mount type=volume,src=gamer-production-data,dst=/data \
   --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 \
-  posase/gamer:v1.0.6
+  posase/gamer:v1.0.7
 ```
 
 Open `http://localhost:18443` using your configured password. There is no default
@@ -66,7 +67,7 @@ backup, retains the previous container, and inherits its exact volume and bind m
 Keep any additional custom ports or environment settings from your original command.
 
 ```bash
-image=posase/gamer:v1.0.6
+image=posase/gamer:v1.0.7
 docker pull "$image" &&
 docker run --rm --entrypoint cat "$image" /app/chromium-seccomp.json > gamer-seccomp-v106.json &&
 docker stop -t 90 gamer &&
@@ -97,7 +98,7 @@ bundle's `restore.sh` validates the data and starts Gamer with scheduling disabl
 Verify account login and the task list, stop the old production instance, then run
 `bash restore.sh activate`. Only one machine should schedule the same accounts.
 That legacy migration bundle targets v1.0.2; after migration, use the update
-instructions above to switch the existing installation to v1.0.6.
+instructions above to switch the existing installation to v1.0.7.
 
 Detailed steps: https://github.com/jesongit/gamer/blob/docker-v1.0.2/deploy/docker/MIGRATION.md
 

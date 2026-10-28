@@ -369,8 +369,8 @@ export function uninstallPrompt(plugin: InstalledPluginSnapshot, deleteData = fa
     ? `\n仍被 ${blockers.length} 个 App Package/任务/Workflow 引用，卸载后相关任务可能挂起。`
     : ''
   return deleteData
-    ? `确认卸载 ${plugin.name || plugin.id}@${plugin.active_version || plugin.version}，并删除该插件的用户数据？${dependencyText}`
-    : `确认卸载 ${plugin.name || plugin.id}@${plugin.active_version || plugin.version}？用户数据将保留，可在之后重新安装时继续使用。${dependencyText}`
+    ? `确认卸载 ${plugin.name || plugin.id} 的全部已安装版本，并删除该插件的用户数据？${dependencyText}`
+    : `确认卸载 ${plugin.name || plugin.id} 的全部已安装版本？用户数据将保留，可在之后重新安装时继续使用。${dependencyText}`
 }
 
 export function lifecyclePrompt(action: 'enable' | 'disable' | 'start' | 'stop', plugin: InstalledPluginSnapshot): string {

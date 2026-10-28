@@ -282,6 +282,23 @@ impl ExtensionStore {
         result
     }
 
+    pub(crate) fn remove_plugin(&self, id: &ExtensionId) -> ExtensionResult<bool> {
+        let root = self.extensions_root().join(id.as_str());
+        match fs::symlink_metadata(&root) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(ExtensionError::InvalidPath(root.display().to_string())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
+        fs::remove_dir_all(&root)?;
+        self.manifests
+            .lock()
+            .unwrap()
+            .retain(|path, _| !path.starts_with(&root));
+        sync_directory(&self.extensions_root())?;
+        Ok(true)
+    }
+
     pub(crate) fn remove_version(
         &self,
         id: &ExtensionId,

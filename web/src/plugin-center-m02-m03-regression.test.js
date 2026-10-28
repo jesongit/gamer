@@ -54,7 +54,7 @@ function makeClient(extensions) {
     updateExtension: vi.fn(),
     installExtension: vi.fn(),
     inspectExtension: vi.fn(),
-    uninstallExtension: vi.fn(async id => {
+    uninstallPlugin: vi.fn(async id => {
       current = current.filter(plugin => plugin.id !== id)
       // The real API resolves a 204 response without a JSON body.
       return { ok: true, status: 204 }
@@ -231,7 +231,7 @@ describe('P2-UI M02/M03 插件中心回归', () => {
     try {
       await wrapper.findAll('button').find(button => button.text() === '卸载').trigger('click')
       await flushPromises()
-      expect(client.uninstallExtension).toHaveBeenCalledTimes(1)
+      expect(client.uninstallPlugin).toHaveBeenCalledTimes(1)
       expect(wrapper.findAll('.plugin-card')).toHaveLength(1)
       expect(wrapper.get('.plugin-card').text()).toContain('未安装')
       expect(wrapper.get('.plugin-card button').text()).toBe('安装')
@@ -247,6 +247,27 @@ describe('P2-UI M02/M03 插件中心回归', () => {
       expect(wrapper.get('.plugin-card').text()).toContain('状态未确认')
       expect(wrapper.get('.plugin-card').text()).not.toContain('未安装')
       expect(wrapper.get('.plugin-card button').attributes('disabled')).toBeDefined()
+    } finally { wrapper.unmount() }
+  })
+
+  it('旧插件的全部版本卸载使用插件级入口，本地独有条目随之消失', async () => {
+    const { wrapper, client } = await mountCenter([], [installed('gamer-ai', '0.2.0', { installed_versions: ['0.1.0','0.2.0'] })])
+    try {
+      await wrapper.findAll('button').find(button => button.text() === '卸载').trigger('click')
+      await flushPromises()
+      expect(client.uninstallPlugin).toHaveBeenCalledExactlyOnceWith('gamer-ai', {deleteData:false})
+      expect(wrapper.find('[data-plugin-id="gamer-ai"]').exists()).toBe(false)
+    } finally { wrapper.unmount() }
+  })
+
+  it('卸载后管理接口仍返回旧版本时，不宣称已卸载成功', async () => {
+    const { wrapper, client } = await mountCenter([], [installed('demo.old', '2.0.0')])
+    try {
+      client.uninstallPlugin.mockResolvedValueOnce({ok:true,status:204})
+      await wrapper.findAll('button').find(button => button.text() === '卸载').trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).toContain('卸载后插件仍处于已安装状态')
+      expect(wrapper.find('.plugin-result').exists()).toBe(false)
     } finally { wrapper.unmount() }
   })
 

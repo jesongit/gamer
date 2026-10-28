@@ -489,6 +489,9 @@ mod sec_tests {
     mod extensions_tests {
         include!("tests/extensions.rs");
     }
+    mod mcp_settings_tests {
+        include!("tests/mcp_settings.rs");
+    }
     mod packages_tests {
         include!("tests/packages.rs");
     }

@@ -226,6 +226,7 @@ export const api = {
   listMcpTokens: () => req('GET', '/api/mcp/tokens'),
   getMcpCatalog: () => req('GET', '/api/mcp/catalog'),
   createMcpToken: token => req('POST', '/api/mcp/tokens', token),
+  viewMcpToken: id => req('GET', `/api/mcp/tokens/${encodeURIComponent(requireId(id, 'token_id'))}`),
   revokeMcpToken: id => req('DELETE', `/api/mcp/tokens/${encodeURIComponent(requireId(id, 'token_id'))}`),
   listExternalControl: () => req('GET', '/api/external-control'),
   startExternalControl: request => req('POST', '/api/external-control', request),
@@ -293,6 +294,9 @@ export const api = {
   uninstallExtension: (id, version, { deleteData = false } = {}) => req(
     'DELETE',
     `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/${encodeURIComponent(requireId(version, 'extension_version'))}?delete_data=${deleteData ? '1' : '0'}`,
+  ),
+  uninstallPlugin: (id, { deleteData = false } = {}) => req(
+    'DELETE', `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/installations?delete_data=${deleteData ? '1' : '0'}`,
   ),
 
   // 设备

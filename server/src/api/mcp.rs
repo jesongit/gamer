@@ -12,7 +12,7 @@ use axum::{
 use serde_json::{json, Value};
 
 use super::AppState;
-use crate::mcp::{CreateTokenRequest, ErrorKind, McpError, McpService};
+use crate::mcp::{AllowedObjects, CreateTokenRequest, ErrorKind, McpError, McpService};
 
 pub(super) async fn post_message(
     State(state): State<AppState>,
@@ -76,19 +76,82 @@ async fn process_message(
     }
 }
 
-/// These three management handlers belong only in the admin-authenticated
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TokenSettingsRequest {
+    label: String,
+    #[serde(default)]
+    expires_in_seconds: u64,
+}
+
+/// Credential management belongs only in the admin-authenticated
 /// route group; they are never tools on the external MCP surface.
 pub(super) async fn api_create_token(
     State(state): State<AppState>,
-    Json(request): Json<CreateTokenRequest>,
+    Json(request): Json<TokenSettingsRequest>,
 ) -> Response {
-    match state.mcp.credentials().create(request) {
-        Ok(created) => (StatusCode::CREATED, Json(created)).into_response(),
+    let tools = match state.mcp.management_catalog() {
+        Ok(tools) => tools,
+        Err(error) => return mcp_error(error),
+    };
+    // V1 presents a single access credential. Freeze the currently exposed
+    // scopes explicitly; transport, tool exposure and execution gates still apply.
+    let scopes = tools
+        .iter()
+        .flat_map(|tool| tool.required_scopes.iter().cloned())
+        .chain(["control".into()])
+        .collect();
+    let all = ["*".into()].into();
+    let allowed = AllowedObjects {
+        devices: all,
+        packages: ["*".into()].into(),
+        plugins: ["*".into()].into(),
+        runners: ["*".into()].into(),
+        runs: ["*".into()].into(),
+        tasks: ["*".into()].into(),
+        media: ["*".into()].into(),
+    };
+    match state.mcp.credentials().create(CreateTokenRequest {
+        label: request.label,
+        expires_in_seconds: request.expires_in_seconds,
+        scopes,
+        allowed,
+    }) {
+        Ok(created) => (
+            StatusCode::CREATED,
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(created),
+        )
+            .into_response(),
         Err(error) => mcp_error(error),
     }
 }
 pub(super) async fn api_list_tokens(State(state): State<AppState>) -> Response {
-    Json(json!({"tokens":state.mcp.credentials().list()})).into_response()
+    let credentials = state.mcp.credentials();
+    let tokens: Vec<_> = credentials
+        .list()
+        .into_iter()
+        .map(|token| {
+            let can_view = credentials.can_reveal(&token.token_id);
+            let mut value = serde_json::to_value(token).expect("token metadata is serializable");
+            value["can_view"] = can_view.into();
+            value
+        })
+        .collect();
+    Json(json!({"tokens":tokens})).into_response()
+}
+pub(super) async fn api_view_token(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    match state.mcp.credentials().reveal(&id) {
+        Ok(token) => (
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(json!({"token":token})),
+        )
+            .into_response(),
+        Err(error) => mcp_error(error),
+    }
 }
 pub(super) async fn api_revoke_token(
     State(state): State<AppState>,
@@ -99,7 +162,10 @@ pub(super) async fn api_revoke_token(
         Ok(true) => {
             state.mcp.drain_token_work(&id).await;
             state.external_control.revoke(&id).await;
-            Json(json!({"token_id":id,"revoked":true})).into_response()
+            match state.mcp.credentials().remove_revoked(&id) {
+                Ok(()) => Json(json!({"token_id":id,"deleted":true})).into_response(),
+                Err(error) => mcp_error(error),
+            }
         }
         Err(error) => mcp_error(error),
     }

@@ -3,7 +3,7 @@ import { api } from '../../api'
 
 const NON_INPUT_TYPES = new Set(['audio', 'reset_video', 'ping', 'frame_ack'])
 const PHASE_MESSAGES = {
-  running: '外部控制中；请在设置中暂停控制并等待完成，再人工操作。',
+  running: '外部控制中；请等待控制结束后再人工操作，也可在设置中删除对应令牌以结束控制。',
   pausing: '正在暂停外部控制，动作收尾完成前不能人工操作。',
   paused: '外部控制已暂停，可以人工操作。',
   resuming: '正在恢复外部控制，人工操作已锁定。',

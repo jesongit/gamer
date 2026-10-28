@@ -2413,6 +2413,22 @@ impl ExtensionService {
         id: &ExtensionId,
         version: &ExtensionVersion,
     ) -> ExtensionResult<bool> {
+        self.uninstall_selected(id, version, false).await
+    }
+
+    /// The plugin-level management action removes every installed version.
+    /// Historical/private user data is outside this installation directory.
+    pub(crate) async fn uninstall_all(&self, id: &ExtensionId) -> ExtensionResult<bool> {
+        let version = self.snapshot_for(id)?.active_version().clone();
+        self.uninstall_selected(id, &version, true).await
+    }
+
+    async fn uninstall_selected(
+        &self,
+        id: &ExtensionId,
+        version: &ExtensionVersion,
+        remove_all: bool,
+    ) -> ExtensionResult<bool> {
         let states = self.store.read_state()?;
         let versions = self.versions_for(id)?;
         let record = state_for_versions(id, &versions, states.get(id).cloned())?;
@@ -2425,11 +2441,11 @@ impl ExtensionService {
                 version: version.to_string(),
             });
         }
-        let is_active = record.active_version.as_ref() == Some(version);
+        let is_active = remove_all || record.active_version.as_ref() == Some(version);
         if is_active {
             let next_active = versions
                 .iter()
-                .filter(|candidate| candidate.manifest().version() != version)
+                .filter(|candidate| !remove_all && candidate.manifest().version() != version)
                 .map(|candidate| candidate.manifest().version())
                 .max();
             self.ensure_provider_transition(id, next_active)?;
@@ -2452,7 +2468,7 @@ impl ExtensionService {
             let mut states = self.store.read_state()?;
             let versions = self.versions_for(id)?;
             let mut record = state_for_versions(id, &versions, states.get(id).cloned())?;
-            let is_active = record.active_version.as_ref() == Some(version);
+            let is_active = remove_all || record.active_version.as_ref() == Some(version);
             if !versions
                 .iter()
                 .any(|candidate| candidate.manifest().version() == version)
@@ -2471,7 +2487,7 @@ impl ExtensionService {
             let next_active = if is_active {
                 versions
                     .iter()
-                    .filter(|candidate| candidate.manifest().version() != version)
+                    .filter(|candidate| !remove_all && candidate.manifest().version() != version)
                     .map(|candidate| candidate.manifest().version())
                     .max()
             } else {
@@ -2516,7 +2532,12 @@ impl ExtensionService {
                 self.refresh_ui_registry()?;
             }
 
-            match self.store.remove_version(id, version) {
+            let removal = if remove_all {
+                self.store.remove_plugin(id)
+            } else {
+                self.store.remove_version(id, version)
+            };
+            match removal {
                 Ok(true) => {
                     removed = true;
                     let remaining = self.versions_for(id)?;
@@ -3122,6 +3143,37 @@ mod retired_installation_tests {
             );
         }
     }
+    #[tokio::test]
+    async fn uninstall_all_retired_versions_removes_list_entry_and_keeps_private_data() {
+        let directory = tempfile::tempdir().unwrap();
+        seed_historical_version(directory.path(), "gamer-ai", "0.1.0", true);
+        seed_historical_version(directory.path(), "gamer-ai", "0.2.0", true);
+        let private = directory
+            .path()
+            .join("extension-data/gamer-ai/private/settings.dat");
+        fs::create_dir_all(private.parent().unwrap()).unwrap();
+        fs::write(&private, b"original private bytes").unwrap();
+        let service =
+            ExtensionService::for_data_root(directory.path(), CapabilityRegistry::default());
+        let id = ExtensionId::parse("gamer-ai").unwrap();
+        assert_eq!(
+            service
+                .snapshot_for(&id)
+                .unwrap()
+                .installed_versions()
+                .len(),
+            2
+        );
+        assert!(service.uninstall_all(&id).await.unwrap());
+        assert!(service.list().unwrap().is_empty());
+        assert!(!service.store.read_state().unwrap().contains_key(&id));
+        assert_eq!(fs::read(&private).unwrap(), b"original private bytes");
+        let reopened =
+            ExtensionService::for_data_root(directory.path(), CapabilityRegistry::default());
+        assert!(reopened.list().unwrap().is_empty());
+        assert!(reopened.uninstall_all(&id).await.is_err());
+    }
+
     #[tokio::test]
     async fn retired_ocr_startup_retains_installation_and_private_bytes() {
         let directory = tempfile::tempdir().unwrap();
@@ -4125,6 +4177,18 @@ entry = "plugin.wasm"
 
         // The provider is stale/non-running, so the test isolates the version
         // transition guard from the ordinary stop-before-uninstall guard.
+        assert!(matches!(
+            service.uninstall_all(&provider).await.unwrap_err(),
+            ExtensionError::DependencyOfRunningExtension { .. }
+        ));
+        assert_eq!(
+            service
+                .snapshot_for(&provider)
+                .unwrap()
+                .installed_versions()
+                .len(),
+            2
+        );
         service
             .force_state(&provider, ExtensionState::Enabled, None)
             .await

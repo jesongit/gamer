@@ -255,6 +255,9 @@ describe('Phase 1 plugin center contracts（免签名市场）', () => {
     expect(fetch.mock.calls[1][0]).toBe('/api/extensions')
     expect(fetch.mock.calls[2][0]).toBe('/api/extensions/management')
     expect(fetch.mock.calls[3][0]).toBe('/api/extensions/gamer-yaml/3.1.1?delete_data=1')
+    fetch.mockResolvedValueOnce({ ok: true, status: 204, headers: { get: () => null } })
+    await api.uninstallPlugin('gamer-yaml', {deleteData:false})
+    expect(fetch.mock.calls[4][0]).toBe('/api/extensions/gamer-yaml/installations?delete_data=0')
     expect(uninstallPrompt({ id: 'gamer-yaml', version: '3.1.1', state: 'enabled' }, true)).toMatch(/删除该插件的用户数据/)
   })
 

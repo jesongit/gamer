@@ -233,7 +233,34 @@ pub(super) async fn api_uninstall_extension(
         .delete_data
         .as_deref()
         .is_some_and(|value| matches!(value, "1" | "true" | "yes"));
-    match st.extensions.uninstall(&id, &version).await {
+    let removed = st.extensions.uninstall(&id, &version).await;
+    finish_uninstall(&st, &id, removed, delete_data)
+}
+
+pub(super) async fn api_uninstall_plugin(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<UninstallQuery>,
+) -> Response {
+    let id = match ExtensionId::parse(&id) {
+        Ok(id) => id,
+        Err(error) => return extension_error(error),
+    };
+    let delete_data = query
+        .delete_data
+        .as_deref()
+        .is_some_and(|value| matches!(value, "1" | "true" | "yes"));
+    let removed = st.extensions.uninstall_all(&id).await;
+    finish_uninstall(&st, &id, removed, delete_data)
+}
+
+fn finish_uninstall(
+    st: &AppState,
+    id: &ExtensionId,
+    removed: Result<bool, ExtensionError>,
+    delete_data: bool,
+) -> Response {
+    match removed {
         Ok(true) => {
             // WASM user data is deliberately outside immutable plugin
             // versions. The management flag deletes only this exact,

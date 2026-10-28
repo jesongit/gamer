@@ -268,7 +268,10 @@ pub(crate) fn build_router_with_external(
             "/api/mcp/tokens",
             get(mcp::api_list_tokens).post(mcp::api_create_token),
         )
-        .route("/api/mcp/tokens/:id", delete(mcp::api_revoke_token))
+        .route(
+            "/api/mcp/tokens/:id",
+            get(mcp::api_view_token).delete(mcp::api_revoke_token),
+        )
         .route("/api/mcp/catalog", get(mcp::api_catalog))
         .route(
             "/api/external-control",
@@ -619,6 +622,10 @@ pub(crate) fn build_router_with_external(
         .route(
             "/api/extensions/:id/update",
             post(extensions::api_update_extension),
+        )
+        .route(
+            "/api/extensions/:id/installations",
+            delete(extensions::api_uninstall_plugin),
         )
         .route(
             "/api/extensions/:id/enable",

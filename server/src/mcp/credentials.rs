@@ -1,10 +1,11 @@
-//! Independent MCP credentials. Only one-way digests are persisted.
+//! Independent MCP credentials, with encrypted secrets for administrator viewing.
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Mutex,
 };
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -65,7 +66,7 @@ pub(crate) struct TokenMetadata {
 }
 impl TokenMetadata {
     fn principal(&self, now: i64) -> Result<ExternalPrincipal, McpError> {
-        if self.revoked || self.expires_at <= now {
+        if self.revoked || (self.expires_at != 0 && self.expires_at <= now) {
             return Err(McpError::unauthorized());
         }
         Ok(ExternalPrincipal {
@@ -92,7 +93,7 @@ pub(crate) struct CreateTokenRequest {
     pub expires_in_seconds: u64,
 }
 
-/// The secret is intentionally not Debug and is returned only at creation.
+/// Secrets are intentionally not Debug or included in metadata/list responses.
 #[derive(Serialize)]
 pub(crate) struct CreatedToken {
     pub token: String,
@@ -103,6 +104,8 @@ pub(crate) struct CreatedToken {
 struct StoredToken {
     metadata: TokenMetadata,
     digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    encrypted_token: Option<String>,
 }
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -193,9 +196,9 @@ impl CredentialStore {
                 return Err(McpError::invalid("Invalid credential object allowlist"));
             }
         }
-        if request.expires_in_seconds == 0 || request.expires_in_seconds > 366 * 86_400 {
+        if request.expires_in_seconds > 366 * 86_400 {
             return Err(McpError::invalid(
-                "Credential lifetime must be between one second and 366 days",
+                "Credential lifetime must be zero (no expiry) or at most 366 days",
             ));
         }
         let token = format!(
@@ -209,12 +212,22 @@ impl CredentialStore {
             scopes: request.scopes,
             allowed: request.allowed,
             created_at: now,
-            expires_at: now.saturating_add(request.expires_in_seconds as i64),
+            expires_at: if request.expires_in_seconds == 0 {
+                0
+            } else {
+                now.saturating_add(request.expires_in_seconds as i64)
+            },
             revoked: false,
         };
         let stored = StoredToken {
             metadata: metadata.clone(),
             digest: digest(&token),
+            encrypted_token: Some(
+                base64::engine::general_purpose::STANDARD.encode(
+                    crate::core::secrets::protect_file(&self.path, token.as_bytes(), true)
+                        .map_err(|_| McpError::internal("Cannot protect MCP credential"))?,
+                ),
+            ),
         };
         let mut tokens = self.tokens.lock().unwrap();
         if tokens.len() >= 1024 {
@@ -264,6 +277,44 @@ impl CredentialStore {
             .get(id)
             .map(|s| s.metadata.clone())
     }
+    pub(crate) fn can_reveal(&self, id: &str) -> bool {
+        self.tokens
+            .lock()
+            .unwrap()
+            .get(id)
+            .is_some_and(|stored| !stored.metadata.revoked && stored.encrypted_token.is_some())
+    }
+    pub(crate) fn reveal(&self, id: &str) -> Result<String, McpError> {
+        let tokens = self.tokens.lock().unwrap();
+        let stored = tokens
+            .get(id)
+            .ok_or_else(|| McpError::new(ErrorKind::NotFound, "token_not_found", "令牌不存在"))?;
+        if stored.metadata.revoked {
+            return Err(McpError::unauthorized());
+        }
+        let encrypted = stored.encrypted_token.as_ref().ok_or_else(|| {
+            McpError::new(
+                ErrorKind::Conflict,
+                "token_not_recoverable",
+                "旧令牌仅保存了哈希，无法查看原文；请创建新令牌",
+            )
+        })?;
+        let encrypted = base64::engine::general_purpose::STANDARD
+            .decode(encrypted)
+            .map_err(|_| McpError::internal("Cannot read protected MCP credential"))?;
+        let plain =
+            crate::core::secrets::protect_file(&self.path, &encrypted, false).map_err(|_| {
+                McpError::internal("Cannot decrypt MCP credential; restore its original key")
+            })?;
+        let token = String::from_utf8(plain)
+            .map_err(|_| McpError::internal("Invalid protected MCP credential"))?;
+        if !constant_time_equal(digest(&token).as_bytes(), stored.digest.as_bytes()) {
+            return Err(McpError::internal(
+                "Protected MCP credential does not match its digest",
+            ));
+        }
+        Ok(token)
+    }
     pub(crate) fn principal_for_id(&self, id: &str) -> Result<ExternalPrincipal, McpError> {
         self.by_token_id(id)
             .ok_or_else(McpError::unauthorized)?
@@ -285,6 +336,23 @@ impl CredentialStore {
         self.persist(&next)?;
         *tokens = next;
         Ok(true)
+    }
+    /// Called only after revocation and cancellation of token-owned temporary work.
+    pub(crate) fn remove_revoked(&self, id: &str) -> Result<(), McpError> {
+        let mut tokens = self.tokens.lock().unwrap();
+        let Some(stored) = tokens.get(id) else {
+            return Ok(());
+        };
+        if !stored.metadata.revoked {
+            return Err(McpError::internal(
+                "Revoke MCP credential before deleting it",
+            ));
+        }
+        let mut next = tokens.clone();
+        next.remove(id);
+        self.persist(&next)?;
+        *tokens = next;
+        Ok(())
     }
     fn persist(&self, tokens: &BTreeMap<String, StoredToken>) -> Result<(), McpError> {
         let bytes = serde_json::to_vec_pretty(&StoredCredentials {
@@ -331,13 +399,20 @@ mod tests {
         }
     }
     #[test]
-    fn secrets_are_shown_once_and_scope_is_not_inferred_from_empty_allowlists() {
+    fn secrets_are_encrypted_and_scope_is_not_inferred_from_empty_allowlists() {
         let root = tempfile::tempdir().unwrap();
         let store = CredentialStore::open(root.path()).unwrap();
         let created = store.create(request()).unwrap();
         let bytes = std::fs::read_to_string(root.path().join("tokens.json")).unwrap();
         assert!(!bytes.contains(&created.token));
         let reopened = CredentialStore::open(root.path()).unwrap();
+        assert_eq!(
+            reopened.reveal(&created.metadata.token_id).unwrap(),
+            created.token
+        );
+        assert!(!serde_json::to_string(&reopened.list())
+            .unwrap()
+            .contains(&created.token));
         let principal = reopened.authenticate(&created.token).unwrap();
         assert!(principal.allowed.authorize("package", "a").is_ok());
         assert!(principal.allowed.authorize("package", "b").is_err());
@@ -345,6 +420,43 @@ mod tests {
         reopened.revoke(&principal.token_id).unwrap();
         assert!(reopened.authenticate(&created.token).is_err());
         assert!(reopened.by_token_id(&principal.token_id).unwrap().revoked);
+        assert!(reopened.reveal(&principal.token_id).is_err());
+        reopened.remove_revoked(&principal.token_id).unwrap();
+        assert!(reopened.list().is_empty());
+        assert!(CredentialStore::open(root.path())
+            .unwrap()
+            .list()
+            .is_empty());
+    }
+    #[test]
+    fn zero_lifetime_never_expires_and_legacy_hashes_remain_usable() {
+        let root = tempfile::tempdir().unwrap();
+        let store = CredentialStore::open(root.path()).unwrap();
+        let mut request = request();
+        request.expires_in_seconds = 0;
+        let created = store.create_at(request, 10).unwrap();
+        assert_eq!(created.metadata.expires_at, 0);
+        assert!(store.authenticate_at(&created.token, i64::MAX).is_ok());
+        // Simulate a pre-simplification store: the original digest still works,
+        // but no plaintext can be recovered from an old one-way hash.
+        let path = root.path().join("tokens.json");
+        let mut persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        persisted["tokens"][&created.metadata.token_id]
+            .as_object_mut()
+            .unwrap()
+            .remove("encrypted_token");
+        std::fs::write(&path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+        let reopened = CredentialStore::open(root.path()).unwrap();
+        assert!(reopened.authenticate(&created.token).is_ok());
+        assert!(!reopened.can_reveal(&created.metadata.token_id));
+        assert_eq!(
+            reopened
+                .reveal(&created.metadata.token_id)
+                .unwrap_err()
+                .code,
+            "token_not_recoverable"
+        );
     }
     #[test]
     fn absolute_expiry_is_checked_without_sleep_and_failed_writes_do_not_activate_tokens() {
