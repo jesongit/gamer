@@ -23,13 +23,19 @@ pub(super) async fn list(State(st): State<AppState>) -> Response {
 pub(super) struct SaveSource {
     repository: String,
     enabled: bool,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
 }
 pub(super) async fn save(State(st): State<AppState>, Json(input): Json<SaveSource>) -> Response {
     json_call(move || {
-        Ok(serde_json::to_value(
-            st.package_market
-                .save_source(&input.repository, input.enabled)?,
-        )?)
+        Ok(serde_json::to_value(st.package_market.save_preset(
+            &input.repository,
+            input.enabled,
+            input.name.as_deref(),
+            input.id.as_deref(),
+        )?)?)
     })
     .await
 }

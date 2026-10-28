@@ -12,6 +12,7 @@ use std::{
 use semver::Version;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+mod sources;
 
 const RELEASES: &str = "https://api.github.com/repos/jesongit/gamer-plugins/releases?per_page=100";
 const DOWNLOAD_BASE: &str = "https://github.com/jesongit/gamer-plugins/releases/download/";
@@ -50,10 +51,16 @@ pub(crate) struct PluginMarket {
     beta: bool,
     agent: ureq::Agent,
     cache: Mutex<Cache>,
+    sources: crate::market_sources::SourceStore,
+    source_cache: Mutex<BTreeMap<String, std::sync::Arc<Mutex<Cache>>>>,
 }
 
 impl PluginMarket {
+    #[cfg(test)]
     pub(crate) fn new(web_dir: PathBuf) -> Self {
+        Self::with_data(web_dir.clone(), web_dir)
+    }
+    pub(crate) fn with_data(web_dir: PathBuf, data: PathBuf) -> Self {
         Self {
             web_dir,
             beta: !Version::parse(env!("CARGO_PKG_VERSION"))
@@ -68,6 +75,8 @@ impl PluginMarket {
                 .user_agent(concat!("Gamer-Plugin-Market/", env!("CARGO_PKG_VERSION")))
                 .build(),
             cache: Mutex::new(Cache::default()),
+            sources: crate::market_sources::SourceStore::new(data, "plugin"),
+            source_cache: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -242,6 +251,15 @@ fn parse_entries(
     web_dir: &std::path::Path,
     beta: bool,
 ) -> Result<Vec<Entry>, String> {
+    parse_entries_with_downloads(doc, release, web_dir, beta, None)
+}
+fn parse_entries_with_downloads(
+    doc: &Value,
+    release: Option<&Value>,
+    web_dir: &std::path::Path,
+    beta: bool,
+    downloads: Option<&BTreeMap<String, String>>,
+) -> Result<Vec<Entry>, String> {
     if doc["schema_version"] != 2 {
         return Err("不支持的官方插件列表格式".into());
     }
@@ -274,7 +292,14 @@ fn parse_entries(
             .ok_or("插件大小无效")?;
         let filename = format!("{id}-{version_text}.gplugin");
         let url = raw["download_url"].as_str().ok_or("插件缺少下载地址")?;
-        let origin = if let Some(release) = release {
+        let origin = if let Some(downloads) = downloads {
+            Origin::Remote(
+                downloads
+                    .get(&filename)
+                    .ok_or("插件发布缺少归档附件")?
+                    .clone(),
+            )
+        } else if let Some(release) = release {
             let tag = release["tag_name"].as_str().ok_or("发布缺少标签")?;
             let expected = format!("{DOWNLOAD_BASE}{tag}/{filename}");
             if url != expected {

@@ -464,6 +464,36 @@ async fn package_sources_are_authenticated_persistent_settings_independent_of_pa
     assert_eq!(missing.status(), StatusCode::BAD_GATEWAY);
 }
 
+#[tokio::test]
+async fn market_source_presets_require_auth_and_preserve_builtin_and_installed_content() {
+    let t = build_app("market-presets", test_credential("admin123"), Default::default());
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    for path in ["/api/package-sources", "/api/extensions/market/sources"] {
+        let anonymous = send(&t.app, req("GET",path,None,&[],None)).await;
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+        let response = post_json(&t,&sid,path,serde_json::json!({"repository":"http://127.0.0.1:13000/owner/custom.git","name":"我的来源","enabled":true})).await;
+        assert_eq!(response.status(),StatusCode::OK);
+        let presets = json_body(response).await;
+        assert_eq!(presets.as_array().unwrap().iter().filter(|s|s["builtin"]==true).count(),2);
+        let custom = presets.as_array().unwrap().iter().find(|s|s["name"]=="我的来源").unwrap();
+        let id = custom["id"].as_str().unwrap();
+        let edited = post_json(&t,&sid,path,serde_json::json!({"id":id,"repository":"https://other.example/catalog.json","name":"修改后的来源","enabled":true})).await;
+        assert_eq!(edited.status(),StatusCode::OK);
+        let rejected = post_json(&t,&sid,path,serde_json::json!({"repository":"http://8.8.8.8/owner/repo","name":"不安全地址","enabled":true})).await;
+        assert_eq!(rejected.status(),StatusCode::BAD_REQUEST);
+        let builtin = presets.as_array().unwrap().iter().find(|s|s["builtin"]==true).unwrap()["id"].as_str().unwrap();
+        let rejected = send(&t.app,req("DELETE",&format!("{path}/{builtin}"),None,&[("cookie".into(),sid.clone())],None)).await;
+        assert_eq!(rejected.status(),StatusCode::BAD_REQUEST);
+        let removed = send(&t.app,req("DELETE",&format!("{path}/{id}"),None,&[("cookie".into(),sid.clone())],None)).await;
+        assert_eq!(removed.status(),StatusCode::OK);
+        let list = send(&t.app,req("GET",path,None,&[("cookie".into(),sid.clone())],None)).await;
+        let list = json_body(list).await;
+        assert_eq!(list.as_array().unwrap().len(),2);
+    }
+    assert!(t.dir.join("plugin-sources.json").is_file());
+    assert!(t.dir.join("package-sources.json").is_file());
+}
+
 // Package REST 冒烟（plan §2-§15 / §23 验收链）：建包 → 写资源 → 读资源 →
 // 列表 → 复制 → 导出 → 删除；导入路径覆盖「同 id 二次导入默认 409 +
 // overwrite=true 原子替换」与包内预设发布（id = `<package-id>:<名>`）。

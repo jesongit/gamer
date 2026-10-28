@@ -1,6 +1,6 @@
 //! Public package catalogs from GitHub, prefix mirrors or HTTPS static directories.
 //! No credentials, plugin lifecycle or DSL knowledge.
-mod source;
+pub(crate) mod source;
 use crate::{
     package_archive::{sha256_hex, validate_and_read_manifest},
     resources::{parse_package_toml, validate_scope_id},
@@ -11,7 +11,6 @@ use serde_json::{json, Value};
 use source::SourceLocation;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     io::Read,
     path::PathBuf,
     sync::Mutex,
@@ -22,7 +21,7 @@ pub(crate) const MAX_JSON: u64 = 2 * 1024 * 1024;
 pub(crate) const MAX_ARCHIVE: u64 = 100 * 1024 * 1024;
 pub(crate) const MAX_CATALOG_BYTES: u64 = 512 * 1024 * 1024;
 pub(crate) const MAX_PACKAGES: usize = 128;
-const OFFICIAL_REPOSITORY: &str = "jesongit/gamer-packages";
+pub(crate) use crate::market_sources::Source;
 
 /// Strictly two GitHub path segments; never interpret caller input as a URL/CLI flag.
 pub(crate) fn repository(input: &str) -> Result<String> {
@@ -176,12 +175,6 @@ impl Catalog {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct Source {
-    pub id: String,
-    pub repository: String,
-    pub enabled: bool,
-}
 #[derive(Clone, Debug)]
 pub(crate) struct PublishedCatalog {
     pub release_id: u64,
@@ -190,6 +183,7 @@ pub(crate) struct PublishedCatalog {
     pub catalog: Catalog,
     // Constructed from the configured source, never a catalog-provided download URL.
     archive_base: String,
+    archive_urls: BTreeMap<String, String>,
 }
 impl PublishedCatalog {
     pub(crate) fn fingerprint(&self) -> String {
@@ -202,6 +196,7 @@ type FetchFixture = std::sync::Arc<dyn Fn(&str, u64) -> Result<Vec<u8>> + Send +
 
 pub(crate) struct PublicClient {
     agent: ureq::Agent,
+    lan_agent: ureq::Agent,
     #[cfg(test)]
     fetch_fixture: Option<FetchFixture>,
 }
@@ -211,11 +206,19 @@ impl Default for PublicClient {
             #[cfg(test)]
             fetch_fixture: None,
             agent: ureq::AgentBuilder::new()
-                .https_only(true)
+                .https_only(false)
+                .redirects(0)
                 .try_proxy_from_env(true)
                 .timeout_connect(Duration::from_secs(5))
                 .timeout(Duration::from_secs(30))
                 .user_agent(concat!("Gamer-Package-Market/", env!("CARGO_PKG_VERSION")))
+                .build(),
+            lan_agent: ureq::AgentBuilder::new()
+                .https_only(false)
+                .redirects(0)
+                .timeout_connect(Duration::from_secs(5))
+                .timeout(Duration::from_secs(30))
+                .user_agent(concat!("Gamer-Market/", env!("CARGO_PKG_VERSION")))
                 .build(),
         }
     }
@@ -232,20 +235,77 @@ impl PublicClient {
         if let Some(fetch) = &self.fetch_fixture {
             return fetch(url, limit);
         }
-        read_limited(
-            self.agent
-                .get(url)
+        let mut url = reqwest::Url::parse(url)?;
+        let allow_http = url.scheme() == "http";
+        for _ in 0..=5 {
+            source::validate_download_url(&url)?;
+            ensure!(
+                allow_http || url.scheme() == "https",
+                "来源重定向不能降级到 HTTP"
+            );
+            let agent = if url.scheme() == "http" {
+                &self.lan_agent
+            } else {
+                &self.agent
+            };
+            let response = agent
+                .get(url.as_str())
                 .call()
                 .map_err(|error| match error {
-                    ureq::Error::Status(status, _) => anyhow!("配置源返回 HTTP {status}"),
-                    _ => anyhow!("配置源请求失败，请检查网络和地址"),
-                })?
-                .into_reader(),
-            limit,
-        )
+                    ureq::Error::Status(status, _) => anyhow!("来源返回 HTTP {status}"),
+                    _ => anyhow!("来源请求失败，请检查网络和地址"),
+                })?;
+            if matches!(response.status(), 301 | 302 | 303 | 307 | 308) {
+                url = url.join(response.header("location").context("来源重定向缺少地址")?)?;
+                continue;
+            }
+            ensure!(
+                response.status() == 200,
+                "来源返回 HTTP {}",
+                response.status()
+            );
+            return read_limited(response.into_reader(), limit);
+        }
+        bail!("来源重定向次数过多")
     }
     pub(crate) fn latest(&self, repo: &str) -> Result<Option<PublishedCatalog>> {
         let location = SourceLocation::parse(repo)?;
+        if matches!(location, SourceLocation::Gitea { .. }) {
+            let released = location
+                .released_catalog("packages.json", false, |url, limit| self.fetch(url, limit));
+            if released
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("HTTP 404"))
+            {
+                if let Some(url) = location.directory_catalog("packages.json") {
+                    return self.catalog_from_url(url.as_str()).map(Some);
+                }
+            }
+            let Some((release, document)) = released? else {
+                return Ok(None);
+            };
+            let catalog: Catalog =
+                serde_json::from_value(document.clone()).context("配置目录格式无效")?;
+            catalog.validate()?;
+            let archive_urls = catalog
+                .packages
+                .iter()
+                .map(|p| {
+                    Ok((
+                        p.asset_name.clone(),
+                        location.release_asset(&release, &p.asset_name, Some(p.size))?,
+                    ))
+                })
+                .collect::<Result<_>>()?;
+            return Ok(Some(PublishedCatalog {
+                release_id: release["id"].as_u64().context("Release ID 缺失")?,
+                tag: release["tag_name"].as_str().unwrap().into(),
+                digest: sha256_hex(&serde_json::to_vec(&document)?),
+                catalog,
+                archive_base: String::new(),
+                archive_urls,
+            }));
+        }
         let SourceLocation::Github {
             repository: repo,
             prefix,
@@ -314,6 +374,7 @@ impl PublicClient {
             digest: sha256_hex(&bytes),
             catalog,
             archive_base: base.to_string(),
+            archive_urls: BTreeMap::new(),
         })
     }
     fn catalog_from_release(
@@ -364,6 +425,7 @@ impl PublicClient {
             digest: sha256_hex(&bytes),
             catalog,
             archive_base: location.release_base(repo, tag),
+            archive_urls: BTreeMap::new(),
         })
     }
     pub(crate) fn archive(&self, repo: &str, tag: &str, entry: &PackageEntry) -> Result<Vec<u8>> {
@@ -404,61 +466,39 @@ struct Cached {
     error: Option<String>,
 }
 pub(crate) struct PackageMarket {
-    path: PathBuf,
-    lock: Mutex<()>,
+    sources: crate::market_sources::SourceStore,
     cache: Mutex<BTreeMap<String, std::sync::Arc<Mutex<Cached>>>>,
     client: PublicClient,
 }
 impl PackageMarket {
     pub(crate) fn new(data: PathBuf) -> Self {
         Self {
-            path: data.join("package-sources.json"),
-            lock: Mutex::new(()),
+            sources: crate::market_sources::SourceStore::new(data, "package"),
             cache: Mutex::new(BTreeMap::new()),
             client: PublicClient::default(),
         }
     }
-    fn load(&self) -> Result<Vec<Source>> {
-        match fs::read(&self.path) {
-            Ok(bytes) => {
-                ensure!(bytes.len() < 65536, "仓库源设置超限");
-                Ok(serde_json::from_slice(&bytes)?)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![Source {
-                id: sha256_hex(OFFICIAL_REPOSITORY.as_bytes())[..16].into(),
-                repository: OFFICIAL_REPOSITORY.into(),
-                enabled: true,
-            }]),
-            Err(e) => Err(e.into()),
-        }
-    }
     pub(crate) fn sources(&self) -> Result<Vec<Source>> {
-        let _guard = self.lock.lock().unwrap();
-        self.load()
+        self.sources.list()
     }
+    #[cfg(test)]
     pub(crate) fn save_source(&self, input: &str, enabled: bool) -> Result<Vec<Source>> {
+        self.save_preset(input, enabled, None, None)
+    }
+    pub(crate) fn save_preset(
+        &self,
+        input: &str,
+        enabled: bool,
+        name: Option<&str>,
+        id: Option<&str>,
+    ) -> Result<Vec<Source>> {
         let repo = SourceLocation::parse(input)?.canonical();
-        let _guard = self.lock.lock().unwrap();
-        let mut sources = self.load()?;
-        if let Some(source) = sources.iter_mut().find(|s| s.repository == repo) {
-            source.enabled = enabled;
-        } else {
-            ensure!(sources.len() < 16, "最多添加 16 个仓库源");
-            sources.push(Source {
-                id: sha256_hex(repo.as_bytes())[..16].into(),
-                repository: repo,
-                enabled,
-            });
-        }
-        fs::create_dir_all(self.path.parent().unwrap())?;
-        crate::core::fs::atomic_write(&self.path, &serde_json::to_vec_pretty(&sources)?)?;
+        let sources = self.sources.save(repo, enabled, name, id)?;
+        self.cache.lock().unwrap().clear();
         Ok(sources)
     }
     pub(crate) fn remove(&self, id: &str) -> Result<()> {
-        let _guard = self.lock.lock().unwrap();
-        let mut sources = self.load()?;
-        sources.retain(|s| s.id != id);
-        crate::core::fs::atomic_write(&self.path, &serde_json::to_vec_pretty(&sources)?)?;
+        self.sources.remove(id)?;
         self.cache.lock().unwrap().remove(id);
         Ok(())
     }
@@ -510,7 +550,7 @@ impl PackageMarket {
     ) -> Result<Vec<u8>> {
         let source = self.source(source)?;
         self.catalog(&source.id, false)?;
-        let (archive_base, entry) = {
+        let (archive_url, entry) = {
             let cached = self
                 .cache
                 .lock()
@@ -526,9 +566,18 @@ impl PackageMarket {
                 .iter()
                 .find(|p| p.id == id && p.version == version && p.sha256 == hash)
                 .context("目录已变化，请刷新后重试")?;
-            (snapshot.archive_base.clone(), entry.clone())
+            (
+                snapshot
+                    .archive_urls
+                    .get(&entry.asset_name)
+                    .cloned()
+                    .unwrap_or_else(|| format!("{}{}", snapshot.archive_base, entry.asset_name)),
+                entry.clone(),
+            )
         };
-        self.client.archive_at(&archive_base, &entry)
+        let bytes = self.client.fetch(&archive_url, MAX_ARCHIVE)?;
+        entry.verify(&bytes)?;
+        Ok(bytes)
     }
 }
 
@@ -536,6 +585,82 @@ impl PackageMarket {
 mod tests {
     use super::*;
     type Requests = std::sync::Arc<Mutex<Vec<String>>>;
+    #[test]
+    fn gitea_source_downloads_only_selected_release_and_rejects_modified_archive() {
+        let server = source::test_http::TestServer::new();
+        let (directory, bytes) = fixture();
+        let (entry, catalog) = catalog_fixture(&bytes);
+        let release = json!({"id":7,"tag_name":"demo-v1.0.0","draft":false,"prerelease":false,"published_at":"2026-10-28T00:00:00Z","assets":[
+            {"name":"packages.json","size":catalog.len(),"browser_download_url":format!("{}/attachments/catalog",server.base)},
+            {"name":entry.asset_name,"size":entry.size,"browser_download_url":format!("{}/attachments/package",server.base)}
+        ]});
+        server.put(
+            "/api/v1/repos/owner/repo/releases?limit=100",
+            &serde_json::to_vec(&json!([release])).unwrap(),
+        );
+        server.put("/attachments/catalog", &catalog);
+        server.put("/attachments/package", &bytes);
+        let market = PackageMarket::new(directory.path().into());
+        let saved = market
+            .save_source(&format!("{}/owner/repo.git", server.base), true)
+            .unwrap();
+        let id = &saved
+            .iter()
+            .find(|s| s.repository.starts_with(&server.base))
+            .unwrap()
+            .id;
+        assert!(market.catalog(id, true).unwrap()["warning"].is_null());
+        assert_eq!(
+            market
+                .archive(id, &entry.id, &entry.version, &entry.sha256)
+                .unwrap(),
+            bytes
+        );
+        server.put("/attachments/package", b"corrupt");
+        assert!(market
+            .archive(id, &entry.id, &entry.version, &entry.sha256)
+            .is_err());
+        assert_eq!(
+            server.calls.lock().unwrap()[0],
+            "/api/v1/repos/owner/repo/releases?limit=100"
+        );
+    }
+    #[test]
+    fn http_download_revalidates_redirect_destinations_before_connecting() {
+        let server = source::test_http::TestServer::new();
+        server.redirect("/escape", "http://8.8.8.8/private");
+        assert!(PublicClient::default()
+            .fetch(&format!("{}/escape", server.base), 32)
+            .unwrap_err()
+            .to_string()
+            .contains("HTTPS"));
+        server.redirect("/local", "/payload");
+        server.put("/payload", b"ok");
+        assert_eq!(
+            PublicClient::default()
+                .fetch(&format!("{}/local", server.base), 32)
+                .unwrap(),
+            b"ok"
+        );
+    }
+    #[test]
+    fn static_directory_with_two_segments_still_works_when_it_is_not_a_git_server() {
+        let server = source::test_http::TestServer::new();
+        let (_directory, archive) = fixture();
+        let (entry, catalog) = catalog_fixture(&archive);
+        server.put("/team/configs/packages.json", &catalog);
+        server.put(&format!("/team/configs/{}", entry.asset_name), &archive);
+        let client = PublicClient::default();
+        let published = client
+            .latest(&format!("{}/team/configs", server.base))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            client.archive_at(&published.archive_base, &entry).unwrap(),
+            archive
+        );
+        assert_eq!(server.calls.lock().unwrap().len(), 3);
+    }
     fn fixture_client(responses: BTreeMap<String, Vec<u8>>) -> (PublicClient, Requests) {
         let requests = Requests::default();
         let observed = requests.clone();
@@ -782,16 +907,24 @@ mod tests {
             .unwrap();
         assert_eq!(
             market.save_source("owner/repo.git", false).unwrap().len(),
-            2
+            3
         );
-        assert!(!PackageMarket::new(d.path().into()).sources().unwrap()[1].enabled);
-        for source in first {
+        assert!(
+            !PackageMarket::new(d.path().into())
+                .sources()
+                .unwrap()
+                .iter()
+                .find(|s| s.repository == "owner/repo")
+                .unwrap()
+                .enabled
+        );
+        for source in first.into_iter().filter(|s| !s.builtin) {
             market.remove(&source.id).unwrap();
         }
-        assert!(PackageMarket::new(d.path().into())
-            .sources()
-            .unwrap()
-            .is_empty());
+        assert_eq!(
+            PackageMarket::new(d.path().into()).sources().unwrap().len(),
+            2
+        );
     }
     #[test]
     fn limit_is_enforced_while_reading() {

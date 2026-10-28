@@ -218,8 +218,9 @@ pub(crate) fn build_router_with_external(
         extensions,
         mcp,
         external_control,
-        plugin_market: Arc::new(crate::extensions::market::PluginMarket::new(
+        plugin_market: Arc::new(crate::extensions::market::PluginMarket::with_data(
             cfg.web_dist_dir(),
+            cfg.data_dir.clone(),
         )),
         package_market: Arc::new(crate::package_market::PackageMarket::new(
             cfg.data_dir.clone(),
@@ -322,6 +323,14 @@ pub(crate) fn build_router_with_external(
         .route(
             "/api/extensions/market/registry.json",
             get(extensions_market::registry),
+        )
+        .route(
+            "/api/extensions/market/sources",
+            get(extensions_market::sources).post(extensions_market::save_source),
+        )
+        .route(
+            "/api/extensions/market/sources/:id",
+            delete(extensions_market::remove_source),
         )
         .route(
             "/api/extensions/market/:id/:version/archive",

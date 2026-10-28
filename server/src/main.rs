@@ -30,6 +30,7 @@ mod extensions;
 mod external_control;
 mod logging;
 mod maintenance;
+mod market_sources;
 mod matcher;
 mod mcp;
 mod mcp_core;
