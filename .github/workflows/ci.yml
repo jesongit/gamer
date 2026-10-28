@@ -189,6 +189,9 @@ jobs:
       - name: pnpm install (--frozen-lockfile)
         run: pnpm install --frozen-lockfile
 
+      - name: Frontend dependency security audit
+        run: pnpm audit --registry=https://registry.npmjs.org --audit-level=low
+
       - name: Verify pinned plugin SDK
         working-directory: .
         run: node tools/check-plugin-sdk.mjs
