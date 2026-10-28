@@ -1,10 +1,10 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-10-28T16:58:09Z",
+  "generated_at": "2026-10-28T20:46:52Z",
   "host_api": "1.0.0",
   "provenance": {
-    "plugin_commit": "e5cc8f1e274543beb9efcc00e84e8f55785e0811",
-    "sdk_host_commit": "143309f17359e261ccace0827484c10f79ae6bb2",
+    "plugin_commit": "cff76b659d95e21ef7bd1c3aba317a6226eb3d2b",
+    "sdk_host_commit": "7fed8dcc3f203f90d29320490f58f4a48999e3dc",
     "sdk_snapshot_kind": "commit"
   },
   "plugins": [
@@ -14,7 +14,7 @@
       "name": "键盘映射",
       "description": "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键",
       "publisher": "gamer.dev",
-      "download_url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-video-v0.2.9/gamer-keymap-0.1.9.gplugin",
+      "download_url": "/plugins/gamer-keymap-0.1.9.gplugin",
       "sha256": "cb68af6c48d91b5ac61e2eeb3a2c00f0dada84e2a98296365319b36cd05a5444",
       "size": 134666,
       "permissions": [
@@ -59,7 +59,7 @@
       "name": "直播助手",
       "description": "设备直播与文件夹视频自动直播，弹幕排队执行脚本并自动切换画面；支持直播姬与手动 RTMP 输出",
       "publisher": "gamer.dev",
-      "download_url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-video-v0.2.9/gamer-live-0.2.20.gplugin",
+      "download_url": "/plugins/gamer-live-0.2.20.gplugin",
       "sha256": "dbc187b5328c1877114f81f25d9b2257f020afbce232519c10f0432c0a4fe544",
       "size": 36251,
       "permissions": [
@@ -104,7 +104,7 @@
       "name": "通知助手",
       "description": "全局通知通道、任务结果通知与自动化通知",
       "publisher": "gamer.dev",
-      "download_url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-video-v0.2.9/gamer-notify-0.1.3.gplugin",
+      "download_url": "/plugins/gamer-notify-0.1.3.gplugin",
       "sha256": "6bcdc9ebd7b55786981d1c51339f9178629897dca054999c221f16f2fec5d994",
       "size": 6063,
       "permissions": [
@@ -140,7 +140,7 @@
       "name": "配置包发布",
       "description": "使用本机 GitHub CLI 将配置包发布到自己的公开仓库",
       "publisher": "gamer.dev",
-      "download_url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-video-v0.2.9/gamer-package-publisher-0.1.1.gplugin",
+      "download_url": "/plugins/gamer-package-publisher-0.1.1.gplugin",
       "sha256": "22cf8650b3c39368e707b2e167de8286d510029c1decf55caa1cc082d180ed04",
       "size": 5170,
       "permissions": [
@@ -176,7 +176,7 @@
       "name": "视频工作台",
       "description": "视频工作台：媒体素材库、设备录制与可携带演示素材",
       "publisher": "gamer.dev",
-      "download_url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-video-v0.2.9/gamer-video-0.2.9.gplugin",
+      "download_url": "/plugins/gamer-video-0.2.9.gplugin",
       "sha256": "3bc3a231db73a48e552ed594a65e293548d7a011a1ac2a473477d748d8446bcc",
       "size": 34152,
       "permissions": [
@@ -213,13 +213,13 @@
     },
     {
       "id": "gamer-yaml",
-      "version": "0.3.27",
+      "version": "0.3.28",
       "name": "自动化",
       "description": "自动化：按用户步骤编写脚本、脚本版本管理、素材与运行验证",
       "publisher": "gamer.dev",
-      "download_url": "https://github.com/jesongit/gamer-plugins/releases/download/gamer-video-v0.2.9/gamer-yaml-0.3.27.gplugin",
-      "sha256": "de142b67546a06c851f01ea49f8ade176b556c82974abb77d12883afaba8290e",
-      "size": 439514,
+      "download_url": "/plugins/gamer-yaml-0.3.28.gplugin",
+      "sha256": "bd7a7e44f974e5bb6513d8ae53b37a6ef19c1982e56dc240d3d1526d9a97a9f2",
+      "size": 440456,
       "permissions": [
         "ui.host",
         "device.read",
@@ -232,6 +232,7 @@
         "vision.color",
         "vision.ocr",
         "resource.read",
+        "resource.write",
         "runtime.sleep",
         "log.write",
         "notify.send",
@@ -265,7 +266,7 @@
       },
       "execution": {
         "kind": "wasm",
-        "host_version": ">=0.5.2"
+        "host_version": ">=0.5.9"
       }
     }
   ]

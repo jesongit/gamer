@@ -219,7 +219,7 @@ Builtin 使用 `ExternalToolHandler` 显式注册语义；WASM 调用现有 call
 
 当前通用 WASM 外部工具支持安全读取/资源处理。没有专用租约适配的 input/touch/device.app/run imports 隐藏并拒绝，不能复用 UI 的输入身份。第三方 Runner 还须显式支持冻结的受限 ExecutionPolicy 才能接受外部正式运行。
 
-管理 call、declarative 按钮、YAML 原生函数不会自动进入工具目录；不存在万能 plugin_call。插件停用/卸载/更新会使旧工具不可调用。MCP 不开放凭据、正式发布、回退、删除、通知发送或配置包公开发布。
+管理 call、declarative 按钮、YAML 原生函数不会自动进入工具目录；不存在万能 plugin_call。插件停用/卸载/更新会使旧工具不可调用。MCP 不开放凭据、回退、删除、通知发送或配置包公开发布。宿主 0.5.9 / YAML 0.3.28 起，正式脚本发布通过显式 `draft_publish_preview` / `draft_publish` 工具开放，要求准确 head 与双 SHA256；Core 另提供任务入口 CAS 切换和已安装插件的版本/哈希钉住更新工具。设置页默认令牌覆盖当前及未来已开放工具，旧默认令牌保留原密钥；显式受限凭据仍须满足工具 scope 和对象范围。
 
 ## 5. 版本与兼容语义
 

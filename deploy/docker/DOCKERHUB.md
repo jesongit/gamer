@@ -36,7 +36,7 @@ adds pinned formal publication; Core supports task entrypoint changes and instal
 plugin updates with version, hash and permission checks. No token recreation is needed.
 The `latest` image tag follows this stable release; versioned tags stay immutable.
 The published architecture is **linux/amd64**, for Intel/AMD x86_64 hosts.
-The previous `v1.0`, `v1.0.1`, `v1.0.2`, `v1.0.3`, `v1.0.4`, `v1.0.5`, `v1.0.6`, `v1.0.7` `v1.0.8` and `v1.0.9` tags remain unchanged. No ARM64 release is claimed.
+The previous `v1.0`, `v1.0.1`, `v1.0.2`, `v1.0.3`, `v1.0.4`, `v1.0.5`, `v1.0.6`, `v1.0.7`, `v1.0.8` and `v1.0.9` tags remain unchanged. No ARM64 release is claimed.
 
 The v1.0.10 deployment bundle includes the unchanged Chromium seccomp file:
 https://github.com/jesongit/gamer/releases/tag/docker-v1.0.10
