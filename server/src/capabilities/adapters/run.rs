@@ -123,6 +123,9 @@ impl RunService for RunAdapter {
                 StartError::ShuttingDown => {
                     CapabilityError::Unavailable("run manager is shutting down")
                 }
+                StartError::Maintenance => CapabilityError::Unavailable(
+                    "plugin update in progress; retry after maintenance",
+                ),
             })?;
         let handle = RunHandle::new();
         self.handles

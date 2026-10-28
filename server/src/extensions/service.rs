@@ -303,6 +303,9 @@ pub(crate) struct ExtensionInstallContext {
     pub(crate) expected_sha256: Option<String>,
 }
 
+pub(crate) type ExtensionUpdateAdmission =
+    Arc<dyn Fn(&ExtensionVersion, &ExtensionInspection) -> ExtensionResult<()> + Send + Sync>;
+
 impl ExtensionInspection {
     pub(crate) fn manifest(&self) -> &ExtensionManifest {
         &self.manifest
@@ -1715,6 +1718,34 @@ impl ExtensionService {
         let _call_gate = call_gate.write().await;
         let _cancellation = cancellation;
 
+        self.update_under_gate(archive, context, None).await
+    }
+
+    /// MCP updates never cancel in-flight plugin work to obtain admission.
+    /// The caller separately holds the Core idle-run reservation.
+    pub(crate) async fn update_quiescent(
+        &self,
+        archive: &[u8],
+        context: &ExtensionInstallContext,
+        admission: ExtensionUpdateAdmission,
+    ) -> ExtensionResult<ExtensionSnapshot> {
+        let manifest = self.inspect_compatible(archive)?;
+        let gate = self.call_gate(manifest.id());
+        let _gate = gate
+            .try_write()
+            .map_err(|_| ExtensionError::Runtime("plugin_busy: wait for in-flight calls".into()))?;
+        self.update_under_gate(archive, context, Some(&admission))
+            .await
+    }
+
+    async fn update_under_gate(
+        &self,
+        archive: &[u8],
+        context: &ExtensionInstallContext,
+        admission: Option<&ExtensionUpdateAdmission>,
+    ) -> ExtensionResult<ExtensionSnapshot> {
+        let incoming_manifest = self.inspect_compatible(archive)?;
+
         let (was_running, restore_context, old_active_version, install_error) = {
             let _guard = self.operation_lock.lock().await;
             let inspection = self.inspect_with_context(archive, context)?;
@@ -1729,6 +1760,12 @@ impl ExtensionService {
             }
             let mut record =
                 state_for_versions(manifest.id(), &versions, states.get(manifest.id()).cloned())?;
+            if let Some(admit) = admission {
+                admit(
+                    active_version(&versions, &record)?.manifest().version(),
+                    &inspection,
+                )?;
+            }
             let original_state = record.state;
             let old_active_version = record.active_version.clone();
             let was_running = original_state == ExtensionState::Running;
@@ -3996,6 +4033,58 @@ entry = "plugin.wasm"
                 "gamer-video",
             ),
         )])
+    }
+
+    #[tokio::test]
+    async fn quiescent_update_does_not_cancel_calls_and_rechecks_before_version_write() {
+        let root = tempfile::tempdir().unwrap();
+        let service = dependency_service(root.path());
+        let id = ExtensionId::parse("gamer-video").unwrap();
+        service.install(&builtin_video_archive()).await.unwrap();
+        let incoming = zip_of(&[(
+            "manifest.toml",
+            builtin_manifest_bytes("gamer-video", "1.0.1", "gamer-video"),
+        )]);
+        let gate = service.call_gate(&id);
+        let held = gate.read().await;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = calls.clone();
+        let admit: ExtensionUpdateAdmission = Arc::new(move |active, inspection| {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(active.to_string(), "1.0.0");
+            assert_eq!(inspection.manifest().version().to_string(), "1.0.1");
+            Ok(())
+        });
+        let context = ExtensionInstallContext::default();
+        assert!(service
+            .update_quiescent(&incoming, &context, admit.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("plugin_busy"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        drop(held);
+        let revoked: ExtensionUpdateAdmission =
+            Arc::new(|_, _| Err(ExtensionError::Runtime("credential_invalid".into())));
+        assert!(service
+            .update_quiescent(&incoming, &context, revoked)
+            .await
+            .is_err());
+        assert_eq!(
+            service
+                .snapshot_for(&id)
+                .unwrap()
+                .active_version()
+                .to_string(),
+            "1.0.0"
+        );
+        assert_eq!(service.versions_for(&id).unwrap().len(), 1);
+        let updated = service
+            .update_quiescent(&incoming, &context, admit)
+            .await
+            .unwrap();
+        assert_eq!(updated.active_version().to_string(), "1.0.1");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// 必需依赖缺失 → 启动被拒（安装自动启动降级 Enabled + last_error）；

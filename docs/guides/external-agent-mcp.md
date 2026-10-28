@@ -5,7 +5,7 @@ Gamer 提供画面、受控输入、资源、运行证据和插件工具。模�
 ## 连接
 
 1. 在 Gamer「设置 → MCP 与外部控制」填写名称和有效期，点击“添加令牌”。有效期单位为小时，`0` 表示不过期。
-2. 新令牌可使用创建时已经开放的 MCP 功能，不需要逐项勾选权限或对象。令牌的操作权限在创建时固定，对象范围包括现有及以后新增的目标、配置包、插件、执行器、运行、任务和素材。
+2. 设置页创建的令牌默认拥有当前和未来新增的全部已开放 MCP 功能，无需逐项勾选权限或对象。升级或新增插件后继续使用同一令牌，对象范围包括现有及以后新增的目标、配置包、插件、执行器、运行、任务和素材。
 3. 点击“查看”或“复制”使用令牌，离开页面后仍可再次查看。原文经现有凭据保护机制加密保存，认证仍使用哈希；列表接口不返回原文。旧版只有哈希的令牌继续有效，但无法还原原文，可以创建新令牌后删除旧令牌。令牌不进入配置包，也不继承旧 AI 插件令牌。
 4. 默认只允许服务本机连接。需要其他电脑、宿主机或其他容器中的 Agent 接入时，开启“允许远程 MCP 连接”，保存后即时生效。也可在配置顶层设置 `mcp_allow_remote = true` 后启动；缺省为 `false`。
 5. 在自己的 Agent 中添加 Streamable HTTP MCP 服务，请求头填写 `Authorization: Bearer <新令牌>`。本机地址例如 `http://127.0.0.1:8443/api/mcp`；远程开启后，从其他电脑可访问的 Gamer 网页打开设置，复制显示的连接地址，例如 `http://192.168.31.10:18443/api/mcp`。地址沿用网页的协议、主机和映射端口。具体配置文件格式由客户端决定。
@@ -19,17 +19,20 @@ Gamer 提供画面、受控输入、资源、运行证据和插件工具。模�
 
 ## 按用途授权
 
-首版设置页不展示 scope、对象选择和控制会话参数。服务端仍检查显式操作权限与对象范围；新令牌从当前真实工具目录确定权限。安装新插件后，若新工具需要创建时尚不存在的权限，请重新创建令牌。
+设置页不展示 scope、对象选择和控制会话参数，默认令牌持有动态全部 scope。宿主 0.5.9 起，历史设置页默认令牌（七类对象均为单一 `*` 范围且含 `control`，没有新格式显式限制标记）自动按全权限解释，原密钥、到期和撤销状态保留，无需重建。底层明确创建的受限令牌仍逐项检查 scope 与对象范围。全部权限仅覆盖显式开放且可用的 MCP 工具，不自动导出管理接口，不绕过输入屏障、插件权限或受限执行策略。
 
 | 用途 | 主要 scope 与对象 |
 | --- | --- |
 | 观察画面 | `observe` + 明确目标；不会自动开始控制或扫描设备 |
 | 读取配置 | `resource.read` + 配置包 + 插件；Core 资源工具只读 |
 | 编写 YAML 工作稿 | `plugin.gamer-yaml.read`、`plugin.gamer-yaml.draft.write` + gamer-yaml + 配置包 |
+| 发布 YAML 正式版本 | `plugin.gamer-yaml.publish`、`plugin.gamer-yaml.read` + gamer-yaml + 配置包；必须钉住工作稿 head 和双 SHA256 |
 | 读取独立素材 | `plugin.gamer-video.read`、`media.read` + gamer-video + 素材 ID；配置包权限不代替独立素材权限 |
 | 私有版本试跑 | 工具声明的 trial scope、`run.submit` + 目标、配置包、插件、执行器；试跑受令牌撤销和到期取消 |
 | 提交正式脚本 | `run.submit` + 目标、配置包、插件、执行器；读取另需 `run.read`，取消另需 `run.cancel` |
 | 编辑定时任务 | `task.write` + 任务及目标等实际对象；新任务默认禁用，启用或立即运行另需 `run.submit` |
+| 切换已有任务入口 | `task.write` + 任务实际范围；启用中的任务另需 `run.submit`，保留受限执行策略 |
+| 更新已安装插件 | `plugin.update` + 插件；新增权限另需 `plugin.permissions.grant` 与准确权限增量 |
 | 直接操作 | `control` + 目标和可选配置包；仍须管理端显式开始会话 |
 
 插件可有更细的 scope，始终以 `tools/list` 中声明为准。令牌只持有权限，不使缺失、停用或声明不完整的插件自动可用。
@@ -61,9 +64,19 @@ YAML 工作稿引用独立视频素材时，还需授权实际素材所属的 `g
 4. 用 `draft_save` 提交完整 YAML、版本并发条件和明确的 `operation_id`。省略素材关联字段沿用旧关联，显式空列表只清关联，不删除原素材。保存新增版本，不覆盖正式脚本。
 5. 用校验和素材匹配工具检查语法、引用、ZIP/PNG、模板 NCC；它们不执行分支、等待、OCR 或真实点击，不证明游戏完成。
 6. 用户授权后用私有试跑工具执行指定版本，保留返回的实际 `run_id`。按这个 ID 读取 events / trace / image，不能使用全局“最新运行”代替。
-7. Agent 可以继续保存修改后的版本。用户在 Gamer 查看差异、测试并发布大版本；MCP 没有正式发布、回退或删除工具。
+7. Agent 可以继续保存修改后的版本。获用户授权后，先用 `draft_publish_preview` 获取指定版本的 `head_version`、`source_sha256` 和当前正式资源 `resource_sha256`，再用 `draft_publish` 传入 `version`、相同的 `expected_version`、`expected_source_sha256`、`expected_resource_sha256`（新脚本为 `null`）及 `operation_id`。仅发布尚未发布的准确 head；并发编辑、正式资源漂移、语法或引用错误会拒绝。发布复用原事务并生成大版本，保留全部工作稿、模板与历史；预检不代表真实游戏验收。回退和删除仍需管理端操作。
 
 工具全名采用 `gamer.plugin.<插件ID>.<tool_id>`，例如 `gamer.plugin.gamer-yaml.draft_get`。参数名称、必填项和上限从当前 Schema 读取。
+
+### 发布后切换任务入口
+
+用 `gamer.core.task_get` 读取具体任务，再用 `task_retarget` 传 `task_id`、准确的 `expected_updated_at`、`expected_entrypoint`、新的正式 `entrypoint` 和 `operation_id`。可选 `payload` 完整替换参数，省略则保留；Runner 必须能够描述新入口。工具保留时间表、启用状态、下一次触发、其他插件设置、预设与运行历史，不新建任务，不改变已受理运行的冻结入口。启用中的任务须有 `run.submit`；切换后的任务使用当前令牌冻结的受限执行授权，不继承管理员的通知或推流权限。
+
+### 更新已安装插件
+
+先调用 `gamer.core.plugin_update_plan`，指定 `plugin_id` 与 `inspect:true` 检查真实归档、宿主兼容性和准确的 `added_permissions`；`source_id` 仅选择已配置来源，不允许配置新源。随后用 `plugin_update` 传 `plugin_id`、`from_version`、`to_version`、`sha256` 和 `operation_id`。默认禁止增加权限；确需新增权限时，用 `plugin_update_with_permissions` 和独立 `plugin.permissions.grant` scope，`grant_permissions` 必须与归档实际新增权限完全一致。
+
+更新仅允许版本递增和已安装插件，不改变执行类型、自动启用已禁用插件、删除或回退。活动运行或插件调用会使更新拒绝，空闲预约与运行准入共用锁以避免竞争；宿主复用现有安装校验、生命周期、失败恢复和不可变版本保留机制。完成后重新读取工具目录。宿主 0.5.9 与 YAML 0.3.28 新增这些能力；升级后原默认令牌即可使用新增功能；Agent 重新读取工具目录后可继续完成相应操作。
 
 ### 调度、原录像 OCR 与键盘映射
 
@@ -107,7 +120,7 @@ Agent 先读取 `control_status`，再用带当前 session_id、generation 的 `
 
 安装并启用带 `[[tools]]` 声明的新插件版本。宿主读取插件明确声明的 tool_id、action、Schema、scope、权限、effect 与上下文字段，再统一通过 `/api/mcp` 发现和调用。禁用、卸载、更新或缺失实现时不可继续调用旧工具。仅安装旧 UI 或声明权限不会自动生成工具。
 
-官方插件接入包括 YAML 18、视频素材 8、键盘映射 5、直播 7 项工具。OCR 的 2 项工具已经属于 Core，历史 gamer-ocr 插件不再是安装前提。通知和配置发布不开放 MCP 发送、凭据或发布动作。键盘映射工具保存资源，不自动热切换；用户在 Gamer 选用。
+官方插件工具以当前 `tools/list` 为准；YAML 另有明确声明的工作稿发布预检及发布工具。OCR 的 2 项工具已经属于 Core，历史 gamer-ocr 插件不再是安装前提。通知发送、配置包发行插件的发布动作及凭据仍不开放 MCP；YAML 正式脚本发布是独立语义工具。键盘映射工具保存资源，不自动热切换；用户在 Gamer 选用。
 
 第三方 WASM 使用每调用独立 guest/Store、上下文和句柄表，复用编译缓存。当前支持安全的读取和资源处理；没有专用受控租约适配的低层 input/touch/app/run imports 隐藏并拒绝。无需因此放宽原输入屏障。开发契约见 [插件 API](https://github.com/jesongit/gamer/blob/main/docs/reference/PLUGIN_API.md)。
 

@@ -24,6 +24,7 @@ pub(crate) struct CoreTools {
     pub control: Arc<ExternalControlService>,
     pub media: Arc<crate::media::MediaService>,
     pub recordings: Arc<crate::recording::RecordingService>,
+    pub plugin_market: Arc<crate::extensions::market::PluginMarket>,
 }
 
 /// Pure construction: creates only the independent MCP metadata directory and
@@ -38,7 +39,15 @@ pub(crate) fn assemble(
     scheduler: Arc<crate::scheduler::Scheduler>,
     extensions: Arc<crate::extensions::ExtensionService>,
     capabilities: crate::capabilities::CapabilityRegistry,
-) -> anyhow::Result<(Arc<crate::mcp::McpService>, Arc<ExternalControlService>)> {
+) -> anyhow::Result<(
+    Arc<crate::mcp::McpService>,
+    Arc<ExternalControlService>,
+    Arc<crate::extensions::market::PluginMarket>,
+)> {
+    let plugin_market = Arc::new(crate::extensions::market::PluginMarket::with_data(
+        cfg.web_dist_dir(),
+        cfg.data_dir.clone(),
+    ));
     let mcp = Arc::new(crate::mcp::McpService::open(
         &cfg.data_dir,
         crate::mcp::ServerInfo {
@@ -81,9 +90,10 @@ pub(crate) fn assemble(
             control: control.clone(),
             media: crate::media::service(cfg),
             recordings: crate::recording::service(cfg),
+            plugin_market: plugin_market.clone(),
         }),
     )?;
-    Ok((mcp, control))
+    Ok((mcp, control, plugin_market))
 }
 
 pub(crate) fn tool(
@@ -183,6 +193,7 @@ impl ToolProvider for CoreTools {
             ]}}),&["session_id","generation","frame_id","input"],session_context()));
         tools.extend(self.task_tools());
         tools.extend(self.media_tools());
+        tools.extend(self.plugin_update_tools());
         tools
     }
 
@@ -236,16 +247,29 @@ impl ToolProvider for CoreTools {
         if self.is_media_tool(name) {
             return self.call_media(ctx, name, args).await;
         }
+        if matches!(
+            name,
+            "gamer.core.plugin_update_plan"
+                | "gamer.core.plugin_update"
+                | "gamer.core.plugin_update_with_permissions"
+        ) {
+            return self
+                .call_plugin_update(ctx, name, args)
+                .await
+                .map(ToolResult::json);
+        }
         let value = match name {
             "gamer.core.guide" => json!({"version":1,"protocol":"2025-11-25","workflow":[
                 "Discover authorized capabilities and read Package resources.",
                 "Find recorded videos by name with recording_list; inspect recording_get/recording_events and exact media_frame evidence, then use the available video plugin's sample_create with the chosen recording ID and session timeline range.",
-                "Edit YAML through the YAML work-draft tools; saves create a new version. Publication and rollback require the management UI.",
+                "Edit YAML through work-draft tools; saves create a new version. Preview publication, then publish the exact head using both SHA256 pins and the publish scope. Rollback stays in the management UI.",
+                "Retarget existing tasks with task_retarget and their exact timestamp/old entrypoint; enabled tasks require run.submit and retain restricted external execution.",
+                "Inspect installed-plugin updates from configured sources, then update pinned versions/SHA256 while idle. New permissions require the separate grant scope and exact permission delta. Refresh tools/list afterward.",
                 "For direct control, the user starts a token-bound session in Gamer; observe status, capture a frame, act once, then capture again.",
                 "Keepalive extends only your running session. TTL expiry pauses input; the user resumes in Gamer. Release and wait before submitting scripts.",
                 "Use unique operation_id values for side effects. Retry the same ID only with identical arguments. operation_status_unknown requires reconciliation, never blind replay.",
                 "Submitted formal runs and persistent tasks continue after HTTP disconnect or token expiry. Private trials are cancelled on credential expiry/revocation."
-            ],"boundaries":{"generic_resources":"read_only","publish":"management_ui","control_start_resume":"management_ui","tools_list_changed":false},"contexts":["device_id","android_package","package_id","plugin_id"]}),
+            ],"boundaries":{"generic_resources":"read_only","publish":"explicit_pinned_yaml_tool","plugin_update":"configured_sources_installed_only","rollback_delete_credentials":"management_ui","control_start_resume":"management_ui","tools_list_changed":false},"contexts":["device_id","android_package","package_id","plugin_id"]}),
             "gamer.core.capabilities" => {
                 let runners = self
                     .scheduler

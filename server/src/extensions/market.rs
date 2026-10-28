@@ -57,6 +57,11 @@ pub(crate) struct PluginMarket {
 
 impl PluginMarket {
     #[cfg(test)]
+    pub(crate) fn prime_offline(&self) {
+        self.catalog_with(true, || Err("isolated offline fixture".into()))
+            .unwrap();
+    }
+    #[cfg(test)]
     pub(crate) fn new(web_dir: PathBuf) -> Self {
         Self::with_data(web_dir.clone(), web_dir)
     }

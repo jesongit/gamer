@@ -12,6 +12,9 @@ impl CoreTools {
                 json!({"schedule":{"type":"object","properties":{"provider_id":string(),"config":{"type":"object"}},"required":["provider_id","config"],"additionalProperties":false},"after":{"type":"string","format":"date-time"},"count":{"type":"integer","minimum":1,"maximum":10}}),&["schedule"],Default::default()),
             tool("gamer.core.task_list","List tasks allowed by this token, filtered by their actual nested execution scope.","task.read",ToolEffect::Read,json!({}),&[],Default::default()),
             tool("gamer.core.task_get","Read one authorized task including its schedule, runner and current state.","task.read",ToolEffect::Read,json!({"task_id":string()}),&["task_id"],context.clone()),
+            tool("gamer.core.task_retarget","Change only a task's published entrypoint and optionally payload. Supply the exact task timestamp and old entrypoint; schedule, enabled state, extensions and history are preserved. Execution retains the restricted external policy.","task.write",ToolEffect::TaskWrite,
+                json!({"task_id":string(),"expected_updated_at":string(),"expected_entrypoint":string(),"entrypoint":string(),"payload":{"type":"object"}}),
+                &["task_id","expected_updated_at","expected_entrypoint","entrypoint"],context.clone()),
             tool("gamer.core.task_save","Create a disabled task or update an explicitly authorized task. Enabled tasks additionally require run.submit. Omit task_id for creation; updates require expected_updated_at.","task.write",ToolEffect::TaskWrite,
                 json!({"task_id":string(),"expected_updated_at":string(),"name":{"type":"string","minLength":1,"maxLength":255},"device_id":string(),"package_id":string(),"runner_id":string(),"entrypoint":string(),"payload":{"type":"object"},"schedule":{"type":"object","properties":{"provider_id":string(),"config":{"type":"object"}},"required":["provider_id","config"],"additionalProperties":false},"enabled":{"type":"boolean"}}),
                 &["name","device_id","package_id","runner_id","entrypoint","schedule"],ContextRequirements{device_field:Some("device_id".into()),package_field:Some("package_id".into()),runner_field:Some("runner_id".into()),..Default::default()}),
@@ -231,6 +234,59 @@ impl CoreTools {
                     .ok_or_else(|| not_found("task_not_found"))?;
                 self.authorize_task_scope(ctx, &task)?;
                 Ok(json!(task))
+            }
+            "gamer.core.task_retarget" => {
+                let id = text(args, "task_id")?;
+                ctx.authorize_task(id)?;
+                let old = self
+                    .db
+                    .get_timer_task_async(id)
+                    .await
+                    .map_err(business)?
+                    .ok_or_else(|| not_found("task_not_found"))?;
+                self.authorize_task_scope(ctx, &old)?;
+                let expected = args["expected_updated_at"]
+                    .as_str()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
+                if !expected.is_some_and(|s| s.with_timezone(&chrono::Utc) == old.updated_at)
+                    || args["expected_entrypoint"].as_str() != Some(old.entrypoint.as_str())
+                {
+                    return Err(McpError::new(
+                        ErrorKind::Conflict,
+                        "task_changed",
+                        "Re-read the task before retargeting",
+                    ));
+                }
+                let mut task = old.clone();
+                task.entrypoint = text(args, "entrypoint")?.into();
+                if let Some(payload) = args.get("payload") {
+                    task.payload = payload.clone();
+                }
+                let scope = if task.enabled {
+                    self.authorize_task_execution(ctx, &task)?
+                } else {
+                    self.authorize_task_scope(ctx, &task)?
+                };
+                self.authorize_entrypoint(
+                    ctx,
+                    &task.runner_id,
+                    scope.package_id.as_deref().unwrap(),
+                    &task.entrypoint,
+                    &task.payload,
+                )?;
+                // The Runner owns what a published entrypoint means. Do not
+                // persist a dangling or unsupported target for a later run.
+                self.scheduler
+                    .describe_entrypoint(&task.runner_id, &task.entrypoint)
+                    .map_err(|_| not_found("runner_or_entrypoint_unavailable"))?;
+                task.updated_at = chrono::Utc::now();
+                delegation(ctx)
+                    .store_in_task(&mut task.extensions)
+                    .map_err(business)?;
+                self.persist_task_snapshot(ctx, Some(&old), &task).await?;
+                Ok(
+                    json!({"task":task,"execution_policy":"restricted_external","applies_to":"future_submissions"}),
+                )
             }
             "gamer.core.task_save" => {
                 let previous = if let Some(id) = args["task_id"].as_str() {

@@ -34,6 +34,7 @@ mod market_sources;
 mod matcher;
 mod mcp;
 mod mcp_core;
+mod mcp_core_plugins;
 mod media;
 mod metrics;
 mod migrations;
@@ -321,6 +322,7 @@ struct RuntimeServices {
     extensions: Arc<extensions::ExtensionService>,
     mcp: Arc<mcp::McpService>,
     external_control: Arc<external_control::ExternalControlService>,
+    plugin_market: Arc<extensions::market::PluginMarket>,
 }
 
 impl RuntimeServices {
@@ -349,6 +351,7 @@ impl RuntimeServices {
             self.extensions.clone(),
             self.mcp.clone(),
             self.external_control.clone(),
+            self.plugin_market.clone(),
         )
     }
 }
@@ -475,7 +478,7 @@ impl RuntimeServices {
             extensions.register_external_handler(&extensions::ExtensionId::parse(id)?, handler)?;
         }
         generation_service.attach(&extensions);
-        let (mcp, external_control) = mcp_core::assemble(
+        let (mcp, external_control, plugin_market) = mcp_core::assemble(
             cfg,
             db.clone(),
             devices.clone(),
@@ -503,6 +506,7 @@ impl RuntimeServices {
             extensions,
             mcp,
             external_control,
+            plugin_market,
         };
         // 与常规路径一致：在任何设备扫描/保活启动前接入统一 drain，避免
         // activation 后初始化窗口收到 SIGTERM 时漏掉已创建的运行依赖。

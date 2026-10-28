@@ -155,7 +155,7 @@ pub(crate) fn build_router_with_extensions(
         db.clone(),
         runs.clone(),
     );
-    let (mcp, external_control) = crate::mcp_core::assemble(
+    let (mcp, external_control, plugin_market) = crate::mcp_core::assemble(
         &cfg,
         db.clone(),
         devices.clone(),
@@ -180,6 +180,7 @@ pub(crate) fn build_router_with_extensions(
         extensions,
         mcp,
         external_control,
+        plugin_market,
     )
 }
 
@@ -201,6 +202,7 @@ pub(crate) fn build_router_with_external(
     extensions: Arc<crate::extensions::ExtensionService>,
     mcp: Arc<crate::mcp::McpService>,
     external_control: Arc<crate::external_control::ExternalControlService>,
+    plugin_market: Arc<crate::extensions::market::PluginMarket>,
 ) -> Router {
     let metrics = db.metrics();
     let state = AppState {
@@ -218,10 +220,7 @@ pub(crate) fn build_router_with_external(
         extensions,
         mcp,
         external_control,
-        plugin_market: Arc::new(crate::extensions::market::PluginMarket::with_data(
-            cfg.web_dist_dir(),
-            cfg.data_dir.clone(),
-        )),
+        plugin_market,
         package_market: Arc::new(crate::package_market::PackageMarket::new(
             cfg.data_dir.clone(),
         )),

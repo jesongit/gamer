@@ -41,7 +41,7 @@ fn authorize(
     device_id: &str,
     package_id: Option<&str>,
 ) -> Result<(), ApiError> {
-    if !principal.scopes.contains("control") {
+    if !principal.has_scope("control") {
         return Err(ApiError::forbidden("所选令牌没有 control 权限").with_code("scope_denied"));
     }
     principal

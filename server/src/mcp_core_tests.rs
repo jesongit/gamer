@@ -3,6 +3,7 @@ use crate::mcp::{AllowedObjects, CreateTokenRequest, McpService};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 include!("mcp_core_media_tests.rs");
+include!("mcp_core_management_tests.rs");
 
 #[tokio::test]
 async fn mcp_schedule_preview_uses_the_registered_provider_without_saving_or_running() {
@@ -111,11 +112,12 @@ struct Fixture {
     accepted: Arc<Accepted>,
 }
 async fn fixture() -> Fixture {
-    let cfg = crate::config::Config {
+    let mut cfg = crate::config::Config {
         data_dir: std::env::temp_dir().join(format!("gamer-mcp-core-{}", uuid::Uuid::new_v4())),
         ..Default::default()
     };
     std::fs::create_dir_all(&cfg.data_dir).unwrap();
+    cfg.app_dir = Some(cfg.data_dir.clone());
     let db = Arc::new(crate::store::Store::open(&cfg).unwrap());
     let devices = Arc::new(crate::device::DeviceManager::new(db.clone(), cfg.clone()));
     devices
@@ -152,7 +154,7 @@ async fn fixture() -> Fixture {
         cfg.data_dir.clone(),
         capabilities.clone(),
     ));
-    let (service, control) = assemble(
+    let (service, control, plugin_market) = assemble(
         &cfg,
         db.clone(),
         devices.clone(),
@@ -176,6 +178,7 @@ async fn fixture() -> Fixture {
             control,
             media: crate::media::service(&cfg),
             recordings: crate::recording::service(&cfg),
+            plugin_market,
         },
     }
 }

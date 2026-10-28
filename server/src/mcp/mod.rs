@@ -363,7 +363,7 @@ impl McpService {
                         "Dynamic tool providers returned conflicting names",
                     ));
                 }
-                if !descriptor.required_scopes.is_subset(&principal.scopes) {
+                if !principal.has_scopes(&descriptor.required_scopes) {
                     continue;
                 }
                 if !context_has_allowed_objects(&descriptor.context, &principal.allowed) {

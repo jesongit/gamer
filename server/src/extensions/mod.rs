@@ -80,6 +80,7 @@ pub(crate) use model::{
 pub(crate) use permissions::{Permission, PermissionSet};
 #[cfg(test)]
 pub(crate) use service::BuiltinService;
+pub(crate) use service::ExtensionUpdateAdmission;
 pub(crate) use service::{
     CompositeTimerRunnerRegistrar, DependencyStatus, ExtensionInspection, ExtensionInstallContext,
     ExtensionService, ExtensionSnapshot, PermissionDiff, PluginCallContext, TimerRunnerRegistrar,

@@ -199,6 +199,16 @@ pub enum StartError {
     Conflict(Box<RunRecord>),
     /// 服务停机 drain 中拒绝新任务（映射 HTTP 503）
     ShuttingDown,
+    Maintenance,
+}
+
+/// A short, quiescent maintenance reservation. It shares the submission lock,
+/// so an accepted run and maintenance cannot pass their admission checks at once.
+pub(crate) struct IdleMaintenance(Arc<AtomicBool>);
+impl Drop for IdleMaintenance {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 /// 取消请求结果（API 据此映射：Active→202 / NotFound→404 / 终态→409）
@@ -232,6 +242,7 @@ pub struct RunManager {
     history: Mutex<VecDeque<RunRecord>>,
     /// drain 中：拒绝一切新提交
     draining: AtomicBool,
+    maintenance: Arc<AtomicBool>,
     /// 进行中的 spawn 任务数（测试 settle 判定用；生产无读者）
     inflight: AtomicUsize,
     /// 状态/归档变化通知；测试等待状态时使用，避免依赖固定 sleep。
@@ -251,6 +262,7 @@ impl RunManager {
             runs: Mutex::new(HashMap::new()),
             history: Mutex::new(VecDeque::new()),
             draining: AtomicBool::new(false),
+            maintenance: Arc::new(AtomicBool::new(false)),
             inflight: AtomicUsize::new(0),
             state_changed: tokio::sync::Notify::new(),
             result_hook: Mutex::new(None),
@@ -391,6 +403,17 @@ impl RunManager {
         self.runs.lock().unwrap().len()
     }
 
+    pub(crate) fn try_idle_maintenance(&self) -> Option<IdleMaintenance> {
+        let slots = self.active_by_device.lock().unwrap();
+        if !slots.is_empty()
+            || self.draining.load(Ordering::SeqCst)
+            || self.maintenance.swap(true, Ordering::SeqCst)
+        {
+            return None;
+        }
+        Some(IdleMaintenance(self.maintenance.clone()))
+    }
+
     pub fn is_draining(&self) -> bool {
         self.draining.load(Ordering::SeqCst)
     }
@@ -410,6 +433,9 @@ impl RunManager {
         }
         // 提交与归档共用锁序：active_by_device → runs → history。
         let mut dev = self.active_by_device.lock().unwrap();
+        if self.maintenance.load(Ordering::SeqCst) {
+            return Err(StartError::Maintenance);
+        }
         if let Some(existing_rid) = dev.get(req.device_id()) {
             let cur = self
                 .runs
@@ -1238,6 +1264,29 @@ mod tests {
     }
 
     // 九项必测之一：同设备两个不同脚本，第二个 409
+    #[tokio::test]
+    async fn idle_maintenance_reserves_admission_without_cancelling_active_runs() {
+        let mgr = Arc::new(RunManager::new(Arc::new(FakeExecutor::hanging())));
+        let reservation = mgr.try_idle_maintenance().unwrap();
+        assert!(mgr.try_idle_maintenance().is_none());
+        assert!(matches!(
+            mgr.submit(req("d1", "pkg/a.yaml", RunSource::Manual), None),
+            Err(StartError::Maintenance)
+        ));
+        drop(reservation);
+        let run = mgr
+            .submit(req("d1", "pkg/a.yaml", RunSource::Manual), None)
+            .unwrap();
+        assert!(mgr.try_idle_maintenance().is_none());
+        assert_eq!(mgr.active_for_device("d1").unwrap().run_id, run.run_id);
+        assert_eq!(mgr.cancel(&run.run_id), CancelOutcome::Accepted);
+        settled(&mgr).await;
+        let next = mgr.try_idle_maintenance().unwrap();
+        assert!(mgr.try_idle_maintenance().is_none());
+        drop(next);
+        assert!(mgr.try_idle_maintenance().is_some());
+    }
+
     #[tokio::test]
     async fn second_start_on_same_device_conflicts_with_current_record() {
         let fake = Arc::new(FakeExecutor::hanging());

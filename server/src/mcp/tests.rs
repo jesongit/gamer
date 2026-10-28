@@ -98,6 +98,50 @@ fn create_token(service: &McpService, scopes: &[&str], allowed: AllowedObjects) 
 }
 
 #[tokio::test]
+async fn full_access_token_discovers_and_calls_tools_registered_after_creation() {
+    let root = tempfile::tempdir().unwrap();
+    let service = new_service(root.path());
+    let token = create_token(&service, &["*"], AllowedObjects::default());
+    let principal = service.credentials().authenticate(&token.token).unwrap();
+    assert_eq!(
+        service.list_tools(&principal, None).unwrap()["tools"],
+        json!([])
+    );
+    let mut provider = FixtureProvider::new(ToolEffect::DraftWrite);
+    provider.required_scope = "future.plugin.publish".into();
+    let provider = Arc::new(provider);
+    service
+        .register_provider("new-plugin", provider.clone())
+        .unwrap();
+    assert_eq!(
+        service.list_tools(&principal, None).unwrap()["tools"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let result = service
+        .call_tool(
+            principal.clone(),
+            "gamer.core.fixture_000",
+            json!({"operation_id":"new-tool"}),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error);
+    provider.enabled.store(false, Ordering::Release);
+    assert!(service
+        .call_tool(
+            principal,
+            "gamer.core.fixture_000",
+            json!({"operation_id":"disabled-tool"})
+        )
+        .await
+        .is_err());
+    assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
 async fn core_protocol_works_without_ai_plugins_or_a_device() {
     let root = tempfile::tempdir().unwrap();
     let service = new_service(root.path());

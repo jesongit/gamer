@@ -100,17 +100,9 @@ pub(super) async fn api_create_token(
     State(state): State<AppState>,
     Json(request): Json<TokenSettingsRequest>,
 ) -> Response {
-    let tools = match state.mcp.management_catalog() {
-        Ok(tools) => tools,
-        Err(error) => return mcp_error(error),
-    };
-    // V1 presents a single access credential. Freeze the currently exposed
-    // scopes explicitly; transport, tool exposure and execution gates still apply.
-    let scopes = tools
-        .iter()
-        .flat_map(|tool| tool.required_scopes.iter().cloned())
-        .chain(["control".into()])
-        .collect();
+    // Settings credentials cover current and future exposed MCP tools. Object,
+    // transport, plugin exposure and execution-policy gates remain independent.
+    let scopes = ["*".into()].into();
     let all = ["*".into()].into();
     let allowed = AllowedObjects {
         devices: all,

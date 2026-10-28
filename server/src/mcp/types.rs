@@ -237,7 +237,7 @@ impl InvocationContext {
     }
     pub(crate) fn require_scope(&self, scope: &str) -> Result<(), McpError> {
         self.check_active()?;
-        if self.principal.scopes.contains(scope) {
+        if self.principal.has_scope(scope) {
             Ok(())
         } else {
             Err(McpError::forbidden(format!("Required scope: {scope}")))

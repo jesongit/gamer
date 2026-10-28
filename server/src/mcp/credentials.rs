@@ -24,6 +24,19 @@ pub(crate) struct AllowedObjects {
     pub media: BTreeSet<String>,
 }
 impl AllowedObjects {
+    fn is_unrestricted(&self) -> bool {
+        [
+            &self.devices,
+            &self.packages,
+            &self.plugins,
+            &self.runners,
+            &self.runs,
+            &self.tasks,
+            &self.media,
+        ]
+        .iter()
+        .all(|ids| ids.len() == 1 && ids.contains("*"))
+    }
     pub(crate) fn authorize(&self, kind: &str, id: &str) -> Result<(), McpError> {
         let allowed = match kind {
             "device" => &self.devices,
@@ -53,6 +66,14 @@ pub(crate) struct ExternalPrincipal {
     pub allowed: AllowedObjects,
     pub expires_at: i64,
 }
+impl ExternalPrincipal {
+    pub(crate) fn has_scope(&self, scope: &str) -> bool {
+        self.scopes.contains("*") || self.scopes.contains(scope)
+    }
+    pub(crate) fn has_scopes(&self, required: &BTreeSet<String>) -> bool {
+        self.scopes.contains("*") || required.is_subset(&self.scopes)
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct TokenMetadata {
@@ -63,16 +84,30 @@ pub(crate) struct TokenMetadata {
     pub created_at: i64,
     pub expires_at: i64,
     pub revoked: bool,
+    /// Missing only in pre-0.5.9 credentials. False preserves explicit restrictions.
+    #[serde(default)]
+    pub full_access: Option<bool>,
 }
 impl TokenMetadata {
+    fn is_full_access(&self) -> bool {
+        self.full_access.unwrap_or_else(|| {
+            // The old settings page always emitted exactly these object ranges
+            // and control plus the current catalog. No secret/file rewrite is needed.
+            self.allowed.is_unrestricted() && self.scopes.contains("control")
+        })
+    }
     fn principal(&self, now: i64) -> Result<ExternalPrincipal, McpError> {
         if self.revoked || (self.expires_at != 0 && self.expires_at <= now) {
             return Err(McpError::unauthorized());
         }
+        let mut scopes = self.scopes.clone();
+        if self.is_full_access() {
+            scopes.insert("*".into());
+        }
         Ok(ExternalPrincipal {
             token_id: self.token_id.clone(),
             label: self.label.clone(),
-            scopes: self.scopes.clone(),
+            scopes,
             allowed: self.allowed.clone(),
             expires_at: self.expires_at,
         })
@@ -170,11 +205,12 @@ impl CredentialStore {
         if request.scopes.is_empty()
             || request.scopes.len() > 128
             || request.scopes.iter().any(|s| {
-                s.is_empty()
-                    || s.len() > 128
-                    || !s.bytes().all(|b| {
-                        b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':')
-                    })
+                s != "*"
+                    && (s.is_empty()
+                        || s.len() > 128
+                        || !s.bytes().all(|b| {
+                            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':')
+                        }))
             })
         {
             return Err(McpError::invalid("Invalid credential scopes"));
@@ -209,6 +245,7 @@ impl CredentialStore {
         let metadata = TokenMetadata {
             token_id: uuid::Uuid::new_v4().to_string(),
             label: request.label.trim().into(),
+            full_access: Some(request.scopes.contains("*")),
             scopes: request.scopes,
             allowed: request.allowed,
             created_at: now,
@@ -398,6 +435,84 @@ mod tests {
             expires_in_seconds: 100,
         }
     }
+    #[test]
+    fn default_tokens_cover_future_scopes_and_legacy_defaults_keep_the_same_secret() {
+        let root = tempfile::tempdir().unwrap();
+        let store = CredentialStore::open(root.path()).unwrap();
+        let all = ["*".into()].into();
+        let ranges = AllowedObjects {
+            devices: all,
+            packages: ["*".into()].into(),
+            plugins: ["*".into()].into(),
+            runners: ["*".into()].into(),
+            runs: ["*".into()].into(),
+            tasks: ["*".into()].into(),
+            media: ["*".into()].into(),
+        };
+        let mut req = request();
+        req.scopes = ["*".into()].into();
+        req.allowed = ranges.clone();
+        req.expires_in_seconds = 0;
+        let full = store.create(req.clone()).unwrap();
+        assert!(store
+            .authenticate(&full.token)
+            .unwrap()
+            .has_scope("future.plugin.publish"));
+        req.scopes = ["control".into(), "observe".into()].into();
+        let legacy = store.create(req.clone()).unwrap();
+        assert!(!store
+            .authenticate(&legacy.token)
+            .unwrap()
+            .has_scope("future.plugin.publish"));
+        // Only absence of the new marker identifies the old settings format.
+        let path = root.path().join("tokens.json");
+        let mut doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        doc["tokens"][&legacy.metadata.token_id]["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("full_access");
+        let original = serde_json::to_vec(&doc).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let reopened = CredentialStore::open(root.path()).unwrap();
+        let p = reopened.authenticate(&legacy.token).unwrap();
+        assert!(p.has_scope("plugin.gamer-yaml.publish"));
+        assert!(p.has_scope("plugin.update"));
+        assert_eq!(
+            reopened.reveal(&legacy.metadata.token_id).unwrap(),
+            legacy.token
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original,
+            "Authentication must not rewrite old credential bytes"
+        );
+        reopened.revoke(&legacy.metadata.token_id).unwrap();
+        assert!(reopened.authenticate(&legacy.token).is_err());
+        assert!(reopened.authenticate(&full.token).is_ok());
+    }
+
+    #[test]
+    fn legacy_limited_ranges_and_scopes_do_not_become_full_access() {
+        let root = tempfile::tempdir().unwrap();
+        let store = CredentialStore::open(root.path()).unwrap();
+        let mut req = request();
+        req.scopes.insert("control".into());
+        let limited = store.create(req).unwrap();
+        let path = root.path().join("tokens.json");
+        let mut doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        doc["tokens"][&limited.metadata.token_id]["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("full_access");
+        std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+        let reopened = CredentialStore::open(root.path()).unwrap();
+        let p = reopened.authenticate(&limited.token).unwrap();
+        assert!(!p.has_scope("plugin.update"));
+        assert!(p.allowed.authorize("package", "b").is_err());
+    }
+
     #[test]
     fn secrets_are_encrypted_and_scope_is_not_inferred_from_empty_allowlists() {
         let root = tempfile::tempdir().unwrap();

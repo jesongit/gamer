@@ -295,7 +295,7 @@ impl ExecutionPolicy {
         self.allowed_plugins.contains(id) || self.allowed_plugins.contains("*")
     }
     pub(crate) fn has_scope(&self, scope: &str) -> bool {
-        self.scopes.contains(scope)
+        self.scopes.contains("*") || self.scopes.contains(scope)
     }
     pub(crate) fn from_task_extensions(value: &serde_json::Value) -> anyhow::Result<Option<Self>> {
         value

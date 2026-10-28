@@ -1091,7 +1091,7 @@ fn preview_test_state(cfg: crate::config::Config) -> AppState {
         db.clone(),
     ));
     let scheduler = Arc::new(crate::scheduler::Scheduler::new(db.clone()));
-    let (mcp, external_control) = crate::mcp_core::assemble(
+    let (mcp, external_control, _) = crate::mcp_core::assemble(
         &cfg,
         db.clone(),
         devices.clone(),
