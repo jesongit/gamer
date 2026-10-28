@@ -8,6 +8,7 @@
 | --- | --- |
 | `port` | HTTP 监听端口，默认 8443 |
 | `local_only` | 默认 false；true 时 HTTP 与 WebRTC 都只使用 IPv4 回环地址 |
+| `mcp_allow_remote` | 默认 false；在设置页开启远程 MCP 后即时生效，仍需独立 Bearer 令牌；`local_only=true` 继续限制本机 |
 | `data_dir` | 数据根目录，源码开发通常为 `./data` |
 | `adb_path` | ADB 命令名或绝对路径 |
 | `ffmpeg_path` | FFmpeg 命令名或绝对路径；视频功能还需要 ffprobe |

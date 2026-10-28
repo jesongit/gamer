@@ -15,14 +15,14 @@ Linux 使用 Docker Engine，可直接使用 `docker run`。宿主休眠、关�
 Docker Hub：<https://hub.docker.com/r/posase/gamer>。
 
 ```sh
-docker pull posase/gamer:v1.0.2
+docker pull posase/gamer:v1.0.8
 ```
 
-`v1.0.2` 为 Docker 镜像补丁版本，镜像内应用版本仍为 `0.4.0`；新增 prod HTTP Cookie 配置和 Chromium/runc 启动兼容修复，保留原生产诊断策略。
+`v1.0.8` 内应用版本为 `0.5.7`，新增可即时保存的远程 MCP 开关，并沿用网页主机、协议和映射端口显示连接地址；默认仅本机，独立 Bearer 和原有权限检查保持有效。
 该发布仅提供 `linux/amd64`，对应 Intel/AMD 的 x86_64 机器。
-摘要与源码版本见 `deploy/docker/releases/v1.0.2.json`；旧 `v1.0`、`v1.0.1` 保留。
+摘要与源码版本见 `deploy/docker/releases/v1.0.8.json`；已发行旧版本保持不变。
 
-若使用可选 Compose，将部署目录 `.env` 中 `GAMER_IMAGE` 设为 `posase/gamer:v1.0.2`；
+若使用可选 Compose，将部署目录 `.env` 中 `GAMER_IMAGE` 设为 `posase/gamer:v1.0.8`；
 其他数据卷、端口与时区设置保持需要的值。模板为 `deploy/docker/production.env.example`。
 镜像不含用户数据；已有安装须另外迁移完整数据卷，迁移前不要在目标机器初始化新密码。
 
@@ -220,8 +220,8 @@ Docker/WSL 总内存上限和自动回收属于部署机器的系统设置。
 - 凭据使用 AES-256-GCM 认证加密，安装密钥 `/data/state/credentials.key` 为 0600，必须与数据一同备份。
   密钥丢失不能恢复凭据；启动器不会替已有加密凭据悄悄生成新密钥。Windows 原生未配置安装密钥时继续使用原 DPAPI。
 - 默认只发布本机 HTTP 端口。远程访问需 HTTPS 反向代理及防火墙；生产 Cookie 为 Secure。
-  容器桥接来源不算服务端回环，本机管理令牌和 MCP 均保留真实 peer 校验。内部维护用 `docker exec`。
-  MCP 不向容器外暴露旁路认证；跨容器/宿主 Agent 接入需另行设计受限连接方式。
+  容器桥接来源不算服务端回环，本机管理令牌仍仅允许真实回环。内部维护用 `docker exec`。
+  宿主或其他容器中的 Agent 使用 MCP 时，在设置中开启“允许远程 MCP 连接”（持久配置 `mcp_allow_remote = true`），通过已发布的端口 `/api/mcp` 连接并提供独立 Bearer 令牌；对象与工具权限保持有效，默认仍仅本机。
 - 浏览器 CDP 仅监听容器内回环，不发布调试端口。云游戏通常使用浏览器软件解码；多账号同时游戏可能增加 CPU，
   GPU 透传因宿主与驱动而异，不属于跨平台默认方案。空闲 30 分钟回收 Chromium，下次运行自动打开。
 - Android 网络 ADB 可以配置宿主可达地址；USB 透传、WebRTC NAT/TURN/UDP 端口按目标环境单独配置与验收。

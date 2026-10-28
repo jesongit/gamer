@@ -701,3 +701,5 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - 本地市场构建默认移除输出目录中的旧归档；需要保留历史快照时显式使用 `tools/build-plugins.ps1 -KeepStaleArtifacts`，勿将运行数据或唯一归档存于生成物目录。
 
 - 独立插件 CI 会克隆 `sdk/lock.json.commit` 指定的整套宿主，包括原生函数目录快照；新增函数须先同步宿主快照，再将 SDK 来源锁到该提交，否则 `yaml_acceptance_export_native_catalog` 一致性检查失败。
+
+- 远程或 Docker 桥接的 MCP 请求即使携带有效令牌，默认也会在令牌校验前返回 403；需在管理设置开启 `mcp_allow_remote`，并使用网页实际主机与发布端口的 `/api/mcp`，管理员 Cookie 不能代替 MCP Bearer，`local_only=true` 仍限制本机。

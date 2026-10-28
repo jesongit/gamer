@@ -184,7 +184,7 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
 | `POST /api/extensions/:id/update` | 装新版本并激活（Running 拒绝）；版本回退 = 卸载后重装旧归档（历史版本仅展示） |
 | `POST /api/extensions/:id/enable|disable` | 用户生命周期（V1 收敛：enable = 启用意图 + 直接启动，幂等；可带 `{app_context}`，keymap 另支持 `profile`；disable 运行中自动 stop；`/start` `/stop` `/activate` 细粒度端点已删除，内部保留原语） |
 | `POST /api/extensions/:id/call` | `{action, values}` → 公开动作集合门禁（declarative 按钮白名单 ∪ 原生动作清单）→ WASM 常驻实例 `call` / builtin 宿主实现；返回 JSON |
-| `POST /api/mcp` | Core 统一本机 MCP，独立 Bearer；插件工具需 Running 且明确声明；见下节 |
+| `POST /api/mcp` | Core 统一 MCP，默认本机、可显式开启远程，独立 Bearer；插件工具需 Running 且明确声明；见下节 |
 | `GET /api/extensions/:id/capabilities` | 能力发现：`{id, state, running, actions}` 公开动作清单（跨插件调用前查询，简化计划 Phase 4） |
 | `DELETE /api/extensions/:id/:version` | 卸载（active 版本 Running 时拒绝；被运行中插件必需依赖引用时拒绝；非 active 旧版本可直接删除；最后一版才清状态；不删 Package 数据） |
 | `GET /api/extensions` | 列表 + `runtime_available` + UI 贡献注册表 + 各插件 `targets.android`（空声明归一 `["*"]`）+ 依赖实时状态 `dependencies[{id,version_req,required,installed,version,state,satisfied,note}]` |
@@ -194,7 +194,7 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
 
 ## 4.1 统一 MCP 与显式插件工具
 
-Core 的 `/api/mcp` 提供无状态 Streamable HTTP，独立 Bearer 与真实回环连接验证；旧插件 MCP 路由已删除。管理入口为 `/api/mcp/catalog`、`/api/mcp/tokens` 和 `/api/external-control`。完整连接、范围与生命周期见 [外部 Agent 接入指南](../guides/external-agent-mcp.md)。
+Core 的 `/api/mcp` 提供无状态 Streamable HTTP，默认限制真实回环连接；管理设置 `mcp_allow_remote` 可即时允许远程来源，独立 Bearer、Host/Origin 与工具授权检查保持有效；旧插件 MCP 路由已删除。管理入口为 `/api/mcp/catalog`、`/api/mcp/tokens` 和 `/api/external-control`。完整连接、范围与生命周期见 [外部 Agent 接入指南](../guides/external-agent-mcp.md)。
 
 插件在 manifest 中明确 opt-in：
 

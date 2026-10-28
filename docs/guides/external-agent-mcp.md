@@ -7,10 +7,13 @@ Gamer 提供画面、受控输入、资源、运行证据和插件工具。模�
 1. 在 Gamer「设置 → MCP 与外部控制」填写名称和有效期，点击“添加令牌”。有效期单位为小时，`0` 表示不过期。
 2. 新令牌可使用创建时已经开放的 MCP 功能，不需要逐项勾选权限或对象。令牌的操作权限在创建时固定，对象范围包括现有及以后新增的目标、配置包、插件、执行器、运行、任务和素材。
 3. 点击“查看”或“复制”使用令牌，离开页面后仍可再次查看。原文经现有凭据保护机制加密保存，认证仍使用哈希；列表接口不返回原文。旧版只有哈希的令牌继续有效，但无法还原原文，可以创建新令牌后删除旧令牌。令牌不进入配置包，也不继承旧 AI 插件令牌。
-4. 在自己的 Agent 中添加 Streamable HTTP MCP 服务，地址采用页面显示的本机端点，例如 `http://127.0.0.1:8443/api/mcp`；请求头填写 `Authorization: Bearer <新令牌>`。具体配置文件格式由客户端决定。
-5. 连接后先读取 `gamer.core.guide`、`gamer.core.capabilities` 和当前工具目录。插件启停或更新后重新读取目录。
+4. 默认只允许服务本机连接。需要其他电脑、宿主机或其他容器中的 Agent 接入时，开启“允许远程 MCP 连接”，保存后即时生效。也可在配置顶层设置 `mcp_allow_remote = true` 后启动；缺省为 `false`。
+5. 在自己的 Agent 中添加 Streamable HTTP MCP 服务，请求头填写 `Authorization: Bearer <新令牌>`。本机地址例如 `http://127.0.0.1:8443/api/mcp`；远程开启后，从其他电脑可访问的 Gamer 网页打开设置，复制显示的连接地址，例如 `http://192.168.31.10:18443/api/mcp`。地址沿用网页的协议、主机和映射端口。具体配置文件格式由客户端决定。
+6. 连接后先读取 `gamer.core.guide`、`gamer.core.capabilities` 和当前工具目录。插件启停或更新后重新读取目录。
 
-客户端必须运行在 Gamer 服务所在电脑。端点检查真实回环连接、Host、Origin 和转发头；远程网页登录、管理员 Cookie、开发代理和旧 `/api/extensions/gamer-ai/mcp` 地址都不能替代这条连接。不要将密钥发给其他人或写入源码。
+远程开关只放开 MCP 的网络来源和对应的 Host，不改变令牌、对象范围、工具权限或输入屏障。关闭后立即拒绝新的远程调用，本机连接仍可使用；已受理的正式运行和持久任务继续按冻结授权执行。`local_only = true` 时仍只允许本机，需关闭该监听限制并重启才能远程连接。
+
+端点继续校验 Host 和 Origin，浏览器 Origin 必须与 Host 同源；管理员 Cookie 和本机管理令牌不能代替 MCP Bearer。当前不支持含 `Forwarded` / `X-Forwarded-For` 的代理请求，不从转发头推导身份。Docker 使用已发布的 HTTP 端口，开启远程开关后允许实际容器桥接来源。跨公网请使用 HTTPS；不要将令牌写入源码。旧 `/api/extensions/gamer-ai/mcp` 地址不再使用。
 
 协议基线为 `2025-11-25`。POST 使用 JSON-RPC 2.0，`Content-Type: application/json`、`Accept: application/json, text/event-stream`；初始化后携带协商的 `MCP-Protocol-Version`。支持 initialize、ping、tools/list、tools/call，通知返回 202，GET 返回 405。当前不提供 SSE、会话头或工具变更推送；目录分页游标与当前授权和目录绑定。
 

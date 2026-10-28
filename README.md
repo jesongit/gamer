@@ -127,7 +127,7 @@ http://127.0.0.1:8443/api/mcp
 Authorization: Bearer <你的 MCP 令牌>
 ```
 
-请使用设置页显示的实际地址。MCP 检查真实回环连接，使用独立令牌；管理员登录不能替代授权。直接控制需要用户先在管理界面开始或恢复会话，正式发布由用户完成。Docker 的容器外接入限制见部署指南。
+请使用设置页显示的实际地址。MCP 默认仅允许本机；其他电脑或容器中的 Agent 接入需在设置中开启“允许远程 MCP 连接”（配置项 `mcp_allow_remote`），即时生效。远程连接使用网页的协议、主机和映射端口，仍需独立 Bearer 令牌；管理员登录不能替代授权。直接控制需要用户先在管理界面开始或恢复会话，正式发布由用户完成。详见[外部 Agent 接入指南](docs/guides/external-agent-mcp.md)。
 
 接入步骤、权限与客户端检查见 [MCP 指南](docs/guides/external-agent-mcp.md)。
 

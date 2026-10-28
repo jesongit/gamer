@@ -11,6 +11,8 @@
 port = 8443
 # 仅本机访问（HTTP + WebRTC）；本机测试可用 GAMER_LOCAL_ONLY=1 临时开启。
 local_only = false
+# MCP 默认仅允许本机连接。可在设置页即时开启远程连接，或设为 true；仍需独立 Bearer 令牌。
+mcp_allow_remote = false
 # Docker 本机素材/反馈可选配置见 deploy/docker/DOCKERHUB.md。
 # [local_read] published_port = 宿主回环端口，docker_gateway = 实测 NAT 来源 IP。
 # 仅在 Docker 使用 -p 127.0.0.1:宿主端口:8443 时启用；不影响管理认证或 MCP。
