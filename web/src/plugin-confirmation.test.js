@@ -12,7 +12,7 @@ vi.mock('./workspace/plugin-center/registry-client', async importOriginal => ({
   downloadFixedVersion: vi.fn(async () => ({ file: new File(['demo'], 'demo.gplugin') })),
 }))
 let center, host
-afterEach(() => { center?.unmount(); host?.unmount(); finishConfirmation(false); document.body.innerHTML = ''; vi.restoreAllMocks() })
+afterEach(() => { center?.unmount(); host?.unmount(); finishConfirmation(false); document.body.innerHTML = ''; vi.restoreAllMocks(); vi.unstubAllGlobals() })
 async function setup() {
   const client = {
     getExtensionManagement: vi.fn(async () => ({ extensions: [{ ...entry, active_version: '1.0.0', version: '1.0.0', state: 'disabled', permissions: ['resource.read'] }] })),
@@ -30,7 +30,8 @@ async function openUpdate() {
 }
 it('更新显示前后版本及新增权限，取消不上传，确认后只上传一次', async () => {
   const client = await setup()
-  const native = vi.spyOn(window, 'confirm').mockImplementation(() => { throw new Error('不应调用原生确认') })
+  const native = vi.fn(() => { throw new Error('不应调用原生确认') })
+  vi.stubGlobal('confirm', native)
   await openUpdate()
   const text = document.querySelector('.confirmation-dialog').textContent
   expect(text).toContain('1.0.0 → 1.1.0')

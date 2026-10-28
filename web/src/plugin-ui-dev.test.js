@@ -13,6 +13,10 @@ describe('prebuilt plugin modules in the Vite dev server', () => {
   const testRoot = resolve(tmpdir())
   const sharedModule = fileURLToPath(new URL('../../plugins/ui-shared/backdrop-dismiss.js', import.meta.url))
   const serverPrivateProbe = fileURLToPath(new URL('../../server/__gamer_vite_forbidden_fixture__.toml', import.meta.url))
+  // Raw filesystem URLs in Vite 7 resolve on the process drive on Windows.
+  // Keep the real denied fixture on that drive so a missing-file SPA fallback
+  // cannot replace the access-control check when TEMP is on another drive.
+  const privateTestRoot = dirname(serverPrivateProbe)
   const fsUrl = path => `/@fs/${path.replace(/\\/g, '/')}`
   const entry = 'export { value } from "./entry-part.js";\n'
   const chunk = 'export const value = 42;\n'
@@ -21,7 +25,7 @@ describe('prebuilt plugin modules in the Vite dev server', () => {
 
   beforeAll(async () => {
     directory = await mkdtemp(join(testRoot, 'gamer-plugin-ui-dev-'))
-    privateDirectory = await mkdtemp(join(testRoot, 'gamer-plugin-ui-private-'))
+    privateDirectory = await mkdtemp(join(privateTestRoot, 'gamer-plugin-ui-private-'))
     await writeFile(join(privateDirectory, 'config.toml'), privateMarker)
     const assets = join(directory, 'public', 'plugin-ui', 'gamer-example')
     await mkdir(assets, { recursive: true })
@@ -76,9 +80,9 @@ describe('prebuilt plugin modules in the Vite dev server', () => {
   afterAll(async () => {
     await server?.close()
     if (backend) await new Promise(resolve => backend.close(resolve))
-    for (const [fixture, prefix] of [[directory, 'gamer-plugin-ui-dev-'], [privateDirectory, 'gamer-plugin-ui-private-']]) {
+    for (const [fixture, prefix, root] of [[directory, 'gamer-plugin-ui-dev-', testRoot], [privateDirectory, 'gamer-plugin-ui-private-', privateTestRoot]]) {
       if (!fixture) continue
-      if (dirname(fixture) !== testRoot || !basename(fixture).startsWith(prefix)) {
+      if (dirname(fixture) !== root || !basename(fixture).startsWith(prefix)) {
         throw new Error('Refusing to remove a directory outside the test fixture')
       }
       await rm(fixture, { recursive: true, force: true })
