@@ -1062,6 +1062,59 @@
     "source": "plugin"
   },
   {
+    "description": "返回列表元素数，可驱动有界 repeat；空列表返回 0",
+    "name": "list_length",
+    "optional_extension": null,
+    "params": [
+      {
+        "default": null,
+        "desc": "输入列表",
+        "name": "items",
+        "required": true,
+        "type": "list"
+      },
+      {
+        "default": "列表长度",
+        "desc": "可视化显示名称",
+        "name": "name",
+        "required": false,
+        "type": "string"
+      }
+    ],
+    "returns": "integer",
+    "source": "plugin"
+  },
+  {
+    "description": "按从零开始的整数索引读取列表项；负数或越界明确失败，不静默返回 null",
+    "name": "list_get",
+    "optional_extension": null,
+    "params": [
+      {
+        "default": null,
+        "desc": "输入列表",
+        "name": "items",
+        "required": true,
+        "type": "list"
+      },
+      {
+        "default": null,
+        "desc": "从零开始的索引",
+        "name": "index",
+        "required": true,
+        "type": "integer"
+      },
+      {
+        "default": "读取列表项",
+        "desc": "可视化显示名称",
+        "name": "name",
+        "required": false,
+        "type": "string"
+      }
+    ],
+    "returns": "any",
+    "source": "plugin"
+  },
+  {
     "description": "单次识别并查找文字；未找到返回 null，命中可直接传给 tap；等待可使用 repeat",
     "name": "find_text",
     "optional_extension": null,

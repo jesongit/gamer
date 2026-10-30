@@ -1,6 +1,10 @@
 # Isolated engine test fixture; complete visual tasks must declare finish.
-name: YAML 全部 20 个内置函数验收（仅限测试设备）
+name: YAML 原生函数验收（仅限测试设备）
 run:
+  - list_length: {items: [first, second]}
+    as: item_count
+  - list_get: {items: [first, second], index: 1}
+    as: second_item
   - number: {text: "60 / 300", index: 0, format: fraction}
     as: stamina_number
   - calculate: {op: floor_div, a: $stamina_number, b: 10}
