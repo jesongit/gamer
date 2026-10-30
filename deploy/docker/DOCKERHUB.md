@@ -10,11 +10,12 @@ Simplified Chinese OCR. A separate browser or VNC container is not required.
 docker pull --platform linux/amd64 posase/gamer:v1.0.11
 ```
 
-Docker release **v1.0.11** packages application **0.5.10**. Single-screen game control
+Docker release **v1.0.11** packages application **0.5.11**. Single-screen game control
 now supports Ctrl+C to copy selected text and Ctrl+V to paste text, including on
 plain HTTP. The Paste button opens a text field if browser clipboard access is
 unavailable or denied; Android paste preserves Chinese text and emoji. Existing
 control barriers and editor shortcuts remain enforced.
+Wasmtime is patched to 48.0.8 for RUSTSEC-2026-0422, 0423 and 0424.
 
 Enable "Allow remote MCP
 connections" in Settings to connect an Agent from another computer or container.

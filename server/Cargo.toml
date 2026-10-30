@@ -1,6 +1,6 @@
 [package]
 name = "gamer-server"
-version = "0.5.10"
+version = "0.5.11"
 edition = "2021"
 description = "Gamer 游戏自动化助手服务端：scrcpy 设备控制 + WebRTC 推流 + 模板匹配 + YAML 自动化 + 定时任务"
 
@@ -71,7 +71,7 @@ async-recursion = "1"
 # Component Model runtime for the checked-in WIT world; enabled by default
 # since Phase 10 (the plugin market is a product capability). The Engine remains
 # lazy and is created only when an installed extension is started.
-wasmtime = { version = "48.0.7", optional = true, default-features = false, features = ["cranelift", "runtime", "async", "component-model"] }
+wasmtime = { version = "48.0.8", optional = true, default-features = false, features = ["cranelift", "runtime", "async", "component-model"] }
 
 # 脚本包导出/导入（zip）
 zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
