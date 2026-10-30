@@ -76,6 +76,22 @@ $updaterText = Get-Content -LiteralPath (Join-Path $RepoRoot 'updater/Cargo.toml
 $updaterVersion = [regex]::Match($updaterText, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
 if ($updaterVersion -ne $cargoVersion) { $errors.Add("updater version '$updaterVersion' != '$cargoVersion'") }
 
+# Cargo metadata --no-deps does not detect stale root package versions in locks.
+# Check the local packages explicitly before creating an immutable release tag.
+foreach ($lockEntry in @(
+    @{ Path = 'server/Cargo.lock'; Names = @('gamer-server', 'gamer-updater') },
+    @{ Path = 'updater/Cargo.lock'; Names = @('gamer-updater') }
+)) {
+    $lockText = Get-Content -LiteralPath (Join-Path $repoRoot $lockEntry.Path) -Raw
+    foreach ($name in $lockEntry.Names) {
+        $pattern = '(?m)^name = "' + [regex]::Escape($name) + '"\r?\nversion = "([^"]+)"'
+        $lockedVersion = [regex]::Match($lockText, $pattern).Groups[1].Value
+        if ($lockedVersion -ne $cargoVersion) {
+            $errors.Add("$($lockEntry.Path) $name version '$lockedVersion' != '$cargoVersion'")
+        }
+    }
+}
+
 # ---- Optional: release tag ----
 if (-not [string]::IsNullOrWhiteSpace($Tag)) {
     $tagNorm = $Tag.Trim()

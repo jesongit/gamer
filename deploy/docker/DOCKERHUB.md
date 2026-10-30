@@ -10,7 +10,7 @@ Simplified Chinese OCR. A separate browser or VNC container is not required.
 docker pull --platform linux/amd64 posase/gamer:v1.0.11
 ```
 
-Docker release **v1.0.11** packages application **0.5.11**. Single-screen game control
+Docker release **v1.0.11** packages application **0.5.12**. Single-screen game control
 now supports Ctrl+C to copy selected text and Ctrl+V to paste text, including on
 plain HTTP. The Paste button opens a text field if browser clipboard access is
 unavailable or denied; Android paste preserves Chinese text and emoji. Existing
