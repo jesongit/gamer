@@ -710,3 +710,4 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - 局域网 HTTP 页面没有 `navigator.clipboard`，不能靠权限提示解锁；投屏粘贴使用原生 paste 事件，工具条在读取不可用/被拒绝时提供文本框，禁止读取服务端系统剪贴板代替用户电脑剪贴板。
 - scrcpy `INJECT_TEXT` 无法完整输入中文；Android 粘贴应使用 `SET_CLIPBOARD` + paste，按 UTF-8 字节限长；控制 socket 需持续解析设备回包，不能把剪贴板/ACK 留在接收缓冲。
 - scrcpy `GET_CLIPBOARD` 没有请求关联 ID，取消或超时后的迟到回包不能交给下一次复制；在旧回包排空前拒绝新复制，无回包时重新连接画面恢复。
+- `cargo metadata --locked --no-deps` 不会发现 Cargo.lock 本体版本过期，依赖更新与版本编辑并发时还可能写回旧值；顺序完成更新，并核对 server/updater 锁文件中的本体版本，打标签前执行完整 locked 解析。

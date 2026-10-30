@@ -1,0 +1,69 @@
+{
+  "tag": "v0.5.12",
+  "url": "https://github.com/jesongit/gamer/releases/tag/v0.5.12",
+  "anonymous": true,
+  "github_latest": true,
+  "source_commit": "7dbe73aa8cae28a9d683323486eaf6646b6d2869",
+  "assets": [
+    {
+      "name": "0.5.12.json",
+      "bytes": 5529,
+      "sha256": "8097f6a7eea331390657705cdfcf74541577853403896a30e0631b99e6cd0fac"
+    },
+    {
+      "name": "Gamer-0.5.12-licenses.zip",
+      "bytes": 279867,
+      "sha256": "d610cada51ee3706bc1b66b8124685b6ae9d7cfb8d2d82b499c7db0c73dfcb76"
+    },
+    {
+      "name": "Gamer-0.5.12-windows-x64-full.zip",
+      "bytes": 152831892,
+      "sha256": "fdd14cd32e6594fdd125d711bf4534df7a098e77f28281c9813bbca21a1e069b"
+    },
+    {
+      "name": "gamer-adb-37.0.1-windows-x64.zip",
+      "bytes": 4155978,
+      "sha256": "93ff93fac2f37c462731f65c74abe725a4eeb2fb024fd89c81d0727152ece8ca"
+    },
+    {
+      "name": "gamer-app-0.5.12-windows-x64.zip",
+      "bytes": 24962130,
+      "sha256": "4b8b2c5bd0706f7141d62d79c88e3f0112addb83df744fbf717654ffa5cca26e"
+    },
+    {
+      "name": "gamer-ffmpeg-N-126342-gf88b741dbf-20260831-windows-x64.zip",
+      "bytes": 99033031,
+      "sha256": "b115a7955c8a8eb8dff7bbe012096cf5760088a7f2cb99f504cf83be899e8d23"
+    },
+    {
+      "name": "gamer-official-plugins-0.5.12-windows-x64.zip",
+      "bytes": 652174,
+      "sha256": "c3bf98c922a535fb995d5334bdfb79aeeeb3f2251cb254d546231bdcf7326fc4"
+    },
+    {
+      "name": "gamer-release.json",
+      "bytes": 5529,
+      "sha256": "8097f6a7eea331390657705cdfcf74541577853403896a30e0631b99e6cd0fac"
+    },
+    {
+      "name": "gamer-sbom-0.5.12-windows-x64.cdx.json",
+      "bytes": 99224,
+      "sha256": "30fed1fa8adbbd207969e542d52e92e6dba58ed6757373ac704bbe3064da49c7"
+    },
+    {
+      "name": "gamer-scrcpy-server-3.3.3-windows-x64.zip",
+      "bytes": 90038,
+      "sha256": "31a578d2a196519f8b7bf671a4e4e5e2a2d592d130f0b5ec36a20cdc8abb32c1"
+    },
+    {
+      "name": "SHA256SUMS.txt",
+      "bytes": 1003,
+      "sha256": "1c30672e7ed6b24357dd471e318825b81b141e712cab16c479177d3d22f4c244"
+    }
+  ],
+  "hashes_match_verified_draft": true,
+  "portable_startup": "GitHub Release workflow 41116628673 passed",
+  "local_asset_check": "SkipStartupSmoke; did not start a local service",
+  "production_updated": false,
+  "real_accounts_tested": false
+}
