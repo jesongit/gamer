@@ -13,7 +13,7 @@ docker pull --platform linux/amd64 posase/gamer:v1.0.12
 Docker release **v1.0.12** packages application **0.5.13**. YAML adds variable-length
 list helpers and a multi-account run dialog: select accounts, enter shared parameters
 once, and start the same formal script concurrently with independent results. Update
-the YAML plugin to **0.3.29** for the new interface. Private draft parameter forms use
+the YAML plugin to **0.3.30** for the new interface. Private draft parameter forms use
 the exact saved version. Invalid JSON blocks submission instead of sending stale values.
 
 Single-screen game control
@@ -34,7 +34,7 @@ Core MCP can now find original recordings and media by name, read recorded event
 and exact frames, preview schedule triggers, and recognize original media frames
 with OCR. These are scoped evidence tools and do not replay recorded input.
 Plugin and configuration sources still support GitHub, LAN and custom presets.
-The official companion catalog provides Video 0.2.9, Keymap 0.1.9, YAML 0.3.29,
+The official companion catalog provides Video 0.2.9, Keymap 0.1.9, YAML 0.3.30,
 Live 0.2.20, Notify 0.1.3 and Package Publisher 0.1.1. Video adds sample-name search and Keymap provides an
 authoring grammar tool; both require application 0.5.8. Update the application
 first, then install or update plugins through the plugin page. Configuration
