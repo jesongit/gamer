@@ -335,7 +335,7 @@ export const api = {
     try { stamp = JSON.parse(result.headers.get('X-Frame-Stamp') || 'null') } catch { /* rejected by the caller */ }
     return { blob: await result.blob(), stamp }
   },
-  control: (id, cmd) => req('POST', `/api/devices/${id}/control`, cmd),
+  control: (id, cmd) => req('POST', `/api/devices/${encodeURIComponent(id)}/control`, cmd),
   listApps: (id) => req('GET', `/api/devices/${id}/apps`),
   listAppsByAddr: (addr) => req('GET', `/api/apps?addr=${encodeURIComponent(addr)}`),
   // 安装本地 APK：raw 字节直传（服务端组限额 1GiB，临时文件后 adb install -r）；

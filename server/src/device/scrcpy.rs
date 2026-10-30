@@ -89,7 +89,11 @@ pub struct ScrcpySession {
     #[allow(dead_code)]
     pub meta: Mutex<Option<VideoMeta>>,
     /// tokio Mutex：控制 socket 写入可能跨 await
-    control: tokio::sync::Mutex<Option<TcpStream>>,
+    control: tokio::sync::Mutex<Option<tokio::net::tcp::OwnedWriteHalf>>,
+    clipboard: tokio::sync::watch::Sender<Option<String>>,
+    clipboard_request: tokio::sync::Mutex<()>,
+    clipboard_pending: Arc<std::sync::atomic::AtomicBool>,
+    control_reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
     held_inputs: tokio::sync::Mutex<HeldInputs>,
     input_epoch: String,
     input_space: Mutex<InputSpace>,
@@ -113,6 +117,14 @@ struct InputSpace {
     width: u32,
     height: u32,
     revision: u64,
+}
+
+impl Drop for ScrcpySession {
+    fn drop(&mut self) {
+        if let Some(reader) = self.control_reader.get_mut().take() {
+            reader.abort();
+        }
+    }
 }
 
 /// Encode the scrcpy v3 touch control payload. Keeping the wire layout in a
@@ -279,6 +291,8 @@ impl ScrcpySession {
             "audio_codec=opus".into(),
             "audio_bit_rate=128000".into(),
             "control=true".into(),
+            // Only return clipboard text for an explicit user copy request.
+            "clipboard_autosync=false".into(),
             format!("video_bit_rate={}", cfg.bitrate_mbps * 1_000_000),
             "send_codec_meta=true".into(),
             "send_device_meta=true".into(),
@@ -374,11 +388,16 @@ impl ScrcpySession {
         };
 
         let (video_tx, video_rx) = mpsc::channel::<VideoFrame>(64);
+        let (control_read, control_write) = control.into_split();
         let session = Arc::new(Self {
             device: device.clone(),
             adb: adb.clone(),
             meta: Mutex::new(Some(meta)),
-            control: tokio::sync::Mutex::new(Some(control)),
+            control: tokio::sync::Mutex::new(Some(control_write)),
+            clipboard: tokio::sync::watch::channel(None).0,
+            clipboard_request: tokio::sync::Mutex::new(()),
+            clipboard_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            control_reader: Mutex::new(None),
             held_inputs: tokio::sync::Mutex::new(HeldInputs::default()),
             controls: parking_lot::RwLock::new(Arc::new(
                 crate::core::control::ControlRegistry::default(),
@@ -393,6 +412,8 @@ impl ScrcpySession {
             last_frame_at: std::sync::atomic::AtomicU64::new(0),
             app_started: std::sync::atomic::AtomicBool::new(false),
         });
+
+        session.start_control_reader(control_read);
 
         // 9. 视频读取循环（后台任务）
         let s2 = session.clone();
@@ -697,6 +718,9 @@ impl ScrcpySession {
             return false;
         }
         self.control.lock().await.take();
+        if let Some(reader) = self.control_reader.lock().take() {
+            reader.abort();
+        }
         *self.held_inputs.lock().await = HeldInputs::default();
         true
     }
@@ -768,7 +792,8 @@ impl ScrcpySession {
     /// 设置剪贴板
     pub async fn set_clipboard(&self, text: &str, paste: bool) -> anyhow::Result<()> {
         let bytes = text.as_bytes();
-        let len = bytes.len().min(131072);
+        anyhow::ensure!(bytes.len() <= 131072, "剪贴板文本超过 131072 字节");
+        let len = bytes.len();
         let mut buf = Vec::with_capacity(10 + len);
         buf.push(9); // TYPE_SET_CLIPBOARD
         buf.extend_from_slice(&0u64.to_be_bytes()); // sequence
@@ -776,6 +801,65 @@ impl ScrcpySession {
         buf.extend_from_slice(&(len as u32).to_be_bytes());
         buf.extend_from_slice(&bytes[..len]);
         self.send_control(&buf).await
+    }
+
+    fn start_control_reader(&self, mut reader: tokio::net::tcp::OwnedReadHalf) {
+        let clipboard = self.clipboard.clone();
+        let pending = self.clipboard_pending.clone();
+        *self.control_reader.lock() = Some(tokio::spawn(async move {
+            // Keep reading ACKs as well, so repeated pastes cannot fill the socket.
+            loop {
+                let result: anyhow::Result<()> = async {
+                    match reader.read_u8().await? {
+                        0 => {
+                            let len = reader.read_u32().await? as usize;
+                            anyhow::ensure!(len <= 262139, "oversized clipboard response");
+                            let mut bytes = vec![0; len];
+                            reader.read_exact(&mut bytes).await?;
+                            clipboard.send_replace(Some(String::from_utf8(bytes)?));
+                            pending.store(false, std::sync::atomic::Ordering::Release);
+                        }
+                        1 => {
+                            reader.read_u64().await?;
+                        }
+                        2 => {
+                            reader.read_u16().await?;
+                            let len = reader.read_u16().await? as usize;
+                            let mut bytes = vec![0; len];
+                            reader.read_exact(&mut bytes).await?;
+                        }
+                        _ => anyhow::bail!("unknown scrcpy device message"),
+                    }
+                    Ok(())
+                }
+                .await;
+                if result.is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// COPY the current selection, then read it through scrcpy (never host clipboard).
+    pub async fn copy_text(&self) -> anyhow::Result<String> {
+        let _request = self.clipboard_request.lock().await;
+        anyhow::ensure!(
+            !self
+                .clipboard_pending
+                .load(std::sync::atomic::Ordering::Acquire),
+            "上次复制仍未返回，请稍后重试或重新连接画面"
+        );
+        let mut response = self.clipboard.subscribe();
+        // GET_CLIPBOARD has no correlation ID. Keep a timed-out/cancelled request
+        // pending until its reply is drained, so it cannot satisfy a later copy.
+        self.clipboard_pending
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.send_control(&[8, 1]).await?; // GET_CLIPBOARD, COPY_KEY_COPY
+        tokio::time::timeout(Duration::from_secs(2), response.changed())
+            .await
+            .map_err(|_| anyhow::anyhow!("设备没有返回文本，请重新连接画面后选中文字再复制"))??;
+        let text = response.borrow_and_update().clone().unwrap_or_default();
+        Ok(text)
     }
 
     /// 启动应用（new-display 模式下自动启动到虚拟屏）
@@ -1039,6 +1123,10 @@ mod tests {
             adb: Adb::new(cfg),
             meta: parking_lot::Mutex::new(None),
             control: tokio::sync::Mutex::new(None),
+            clipboard: tokio::sync::watch::channel(None).0,
+            clipboard_request: tokio::sync::Mutex::new(()),
+            clipboard_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            control_reader: Mutex::new(None),
             held_inputs: tokio::sync::Mutex::new(HeldInputs::default()),
             controls: parking_lot::RwLock::new(Arc::new(
                 crate::core::control::ControlRegistry::default(),
@@ -1111,8 +1199,91 @@ mod tests {
             .await
             .unwrap();
         let (reader, _) = listener.accept().await.unwrap();
-        *session.control.lock().await = Some(writer);
+        let (read, write) = writer.into_split();
+        *session.control.lock().await = Some(write);
+        session.start_control_reader(read);
         reader
+    }
+
+    #[tokio::test]
+    async fn clipboard_copy_drains_acks_and_preserves_repeated_unicode_text() {
+        let (_manager, session, _dir) = online_test_manager(ScreenMode::Mirror);
+        let mut peer = attach_test_control(&session).await;
+        let device = tokio::spawn(async move {
+            for _ in 0..2 {
+                let mut request = [0; 2];
+                peer.read_exact(&mut request).await.unwrap();
+                assert_eq!(request, [8, 1]);
+                peer.write_all(&[1, 0, 0, 0, 0, 0, 0, 0, 0]).await.unwrap();
+                let text = " 中文🙂\n".as_bytes();
+                peer.write_u8(0).await.unwrap();
+                peer.write_u32(text.len() as u32).await.unwrap();
+                peer.write_all(text).await.unwrap();
+            }
+        });
+        assert_eq!(session.copy_text().await.unwrap(), " 中文🙂\n");
+        assert_eq!(session.copy_text().await.unwrap(), " 中文🙂\n");
+        device.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clipboard_cancelled_copy_cannot_supply_a_later_request() {
+        let (_manager, session, _dir) = online_test_manager(ScreenMode::Mirror);
+        let mut peer = attach_test_control(&session).await;
+        let request_session = session.clone();
+        let request = tokio::spawn(async move { request_session.copy_text().await });
+        let mut packet = [0; 2];
+        peer.read_exact(&mut packet).await.unwrap();
+        request.abort();
+        let _ = request.await;
+        assert!(session
+            .copy_text()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("上次复制"));
+        peer.write_all(&[0, 0, 0, 0, 3, b'o', b'l', b'd'])
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while session.clipboard_pending.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let device = tokio::spawn(async move {
+            peer.read_exact(&mut packet).await.unwrap();
+            assert_eq!(packet, [8, 1]);
+            peer.write_all(&[0, 0, 0, 0, 3, b'n', b'e', b'w'])
+                .await
+                .unwrap();
+        });
+        assert_eq!(session.copy_text().await.unwrap(), "new");
+        device.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clipboard_paste_packet_preserves_unicode_and_rejects_oversize() {
+        let (_manager, session, _dir) = online_test_manager(ScreenMode::Mirror);
+        let mut peer = attach_test_control(&session).await;
+        let text = " 中文🙂\n";
+        session.set_clipboard(text, true).await.unwrap();
+        let mut header = [0; 14];
+        peer.read_exact(&mut header).await.unwrap();
+        assert_eq!(header[0], 9);
+        assert_eq!(header[9], 1);
+        assert_eq!(
+            u32::from_be_bytes(header[10..14].try_into().unwrap()) as usize,
+            text.len()
+        );
+        let mut body = vec![0; text.len()];
+        peer.read_exact(&mut body).await.unwrap();
+        assert_eq!(body, text.as_bytes());
+        assert!(session
+            .set_clipboard(&"中".repeat(43691), true)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -1364,7 +1535,7 @@ mod tests {
             .await
             .unwrap();
         let (mut old_reader, _) = listener.accept().await.unwrap();
-        *old.control.lock().await = Some(writer);
+        *old.control.lock().await = Some(writer.into_split().1);
         let device = Arc::new(DeviceAdapter::new(manager.clone()));
         let touch = Arc::new(TouchAdapter::new(device.clone()));
         let input = InputAdapter::new(device, touch.clone());
@@ -1386,7 +1557,7 @@ mod tests {
             .await
             .unwrap();
         let (mut new_reader, _) = listener.accept().await.unwrap();
-        *new.control.lock().await = Some(writer);
+        *new.control.lock().await = Some(writer.into_split().1);
         manager
             .devices
             .write()
@@ -1452,7 +1623,7 @@ mod tests {
             .await
             .unwrap();
         let (mut reader, _) = listener.accept().await.unwrap();
-        *session.control.lock().await = Some(writer);
+        *session.control.lock().await = Some(writer.into_split().1);
         let controls = manager.controls.clone();
         let id = session.device.id.clone();
         let old_viewer = controls.manual_lease(&id);

@@ -34,7 +34,7 @@ describe('投屏键盘控制接线', () => {
     expect(consoleSource).toContain('getKeyMetaState: () => keyboard.getMetaState()')
     expect(consoleSource).toContain('onText: sendControl')
     expect(consoleSource).toContain('mode: keyboardMode')
-    expect(consoleImpl).toContain("{ type: 'text', text: chunk }")
+    expect(consoleImpl).toContain("{ type: 'clipboard', text, paste: true }")
     expect(consoleImpl).toContain('navigator.clipboard.readText()')
     expect(consoleSource).toContain('toggleKeyboardMode')
     expect(consoleSource).toContain("toast('键盘控制通道未连接', 'warn')")

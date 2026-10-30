@@ -1062,6 +1062,44 @@ impl CdpSession {
         Ok(())
     }
 
+    /// Read only the visible page's selection, without touching the server OS clipboard.
+    pub async fn copy_text(&self, expected: &FrameStamp) -> anyhow::Result<String> {
+        let _admission = self.controls.admit(&self.id).await?;
+        let _gate = self.gate.lock().await;
+        ensure!(
+            self.runs.load(Ordering::SeqCst) == 0 || self.controls.status(&self.id).owner.is_some(),
+            "目标正在执行任务"
+        );
+        self.ready().await?;
+        self.validate(expected)?;
+        let result = self.transport.call_checked("Runtime.evaluate", json!({
+            "expression": r#"(() => {
+                let doc = document, root = doc, active = doc.activeElement;
+                for (let depth = 0; active && depth < 32; depth++) {
+                    if (active.shadowRoot) { root = active.shadowRoot; active = root.activeElement; continue; }
+                    if (active.tagName === 'IFRAME') {
+                        try { if (active.contentDocument) { doc = active.contentDocument; root = doc; active = doc.activeElement; continue; } } catch {}
+                        return '';
+                    }
+                    break;
+                }
+                if (active && ['INPUT', 'TEXTAREA'].includes(active.tagName)) {
+                    if (active.type === 'password') return '';
+                    if (typeof active.selectionStart === 'number') return active.value.slice(active.selectionStart, active.selectionEnd);
+                }
+                return String(root.getSelection?.() || doc.getSelection() || '');
+            })()"#,
+            "returnByValue": true,
+        }), Some(expected.revision)).await?;
+        self.validate(expected)?;
+        let text = result["result"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        ensure!(text.len() <= 131072, "选中文本过长，请分段复制");
+        Ok(text)
+    }
+
     pub async fn input(&self, value: &Value, expected: Option<&FrameStamp>) -> anyhow::Result<()> {
         let _admission = self.controls.admit(&self.id).await?;
         let _gate = self.gate.lock().await;

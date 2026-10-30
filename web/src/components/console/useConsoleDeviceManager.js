@@ -31,6 +31,8 @@ export function useConsoleDeviceManager({
   sendControl,
   /** 服务端权威控制状态的 UI 镜像；缺省保持已有调用方契约。 */
   guardManualInput = () => true,
+  requestPasteText = () => {},
+  inputContext = () => store.deviceId,
   selectTarget,
   beforeTargetRemoval = () => true,
   onTargetRemoved,
@@ -501,47 +503,39 @@ export function useConsoleDeviceManager({
 
   function rotate() { if (connected.value && guardManualInput()) sendControl({ type: 'rotate' }) }
 
-  function splitTextForScrcpy(text, maxBytes = 300) {
-    const encoder = new TextEncoder()
-    const chunks = []
-    let current = ''
-    let currentBytes = 0
-    for (const char of text) {
-      const charBytes = encoder.encode(char).length
-      if (current && currentBytes + charBytes > maxBytes) {
-        chunks.push(current)
-        current = ''
-        currentBytes = 0
-      }
-      current += char
-      currentBytes += charBytes
-    }
-    if (current) chunks.push(current)
-    return chunks
+  function pasteText(text, deviceId = store.deviceId) {
+    const report = beginReport()
+    if (!connected.value || store.deviceId !== deviceId || !guardManualInput()) return false
+    if (!text) { report('剪贴板没有文本', 'warn'); return false }
+    const maxBytes = deviceId?.startsWith('browser-') ? 16384 : 131072
+    if (new TextEncoder().encode(text).length > maxBytes) { report(`文本过长，请分段粘贴（每次最多 ${maxBytes / 1024} KiB）`, 'warn'); return false }
+    // Android 的文本注入不能完整输入中文；通过设备剪贴板 + PASTE 保留原文。
+    const message = deviceId?.startsWith('browser-')
+      ? { type: 'text', text }
+      : { type: 'clipboard', text, paste: true }
+    if (sendControl(message) === false) return false
+    report(`已发送 ${text.length} 个字符`, 'success')
+    return true
   }
 
   async function clipboard() {
     const toast = beginReport()
     if (!connected.value) return toast('请先连接设备', 'error')
     if (!guardManualInput()) return
+    const deviceId = store.deviceId
+    const context = inputContext()
     if (!navigator.clipboard?.readText) {
-      return toast('当前浏览器不允许读取系统剪贴板，请使用 HTTPS 或 localhost', 'warn')
+      return requestPasteText(deviceId)
     }
     let text
     try {
       text = await navigator.clipboard.readText()
     } catch (e) {
-      return toast('读取系统剪贴板失败，请允许浏览器访问剪贴板', 'error')
+      if (connected.value && store.deviceId === deviceId && inputContext() === context && guardManualInput()) requestPasteText(deviceId)
+      return
     }
     if (!text) return toast('系统剪贴板为空', 'warn')
-    // 读取剪贴板期间控制权可能变化；发送前再次判断，不误报粘贴成功。
-    if (!guardManualInput()) return
-
-    // scrcpy 文本控制消息单条上限为 300 字节；按 UTF-8 字符切块，避免中文
-    // 或 emoji 被截断。DataChannel 本身有序，多个 text 消息会按原顺序提交。
-    const chunks = splitTextForScrcpy(text)
-    for (const chunk of chunks) if (sendControl({ type: 'text', text: chunk }) === false) return
-    toast(`已粘贴 ${text.length} 个字符`, 'success')
+    if (inputContext() === context) pasteText(text, deviceId)
   }
 
   function launchGame() {
@@ -629,7 +623,7 @@ export function useConsoleDeviceManager({
     appSelectSaving, onAppSelect,
     // 工具条快捷动作与下拉菜单（更多/功能）
     key, toolbarMenuOpen, toolbarMenuStyle,
-    closeToolbarMenu, toggleToolbarMenu, shot, rotate, clipboard, launchGame, stopGame,
+    closeToolbarMenu, toggleToolbarMenu, shot, rotate, clipboard, pasteText, launchGame, stopGame,
     apkInstalling, installApk,
     // 上下文对象
     deviceSettingsContext,

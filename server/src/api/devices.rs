@@ -688,6 +688,8 @@ pub(super) struct ControlReq {
     text: Option<String>,
     keycode: Option<u32>,
     app: Option<String>,
+    paste: Option<bool>,
+    stamp: Option<crate::capabilities::FrameStamp>,
 }
 
 /// 坐标合法性：有限 + 常规显示分辨率范围（scrcpy 按视频分辨率像素注入，
@@ -713,7 +715,8 @@ pub(super) enum Ctl<'a> {
     StartApp(&'a str),
     StopApp(&'a str),
     Rotate,
-    Clipboard(&'a str),
+    Clipboard(&'a str, bool),
+    CopyText,
 }
 
 /// 控制命令解析与校验（纯函数，可单测）：
@@ -800,6 +803,7 @@ pub(super) fn parse_ctl(req: &ControlReq) -> Result<Ctl<'_>, ApiError> {
             Ok(Ctl::StopApp(app))
         }
         "rotate" => Ok(Ctl::Rotate),
+        "copy_text" => Ok(Ctl::CopyText),
         "clipboard" => {
             let text = req
                 .text
@@ -812,7 +816,7 @@ pub(super) fn parse_ctl(req: &ControlReq) -> Result<Ctl<'_>, ApiError> {
                     "clipboard 文本超过 131072 字节（协议上限）",
                 ));
             }
-            Ok(Ctl::Clipboard(text))
+            Ok(Ctl::Clipboard(text, req.paste.unwrap_or(false)))
         }
         _ => Err(ApiError::bad_request("unknown command")),
     }
@@ -828,11 +832,28 @@ pub(super) async fn api_control(
         Ok(c) => c,
         Err(err) => return err.into_response(),
     };
+    if crate::targets::is_browser(&id) && matches!(ctl, Ctl::CopyText) {
+        let Some(stamp) = req.stamp.as_ref() else {
+            return ApiError::bad_request("缺少当前画面 stamp").into_response();
+        };
+        let result = st
+            .devices
+            .controls
+            .manual(&id, async {
+                st.devices.browsers.session(&id)?.copy_text(stamp).await
+            })
+            .await;
+        return match result {
+            Ok(text) => Json(serde_json::json!({"ok": true, "text": text})).into_response(),
+            Err(error) => ApiError::conflict(error.to_string()).into_response(),
+        };
+    }
     let Some(session) = st.devices.session(&id) else {
         return err_response(StatusCode::CONFLICT, "设备未连接");
     };
     // 录制输入观察（合同 §2.1）：REST 控制入口的来源标注为 manual；观察本体
     // 在 scrcpy 注入原语内（已被接受的输入进入设备发送路径后记录）。
+    let mut copied_text = None;
     let result = st
         .devices
         .controls
@@ -852,13 +873,21 @@ pub(super) async fn api_control(
                     Ctl::StartApp(app) => session.start_app(app).await,
                     Ctl::StopApp(app) => session.stop_app(app).await,
                     Ctl::Rotate => session.rotate_device().await,
-                    Ctl::Clipboard(text) => session.set_clipboard(text, false).await,
+                    Ctl::Clipboard(text, paste) => session.set_clipboard(text, paste).await,
+                    Ctl::CopyText => {
+                        copied_text = Some(session.copy_text().await?);
+                        Ok(())
+                    }
                 }
             }),
         )
         .await;
     match result {
-        Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
+        Ok(_) => Json(match copied_text {
+            Some(text) => serde_json::json!({"ok": true, "text": text}),
+            None => serde_json::json!({"ok": true}),
+        })
+        .into_response(),
         Err(e)
             if e.to_string().starts_with("control_")
                 || e.to_string().starts_with("stale_generation") =>

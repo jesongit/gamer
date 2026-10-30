@@ -82,7 +82,7 @@
           </div>
           <div class="tb-group tb-control-group" role="group" aria-label="投屏操作">
             <button class="btn btn-sm" title="截图" aria-label="截图" :disabled="!connected" @click="shot"><UiIcon name="image" />截图</button>
-            <button v-if="isBrowser" class="btn btn-sm" :disabled="!connected || manualInputLocked" title="粘贴文字到网页" @click="clipboard()"><UiIcon name="copy" />粘贴</button>
+            <button v-if="isBrowser" class="btn btn-sm" :disabled="!connected || manualInputLocked" title="粘贴文字到网页（也可聚焦画面后按 Ctrl+V）" @click="clipboard()"><UiIcon name="copy" />粘贴</button>
             <button v-if="!isBrowser" class="btn btn-sm" title="返回" aria-label="返回" :disabled="!connected || manualInputLocked" @click="key('BACK')"><UiIcon name="back" />返回</button>
             <button
               class="btn btn-sm keyboard-mode-btn"
@@ -119,8 +119,10 @@
       @focusout="onStageFocusOut"
       @keydown="onStageKeyDown"
       @keyup="onStageKeyUp"
+      @paste="consoleClipboard.handlePaste"
       @click="onStageClick"
     >
+      <textarea ref="clipboardCapture" class="clipboard-capture" tabindex="-1" aria-label="粘贴到游戏" />
       <div v-if="inputControlMessage" class="input-control-hint" :class="{ paused: !manualInputLocked }" role="status" aria-live="polite">{{ inputControlMessage }}</div>
 
       <!-- 菜单脱离横向滚动行挂到 body，避免窄窗口下被工具条裁掉 -->
@@ -139,7 +141,7 @@
           <button v-if="isBrowser" class="tb-more-item action-menu-item danger" role="menuitem" @click="closeToolbarMenu(); removeBrowserTarget()">删除浏览器目标</button>
         </div>
         <div v-if="toolbarMenuOpen === 'actions'" class="tb-more-dropdown tb-more-dropdown-fixed action-menu" :style="toolbarMenuStyle" role="menu">
-          <button class="tb-more-item action-menu-item" role="menuitem" :disabled="manualInputLocked" @click="closeToolbarMenu(); clipboard()">粘贴</button>
+          <button class="tb-more-item action-menu-item" role="menuitem" :disabled="manualInputLocked" title="粘贴文字；也可聚焦画面后按 Ctrl+V" @click="closeToolbarMenu(); clipboard()">粘贴</button>
           <button class="tb-more-item action-menu-item" role="menuitem" @click="closeToolbarMenu(); shot()">截图</button>
           <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" :disabled="manualInputLocked" @click="closeToolbarMenu(); key('HOME')">主屏幕</button>
           <button v-if="!isBrowser" class="tb-more-item action-menu-item" role="menuitem" :disabled="manualInputLocked" @click="closeToolbarMenu(); key('BACK')">返回</button>
@@ -315,6 +317,7 @@
     <OperationStatusBar :core="operationFeedback.state.core" :core-statuses="coreStatuses" :plugin="activeOperationFeedback" />
     <!-- 设备设置 / 新增设备弹窗 -->
     <DeviceSettingsModal :context="deviceSettingsContext" />
+    <ConsoleClipboardDialog :state="consoleClipboard.dialog" @close="consoleClipboard.close()" @submit="consoleClipboard.submit" />
 
     <!-- 运行参数弹窗（脚本声明 params 时点运行/从此运行弹出；稀疏 args 提交、400 诊断回填标红） -->
     <RunParamsModal
@@ -373,6 +376,8 @@ import { usePackageContext } from '../composables/usePackageContext'
 import { loadPackages, currentPackageId, selectPackage, packageStore } from '../package-store'
 import { useRunningPackageContext } from '../composables/useRunningPackageContext'
 import { createKeyboardController, shouldIgnoreKeyboardTarget } from '../keyboard-control'
+import { useConsoleClipboard } from '../components/console/useConsoleClipboard'
+import ConsoleClipboardDialog from '../components/console/ConsoleClipboardDialog.vue'
 import { buildTouchPhase, createKeymapController } from '../keymap-control'
 import { useConsolePanelResize } from '../components/console/useConsolePanelResize'
 import { useConsoleDeviceManager } from '../components/console/useConsoleDeviceManager'
@@ -488,7 +493,7 @@ const {
   forceReconnecting, forceReconnect,
   appSelectSaving, onAppSelect, appLoading, pkgOptions, packageOptionLabel,
   key, toolbarMenuOpen, toolbarMenuStyle,
-  closeToolbarMenu, toggleToolbarMenu, shot, rotate, clipboard, launchGame, stopGame,
+  closeToolbarMenu, toggleToolbarMenu, shot, rotate, clipboard, pasteText, launchGame, stopGame,
   apkInstalling, installApk,
   deviceSettingsContext,
 } = useConsoleDeviceManager({
@@ -507,6 +512,8 @@ const {
   cleanup,
   sendControl,
   guardManualInput: () => isSingleScreen.value && inputControl.requireManual(),
+  requestPasteText: id => consoleClipboard.openPaste(id),
+  inputContext: () => JSON.stringify([store.deviceId, inputControl.status.value?.generation, connected.value, stageCtl.view.canDeviceInput]),
   selectTarget: id => addAndSelectTarget(id),
   beforeTargetRemoval: id => beforeTargetChange(null),
   onTargetRemoved: id => removeTargetCell(id),
@@ -927,7 +934,8 @@ function sendControl(obj) {
     lastDragInputAt = Date.now()
   }
   const channel = webrtcLifecycle.getControlChannel()
-  if (channel && channel.readyState === 'open') {
+  // Large clipboard payloads use HTTP rather than exceeding SCTP message limits.
+  if (channel && channel.readyState === 'open' && !(obj.type === 'clipboard' && new TextEncoder().encode(obj.text || '').length > 60000)) {
     channel.send(JSON.stringify(obj))
     return true
   }
@@ -978,16 +986,35 @@ function onStageFocusOut(e) {
 }
 
 function releaseStageKeyboard() {
-  if (isBrowser.value) browserPreview.release()
   keyboardFocused.value = false
+  releaseHeldStageKeys()
+}
+
+function releaseHeldStageKeys() {
+  if (isBrowser.value) browserPreview.release()
   keymap.releaseAll()
   syncKeymapPressed()
   keyboard.releaseAll()
 }
 
+const consoleClipboard = useConsoleClipboard({
+  deviceId: () => store.deviceId,
+  context: () => JSON.stringify([store.deviceId, inputControl.status.value?.generation, connected.value,
+    stageCtl.view.canDeviceInput, isSingleScreen.value, browserPreview.view?.stamp]),
+  canUse: () => isSingleScreen.value && connected.value && !manualInputLocked.value && stageCtl.view.canDeviceInput
+    && !picking.value && !selecting.value && !cellPick.mode,
+  copyFromDevice: id => api.control(id, { type: 'copy_text', ...(isBrowser.value ? { stamp: browserPreview.view.stamp } : {}) }),
+  pasteText,
+  releaseKeys: releaseHeldStageKeys,
+  focusStage: () => stageFocusEl.value?.focus({ preventScroll: true }),
+  toast,
+})
+const clipboardCapture = consoleClipboard.capture
+
 function onStageKeyDown(e) {
   if (e.defaultPrevented || e.isComposing || shouldIgnoreKeyboardTarget(e.target) || hasOpenInputDialog()
     || !connected.value || manualInputLocked.value || !stageCtl.view.canDeviceInput || picking.value || selecting.value || cellPick.mode || isGlobalEscapeConsumed(e)) return
+  if (consoleClipboard.handleKeyDown(e)) return
   if (keyboardMode.value === 'game') {
     const mapped = keymap.handleKeyDown(e)
     syncKeymapPressed()
@@ -999,6 +1026,7 @@ function onStageKeyDown(e) {
 }
 
 function onStageKeyUp(e) {
+  if (consoleClipboard.handleKeyUp(e)) return
   if (shouldIgnoreKeyboardTarget(e.target) || hasOpenInputDialog() || !connected.value || manualInputLocked.value || !stageCtl.view.canDeviceInput) return
   const mapped = keymap.handleKeyUp(e)
   syncKeymapPressed()
@@ -1608,6 +1636,7 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.clipboard-capture { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; clip-path: inset(50%); overflow: hidden; }
 .panel-target-context { flex:none; display:flex; flex-direction:column; gap:3px; padding:10px 12px; border-bottom:1px solid var(--border); border-left:1px solid var(--accent); background:var(--bg-1); }
 .panel-target-context strong { color:var(--accent); font-size:13px; line-height:1.5; overflow-wrap:anywhere; }
 .panel-target-context span { color:var(--text-2); font-size:12px; line-height:1.4; }

@@ -26,6 +26,67 @@ fn target(url: &str, profile: &str) -> BrowserTarget {
 }
 
 #[tokio::test]
+#[ignore = "requires installed browser; isolated clipboard selection and control barrier"]
+async fn clipboard_reads_selected_text_and_rejects_stale_or_owned_input() {
+    use axum::{response::Html, routing::get, Router};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let app = Router::new().route("/", get(|| async { Html("<!doctype html><meta charset=utf-8><textarea id=entry> 中文🙂\n</textarea><input id=secret type=password value=secret>") }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        data_dir: dir.path().into(),
+        ..Default::default()
+    };
+    let controls = Arc::new(crate::core::control::ControlRegistry::default());
+    let target = target(&url, "clipboard");
+    let session = CdpSession::launch_with_controls(
+        &target,
+        &cfg,
+        browser_executable(&cfg).unwrap(),
+        controls.clone(),
+    )
+    .await
+    .unwrap();
+    session.capture_for_prepare().await.unwrap();
+    let stamp = session.stamp();
+    session
+        .evaluate_for_test("entry.focus(); entry.select()")
+        .await;
+    assert_eq!(
+        controls
+            .manual(&target.id, session.copy_text(&stamp))
+            .await
+            .unwrap(),
+        " 中文🙂\n"
+    );
+    session
+        .evaluate_for_test("secret.focus(); secret.select()")
+        .await;
+    assert_eq!(
+        controls
+            .manual(&target.id, session.copy_text(&stamp))
+            .await
+            .unwrap(),
+        ""
+    );
+    let lease = controls.claim(&target.id, "copy-test").await.unwrap();
+    assert!(controls
+        .manual(&target.id, session.copy_text(&stamp))
+        .await
+        .is_err());
+    controls.release(&lease, async { Ok(()) }).await.unwrap();
+    let mut stale = stamp;
+    stale.revision += 1;
+    assert!(controls
+        .manual(&target.id, session.copy_text(&stale))
+        .await
+        .is_err());
+    session.close().await;
+    server.abort();
+}
+
+#[tokio::test]
 #[ignore = "requires installed browser; isolated reload, bound page and input barrier"]
 async fn reset_input_reloads_bound_page_and_retires_held_input_and_old_frames() {
     use axum::{response::Html, routing::get, Router};
