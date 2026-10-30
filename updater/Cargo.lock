@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "gamer-updater"
-version = "0.5.12"
+version = "0.5.13"
 dependencies = [
  "crc32fast",
  "semver",

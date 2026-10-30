@@ -201,6 +201,25 @@ run:
 
 ## 普通函数、表达式与控制流
 
+列表参数可用 `list_length: {items: $codes}` 获取长度，用 `list_get: {items: $codes, index: $index}` 读取从零开始的元素；空列表长度为 0，负数、非整数或越界索引明确失败，元素原值（包括 null）保持不变。这两个纯原生函数需要含对应实现的新宿主，仅更新插件归档不生效；不引入动态索引或新 YAML 关键字。
+
+```yaml
+params:
+  codes: {type: list, required: true, desc: 兑换码字符串列表}
+vars:
+  index: 0
+run:
+  - list_length: {items: $codes}
+    as: count
+  - repeat: $count
+    do:
+      - list_get: {items: $codes, index: $index}
+        as: code
+      - log: $code
+      - calculate: {op: add, a: $index, b: 1}
+        as: index
+```
+
 普通函数调用、`if`、有界 `repeat`、`break`、`return`、参数和变量继续使用现有语义。以下为可嵌入 `run` 的片段，不是缺少版本与完成条件的完整脚本：
 
 ```yaml

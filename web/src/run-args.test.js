@@ -376,7 +376,7 @@ describe('Console 运行参数接线', () => {
     expect(consoleSrc).toContain("RunParamsModal")
     expect(consoleSrc).toContain('<RunParamsModal')
     expect(runnerSrc).toContain('runYamlScript(opts.id, device, 0, opts.args)')
-    expect(runnerSrc).toContain('runArgsFlow.confirm(...args)')
+    expect(runnerSrc).toContain('runArgsFlow.confirm(args)')
     expect(runnerSrc).toContain('pushRunConflict(e.data)')
     // resolved_args 摘要进运行日志区（「默认继承/显式覆盖」来源标注）
     expect(runnerSrc).toContain('pushLog(\'info\'')

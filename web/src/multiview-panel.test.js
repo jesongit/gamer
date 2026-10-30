@@ -29,6 +29,17 @@ it('source drafts reject even same-package target changes without moving focus o
   runner.scriptPanel.sourceEditorDirty.value=false
   expect(runner.beforeTargetChange('b')).toBe(true)
 })
+it('the parameter-modal submit envelope forwards a full string list without nesting args', async () => {
+  vi.spyOn(api, 'getEntrypointParams').mockResolvedValue({ schema: [{ name: 'codes', type: 'list', required: true }] })
+  const run = vi.spyOn(api, 'run').mockResolvedValue({ run_id: 'codes-run', state: 'starting' })
+  runner.scriptPanel.selScript.value = 'one/redeem.yaml'
+  await nextTick()
+  await runner.scriptPanel.runScript()
+  expect(runner.runArgsFlow.modal.open).toBe(true)
+  const codes = ['永远不会抛弃你', '永远不会欺骗你', '星神阿哈祝福你']
+  await runner.onRunArgsSubmit({ args: { codes } })
+  expect(run).toHaveBeenCalledWith(expect.objectContaining({ device_id: 'a', payload: { args: { codes } } }))
+})
 it('successful target projection preserves each package/script/args and never writes into previous target',async()=>{
   expect(runner.projectTargetConfig('b')).toBe(true);store.deviceId='b';await nextTick()
   expect(currentPackageId.value).toBe('two');expect(runner.scriptPanel.selScript.value).toBe('two/b.yaml')
