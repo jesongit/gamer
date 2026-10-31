@@ -712,3 +712,4 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - scrcpy `GET_CLIPBOARD` 没有请求关联 ID，取消或超时后的迟到回包不能交给下一次复制；在旧回包排空前拒绝新复制，无回包时重新连接画面恢复。
 - `cargo metadata --locked --no-deps` 不会发现 Cargo.lock 本体版本过期，依赖更新与版本编辑并发时还可能写回旧值；顺序完成更新，并核对 server/updater 锁文件中的本体版本，打标签前执行完整 locked 解析。
 - 可变长度列表不能用点号引用或算术函数逐项读取：YAML 引用只支持对象字段；使用原生 list_length/list_get，新增 host 实现须升级宿主，仅更新插件无效。
+- 配套插件发布必须另行同步内网 Release 的 registry.json、全部 .gplugin、合集和校验文件；只推送内网 Git 提交与标签不会更新插件市场。以内网匿名附件校验及 Gamer 实际来源下载验收为完成条件。
