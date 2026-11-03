@@ -7,52 +7,25 @@ Simplified Chinese OCR. A separate browser or VNC container is not required.
 ## Release
 
 ```sh
-docker pull --platform linux/amd64 posase/gamer:v1.0.12
+docker pull --platform linux/amd64 posase/gamer:v1.0.13
 ```
 
-Docker release **v1.0.12** packages application **0.5.13**. YAML adds variable-length
-list helpers and a multi-account run dialog: select accounts, enter shared parameters
-once, and start the same formal script concurrently with independent results. Update
-the YAML plugin to **0.3.30** for the new interface. Private draft parameter forms use
-the exact saved version. Invalid JSON blocks submission instead of sending stale values.
+Docker release **v1.0.13** packages application **0.5.14**. This is a production
+hotfix for scheduled-task reliability. OCR preprocessing now normalizes small
+dark-background UI crops (white text) to dark-text-on-light before Tesseract,
+fixing intermittent empty results on identical regions (challenge counter
+reads failing with `COUNT_OCR_EMPTY`). The HSR daily script gains a fallback
+template and widened region for the dungeon "enter" button on the training
+goal panel's alternate layout (`CHALLENGE_PAGE_TIMEOUT`). No YAML keyword,
+plugin version or database schema changes; existing tasks and packages are
+untouched.
 
-Single-screen game control
-now supports Ctrl+C to copy selected text and Ctrl+V to paste text, including on
-plain HTTP. The Paste button opens a text field if browser clipboard access is
-unavailable or denied; Android paste preserves Chinese text and emoji. Existing
-control barriers and editor shortcuts remain enforced.
-Wasmtime is patched to 48.0.8 for RUSTSEC-2026-0422, 0423 and 0424.
-
-Enable "Allow remote MCP
-connections" in Settings to connect an Agent from another computer or container.
-The switch is saved immediately; copied endpoints retain the actual web host,
-protocol and published port. Independent Bearer authentication, token revocation,
-object permissions and control barriers remain enforced. Remote access is off by
-default (`mcp_allow_remote = false`); an installation using `local_only = true`
-still accepts local connections only.
-Core MCP can now find original recordings and media by name, read recorded events
-and exact frames, preview schedule triggers, and recognize original media frames
-with OCR. These are scoped evidence tools and do not replay recorded input.
-Plugin and configuration sources still support GitHub, LAN and custom presets.
-The official companion catalog provides Video 0.2.9, Keymap 0.1.9, YAML 0.3.30,
-Live 0.2.20, Notify 0.1.3 and Package Publisher 0.1.1. Video adds sample-name search and Keymap provides an
-authoring grammar tool; both require application 0.5.8. Update the application
-first, then install or update plugins through the plugin page. Configuration
-packages are separate from plugin updates. Database schema remains 7.
-Rust and frontend dependencies have been upgraded, with strict security audits
-covering six Rust and seven npm lockfiles without advisory exemptions. The release
-includes a dependency inventory and audit receipt. ZIP imports support Store and
-Deflate, the formats used by the official packaging tools.
-Default MCP tokens now cover current and future exposed tools. Existing settings-page
-default tokens keep their secrets and gain new functions after upgrade. YAML 0.3.28
-adds pinned formal publication; Core supports task entrypoint changes and installed
-plugin updates with version, hash and permission checks. No token recreation is needed.
 The `latest` image tag follows this stable release; versioned tags stay immutable.
 The published architecture is **linux/amd64**, for Intel/AMD x86_64 hosts.
-The previous `v1.0`, `v1.0.1`, `v1.0.2`, `v1.0.3`, `v1.0.4`, `v1.0.5`, `v1.0.6`, `v1.0.7`, `v1.0.8`, `v1.0.9`, `v1.0.10` and `v1.0.11` tags remain unchanged. No ARM64 release is claimed.
+The previous `v1.0`, `v1.0.1`, `v1.0.2`, `v1.0.3`, `v1.0.4`, `v1.0.5`, `v1.0.6`, `v1.0.7`, `v1.0.8`, `v1.0.9`, `v1.0.10`, `v1.0.11` and `v1.0.12` tags remain unchanged. No ARM64 release is claimed.
 
-The v1.0.12 deployment bundle includes the unchanged Chromium seccomp file:
-https://github.com/jesongit/gamer/releases/tag/docker-v1.0.12
+The v1.0.13 deployment bundle includes the unchanged Chromium seccomp file:
+https://github.com/jesongit/gamer/releases/tag/docker-v1.0.13
 
 ## Fresh installation with docker run
 
@@ -94,19 +67,30 @@ backup, retains the previous container, and inherits its exact volume and bind m
 Keep any additional custom ports or environment settings from your original command.
 
 ```bash
-image=posase/gamer:v1.0.12
+image=posase/gamer:v1.0.13
 docker pull "$image" &&
-docker run --rm --entrypoint cat "$image" /app/chromium-seccomp.json > gamer-seccomp-v112.json &&
+docker run --rm --entrypoint cat "$image" /app/chromium-seccomp.json > gamer-seccomp-v113.json &&
 docker stop -t 90 gamer &&
 (umask 077; docker run --rm --memory 512m --memory-swap 512m \
   --volumes-from gamer:ro --entrypoint python3 "$image" \
-  /app/tools/volume-transfer.py export --gzip > "gamer-before-v112-$(date +%s).tar.gz") &&
-docker rename gamer gamer-before-v112 &&
-docker update --restart=no gamer-before-v112 &&
+  /app/tools/volume-transfer.py export --gzip > "gamer-before-v113-$(date +%s).tar.gz") &&
+docker rename gamer gamer-before-v113 &&
+docker update --restart=no gamer-before-v113 &&
 docker run -d --name gamer --init --restart unless-stopped --stop-timeout 90 --shm-size 1g \
-  --volumes-from gamer-before-v112 --security-opt "seccomp=$PWD/gamer-seccomp-v112.json" \
+  --volumes-from gamer-before-v113 --security-opt "seccomp=$PWD/gamer-seccomp-v113.json" \
   -p 18443:8443 -e GAMER_PROFILE=prod -e GAMER_COOKIE_SECURE=false \
   --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 "$image"
+```
+
+If the backup export aborts with `Unsupported link or special file`, the volume
+contains a Chromium runtime socket (real installations with browser audio do).
+Use a direct volume tar as the cold backup instead, then continue from
+`docker rename`:
+
+```bash
+mkdir -p /tmp/gamer-backup
+docker run --rm --volumes-from gamer:ro -v /tmp/gamer-backup:/backup alpine \
+  tar czf /backup/gamer-vol-cold.tar.gz --exclude='state/home/.config/pulse/*-runtime/*' /data
 ```
 
 Database schema remains 7. The existing username/password, credential key, tasks,
