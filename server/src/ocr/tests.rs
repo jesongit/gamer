@@ -194,6 +194,41 @@ fn png(width: u32, height: u32) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())
 }
 
+fn luma_png(width: u32, height: u32, shade: u8) -> String {
+    let mut bytes = Cursor::new(Vec::new());
+    image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(
+        width,
+        height,
+        image::Luma([shade]),
+    ))
+    .write_to(&mut bytes, ImageFormat::Png)
+    .unwrap();
+    base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())
+}
+
+fn prepared_mean(prepared: &Prepared) -> u64 {
+    let decoded = image::load_from_memory(&prepared.png)
+        .unwrap()
+        .into_luma8();
+    let pixels = decoded.pixels().count().max(1) as u64;
+    decoded.pixels().map(|p| p.0[0] as u64).sum::<u64>() / pixels
+}
+
+#[test]
+fn prepare_normalizes_dark_background_crops_for_tesseract() {
+    // 深底白字的小幅 UI 截图（平均亮度低于中点）必须整图反色为深字浅底，
+    // 否则 Tesseract psm 6 对部分字形会整体返回空（v1.0.13 线上故障）。
+    let dark: Request =
+        serde_json::from_value(json!({"png_base64": luma_png(41, 32, 30)})).unwrap();
+    let prepared = dark.prepare().unwrap();
+    assert!(prepared_mean(&prepared) > 200, "深色输入应被反色");
+    // 浅底深字保持原样，不做无谓反色。
+    let light: Request =
+        serde_json::from_value(json!({"png_base64": luma_png(41, 32, 200)})).unwrap();
+    let prepared = light.prepare().unwrap();
+    assert_eq!(prepared_mean(&prepared), 200);
+}
+
 #[test]
 fn request_decoding_and_limits_are_checked_before_process_execution() {
     let engine = settings::Engine {

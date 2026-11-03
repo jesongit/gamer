@@ -162,11 +162,22 @@ impl Request {
         limits.max_alloc = Some(32 * 1024 * 1024);
         reader.limits(limits);
         let decoded = reader.decode().context("OCR PNG 解码失败")?.into_luma8();
-        let image = if width == scaled_width && height == scaled_height {
+        let mut image = if width == scaled_width && height == scaled_height {
             decoded
         } else {
             image::imageops::resize(&decoded, scaled_width, scaled_height, FilterType::Triangle)
         };
+        // Tesseract 对深底白字的小幅 UI 截图自动反色不稳定：同一管线下不同字形
+        // 时而正常识别时而整体返回空（实测 psm 6 下"1"可识别、"3"连续为空）。
+        // 这里统一归一化为深字浅底：平均亮度低于中点的输入先整图反色；浅底深字
+        // 与中灰输入保持原样，坐标映射不受影响（尺寸不变）。
+        {
+            let pixels = image.pixels().count().max(1) as u64;
+            let mean = image.pixels().map(|p| p.0[0] as u64).sum::<u64>() / pixels;
+            if mean < 128 {
+                image::imageops::invert(&mut image);
+            }
+        }
         let mut png = Cursor::new(Vec::new());
         image::DynamicImage::ImageLuma8(image)
             .write_to(&mut png, ImageFormat::Png)
