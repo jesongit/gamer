@@ -7,26 +7,26 @@ Simplified Chinese OCR. A separate browser or VNC container is not required.
 ## Release
 
 ```sh
-docker pull --platform linux/amd64 posase/gamer:v1.0.14
+docker pull --platform linux/amd64 posase/gamer:v1.0.15
 ```
 
-Docker release **v1.0.14** packages application **0.5.15**. Scheduled tasks gain
-multi-input support with bounded concurrency: a task may define up to 64 inputs
-(per-input device override for YAML automation) and a concurrency limit
-(default 1, max 64). Each trigger dispatches one run per input under the
-concurrency cap; after all runs finish, the per-input results are persisted and
-a **single merged notification** is sent (new template variables
-`summary.total` / `summary.success` / `summary.failed` / `summary.lines`).
-Database schema upgrades 7 → 8 on first start (`inputs_json`,
-`result_summary_json`, `concurrency`); existing tasks keep their values and
-behave as single-input as before. No YAML keyword or plugin version change.
+Docker release **v1.0.15** packages application **0.5.16**. Task save hotfix:
+the API save boundary now defaults a missing/empty `inputs[].id` to
+`device_id`, and the task form sends `id` explicitly, so saving a
+multi-input task no longer fails with
+`task inputs[0].id must not be empty`. Multi-input dispatch, bounded
+concurrency and single merged notifications (introduced in v1.0.14: up to 64
+inputs with per-input device override for YAML automation, concurrency default
+1 max 64, one aggregated notification per trigger with the
+`summary.total` / `summary.success` / `summary.failed` / `summary.lines`
+template variables) are unchanged. Database schema stays v8.
 
 The `latest` image tag follows this stable release; versioned tags stay immutable.
 The published architecture is **linux/amd64**, for Intel/AMD x86_64 hosts.
-The previous `v1.0`, `v1.0.1`, `v1.0.2`, `v1.0.3`, `v1.0.4`, `v1.0.5`, `v1.0.6`, `v1.0.7`, `v1.0.8`, `v1.0.9`, `v1.0.10`, `v1.0.11`, `v1.0.12` and `v1.0.13` tags remain unchanged. No ARM64 release is claimed.
+The previous `v1.0`, `v1.0.1`, `v1.0.2`, `v1.0.3`, `v1.0.4`, `v1.0.5`, `v1.0.6`, `v1.0.7`, `v1.0.8`, `v1.0.9`, `v1.0.10`, `v1.0.11`, `v1.0.12`, `v1.0.13` and `v1.0.14` tags remain unchanged. No ARM64 release is claimed.
 
-The v1.0.14 deployment bundle includes the unchanged Chromium seccomp file:
-https://github.com/jesongit/gamer/releases/tag/docker-v1.0.14
+The v1.0.15 deployment bundle includes the unchanged Chromium seccomp file:
+https://github.com/jesongit/gamer/releases/tag/docker-v1.0.15
 
 ## Fresh installation with docker run
 
