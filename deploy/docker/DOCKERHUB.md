@@ -132,6 +132,12 @@ database migration. Its isolated upgrade and cold-backup rollback checks use
 v1.0.5 with synthetic data; see the release receipt for the completed results. Data and credential keys must
 be backed up together. Tests used local synthetic pages, not real game accounts.
 
+On shared small hosts, scheduled tasks can saturate all cores at night. A CPU cap
+set with `docker update --cpus 2 gamer` takes effect immediately and survives
+container and daemon restarts, but is lost when the container is recreated by an
+upgrade; add `--cpus 2` to the new container's `docker run` (or run
+`docker update` again afterwards).
+
 The service listens on TCP 8443. Publish host TCP 18443 as above for direct HTTP,
 or use SSH forwarding / an HTTPS reverse proxy. The image contains no user data
 or credentials.
