@@ -560,6 +560,8 @@ function buildTaskSaveBody() {
   const inputs = form.inputs
     .filter((entry) => entry.device_id)
     .map((entry) => ({
+      // id = 设备 id：Core 校验 inputs[].id 非空且为摘要/通知寻址的稳定键
+      id: entry.device_id,
       device_id: entry.device_id,
       ...(entry.label?.trim() ? { label: entry.label.trim() } : {}),
     }))

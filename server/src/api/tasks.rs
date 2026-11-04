@@ -284,6 +284,23 @@ pub(super) fn build_task(
         .inputs
         .or_else(|| existing.as_ref().map(|t| t.inputs.clone()))
         .unwrap_or_default();
+    // 保存边界宽容缺省 id：未显式提供时默认 = device_id（前端旧版本/脚本调用
+    // 少写一个字段不至于 400；Core 的 result_summary 仍以 id 为稳定键）。
+    for input in task.inputs.iter_mut() {
+        if let Some(map) = input.as_object_mut() {
+            let id_empty = map
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .map(str::is_empty)
+                .unwrap_or(true);
+            if id_empty {
+                if let Some(device) = map.get("device_id").cloned() {
+                    map.insert("id".into(), device);
+                }
+            }
+        }
+    }
     task.concurrency = req
         .concurrency
         .or_else(|| existing.as_ref().map(|t| t.concurrency))

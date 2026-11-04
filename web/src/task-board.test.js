@@ -397,7 +397,7 @@ describe('新建任务：贡献渲染 + cron 触发方式 + 保存 ADR-12 body',
       runner: { runner_id: 'gamer-yaml', entrypoint: 'com.demo/main.yml' },
       schedule: { provider_id: 'cron', config: { expression: '0 8 * * *' } },
     })
-    expect(posted.body.inputs).toEqual([{ device_id: 'dev1', android_package: 'com.demo' }])
+    expect(posted.body.inputs).toEqual([{ id: 'dev1', device_id: 'dev1', android_package: 'com.demo' }])
     expect(posted.body.concurrency).toBe(1)
     expect(posted.body.runner.payload.args).toEqual({})
     expect(posted.body.id).toBeUndefined()
