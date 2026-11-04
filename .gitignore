@@ -91,6 +91,11 @@ prompt.md
 .impeccable/
 web/.impeccable/
 
+# 本机线上环境记录（内网 MCP 地址与令牌，不入库）
+online.env
+# 线上部署运行时产物（容器内提取的 seccomp 等一次性文件）
+server/runtime/
+
 # ===== 阶段备份（重构/发布前的只读数据快照，如 backups/stage0-data、baseline-backups/）=====
 backups/
 baseline-backups/
