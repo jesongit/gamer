@@ -7,25 +7,26 @@ Simplified Chinese OCR. A separate browser or VNC container is not required.
 ## Release
 
 ```sh
-docker pull --platform linux/amd64 posase/gamer:v1.0.13
+docker pull --platform linux/amd64 posase/gamer:v1.0.14
 ```
 
-Docker release **v1.0.13** packages application **0.5.14**. This is a production
-hotfix for scheduled-task reliability. OCR preprocessing now normalizes small
-dark-background UI crops (white text) to dark-text-on-light before Tesseract,
-fixing intermittent empty results on identical regions (challenge counter
-reads failing with `COUNT_OCR_EMPTY`). The HSR daily script gains a fallback
-template and widened region for the dungeon "enter" button on the training
-goal panel's alternate layout (`CHALLENGE_PAGE_TIMEOUT`). No YAML keyword,
-plugin version or database schema changes; existing tasks and packages are
-untouched.
+Docker release **v1.0.14** packages application **0.5.15**. Scheduled tasks gain
+multi-input support with bounded concurrency: a task may define up to 64 inputs
+(per-input device override for YAML automation) and a concurrency limit
+(default 1, max 64). Each trigger dispatches one run per input under the
+concurrency cap; after all runs finish, the per-input results are persisted and
+a **single merged notification** is sent (new template variables
+`summary.total` / `summary.success` / `summary.failed` / `summary.lines`).
+Database schema upgrades 7 → 8 on first start (`inputs_json`,
+`result_summary_json`, `concurrency`); existing tasks keep their values and
+behave as single-input as before. No YAML keyword or plugin version change.
 
 The `latest` image tag follows this stable release; versioned tags stay immutable.
 The published architecture is **linux/amd64**, for Intel/AMD x86_64 hosts.
-The previous `v1.0`, `v1.0.1`, `v1.0.2`, `v1.0.3`, `v1.0.4`, `v1.0.5`, `v1.0.6`, `v1.0.7`, `v1.0.8`, `v1.0.9`, `v1.0.10`, `v1.0.11` and `v1.0.12` tags remain unchanged. No ARM64 release is claimed.
+The previous `v1.0`, `v1.0.1`, `v1.0.2`, `v1.0.3`, `v1.0.4`, `v1.0.5`, `v1.0.6`, `v1.0.7`, `v1.0.8`, `v1.0.9`, `v1.0.10`, `v1.0.11`, `v1.0.12` and `v1.0.13` tags remain unchanged. No ARM64 release is claimed.
 
-The v1.0.13 deployment bundle includes the unchanged Chromium seccomp file:
-https://github.com/jesongit/gamer/releases/tag/docker-v1.0.13
+The v1.0.14 deployment bundle includes the unchanged Chromium seccomp file:
+https://github.com/jesongit/gamer/releases/tag/docker-v1.0.14
 
 ## Fresh installation with docker run
 
@@ -36,7 +37,7 @@ Download and extract the deployment bundle from the release above. It includes
 docker volume create gamer-production-data
 docker run --rm -it --memory 512m --memory-swap 512m --entrypoint python3 \
   --mount type=volume,src=gamer-production-data,dst=/data \
-  posase/gamer:v1.0.13 /app/tools/gamer_docker.py init
+  posase/gamer:v1.0.14 /app/tools/gamer_docker.py init
 
 docker run -d --name gamer --init --restart unless-stopped \
   --stop-timeout 90 --shm-size 1g \
@@ -45,7 +46,7 @@ docker run -d --name gamer --init --restart unless-stopped \
   -e GAMER_PROFILE=prod -e GAMER_COOKIE_SECURE=false \
   --mount type=volume,src=gamer-production-data,dst=/data \
   --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 \
-  posase/gamer:v1.0.13
+  posase/gamer:v1.0.14
 ```
 
 Open `http://localhost:18443` using your configured password. There is no default
@@ -67,17 +68,17 @@ backup, retains the previous container, and inherits its exact volume and bind m
 Keep any additional custom ports or environment settings from your original command.
 
 ```bash
-image=posase/gamer:v1.0.13
+image=posase/gamer:v1.0.14
 docker pull "$image" &&
-docker run --rm --entrypoint cat "$image" /app/chromium-seccomp.json > gamer-seccomp-v113.json &&
+docker run --rm --entrypoint cat "$image" /app/chromium-seccomp.json > gamer-seccomp-v114.json &&
 docker stop -t 90 gamer &&
 (umask 077; docker run --rm --memory 512m --memory-swap 512m \
   --volumes-from gamer:ro --entrypoint python3 "$image" \
-  /app/tools/volume-transfer.py export --gzip > "gamer-before-v113-$(date +%s).tar.gz") &&
-docker rename gamer gamer-before-v113 &&
-docker update --restart=no gamer-before-v113 &&
+  /app/tools/volume-transfer.py export --gzip > "gamer-before-v114-$(date +%s).tar.gz") &&
+docker rename gamer gamer-before-v114 &&
+docker update --restart=no gamer-before-v114 &&
 docker run -d --name gamer --init --restart unless-stopped --stop-timeout 90 --shm-size 1g \
-  --volumes-from gamer-before-v113 --security-opt "seccomp=$PWD/gamer-seccomp-v113.json" \
+  --volumes-from gamer-before-v114 --security-opt "seccomp=$PWD/gamer-seccomp-v114.json" \
   -p 18443:8443 -e GAMER_PROFILE=prod -e GAMER_COOKIE_SECURE=false \
   --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 "$image"
 ```
@@ -93,7 +94,7 @@ docker run --rm --volumes-from gamer:ro -v /tmp/gamer-backup:/backup alpine \
   tar czf /backup/gamer-vol-cold.tar.gz --exclude='state/home/.config/pulse/*-runtime/*' /data
 ```
 
-Database schema remains 7. The existing username/password, credential key, tasks,
+Database schema upgrades to 8 on first start. The existing username/password, credential key, tasks,
 task enabled flags and scheduler configuration stay in the original `/data` mount.
 An existing installation does not need init, restore or activate again. If any step
 fails, the `&&` chain stops; retain the backup and previous container for diagnosis.

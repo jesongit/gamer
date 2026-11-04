@@ -1,0 +1,61 @@
+{
+  "source_commit": "25c34c6ed70952b0d298897d41bbf21f16270ac2",
+  "plugin_commit": "493a1b551022d8a4384aa34796cc44bb1586fbb3",
+  "application_version": "0.5.15",
+  "image": "posase/gamer:v1.0.14",
+  "release_tag": "docker-v1.0.14",
+  "clean_git_archives": true,
+  "digest": "sha256:4ca7d41220194128ccb7f9e72da07a2e29730ee357aa735786e07a00e61c7c92",
+  "platform": "linux/amd64",
+  "source_ci": null,
+  "plugin_ci": null,
+  "verified_at_utc": "2026-11-04T16:00:00.000000+00:00",
+  "public": true,
+  "anonymous_pull_verified": true,
+  "pull_layers_already_cached": false,
+  "user_data_included": false,
+  "production_updated": true,
+  "real_accounts_tested": false,
+  "schema": 8,
+  "runtime_acceptance": "passed",
+  "feature": {
+    "summary": "定时任务多输入与并发：Task.inputs（gamer-yaml 设备覆盖，≤64 条）+ Task.concurrency（默认 1，上限 64）；每次触发按输入×payload 合并并发派发，全部终态后写 result_summary_json 并发一条聚合通知（gamer-notify 新增 summary.total/success/failed/lines 变量）",
+    "dispatch": "信号量许可覆盖运行全生命周期（完成回调释放）；scheduled_runs 每次触发 claim 一次；提交失败/完成回调均记账，未收到结果以失败占位保证行数=输入数",
+    "notify_merge": "last_result 折叠为 成功/部分成功 k/n/失败；聚合通知经既有 result_hook 管线（模板/通道/幂等去重复用），event_id = schedule:<task>:summary:<ts>",
+    "submit_now_multi": "立即运行对多输入任务派发全部输入，返回首个成功 run_id"
+  },
+  "schema_migration": {
+    "from": 7,
+    "to": 8,
+    "columns": ["inputs_json TEXT NOT NULL DEFAULT '[]'", "result_summary_json TEXT NOT NULL DEFAULT '[]'", "concurrency INTEGER NOT NULL DEFAULT 0"],
+    "idempotent": "逐列检查 pragma_table_info 后 ALTER，外部预补列场景安全",
+    "online_applied": "线上首启日志确认 from=7 to=8 \"task multi-inputs with bounded concurrency\""
+  },
+  "validation": {
+    "server_tests": "1221 passed, 0 failed (Windows host, full suite; rate_limit 一例为并发环境抖动，单独复跑通过)",
+    "web_tests": "893 passed, 0 failed (100 files; 含新增多输入保存 body 用例)",
+    "docker_build": "clean git archive 25c34c6e + pinned submodule 493a1b55; base images linux/amd64; CARGO_BUILD_JOBS=1",
+    "note": "CI 将随 push/tag 触发补充验证"
+  },
+  "remote_mcp_acceptance": {
+    "initialize_version": "0.5.15",
+    "tasks_after_merge": 1,
+    "merged_task": {
+      "name": "云游戏日常合并",
+      "concurrency": 2,
+      "inputs": ["155/browser-c710d2f2", "188/browser-hsr-account-2", "136/browser-hsr-account-3", "173/browser-623628d96b0e"],
+      "schedule": "cron 1 4 * * *",
+      "script_notify_args": {"notify_success": false, "notify_failure": false},
+      "next_wakeup_utc": "2026-11-04T20:01:00Z"
+    }
+  },
+  "deployment": {
+    "host": "FnOS 192.168.31.10",
+    "backup": "gamer-vol-before-v114.tar.gz (1.76GB, sha256 001d197b4cef1de394224945da3bb965f55f60b4da8f0ecc0d32bdf99ce15b5c, gzip -t 通过)",
+    "container": "旧容器保留为 gamer-before-v114（restart=no）；新容器继承卷/端口 18443/seccomp（新镜像提取）/env/日志配置，healthy",
+    "merge_execution": "停机窗口内经 docker exec python3 容器内执行合并脚本（宿主 python3 无 volume 权限）"
+  },
+  "previous_tags_unchanged": {
+    "v1.0.13": "sha256:602a30a7a91d334901aa470c18109834124c18531d6cf6146de2a358345b9cf9"
+  }
+}

@@ -716,3 +716,4 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - Tesseract（psm 6 + whitelist）对深底白字的小幅 UI 截图自动反色不稳定，同区域不同字形会时而正常时而整图返回空；宿主 `Request::prepare` 已按平均亮度统一反色归一化为深字浅底，再遇"区域正确却识别为空"先查预处理与字形，不要盲目改脚本坐标。
 - HSR「培养目标」面板按账号状态呈现不同布局，固定 region 的按钮模板会随推荐内容行数漂移；脚本对可能漂移的按钮应保留旧模板步骤并追加新模板/扩大区域的兜底分支，不要只调一次坐标。
 - Windows 下 `python -`（heredoc/stdin 传脚本）会进 pyrepl 死循环（WinError 123 readline 报错刷屏）；一次性数据迁移逻辑必须写成临时 `.py` 文件用 `python -X utf8 file.py` 执行，用完删除。多输入定时任务的轮询/派发注意：信号量许可须覆盖整个运行生命周期（完成回调释放），只在提交瞬间持许可不构成并发上限。
+- FnOS 线上部署 SSH 用户名是 **`Jeson`**（大写 J，公钥已装），22 端口；`root`/`posase`/小写均拒绝。生产数据卷 `gamer-production-data` 为 root-owned，宿主普通用户的 python3 读不了 `/vol1/docker/volumes/gamer-production-data/_data/gamer.db`——库级数据操作须 `docker cp` 脚本进容器后 `docker exec gamer python3 …` 在容器内执行（容器内置 python3）。
