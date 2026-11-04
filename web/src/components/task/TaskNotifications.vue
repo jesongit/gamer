@@ -45,7 +45,7 @@ onMounted(refresh)
     </div>
     <p v-if="availability" class="hint" role="status">{{ availability }}</p>
     <template v-if="policy.enabled">
-      <p class="hint">定时执行与任务测试使用此配置。通知失败不影响任务结果。</p>
+      <p class="hint">定时执行与任务测试使用此配置。通知失败不影响任务结果。多输入任务自动合并为一条摘要通知（新增 summary.total、summary.success、summary.failed、summary.lines 变量，默认文案已含逐输入明细）。</p>
       <details v-for="result in notificationResults" :key="result.key" :open="policy.results[result.key].enabled">
         <summary>
           <label @click.stop><input type="checkbox" :checked="policy.results[result.key].enabled" @change="changeRule(result.key, { enabled: $event.target.checked })" /> {{ result.label }}时通知</label>
@@ -62,7 +62,7 @@ onMounted(refresh)
           <textarea class="input" rows="3" :value="policy.results[result.key].content" placeholder="留空使用默认摘要：任务、目标、结果、时间、耗时、错误" @input="changeRule(result.key, { content: $event.target.value })" />
         </div>
       </details>
-      <p class="hint variables">可用变量：<code v-pre>{{task.name}} {{task.id}} {{target.name}} {{target.id}} {{device.name}} {{device.id}} {{result}} {{time}} {{elapsed}} {{error}} {{entrypoint}} {{run.id}}</code></p>
+      <p class="hint variables">可用变量：<code v-pre>{{task.name}} {{task.id}} {{target.name}} {{target.id}} {{device.name}} {{device.id}} {{result}} {{time}} {{elapsed}} {{error}} {{entrypoint}} {{run.id}} {{summary.total}} {{summary.success}} {{summary.failed}} {{summary.lines}}</code></p>
     </template>
   </section>
 </template>

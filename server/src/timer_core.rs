@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 
 use crate::core::{AndroidPackageName, AppContext, AppPackageId, DeviceId, RunPayload, RunRequest};
 use crate::metrics::SchedulerEvent;
@@ -56,6 +56,18 @@ impl TaskSchedule {
         );
         Ok(())
     }
+}
+
+/// 任务级聚合摘要里单个输入的结果行。`inputs[i].id` 与该行的 `input_id`
+/// 一一对应；单输入任务不生成摘要行（沿用 `last_result`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskInputResult {
+    pub input_id: String,
+    pub label: Option<String>,
+    pub state: String,
+    pub error: Option<String>,
+    pub finished_at: DateTime<Utc>,
+    pub elapsed_secs: u64,
 }
 
 /// User-owned task lifecycle.  Suspended tasks remain persisted and can carry
@@ -97,6 +109,10 @@ impl TaskState {
 /// `runner_id`/`entrypoint`/`payload` triple in Rust and in SQLite columns;
 /// the HTTP API nests it as `runner: {runner_id, entrypoint, payload}`.  All
 /// runner-specific input is kept in the opaque `payload`.
+///
+/// 多输入：`inputs` 非空时每次触发按「输入× payload 合并」并发派发多个运行
+/// （并发上限 = `concurrency`），并把逐输入结果聚合进 `result_summary`。
+/// 空数组 = 单输入任务，行为与既有模型完全一致。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
@@ -108,6 +124,15 @@ pub struct Task {
     /// Opaque optional extension settings; absence never affects task schedulability.
     #[serde(default = "empty_extensions")]
     pub extensions: Value,
+    /// 多输入定义（runner 私有语义；gamer-yaml = 设备覆盖列表）。空 = 单输入。
+    #[serde(default)]
+    pub inputs: Vec<Value>,
+    /// 每次触发的最大并发运行数；0/缺省 = 1。仅多输入任务生效。
+    #[serde(default)]
+    pub concurrency: u32,
+    /// 最后一次触发的逐输入聚合摘要（单输入任务为 None）。
+    #[serde(default)]
+    pub result_summary: Option<Vec<TaskInputResult>>,
     pub schedule: TaskSchedule,
     pub state: TaskState,
     /// Compatibility flag for disabled tasks.  New callers should use
@@ -123,6 +148,10 @@ pub struct Task {
     pub preset_id: Option<String>,
     pub suspend_reason: Option<String>,
 }
+
+/// 多输入规模上限：每次触发的输入数与并发上限共用同一硬顶，防误配放大。
+pub const TASK_MAX_INPUTS: usize = 64;
+pub const TASK_MAX_CONCURRENCY: u32 = 64;
 
 impl Task {
     /// Restore only host-persisted delegation metadata. Task payload remains
@@ -156,6 +185,9 @@ impl Task {
             entrypoint: entrypoint.into(),
             payload,
             extensions: empty_extensions(),
+            inputs: Vec::new(),
+            concurrency: 0,
+            result_summary: None,
             schedule,
             state: TaskState::Active,
             enabled: true,
@@ -169,6 +201,11 @@ impl Task {
         };
         task.validate()?;
         Ok(task)
+    }
+
+    /// 每次触发的有效并发上限（1..=64；0/缺省 = 1）。
+    pub fn concurrency_limit(&self) -> usize {
+        (self.concurrency.max(1) as usize).min(TASK_MAX_CONCURRENCY as usize)
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -188,6 +225,29 @@ impl Task {
             self.extensions.is_object() && self.extensions.to_string().len() <= 64 * 1024,
             "task extensions must be a JSON object of at most 64 KiB"
         );
+        anyhow::ensure!(
+            self.inputs.len() <= TASK_MAX_INPUTS,
+            "task inputs must contain at most {TASK_MAX_INPUTS} entries"
+        );
+        for (index, input) in self.inputs.iter().enumerate() {
+            anyhow::ensure!(
+                input.is_object(),
+                "task inputs[{index}] must be a JSON object"
+            );
+            let id = input
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            anyhow::ensure!(
+                !id.is_empty() && id.len() <= 255,
+                "task inputs[{index}].id must not be empty (≤255 chars)"
+            );
+            anyhow::ensure!(
+                input.to_string().len() <= 16 * 1024,
+                "task inputs[{index}] must be at most 16 KiB"
+            );
+        }
         self.schedule.validate()?;
         Ok(())
     }
@@ -224,6 +284,9 @@ impl Task {
             entrypoint: row.entrypoint,
             payload,
             extensions: serde_json::from_str(&row.extensions_json)?,
+            inputs: serde_json::from_str(&row.inputs_json)?,
+            concurrency: u32::try_from(row.concurrency.max(0)).unwrap_or(TASK_MAX_CONCURRENCY),
+            result_summary: serde_json::from_str(&row.result_summary_json)?,
             schedule,
             state,
             enabled: row.enabled,
@@ -242,6 +305,258 @@ impl Task {
 
 fn empty_extensions() -> Value {
     serde_json::json!({})
+}
+
+/// 单输入任务（`inputs` 空）的等价输入列表：把基础 payload 包成唯一输入，
+/// 让多输入路径与单输入共用同一语义（id = 空串，仅作占位）。
+fn task_effective_inputs(task: &Task) -> Vec<Value> {
+    if task.inputs.is_empty() {
+        return vec![Value::Object(serde_json::Map::new())];
+    }
+    task.inputs.clone()
+}
+
+/// payload × input 合并：浅层对象合并，输入覆盖任务级同名字段。
+fn merge_payload(base: &Value, input: &Value) -> Value {
+    let mut merged = match base.as_object() {
+        Some(map) => map.clone(),
+        None => serde_json::Map::new(),
+    };
+    if let Some(overrides) = input.as_object() {
+        for (key, value) in overrides {
+            if key == "id" || key == "label" || key == "device_id" {
+                continue;
+            }
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    Value::Object(merged)
+}
+
+fn outcome_of_error(error: &TimerRunnerError) -> TimerOutcome {
+    match error {
+        TimerRunnerError::Conflict(_) => TimerOutcome::Cancelled,
+        TimerRunnerError::ShuttingDown => TimerOutcome::Cancelled,
+        _ => TimerOutcome::Failed(error.to_string()),
+    }
+}
+
+/// 多输入触发的共享完成聚合器：`expected` 个输入全部到达终态后，按任务
+/// `inputs` 声明顺序合成摘要并调用一次 `finalize`（result_summary /
+/// `last_result` 持久化、scheduled_runs 终态、单条聚合通知）。回调来自
+/// runner 的完成钩子与提交任务（都在 tokio 上下文），内部只做内存记账。
+struct MultiFinisher {
+    inner: Mutex<MultiFinisherInner>,
+    db: Db,
+    result_hook: Mutex<Option<TaskResultHook>>,
+    task: Task,
+    scheduled_at: Option<i64>,
+}
+
+struct MultiFinisherInner {
+    expected: usize,
+    done: bool,
+    results: Vec<TaskInputResult>,
+}
+
+impl MultiFinisher {
+    fn new(
+        db: Db,
+        result_hook: Option<TaskResultHook>,
+        task: Task,
+        expected: usize,
+        scheduled_at: Option<i64>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(MultiFinisherInner {
+                expected,
+                done: false,
+                results: Vec::new(),
+            }),
+            db,
+            result_hook: Mutex::new(result_hook),
+            task,
+            scheduled_at,
+        })
+    }
+
+    fn record(&self, input_id: &str, outcome: TimerOutcome, elapsed_secs: u64) {
+        let finalize = {
+            let mut inner = self.inner.lock().expect("multi finisher mutex poisoned");
+            if inner.done {
+                return;
+            }
+            inner.results.push(TaskInputResult {
+                input_id: input_id.to_string(),
+                label: None,
+                state: outcome_name(&outcome).to_string(),
+                error: match &outcome {
+                    TimerOutcome::Failed(message) => Some(message.clone()),
+                    TimerOutcome::Cancelled => Some("已取消".into()),
+                    TimerOutcome::Success => None,
+                },
+                finished_at: Utc::now(),
+                elapsed_secs,
+            });
+            if inner.results.len() >= inner.expected {
+                inner.done = true;
+                true
+            } else {
+                false
+            }
+        };
+        if finalize {
+            let summary = self.ordered_summary();
+            self.finalize(&summary);
+        }
+    }
+
+    /// 按任务 `inputs` 声明顺序输出摘要行；结果行补齐输入的 label（重复 id
+    /// 按到达顺序依次消费），未收到的输入以失败占位，保证行数 = 输入数。
+    fn ordered_summary(&self) -> Vec<TaskInputResult> {
+        let inner = self.inner.lock().expect("multi finisher mutex poisoned");
+        let mut remaining = inner.results.clone();
+        self.task
+            .inputs
+            .iter()
+            .map(|input| {
+                let id = input
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let label = input
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+                let position = remaining
+                    .iter()
+                    .position(|row| row.input_id == id)
+                    .map(|position| remaining.remove(position));
+                position.unwrap_or_else(|| TaskInputResult {
+                    input_id: id,
+                    label: label.clone(),
+                    state: "failed".into(),
+                    error: Some("提交失败".into()),
+                    finished_at: Utc::now(),
+                    elapsed_secs: 0,
+                })
+                .with_label(label)
+            })
+            .collect()
+    }
+
+    /// 聚合持久化与通知（每次触发恰好调用一次）：`result_summary_json` /
+    /// 折叠 `last_result` 持久化、scheduled_runs 终态、单条聚合通知。
+    fn finalize(&self, summary: &[TaskInputResult]) {
+        let total = summary.len().max(1);
+        let ok = summary.iter().filter(|row| row.state == "success").count();
+        let failed = total - ok;
+        let folded = if failed == 0 {
+            "成功".to_string()
+        } else if ok == 0 {
+            "失败".to_string()
+        } else {
+            format!("部分成功 {ok}/{total}")
+        };
+        let summary_json = serde_json::to_string(summary).unwrap_or_else(|_| "[]".into());
+        let db = self.db.clone();
+        let task_id = self.task.id.clone();
+        let folded_label = folded;
+        tokio::spawn(async move {
+            let _ = db
+                .update_timer_task_result_summary_async(&task_id, &summary_json, Some(&folded_label))
+                .await;
+        });
+        if let Some(scheduled_at) = self.scheduled_at {
+            let state = if failed == 0 { "success" } else { "failed" };
+            let error = summary
+                .iter()
+                .filter(|row| row.state != "success")
+                .find_map(|row| row.error.clone());
+            let db = self.db.clone();
+            let task_id = self.task.id.clone();
+            tokio::spawn(async move {
+                let _ = db
+                    .finish_scheduled_run_async(&task_id, scheduled_at, state, None, error.as_deref())
+                    .await;
+            });
+        }
+        if let Some(hook) = self
+            .result_hook
+            .lock()
+            .expect("task result hook poisoned")
+            .clone()
+        {
+            Self::emit_summary_notification(&hook, &self.task, summary);
+        }
+    }
+
+    /// 多输入任务只发一条聚合通知：以折叠后的状态/错误复用既有 result_hook
+    /// 管线（模板、通道、幂等去重全部沿用）。
+    fn emit_summary_notification(
+        hook: &TaskResultHook,
+        task: &Task,
+        summary: &[TaskInputResult],
+    ) {
+        let total = summary.len();
+        let ok = summary.iter().filter(|row| row.state == "success").count();
+        let failed = total - ok;
+        let error = (failed > 0).then(|| {
+            summary
+                .iter()
+                .filter(|row| row.state != "success")
+                .map(|row| {
+                    let label = row.label.clone().unwrap_or_else(|| row.input_id.clone());
+                    format!(
+                        "{label}：{}",
+                        row.error.clone().unwrap_or_else(|| row.state.clone())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("；")
+        });
+        let event_id = format!(
+            "schedule:{}:summary:{}",
+            task.id,
+            Utc::now().timestamp_millis()
+        );
+        hook(
+            task.clone(),
+            TaskResult {
+                event_id,
+                run_id: None,
+                state: if failed == 0 {
+                    "success".into()
+                } else {
+                    "failed".into()
+                },
+                error,
+                finished_at: Utc::now(),
+                elapsed_secs: 0,
+            },
+        );
+    }
+}
+
+impl TaskInputResult {
+    /// 摘要行 label 缺省时回落到输入声明的 label（或保持 input_id）。
+    fn with_label(mut self, label: Option<String>) -> Self {
+        if self.label.is_none() {
+            self.label = label;
+        }
+        self
+    }
+}
+
+fn outcome_name(outcome: &TimerOutcome) -> &'static str {
+    match outcome {
+        TimerOutcome::Success => "success",
+        TimerOutcome::Failed(_) => "failed",
+        TimerOutcome::Cancelled => "cancelled",
+    }
 }
 
 fn parse_timestamp(value: String) -> anyhow::Result<DateTime<Utc>> {
@@ -1003,6 +1318,11 @@ impl TimerCore {
         }
     }
 
+    /// 分发一次触发。`task.inputs` 为空 = 单输入（原有路径，一次性派发一个
+    /// 运行）；非空 = 多输入并发派发：按「输入 × payload 合并」逐个提交运行，
+    /// `Semaphore` 限制同时在飞数量（`task.concurrency`，默认 1），每个运行的
+    /// **真实完成结果**经共享聚合器记账；全部终态后把逐输入结果写入
+    /// `result_summary_json`、折叠 `last_result` 并触发一次聚合通知。
     pub async fn dispatch(
         &self,
         task: Task,
@@ -1047,49 +1367,207 @@ impl TimerCore {
                 .await;
             return;
         }
-        let request = match task.run_request() {
-            Ok(request) => request,
-            Err(error) => {
-                self.handle_runner_error(
-                    &task,
-                    scheduled_at,
-                    TimerRunnerError::Invalid(error.to_string()),
-                )
-                .await;
-                return;
-            }
-        };
-        let run_id = task.id.clone();
-        let completion = self.completion_hook(task.clone(), scheduled_at);
-        match runner
-            .submit(request, &task.id, scheduled_at, completion)
-            .await
-        {
-            Ok(run) => {
-                {
-                    let mut active_runs_guard = self
-                        .active_runs
-                        .lock()
-                        .expect("timer active run mutex poisoned");
-                    let mut completed_before_registration = self
-                        .completed_before_registration
-                        .lock()
-                        .expect("timer completed-run mutex poisoned");
-                    if !completed_before_registration.remove(&run.run_id) {
-                        active_runs_guard.insert(run_id, run.run_id.clone());
+        let inputs = task_effective_inputs(&task);
+        if inputs.len() <= 1 {
+            let request = match task.run_request() {
+                Ok(request) => request,
+                Err(error) => {
+                    self.handle_runner_error(
+                        &task,
+                        scheduled_at,
+                        TimerRunnerError::Invalid(error.to_string()),
+                    )
+                    .await;
+                    return;
+                }
+            };
+            let completion = self.completion_hook(task.clone(), scheduled_at);
+            match runner
+                .submit(request, &task.id, scheduled_at, completion)
+                .await
+            {
+                Ok(run) => {
+                    self.register_active_run(&task.id, &run.run_id);
+                    if let Some(scheduled_at) = scheduled_at {
+                        if let Err(error) = self
+                            .db
+                            .attach_scheduled_run_async(&task.id, scheduled_at, &run.run_id)
+                            .await
+                        {
+                            tracing::error!(task = %task.id, %error, "timer run attachment failed");
+                        }
                     }
                 }
-                if let Some(scheduled_at) = scheduled_at {
-                    if let Err(error) = self
-                        .db
-                        .attach_scheduled_run_async(&task.id, scheduled_at, &run.run_id)
-                        .await
+                Err(error) => self.handle_runner_error(&task, scheduled_at, error).await,
+            }
+            return;
+        }
+        self.dispatch_multi(task, scheduled_at, runner, inputs).await;
+    }
+
+    /// 多输入并发派发：计划触发点只 claim 一次（幂等记录复用原键）；每个
+    /// （输入 × payload）组合独立提交并挂各自的完成回调；并发信号量的许可
+    /// 由完成回调释放（许可覆盖整个运行生命周期，不是仅提交瞬间）；
+    /// `scheduled_runs` 终态在全部输入到达终态时由 MultiFinisher 统一写。
+    /// 本函数不等待任何运行结束——派发即返回，不阻塞调度循环。
+    async fn dispatch_multi(
+        &self,
+        task: Task,
+        scheduled_at: Option<i64>,
+        runner: Arc<dyn TimerRunner>,
+        inputs: Vec<Value>,
+    ) {
+        let limit = task.concurrency_limit();
+        let semaphore = Arc::new(Semaphore::new(limit));
+        let finisher = MultiFinisher::new(
+            self.db.clone(),
+            self.result_hook
+                .lock()
+                .expect("task result hook poisoned")
+                .clone(),
+            task.clone(),
+            inputs.len(),
+            scheduled_at,
+        );
+        let mut failures = Vec::new();
+        let finisher_for_failures = finisher.clone();
+        for input in inputs {
+            let input_id = input
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let base = merge_payload(&task.payload, &input);
+            let mut app = task.app.clone();
+            if let Some(device) = input.get("device_id").and_then(Value::as_str) {
+                match DeviceId::new(device) {
+                    Ok(device_id) => app.device_id = device_id,
+                    Err(error) => {
+                        tracing::warn!(
+                            task = %task.id,
+                            error = %error,
+                            "timer multi-input device override rejected"
+                        );
+                        failures.push((
+                            input_id,
+                            TimerRunnerError::Invalid(format!("设备覆盖无效：{error}")),
+                        ));
+                        continue;
+                    }
+                }
+            }
+            let mut request = match RunRequest::for_app(
+                app,
+                task.runner_id.clone(),
+                task.entrypoint.clone(),
+                RunPayload::new(base),
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    failures.push((input_id, TimerRunnerError::Invalid(error.to_string())));
+                    continue;
+                }
+            };
+            request.execution_policy =
+                match crate::core::ExecutionPolicy::from_task_extensions(&task.extensions) {
+                    Ok(policy) => policy,
+                    Err(error) => {
+                        failures.push((input_id, TimerRunnerError::Invalid(error.to_string())));
+                        continue;
+                    }
+                };
+            let runner = runner.clone();
+            let semaphore = semaphore.clone();
+            let db = self.db.clone();
+            let task_id = task.id.clone();
+            let scheduled_at_slot = scheduled_at;
+            let finisher_for_submit = finisher_for_failures.clone();
+            let input_id_for_submit = input_id.clone();
+            let finisher_for_watch = finisher_for_failures.clone();
+            let input_id_for_watch = input_id.clone();
+            let finisher_for_error = finisher_for_failures.clone();
+            let spawned = tokio::spawn(async move {
+                // 许可覆盖「排队 + 运行」全程：完成回调（或提交失败）从共享
+                // 单元 take 并释放；Fn 闭包不能 move，所以许可放在单元里。
+                let permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .expect("timer dispatch semaphore is never closed");
+                let started = std::time::Instant::now();
+                let permit_cell: Arc<std::sync::Mutex<Option<tokio::sync::OwnedSemaphorePermit>>> =
+                    Arc::new(std::sync::Mutex::new(Some(permit)));
+                let finisher_for_completion = finisher_for_submit;
+                let input_id_for_completion = input_id_for_submit;
+                let permit_for_completion = permit_cell.clone();
+                let completion: TimerCompletionHook = Arc::new(move |completion| {
+                    finisher_for_completion.record(
+                        &input_id_for_completion,
+                        completion.outcome,
+                        started.elapsed().as_secs(),
+                    );
+                    if let Some(permit) = permit_for_completion
+                        .lock()
+                        .expect("timer permit cell poisoned")
+                        .take()
                     {
-                        tracing::error!(task = %task.id, %error, "timer run attachment failed");
+                        drop(permit);
+                    }
+                });
+                let outcome = runner
+                    .submit(request, &task_id, scheduled_at_slot, completion)
+                    .await;
+                match &outcome {
+                    Ok(run) => {
+                        if let Some(scheduled_at) = scheduled_at_slot {
+                            if let Err(error) = db
+                                .attach_scheduled_run_async(&task_id, scheduled_at, &run.run_id)
+                                .await
+                            {
+                                tracing::error!(task = %task_id, %error, "timer run attachment failed");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        // 提交失败 = 该输入立即到达终态并释放许可；
+                        // 已提交的输入由完成回调记账并释放。
+                        if let Some(permit) = permit_cell
+                            .lock()
+                            .expect("timer permit cell poisoned")
+                            .take()
+                        {
+                            drop(permit);
+                        }
+                        finisher_for_error.record(&input_id, outcome_of_error(error), 0);
                     }
                 }
-            }
-            Err(error) => self.handle_runner_error(&task, scheduled_at, error).await,
+            });
+            // 派发不等待运行：仅兜底 spawn 本身失败（runtime 关停等极端场景）
+            tokio::spawn(async move {
+                if let Err(error) = spawned.await {
+                    finisher_for_watch.record(
+                        &input_id_for_watch,
+                        TimerOutcome::Failed(format!("提交任务失败: {error}")),
+                        0,
+                    );
+                }
+            });
+        }
+        for (input_id, error) in failures {
+            finisher_for_failures.record(&input_id, outcome_of_error(&error), 0);
+        }
+    }
+
+    fn register_active_run(&self, task_id: &str, run_id: &str) {
+        let mut active_runs_guard = self
+            .active_runs
+            .lock()
+            .expect("timer active run mutex poisoned");
+        let mut completed_before_registration = self
+            .completed_before_registration
+            .lock()
+            .expect("timer completed-run mutex poisoned");
+        if !completed_before_registration.remove(run_id) {
+            active_runs_guard.insert(task_id.to_string(), run_id.to_string());
         }
     }
 
@@ -1301,6 +1779,12 @@ impl TimerCore {
                 "timer task is not active".to_string(),
             ));
         }
+        // 多输入任务「立即运行」：并发派发全部输入（同定时触发路径），返回
+        // 首个提交成功的 run_id 作为 202 句柄；结果聚合走 MultiFinisher。
+        let inputs = task_effective_inputs(&task);
+        if inputs.len() > 1 {
+            return self.submit_now_multi(&task, runner, inputs).await;
+        }
         let request = match task.run_request() {
             Ok(request) => request,
             Err(error) => {
@@ -1343,6 +1827,147 @@ impl TimerCore {
             active_runs_guard.insert(task.id, run.run_id.clone());
         }
         Ok(run)
+    }
+
+    /// 多输入任务的立即运行：与定时触发共用 MultiFinisher 聚合（无
+    /// scheduled_at）；全部提交尝试结束后返回首个成功 run_id（或首个错误）。
+    async fn submit_now_multi(
+        &self,
+        task: &Task,
+        runner: Arc<dyn TimerRunner>,
+        inputs: Vec<Value>,
+    ) -> Result<TimerRun, TimerRunnerError> {
+        let limit = task.concurrency_limit();
+        let semaphore = Arc::new(Semaphore::new(limit));
+        let finisher = Arc::new(MultiFinisher::new(
+            self.db.clone(),
+            self.result_hook
+                .lock()
+                .expect("task result hook poisoned")
+                .clone(),
+            task.clone(),
+            inputs.len(),
+            None,
+        ));
+        let mut first_error: Option<TimerRunnerError> = None;
+        let mut first_run: Option<TimerRun> = None;
+        for input in inputs {
+            let input_id = input
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let base = merge_payload(&task.payload, &input);
+            let mut app = task.app.clone();
+            if let Some(device) = input.get("device_id").and_then(Value::as_str) {
+                match DeviceId::new(device) {
+                    Ok(device_id) => app.device_id = device_id,
+                    Err(error) => {
+                        first_error = Some(first_error.unwrap_or_else(|| {
+                            TimerRunnerError::Invalid(error.to_string())
+                        }));
+                        finisher.record(&input_id, TimerOutcome::Failed("设备覆盖无效".into()), 0);
+                        continue;
+                    }
+                }
+            }
+            let request = match RunRequest::for_app(
+                app,
+                task.runner_id.clone(),
+                task.entrypoint.clone(),
+                RunPayload::new(base),
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    first_error = Some(first_error.unwrap_or_else(|| {
+                        TimerRunnerError::Invalid(error.to_string())
+                    }));
+                    finisher.record(&input_id, TimerOutcome::Failed(error.to_string()), 0);
+                    continue;
+                }
+            };
+            let mut request = request;
+            request.execution_policy =
+                match crate::core::ExecutionPolicy::from_task_extensions(&task.extensions) {
+                    Ok(policy) => policy,
+                    Err(error) => {
+                        first_error = Some(first_error.unwrap_or_else(|| {
+                            TimerRunnerError::Invalid(error.to_string())
+                        }));
+                        finisher.record(&input_id, TimerOutcome::Failed(error.to_string()), 0);
+                        continue;
+                    }
+                };
+            let semaphore = semaphore.clone();
+            let finisher = finisher.clone();
+            let runner = runner.clone();
+            let task_id = task.id.clone();
+            let submit = tokio::spawn(async move {
+                let permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .expect("timer dispatch semaphore is never closed");
+                let started = std::time::Instant::now();
+                let permit_cell: Arc<std::sync::Mutex<Option<tokio::sync::OwnedSemaphorePermit>>> =
+                    Arc::new(std::sync::Mutex::new(Some(permit)));
+                let finisher_for_completion = finisher.clone();
+                let input_id_for_submit = input_id.clone();
+                let permit_for_completion = permit_cell.clone();
+                let completion: TimerCompletionHook = Arc::new(move |completion| {
+                    finisher_for_completion.record(
+                        &input_id_for_submit,
+                        completion.outcome,
+                        started.elapsed().as_secs(),
+                    );
+                    if let Some(permit) = permit_for_completion
+                        .lock()
+                        .expect("timer permit cell poisoned")
+                        .take()
+                    {
+                        drop(permit);
+                    }
+                });
+                let outcome = runner.submit(request, &task_id, None, completion).await;
+                match &outcome {
+                    Ok(_) => {}
+                    Err(error) => {
+                        if let Some(permit) = permit_cell
+                            .lock()
+                            .expect("timer permit cell poisoned")
+                            .take()
+                        {
+                            drop(permit);
+                        }
+                        finisher.record(&input_id, outcome_of_error(error), 0);
+                    }
+                }
+                outcome
+            });
+            match submit.await {
+                Ok(Ok(run)) => {
+                    if first_run.is_none() {
+                        first_run = Some(run);
+                    }
+                }
+                Ok(Err(error)) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+                Err(join_error) => {
+                    if first_error.is_none() {
+                        first_error = Some(TimerRunnerError::Other(format!(
+                            "提交任务失败: {join_error}"
+                        )));
+                    }
+                }
+            }
+        }
+        match first_run {
+            Some(run) => Ok(run),
+            None => Err(first_error
+                .unwrap_or_else(|| TimerRunnerError::Invalid("没有可运行的输入".into()))),
+        }
     }
 
     /// Capture a particular run before an externally authorized task mutation.

@@ -3,7 +3,7 @@
 //! 与契约逐条对齐的规则：
 //! - `PRAGMA user_version` 是唯一权威版本标记；**不引入** `schema_migrations` 表，
 //!   不用文件名/旁路标记推断版本；
-//! - v1 是历史基线；当前目标为 v7。v1→v2 为 Timer Core 数据迁移，v2→v3 为
+//! - v1 是历史基线；当前目标为 v8。v1→v2 为 Timer Core 数据迁移，v2→v3 为
 //!   Task 模型收口（P11.1：删 legacy tasks 表 + schedule JSON 改写为
 //!   provider/config），均静态注册于 [`MIGRATIONS`]，禁止运行期动态拼装；
 //! - `user_version=0`（无版本旧库）在进入本模块前即被 [`crate::store`] 明确拒绝
@@ -32,9 +32,9 @@ use rusqlite::{Connection, Transaction};
 /// 本 binary 可打开并继续迁移的最低 user_version（v1 基线；0 永远拒绝）
 pub const MIN_READ_SCHEMA: i64 = 1;
 /// 可打开的最高 user_version；高于此值拒绝启动（schema-policy §3/§4 硬规则）
-pub const MAX_READ_SCHEMA: i64 = 7;
+pub const MAX_READ_SCHEMA: i64 = 8;
 /// 本 binary 迁移完成后的目标 schema 版本
-pub const TARGET_SCHEMA: i64 = 7;
+pub const TARGET_SCHEMA: i64 = 8;
 
 /// 契约 §3 冻结约束 `min_read ≤ target ≤ max_read` 编译期固化：取值漂移在
 /// 编译期即失败，不等运行期诊断
@@ -96,6 +96,12 @@ pub(crate) static MIGRATIONS: &[Migration] = &[
         to: 7,
         description: "persist optional task extension settings",
         apply: crate::store::migrate_v6_to_v7,
+    },
+    Migration {
+        from: 7,
+        to: 8,
+        description: "task multi-inputs with bounded concurrency",
+        apply: crate::store::migrate_v7_to_v8,
     },
 ];
 

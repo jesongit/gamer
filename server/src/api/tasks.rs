@@ -18,9 +18,7 @@ use uuid::Uuid;
 use super::common::validate_text_field;
 use super::{ApiError, AppState};
 use crate::core::AppContext;
-use crate::timer_core::{
-    ScheduleRegistry, Task, TaskPreset, TaskSchedule, TaskState, TimerRunnerError,
-};
+use crate::timer_core::{ScheduleRegistry, Task, TaskPreset, TaskSchedule, TaskState, TimerRunnerError};
 
 // ---------- JSON DTO（ADR-12 嵌套形状；持久层列保持平铺） ----------
 
@@ -51,6 +49,9 @@ fn task_json(task: &Task) -> Value {
             "entrypoint": task.entrypoint,
             "payload": task.payload,
         },
+        "inputs": task.inputs,
+        "concurrency": task.concurrency.max(1),
+        "result_summary": task.result_summary,
         "schedule": task.schedule,
         "extensions": task.extensions,
         "state": task.state,
@@ -218,6 +219,13 @@ pub(super) struct SaveTaskReq {
     pub(super) app: AppContext,
     pub(super) runner: RunnerSpecDto,
     pub(super) schedule: TaskSchedule,
+    /// 多输入定义（可选；空/缺省 = 单输入）。条目形态归 runner 约定，
+    /// Core 只校验对象形态、`id` 非空与规模上限（gamer-yaml = 设备覆盖）。
+    #[serde(default)]
+    pub(super) inputs: Option<Vec<Value>>,
+    /// 每次触发的最大并发数（可选；0/缺省 = 1，上限 64）。
+    #[serde(default)]
+    pub(super) concurrency: Option<u32>,
     #[serde(default)]
     pub(super) enabled: Option<bool>,
     #[serde(default)]
@@ -271,6 +279,21 @@ pub(super) fn build_task(
         .extensions
         .or_else(|| existing.as_ref().map(|t| t.extensions.clone()))
         .unwrap_or_else(|| serde_json::json!({}));
+    // 多输入与并发：显式提交优先，编辑未携带时保留原值（新增任务缺省 = 单输入、并发 1）。
+    task.inputs = req
+        .inputs
+        .or_else(|| existing.as_ref().map(|t| t.inputs.clone()))
+        .unwrap_or_default();
+    task.concurrency = req
+        .concurrency
+        .or_else(|| existing.as_ref().map(|t| t.concurrency))
+        .unwrap_or(0)
+        .clamp(0, crate::timer_core::TASK_MAX_CONCURRENCY);
+    // 保存边界拒绝把并发上限配成 0（0 视为「未配置」并在读取时按 1 处理，
+    // 但持久化值统一钳到 ≥1，避免旧读取方把 0 当无限）。
+    if task.concurrency == 0 {
+        task.concurrency = 1;
+    }
     task.validate()
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     if let Some(previous) = existing {

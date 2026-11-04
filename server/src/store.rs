@@ -1,6 +1,6 @@
 //! SQLite 持久化：设备、定时任务、运行日志。
 //!
-//! 数据库从当前 schema v7 空库创建（无 legacy `tasks` 表）；v1 历史库经
+//! 数据库从当前 schema v8 空库创建（无 legacy `tasks` 表）；v1 历史库经
 //! v1→v2（Timer Core 泛化）与 v2→v3（Task 模型收口）逐级迁移，user_version=0
 //! 仍拒绝自动补齐。
 
@@ -76,6 +76,9 @@ pub(crate) struct TaskStorage {
     pub updated_at: String,
     pub preset_id: Option<String>,
     pub suspend_reason: Option<String>,
+    pub inputs_json: String,
+    pub result_summary_json: String,
+    pub concurrency: i64,
 }
 
 impl TaskStorage {
@@ -101,6 +104,11 @@ impl TaskStorage {
             updated_at: task.updated_at.to_rfc3339(),
             preset_id: task.preset_id.clone(),
             suspend_reason: task.suspend_reason.clone(),
+            inputs_json: serde_json::to_string(&task.inputs)?,
+            result_summary_json: serde_json::to_string(
+                &task.result_summary.clone().unwrap_or_default(),
+            )?,
+            concurrency: task.concurrency as i64,
         })
     }
 }
@@ -134,7 +142,6 @@ const MAX_LOG_MESSAGE_CHARS: usize = 1024;
 /// 目标 schema 版本：权威定义在 `migrations::TARGET_SCHEMA`
 /// （DATA-003 兼容常量），此处仅别名沿用
 const SCHEMA_VERSION: i64 = TARGET_SCHEMA;
-
 #[cfg(test)]
 static DB_BLOCKING_GATE: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(DB_BLOCKING_PERMITS);
@@ -281,16 +288,17 @@ fn ensure_schema(conn: &mut Connection, is_new_database: bool) -> anyhow::Result
         let tx = conn.transaction()?;
         migrate_v5_to_v6(&tx)?;
         migrate_v6_to_v7(&tx)?;
+        migrate_v7_to_v8(&tx)?;
         tx.commit()?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        return validate_schema_v7(conn);
+        return validate_schema_v8(conn);
     }
 
     match version {
         0 => anyhow::bail!(
-            "database schema is unversioned (user_version=0); back up and remove gamer.db to rebuild schema v7"
+            "database schema is unversioned (user_version=0); back up and remove gamer.db to rebuild schema v8"
         ),
-        SCHEMA_VERSION => validate_schema_v7(conn),
+        SCHEMA_VERSION => validate_schema_v8(conn),
         other => apply_schema_migrations(conn, other),
     }
 }
@@ -301,12 +309,12 @@ fn ensure_schema(conn: &mut Connection, is_new_database: bool) -> anyhow::Result
 /// is rejected before this function is ever reached.
 fn apply_schema_migrations(conn: &mut Connection, from_version: i64) -> anyhow::Result<()> {
     crate::migrations::run_migrations(conn, from_version, crate::migrations::MIGRATIONS)?;
-    validate_schema_v7(conn)
+    validate_schema_v8(conn)
 }
 
 /// v3 结构校验。启动路径与 maintenance CLI（DATA-005 migrate 迁移后校验）
 /// 共用同一实现，保证「迁移后开放」的判定一致。
-pub(crate) fn validate_schema_v7(conn: &Connection) -> anyhow::Result<()> {
+pub(crate) fn validate_schema_v8(conn: &Connection) -> anyhow::Result<()> {
     let mut stmt = conn.prepare(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     )?;
@@ -328,7 +336,7 @@ pub(crate) fn validate_schema_v7(conn: &Connection) -> anyhow::Result<()> {
     .collect::<Vec<_>>();
     anyhow::ensure!(
         tables == expected_tables,
-        "schema v7 is incomplete: expected tables {expected_tables:?}, found {tables:?}; back up and rebuild gamer.db"
+        "schema v8 is incomplete: expected tables {expected_tables:?}, found {tables:?}; back up and rebuild gamer.db"
     );
 
     validate_table(
@@ -440,6 +448,9 @@ pub(crate) fn validate_schema_v7(conn: &Connection) -> anyhow::Result<()> {
             ("preset_id", "TEXT", 0, 0),
             ("suspend_reason", "TEXT", 0, 0),
             ("extensions_json", "TEXT", 1, 0),
+            ("inputs_json", "TEXT", 1, 0),
+            ("result_summary_json", "TEXT", 1, 0),
+            ("concurrency", "INTEGER", 1, 0),
         ],
     )?;
     validate_table(
@@ -499,7 +510,7 @@ pub(crate) fn validate_schema_v7(conn: &Connection) -> anyhow::Result<()> {
 /// Compatibility name retained for maintenance callers while the validator
 /// now checks the complete v3 schema.
 pub(crate) fn validate_schema_v1(conn: &Connection) -> anyhow::Result<()> {
-    validate_schema_v7(conn)
+    validate_schema_v8(conn)
 }
 
 /// v1→v2 migration.  Legacy rows are copied into generic timer rows; the old
@@ -648,7 +659,7 @@ fn validate_table(
         .collect::<Vec<_>>();
     anyhow::ensure!(
         actual == expected,
-        "schema v7 is incomplete: table {table} has unexpected columns; back up and rebuild gamer.db"
+        "schema v8 is incomplete: table {table} has unexpected columns; back up and rebuild gamer.db"
     );
     Ok(())
 }
@@ -671,12 +682,12 @@ fn validate_index(
         .find(|(name, _)| name == index);
     let Some((_, is_unique)) = found else {
         anyhow::bail!(
-            "schema v7 is incomplete: missing index {index}; back up and rebuild gamer.db"
+            "schema v8 is incomplete: missing index {index}; back up and rebuild gamer.db"
         );
     };
     anyhow::ensure!(
         is_unique == expected_unique,
-        "schema v7 is incomplete: index {index} has unexpected uniqueness; back up and rebuild gamer.db"
+        "schema v8 is incomplete: index {index} has unexpected uniqueness; back up and rebuild gamer.db"
     );
     let pragma = format!("PRAGMA index_info('{index}')");
     let mut stmt = conn.prepare(&pragma)?;
@@ -689,7 +700,7 @@ fn validate_index(
         .collect::<Vec<_>>();
     anyhow::ensure!(
         actual_columns == expected_columns,
-        "schema v7 is incomplete: index {index} has unexpected columns; back up and rebuild gamer.db"
+        "schema v8 is incomplete: index {index} has unexpected columns; back up and rebuild gamer.db"
     );
     Ok(())
 }
@@ -701,7 +712,36 @@ pub(crate) fn migrate_v6_to_v7(tx: &rusqlite::Transaction<'_>) -> anyhow::Result
     Ok(())
 }
 
-const TIMER_TASK_SELECT: &str = "SELECT id, name, device_id, android_package, content_package, runner_id, entrypoint, payload_json, schedule_json, state, enabled, next_wakeup, last_result, last_run_at, created_at, updated_at, preset_id, suspend_reason, extensions_json FROM timer_tasks";
+/// v7→v8：任务多输入与并发。`inputs_json` 默认 `[]` = 单输入（等价
+/// `[{inputs}]`）；`concurrency` 0 = 未配置（读取时按 1）；
+/// `result_summary_json` 缓存最后一次触发的逐输入摘要。
+/// ALTER 逐列幂等：已存在同名列的库（如外部工具预补列）跳过该列。
+pub(crate) fn migrate_v7_to_v8(tx: &rusqlite::Transaction<'_>) -> anyhow::Result<()> {
+    const COLUMNS: &[(&str, &str)] = &[
+        ("inputs_json", "ALTER TABLE timer_tasks ADD COLUMN inputs_json TEXT NOT NULL DEFAULT '[]'"),
+        (
+            "result_summary_json",
+            "ALTER TABLE timer_tasks ADD COLUMN result_summary_json TEXT NOT NULL DEFAULT '[]'",
+        ),
+        (
+            "concurrency",
+            "ALTER TABLE timer_tasks ADD COLUMN concurrency INTEGER NOT NULL DEFAULT 0",
+        ),
+    ];
+    for (column, ddl) in COLUMNS {
+        let exists: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('timer_tasks') WHERE name = ?1",
+            [column],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            tx.execute_batch(ddl)?;
+        }
+    }
+    Ok(())
+}
+
+const TIMER_TASK_SELECT: &str = "SELECT id, name, device_id, android_package, content_package, runner_id, entrypoint, payload_json, schedule_json, state, enabled, next_wakeup, last_result, last_run_at, created_at, updated_at, preset_id, suspend_reason, extensions_json, inputs_json, result_summary_json, concurrency FROM timer_tasks";
 
 fn timer_tasks_from_conn(conn: &Connection, suffix: &str) -> anyhow::Result<Vec<Task>> {
     let sql = format!("{TIMER_TASK_SELECT} {suffix}");
@@ -734,6 +774,9 @@ fn timer_task_storage_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskSt
         preset_id: r.get(16)?,
         suspend_reason: r.get(17)?,
         extensions_json: r.get(18)?,
+        inputs_json: r.get(19)?,
+        result_summary_json: r.get(20)?,
+        concurrency: r.get(21)?,
     })
 }
 
@@ -769,14 +812,16 @@ fn write_timer_task(conn: &Connection, row: &TaskStorage) -> anyhow::Result<()> 
         r#"INSERT INTO timer_tasks
            (id, name, device_id, android_package, content_package, runner_id,
             entrypoint, payload_json, schedule_json, state, enabled, next_wakeup,
-            last_result, last_run_at, created_at, updated_at, preset_id, suspend_reason, extensions_json)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+            last_result, last_run_at, created_at, updated_at, preset_id, suspend_reason, extensions_json,
+            inputs_json, result_summary_json, concurrency)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
            ON CONFLICT(id) DO UPDATE SET
             name=?2, device_id=?3, android_package=?4, content_package=?5,
             runner_id=?6, entrypoint=?7, payload_json=?8, schedule_json=?9,
             state=?10, enabled=?11, next_wakeup=?12, last_result=?13,
             last_run_at=?14, created_at=?15, updated_at=?16, preset_id=?17,
-            suspend_reason=?18, extensions_json=?19"#,
+            suspend_reason=?18, extensions_json=?19,
+            inputs_json=?20, result_summary_json=?21, concurrency=?22"#,
         rusqlite::params![
             row.id,
             row.name,
@@ -797,6 +842,9 @@ fn write_timer_task(conn: &Connection, row: &TaskStorage) -> anyhow::Result<()> 
             row.preset_id,
             row.suspend_reason,
             row.extensions_json,
+            row.inputs_json,
+            row.result_summary_json,
+            row.concurrency,
         ],
     )?;
     Ok(())
@@ -1643,6 +1691,36 @@ impl Store {
                 "UPDATE timer_tasks SET last_result = ?2, last_run_at = ?3, updated_at = ?3 WHERE id = ?1",
                 rusqlite::params![id, result, last_run_at],
             )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// 聚合摘要缓存（多输入任务）：写 `result_summary_json`；`folded` 非空时
+    /// 同时推进 `last_result` / `last_run_at` / `updated_at`（与单输入路径
+    /// `update_timer_task_result_async` 同源字段）。
+    pub async fn update_timer_task_result_summary_async(
+        &self,
+        id: &str,
+        summary_json: &str,
+        folded: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let id = id.to_string();
+        let summary_json = summary_json.to_string();
+        let folded = folded.map(str::to_string);
+        let last_run_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        self.request_async(move |conn| {
+            if let Some(folded) = &folded {
+                conn.execute(
+                    "UPDATE timer_tasks SET result_summary_json = ?2, last_result = ?3, last_run_at = ?4, updated_at = ?4 WHERE id = ?1",
+                    rusqlite::params![id, summary_json, folded, last_run_at],
+                )?;
+            } else {
+                conn.execute(
+                    "UPDATE timer_tasks SET result_summary_json = ?2 WHERE id = ?1",
+                    rusqlite::params![id, summary_json],
+                )?;
+            }
             Ok(())
         })
         .await
@@ -2851,7 +2929,10 @@ PRAGMA user_version = 2;
                         { "name": "updated_at", "type": "TEXT", "notnull": 1, "pk": 0 },
                         { "name": "preset_id", "type": "TEXT", "notnull": 0, "pk": 0 },
                         { "name": "suspend_reason", "type": "TEXT", "notnull": 0, "pk": 0 },
-                        { "name": "extensions_json", "type": "TEXT", "notnull": 1, "pk": 0 }
+                        { "name": "extensions_json", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "inputs_json", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "result_summary_json", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "concurrency", "type": "INTEGER", "notnull": 1, "pk": 0 }
                     ]
                 }
             ],
@@ -2923,6 +3004,7 @@ PRAGMA user_version = 2;
         ]).as_array().unwrap().clone());
         indexes.sort_by_key(|t| t["name"].as_str().unwrap().to_string());
         // P11.1：v3 快照是全量精确比对——legacy tasks 表已删除，任何漂移在此失败
+        expected["user_version"] = serde_json::json!(TARGET_SCHEMA);
         assert_eq!(actual, expected, "新库 schema 与 v3 快照不一致");
 
         drop(conn);
@@ -2966,7 +3048,7 @@ PRAGMA user_version = 2;
             Ok(_) => panic!("incomplete database must fail fast"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("schema v7 is incomplete"));
+        assert!(error.to_string().contains("schema v8 is incomplete"));
 
         fs::remove_dir_all(dir).unwrap();
     }

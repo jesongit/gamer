@@ -30,7 +30,10 @@
         </thead>
         <tbody>
           <tr v-for="t in tasks" :key="t.id" :class="{ disabled: !t.enabled }">
-            <td class="task-name">{{ t.name }}<span class="task-device">{{ deviceName(t.app?.device_id) }}</span></td>
+            <td class="task-name">
+              {{ t.name }}<span class="task-device">{{ deviceName(t.app?.device_id) }}</span>
+              <span v-if="(t.inputs?.length ?? 0) > 1" class="task-inputs" :title="inputSummary(t)">×{{ t.inputs.length }} 输入 · 并发 {{ t.concurrency || 1 }}</span>
+            </td>
             <td>
               <span class="tag" :class="stateTagClass(t.state)" data-testid="state-badge">{{ stateLabel(t.state) }}</span>
               <div v-if="missingDependency(t)" class="dep-hint" data-testid="dep-hint" :title="t.suspend_reason">
@@ -81,11 +84,22 @@
           </div>
 
           <div class="form-item">
-            <label>设备</label>
-            <select v-model="form.device_id" class="select" data-testid="device-select">
-              <option value="" disabled>选择设备…</option>
-              <option v-for="d in devices" :key="d.id" :value="d.id">{{ d.name }}</option>
-            </select>
+            <label>设备与输入</label>
+            <div v-for="(entry, index) in form.inputs" :key="index" class="input-row">
+              <select v-model="entry.device_id" class="select" data-testid="device-select" :aria-label="`第 ${index + 1} 个输入的设备`">
+                <option value="" disabled>选择设备…</option>
+                <option v-for="d in devices" :key="d.id" :value="d.id">{{ d.name }}</option>
+              </select>
+              <input v-model="entry.label" class="input input-label" placeholder="备注（可选，用于通知摘要）" :aria-label="`第 ${index + 1} 个输入的备注`" />
+              <button v-if="form.inputs.length > 1" class="btn btn-sm btn-ghost" type="button" :aria-label="`删除第 ${index + 1} 个输入`" @click="removeInput(index)"><UiIcon name="close" /></button>
+            </div>
+            <div class="input-actions">
+              <button class="btn btn-sm btn-ghost" type="button" data-testid="add-input" @click="addInput"><UiIcon name="plus" />添加输入</button>
+              <label class="concurrency-label">并发数量
+                <input v-model.number="form.concurrency" class="input input-number" type="number" min="1" :max="64" data-testid="concurrency-input" aria-label="并发数量" />
+              </label>
+              <span class="hint-inline" v-if="form.inputs.length > 1">每次触发按输入并发运行，结果合并为一条摘要通知</span>
+            </div>
           </div>
 
           <div class="form-item">
@@ -260,11 +274,15 @@ function formatRunTime(time) {
 function closeHistory() { historyTask.value = null; void loadTasks() }
 
 // ---- 表单态（触发方式与执行器拆为通用字段 + 结构化编辑字段） ----
+// 多输入：inputs[] = { device_id, label }；单输入任务 = 长度 1 的列表。
+// concurrency = 每次触发的最大并发运行数（服务端默认 1，上限 64）。
 const form = reactive({
   id: null,
   name: '',
   enabled: true,
   device_id: '',
+  inputs: [createInput()],
+  concurrency: 1,
   providerId: CRON_PROVIDER_ID,
   cronExpr: '0 8 * * *',
   configJson: '{}',
@@ -273,6 +291,22 @@ const form = reactive({
   payload: {},
   extensions: {},
 })
+
+function createInput(device_id = '', label = '') {
+  return { device_id, label }
+}
+
+/** 单输入语义视图：主设备 = 第一个输入（兼容既有 device_id 消费方）。 */
+const primaryDeviceId = computed(() => form.inputs[0]?.device_id ?? '')
+
+function addInput() {
+  if (form.inputs.length >= 64) return
+  form.inputs.push(createInput())
+}
+function removeInput(index) {
+  if (form.inputs.length <= 1) return
+  form.inputs.splice(index, 1)
+}
 const customCron = ref(false)
 const cronTime = computed(() => readCommonSchedule(form.cronExpr).time || '08:00')
 const cronFrequency = computed({
@@ -303,9 +337,9 @@ const runnerKnownToServer = computed(() => runners.value.some((r) => r.runner_id
  */
 const editorCtx = computed(() => ({
   packageId: props.packageId ?? null,
-  deviceId: form.device_id,
+  deviceId: primaryDeviceId.value,
   androidPackageName: String(
-    devices.value.find((device) => device.id === form.device_id)?.pkg || '',
+    devices.value.find((device) => device.id === primaryDeviceId.value)?.pkg || '',
   ).trim() || null,
 }))
 const entrypointEditorProps = computed(() => currentContrib.value?.entrypointEditorProps?.(editorCtx.value) ?? {})
@@ -419,11 +453,20 @@ function adaptTaskRow(t) {
     runner: t.runner && typeof t.runner === 'object'
       ? t.runner
       : { runner_id: '', entrypoint: '', payload: {} },
+    inputs: Array.isArray(t.inputs) ? t.inputs : [],
+    concurrency: Number(t.concurrency ?? 1) || 1,
     extensions: t.extensions && typeof t.extensions === 'object' ? t.extensions : {},
     schedule: t.schedule && typeof t.schedule === 'object'
       ? t.schedule
       : { provider_id: '', config: {} },
   }
+}
+
+/** 多输入任务的设备摘要（列表徽标 title）。 */
+function inputSummary(t) {
+  return (t.inputs || [])
+    .map((input) => `${input.label?.trim() || deviceName(input.device_id)}：${deviceName(input.device_id)}`)
+    .join('；')
 }
 
 /** 未注册贡献的 runner：runner JSON 只读展示（entrypoint/payload 原样保留可保存）。 */
@@ -447,6 +490,8 @@ function resetForm() {
     name: '',
     enabled: true,
     device_id: devices.value[0]?.id ?? '',
+    inputs: [createInput(devices.value[0]?.id ?? '', '')],
+    concurrency: 1,
     providerId: CRON_PROVIDER_ID,
     cronExpr: '0 8 * * *',
     configJson: '{}',
@@ -470,11 +515,20 @@ function fillForm(t) {
   customCron.value = false
   const schedule = t.schedule ?? {}
   const config = schedule.config ?? {}
+  // 多输入回填：inputs 为空 = 旧单输入任务（以 app.device_id 建一条输入）
+  const inputs = Array.isArray(t.inputs) && t.inputs.length
+    ? t.inputs.map((input) => createInput(
+        String(input.device_id ?? t.app?.device_id ?? ''),
+        String(input.label ?? ''),
+      ))
+    : [createInput(t.app?.device_id ?? '', '')]
   Object.assign(form, {
     id: t.id,
     name: t.name,
     enabled: !!t.enabled,
     device_id: t.app?.device_id ?? '',
+    inputs,
+    concurrency: Math.max(1, Number(t.concurrency ?? 1) || 1),
     providerId: schedule.provider_id || '',
     cronExpr: schedule.provider_id === CRON_PROVIDER_ID ? String(config.expression ?? '') : '',
     configJson: JSON.stringify(config && typeof config === 'object' ? config : {}, null, 2),
@@ -503,16 +557,32 @@ function buildTaskSaveBody() {
   const config = isCron.value
     ? { expression: form.cronExpr.trim() }
     : parseScheduleConfig().config ?? {}
+  const inputs = form.inputs
+    .filter((entry) => entry.device_id)
+    .map((entry) => ({
+      device_id: entry.device_id,
+      ...(entry.label?.trim() ? { label: entry.label.trim() } : {}),
+    }))
+  const primary = inputs[0] ?? { device_id: form.device_id }
+  const isBrowser = id => String(id ?? '').startsWith('browser-')
+  const multiInput = inputs.length > 1
   return {
     ...(form.id ? { id: form.id } : {}),
     name: form.name.trim(),
     extensions: form.extensions,
     enabled: form.enabled,
+    // 多输入任务：app.device_id = 首输入（占位语义，运行时逐输入覆盖）；
+    // Android 任务逐输入包名不可不同——保留主 app 包名约束。
     app: {
-      device_id: form.device_id,
-      android_package: form.device_id?.startsWith('browser-') ? null : app?.android_package ?? '',
+      device_id: primary.device_id,
+      android_package: isBrowser(primary.device_id) ? null : app?.android_package ?? '',
       content_package: app?.content_package ?? null,
     },
+    inputs: inputs.map((entry) => ({
+      ...entry,
+      android_package: isBrowser(entry.device_id) ? null : app?.android_package ?? '',
+    })),
+    concurrency: Math.min(64, Math.max(1, Number(form.concurrency) || 1)),
     runner: {
       runner_id: form.runnerId,
       entrypoint: form.entrypoint,
@@ -528,7 +598,7 @@ function buildTaskSaveBody() {
 /** 保存任务：客户端校验（必填/JSON/贡献 validate）→ ADR-12 body 提交。 */
 async function saveTask() {
   if (!form.name.trim()) return toast('请填写任务名称', 'error')
-  if (!form.device_id) return toast('请选择设备', 'error')
+  if (!form.inputs.some((entry) => entry.device_id)) return toast('请至少为一个输入选择设备', 'error')
   if (!form.providerId.trim()) return toast('请填写 provider_id', 'error')
   if (isCron.value && !form.cronExpr.trim()) return toast('请填写 cron 表达式', 'error')
   if (!isCron.value) {
@@ -536,6 +606,13 @@ async function saveTask() {
     if (parsed.error) return toast('provider config JSON 解析失败：' + parsed.error, 'error')
   }
   if (!form.entrypoint.trim()) return toast('请选择执行目标', 'error')
+  const duplicateIds = form.inputs
+    .map((entry) => entry.device_id)
+    .filter((id, index, all) => id && all.indexOf(id) !== index)
+  if (duplicateIds.length) return toast('同一设备在多个输入中重复，请合并或删除重复输入', 'error')
+  const mixedTargets = form.inputs.some((entry) => String(entry.device_id ?? '').startsWith('browser-'))
+    !== String(form.inputs.find((entry) => entry.device_id)?.device_id ?? '').startsWith('browser-')
+  if (mixedTargets) return toast('多输入的目标类型必须一致（浏览器或 Android）', 'error')
   if (currentContrib.value && payloadEditorEl.value) {
     const issues = payloadEditorEl.value.validate?.() ?? []
     if (issues.length) {
@@ -687,6 +764,14 @@ onUnmounted(() => { ++tasksRequest; clearInterval(refreshTimer); unregisterEdito
   font-size: 12px; color: var(--text-2);
 }
 .task-name { font-weight: 600; }
+.task-inputs { display:block; font-size: 12px; color: var(--text-2); font-weight: 400; margin-top: 2px; }
+.input-row { display:flex; gap:8px; align-items:center; margin-top:6px; }
+.input-row .select { flex:1; min-width:0; }
+.input-row .input-label { flex:1; min-width:0; }
+.input-actions { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+.concurrency-label { display:flex; align-items:center; gap:6px; font-size:13px; color:var(--text-2); }
+.input-number { width:76px; }
+.hint-inline { font-size:12px; color:var(--text-2); }
 .dep-hint { font-size: 12px; color: var(--warn); margin-top: 2px; font-weight: 400; }
 .mono { font-family: var(--mono); }
 .sub-label { font-size: 12px; color: var(--text-2); margin-top: 6px; }

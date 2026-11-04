@@ -397,8 +397,44 @@ describe('新建任务：贡献渲染 + cron 触发方式 + 保存 ADR-12 body',
       runner: { runner_id: 'gamer-yaml', entrypoint: 'com.demo/main.yml' },
       schedule: { provider_id: 'cron', config: { expression: '0 8 * * *' } },
     })
+    expect(posted.body.inputs).toEqual([{ device_id: 'dev1', android_package: 'com.demo' }])
+    expect(posted.body.concurrency).toBe(1)
     expect(posted.body.runner.payload.args).toEqual({})
     expect(posted.body.id).toBeUndefined()
+  })
+
+  it('多输入：添加输入行生成 inputs 数组与并发数；重复设备被客户端阻断', async () => {
+    const routes = baseRoutes()
+    routes.push({ method: 'POST', url: '/api/tasks', body: {} })
+    const { wrapper, calls } = await mountView(routes)
+    await openAdd(wrapper)
+    await wrapper.find('.modal-body input.input').setValue('多输入任务')
+    await wrapper.find('.sp-name').setValue('com.demo/main.yml')
+    await flushPromises()
+    // 添加第二个输入（默认 dev1）→ 改成 dev2；并发调到 2
+    await wrapper.find('[data-testid="add-input"]').trigger('click')
+    let deviceSelects = wrapper.findAll('[data-testid="device-select"]')
+    expect(deviceSelects).toHaveLength(2)
+    await deviceSelects[1].setValue('dev2')
+    await wrapper.find('[data-testid="concurrency-input"]').setValue('2')
+    await saveButton(wrapper).trigger('click')
+    await flushPromises()
+    const posted = calls.find(c => c.method === 'POST' && c.url === '/api/tasks')
+    expect(posted.body.app.device_id).toBe('dev1')
+    expect(posted.body.inputs.map(i => i.device_id)).toEqual(['dev1', 'dev2'])
+    expect(posted.body.concurrency).toBe(2)
+    // 重复设备：重新打开表单，保存被客户端阻断
+    await openAdd(wrapper)
+    await wrapper.find('.modal-body input.input').setValue('重复设备任务')
+    await wrapper.find('.sp-name').setValue('com.demo/main.yml')
+    await flushPromises()
+    await wrapper.find('[data-testid="add-input"]').trigger('click')
+    deviceSelects = wrapper.findAll('[data-testid="device-select"]')
+    await deviceSelects[1].setValue('dev1')
+    const again = calls.filter(c => c.method === 'POST').length
+    await saveButton(wrapper).trigger('click')
+    await flushPromises()
+    expect(calls.filter(c => c.method === 'POST').length).toBe(again)
   })
 
   it('弹窗内「启用」开关随保存提交；未选执行目标/未填名称被客户端阻断', async () => {

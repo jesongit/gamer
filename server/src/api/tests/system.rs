@@ -496,6 +496,8 @@ fn route_validation_bounds_run_and_task_requests() {
         },
         schedule: TaskSchedule::new("cron", serde_json::json!({"expression": "*/5 * * * *"}))
             .unwrap(),
+        inputs: None,
+        concurrency: None,
         enabled: Some(true),
         preset_id: None,
     };
