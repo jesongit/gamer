@@ -85,17 +85,6 @@ functions:
           - key: Escape
           - sleep:
               duration: 800ms
-          - tap_template:
-              template: mx_shop_close_20261105.png
-              threshold: 0.9
-              region:
-                - 0.94
-                - 0.0
-                - 0.06
-                - 0.1
-            optional: true
-          - sleep:
-              duration: 1s
           - log:
               message: 弹窗无最大值按钮（已兑完或余烬不足），跳过该票据
               level: info
@@ -105,34 +94,12 @@ functions:
       - tap_template:
           template: mx_confirm_20261105.png
           threshold: 0.9
-      - wait_find:
-          template: mx_blank_close_20261105.png
-          threshold: 0.9
-          region:
-            - 0.4
-            - 0.68
-            - 0.2
-            - 0.09
-          timeout: 15s
-          interval: 300ms
-        as: gained
-      - if: $gained
-        then:
-          - tap:
-              position:
-                - 0.15
-                - 0.9
-        else:
-          # 确认点了但无获得提示（极端情况下次数被并发用掉）：按 ESC 关掉可能的弹窗后跳过
-          - key: Escape
-          - sleep:
-              duration: 800ms
-          - log:
-              message: 确认后未出现获得物品提示，按跳过处理
-              level: warn
-          - return: false
       - sleep:
-          duration: 600ms
+          duration: 2s
+      - tap:
+          position:
+            - 0.5
+            - 0.5
 
 run:
   - 云游戏日常_退出收尾.yaml#cloud_enter_game: {}
