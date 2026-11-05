@@ -1,0 +1,192 @@
+# 每月兑换：余烬兑换商店兑换星轨专票与星轨通票（每月 5+5）。
+# 流程：进入游戏 → ESC 菜单 → 商店 → 兑换商店 → 余烬兑换 → 兑换专票/通票 → 关店 → 退出云游戏。
+# 模板均为 2026-11-05 从线上录像/实机帧裁剪的文字模板（避开图标"新"角标与串流延迟数字）。
+# 进游戏/退出云游戏复用 云游戏日常_退出收尾.yaml 的公开函数。
+
+params:
+  notify_success: {type: boolean, default: true, desc: 成功是否通知}
+  notify_failure: {type: boolean, default: true, desc: 失败是否通知}
+
+functions:
+  open_store:
+    run:
+      - repeat: 3
+        do:
+          - key: Escape
+          - sleep:
+              duration: 1200ms
+          - find:
+              template: mx_esc_store_20261105.png
+              threshold: 0.9
+              region:
+                - 0.6
+                - 0.32
+                - 0.12
+                - 0.07
+            as: store_entry
+          - if: $store_entry
+            then:
+              - tap: $store_entry
+              - break: {}
+          - find:
+              template: mx_exit_confirm_20261105.png
+              threshold: 0.9
+              region:
+                - 0.44
+                - 0.36
+                - 0.1
+                - 0.08
+            as: exit_confirm
+          - if: $exit_confirm
+            then:
+              - log:
+                  message: ESC 触发了退出确认框，点击继续游戏取消
+                  level: info
+              - tap_template:
+                  template: mx_exit_cancel_20261105.png
+                  threshold: 0.9
+          - sleep:
+              duration: 1200ms
+
+  redeem_ticket:
+    params:
+      ticket: {type: string, required: true}
+    run:
+      - wait_find:
+          template: $ticket
+          threshold: 0.9
+          region:
+            - 0.14
+            - 0.12
+            - 0.7
+            - 0.5
+          timeout: 30s
+          interval: 800ms
+        as: ticket_card
+      - if: $ticket_card
+        then:
+          - tap: $ticket_card
+        else:
+          - log:
+              message: 票据不在列表，可能本月已兑换，跳过
+              level: info
+          - return: false
+      - wait_find:
+          template: mx_max_btn_20261105.png
+          threshold: 0.9
+          timeout: 15s
+          interval: 300ms
+        as: max_btn
+      - if: $max_btn
+        then:
+          - tap: $max_btn
+        else:
+          - fail:
+              message: 兑换弹窗未出现（最大值按钮找不到），停止兑换
+              code: MX_DIALOG_MISSING
+      - sleep:
+          duration: 400ms
+      - tap_template:
+          template: mx_confirm_20261105.png
+          threshold: 0.9
+      - wait_find:
+          template: mx_blank_close_20261105.png
+          threshold: 0.9
+          region:
+            - 0.4
+            - 0.68
+            - 0.2
+            - 0.09
+          timeout: 15s
+          interval: 300ms
+        as: gained
+      - if: $gained
+        then:
+          - tap:
+              position:
+                - 0.15
+                - 0.9
+        else:
+          - fail:
+              message: 确认后未出现获得物品提示，兑换可能未成功
+              code: MX_GAIN_PROMPT_MISSING
+      - sleep:
+          duration: 600ms
+
+run:
+  - 云游戏日常_退出收尾.yaml#cloud_enter_game: {}
+  - wait_find:
+      template: 手机#009_036_043_094.png
+      threshold: 0.8
+      timeout: 60s
+      interval: 1s
+    as: main_ui_ready
+  - if: $main_ui_ready
+    then:
+      - sleep:
+          duration: 2s
+    else:
+      - fail:
+          message: 进入游戏后 60 秒未见到主界面手机图标，停止兑换
+          code: MX_MAIN_UI_TIMEOUT
+  - open_store: {}
+  - sleep:
+      duration: 2s
+  - tap:
+      position:
+        - 0.078
+        - 0.355
+  - sleep:
+      duration: 1500ms
+  - tap_template:
+      template: mx_shop_exchange_20261105.png
+      threshold: 0.9
+  - wait_find:
+      template: mx_ember_tab_20261105.png
+      threshold: 0.9
+      region:
+        - 0.28
+        - 0.08
+        - 0.2
+        - 0.08
+      timeout: 25s
+      interval: 400ms
+    as: ember_tab
+  - if: $ember_tab
+    then:
+      - tap: $ember_tab
+    else:
+      - fail:
+          message: 兑换商店未出现余烬兑换页签，停止兑换
+          code: MX_EMBER_TAB_MISSING
+  - sleep:
+      duration: 800ms
+  - redeem_ticket:
+      ticket: mx_special_ticket_20261105.png
+  - log:
+      message: 星轨专票兑换完成
+      level: info
+  - redeem_ticket:
+      ticket: mx_express_ticket_20261105.png
+  - log:
+      message: 星轨通票兑换完成
+      level: info
+  - tap_template:
+      template: mx_shop_close_20261105.png
+      threshold: 0.9
+  - sleep:
+      duration: 1s
+  - key: Escape
+  - sleep:
+      duration: 1s
+  - key: Escape
+  - sleep:
+      duration: 2s
+  - 云游戏日常_退出收尾.yaml#exit_cloud_session: {}
+    as: cloud_exit_ok
+  - if: $cloud_exit_ok
+    then: []
+    else:
+      - fail:
+          message: 兑换完成但退出云游戏未确认
+          code: MX_CLOUD_EXIT_UNCONFIRMED
