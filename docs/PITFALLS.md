@@ -718,3 +718,10 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - Windows 下 `python -`（heredoc/stdin 传脚本）会进 pyrepl 死循环（WinError 123 readline 报错刷屏）；一次性数据迁移逻辑必须写成临时 `.py` 文件用 `python -X utf8 file.py` 执行，用完删除。多输入定时任务的轮询/派发注意：信号量许可须覆盖整个运行生命周期（完成回调释放），只在提交瞬间持许可不构成并发上限。
 - FnOS 线上部署 SSH 用户名是 **`Jeson`**（大写 J，公钥已装），22 端口；`root`/`posase`/小写均拒绝。生产数据卷 `gamer-production-data` 为 root-owned，宿主普通用户的 python3 读不了 `/vol1/docker/volumes/gamer-production-data/_data/gamer.db`——库级数据操作须 `docker cp` 脚本进容器后 `docker exec gamer python3 …` 在容器内执行（容器内置 python3）。
 - 模板 NCC 峰极尖锐（细笔画文字 1px 偏移可从 0.99 掉到 0.36），matcher 对 >16x16 模板曾用步长2粗分+±1精化——区域原点奇偶与峰位错开时永远 miss（每月兑换 100x34 文字模板线上实测）。现改为全模板步长1穷举（全屏路径已缩 540px、区域路径面积小，4x 采样可接受）；另注意离线验证模板得分时搜索步长必须为 1，步长2会复现同样的假 miss。
+- 运行中直接 SQL 修改任务 cron 而保留 next_wakeup，会先执行旧游标再按新表达式触发，造成改时当天多跑一轮；使用正常任务更新入口重算游标，不能只改 schedule_json（2026-11-06 线上每月兑换 04:17/05:00 双批次实证）。
+- 多输入聚合通知曾把本批结果配上上批明细，并在标题显示默认设备：MultiFinisher 传旧 Task、通知插件取默认 device 导致；2026-11-06 改为传本批摘要、整批实际耗时和稳定触发键，聚合标题不带默认账号，自定义 target/device.name 为输入列表、id 为空。
+- 历战余响可能弹出提前解锁剧情确认框，直接等待挑战页会超时；窄体力裁剪即使识别文字正确也可能置信度不足被 find_text 过滤，需核对既有帧、弹窗分支、OCR 区域/留白与置信度，保留数值双读校验。
+- 旧 MCP task_save 重建 Task 时遗漏 inputs/concurrency，普通改时会退化为单输入；2026-11-06 保存缺省保留并逐输入校验对象授权，改时维护工具显式携带多输入字段让旧宿主安全拒绝，禁止绕过 API 改 SQLite 游标。
+- Dockerfile 的 syntax=docker/dockerfile:1 会单独访问 Docker Hub 获取前端，即使基础镜像已缓存也会被认证网络故障阻断；临时修复构建可在引擎支持所需语法时使用内置前端，并先核对本地基础镜像摘要。
+- docker inspect 的 HostConfig.SecurityOpt 会返回 seccomp JSON 正文，不能原样传给 CLI --security-opt（CLI 把正文当路径，报 file name too long）；先把原文写入受保护文件再传 seccomp=<路径>，切换后核对策略及其他部署参数，失败立即恢复旧容器。
+- 重建容器应比较环境变量键值及最终 Mounts 语义，不能比较 Env 数组顺序或 -v/--mount 的内部表示；否则相同有效配置也会在健康启动后误触发回滚。
