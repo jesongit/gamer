@@ -170,6 +170,7 @@ cd web && pnpm dev                      # 单起前端
 - 开发/运行中踩到的坑（环境、构建、部署、已知限制）必须记入 [docs/PITFALLS.md](docs/PITFALLS.md)；
   每条保持**精简准确**：一句话现象 + 原因 + 解决/规避，不写流水账、不夸大
 - 修改yaml引擎，必须同步检查，前端校验代码，模板代码，yaml 文档
+- 模板匹配的 `region`（`[x,y,w,h]` 相对坐标）除了框住预期出现区域，**必须额外预留模板自身宽高做冗余**（matcher 要求 region 内部能完整容纳模板并允许其滑动；region 小于模板宽高直接 miss）——给 region 留余量时按「预期命中框 + 模板宽高 + 漂移余量」计算，不要按中心点贴边
 - git 提交遵守下方「Git 提交规范」
 
 ## Git 提交规范（Conventional Commits）
