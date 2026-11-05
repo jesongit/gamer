@@ -16,7 +16,7 @@ impl CoreTools {
                 json!({"task_id":string(),"expected_updated_at":string(),"expected_entrypoint":string(),"entrypoint":string(),"payload":{"type":"object"}}),
                 &["task_id","expected_updated_at","expected_entrypoint","entrypoint"],context.clone()),
             tool("gamer.core.task_save","Create a disabled task or update an explicitly authorized task. Enabled tasks additionally require run.submit. Omit task_id for creation; updates require expected_updated_at.","task.write",ToolEffect::TaskWrite,
-                json!({"task_id":string(),"expected_updated_at":string(),"name":{"type":"string","minLength":1,"maxLength":255},"device_id":string(),"package_id":string(),"runner_id":string(),"entrypoint":string(),"payload":{"type":"object"},"schedule":{"type":"object","properties":{"provider_id":string(),"config":{"type":"object"}},"required":["provider_id","config"],"additionalProperties":false},"enabled":{"type":"boolean"}}),
+                json!({"task_id":string(),"expected_updated_at":string(),"name":{"type":"string","minLength":1,"maxLength":255},"device_id":string(),"package_id":string(),"runner_id":string(),"entrypoint":string(),"payload":{"type":"object"},"inputs":{"type":"array","maxItems":64,"items":{"type":"object"}},"concurrency":{"type":"integer","minimum":1,"maximum":64},"schedule":{"type":"object","properties":{"provider_id":string(),"config":{"type":"object"}},"required":["provider_id","config"],"additionalProperties":false},"enabled":{"type":"boolean"}}),
                 &["name","device_id","package_id","runner_id","entrypoint","schedule"],ContextRequirements{device_field:Some("device_id".into()),package_field:Some("package_id".into()),runner_field:Some("runner_id".into()),..Default::default()}),
             tool("gamer.core.task_control","Control your task or an explicitly authorized task. Running/enabling/resuming additionally requires run.submit for its actual target, Package, plugin, runner, entrypoint and payload.","task.control",ToolEffect::TaskWrite,
                 json!({"task_id":string(),"action":{"enum":["run","enable","resume","disable","suspend","cancel"]}}),&["task_id","action"],context),
@@ -43,6 +43,9 @@ impl CoreTools {
             ));
         }
         authorize_payload(ctx, &task.payload, 0)?;
+        for input in &task.inputs {
+            authorize_payload(ctx, input, 0)?;
+        }
         let owner = self
             .scheduler
             .runner_registry()
@@ -355,7 +358,23 @@ impl CoreTools {
                     task.last_result = old.last_result.clone();
                     task.extensions = old.extensions.clone();
                     task.preset_id = old.preset_id.clone();
+                    task.inputs = old.inputs.clone();
+                    task.concurrency = old.concurrency;
+                    task.result_summary = old.result_summary.clone();
                 }
+                if let Some(inputs) = args.get("inputs") {
+                    task.inputs = serde_json::from_value(inputs.clone()).map_err(business)?;
+                }
+                if let Some(concurrency) = args.get("concurrency") {
+                    let value = concurrency
+                        .as_u64()
+                        .filter(|value| {
+                            (1..=crate::timer_core::TASK_MAX_CONCURRENCY as u64).contains(value)
+                        })
+                        .ok_or_else(|| McpError::invalid("concurrency must be 1..64"))?;
+                    task.concurrency = value as u32;
+                }
+                task.validate().map_err(business)?;
                 let scope = if task.enabled {
                     self.authorize_task_execution(ctx, &task)?
                 } else {

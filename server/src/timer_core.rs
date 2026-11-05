@@ -351,6 +351,8 @@ struct MultiFinisher {
     result_hook: Mutex<Option<TaskResultHook>>,
     task: Task,
     scheduled_at: Option<i64>,
+    started: std::time::Instant,
+    event_id: String,
 }
 
 struct MultiFinisherInner {
@@ -367,6 +369,13 @@ impl MultiFinisher {
         expected: usize,
         scheduled_at: Option<i64>,
     ) -> Arc<Self> {
+        // Freeze the trigger identity before any input is submitted. A replay of
+        // the same scheduled occurrence must reach notification deduplication
+        // with the same key; separate immediate runs each get their own key.
+        let event_id = match scheduled_at {
+            Some(at) => format!("schedule:{}:summary:{at}", task.id),
+            None => format!("task:{}:summary:{}", task.id, uuid::Uuid::new_v4()),
+        };
         Arc::new(Self {
             inner: Mutex::new(MultiFinisherInner {
                 expected,
@@ -377,6 +386,8 @@ impl MultiFinisher {
             result_hook: Mutex::new(result_hook),
             task,
             scheduled_at,
+            started: std::time::Instant::now(),
+            event_id,
         })
     }
 
@@ -435,15 +446,16 @@ impl MultiFinisher {
                     .iter()
                     .position(|row| row.input_id == id)
                     .map(|position| remaining.remove(position));
-                position.unwrap_or_else(|| TaskInputResult {
-                    input_id: id,
-                    label: label.clone(),
-                    state: "failed".into(),
-                    error: Some("提交失败".into()),
-                    finished_at: Utc::now(),
-                    elapsed_secs: 0,
-                })
-                .with_label(label)
+                position
+                    .unwrap_or_else(|| TaskInputResult {
+                        input_id: id,
+                        label: label.clone(),
+                        state: "failed".into(),
+                        error: Some("提交失败".into()),
+                        finished_at: Utc::now(),
+                        elapsed_secs: 0,
+                    })
+                    .with_label(label)
             })
             .collect()
     }
@@ -467,7 +479,11 @@ impl MultiFinisher {
         let folded_label = folded;
         tokio::spawn(async move {
             let _ = db
-                .update_timer_task_result_summary_async(&task_id, &summary_json, Some(&folded_label))
+                .update_timer_task_result_summary_async(
+                    &task_id,
+                    &summary_json,
+                    Some(&folded_label),
+                )
                 .await;
         });
         if let Some(scheduled_at) = self.scheduled_at {
@@ -480,7 +496,13 @@ impl MultiFinisher {
             let task_id = self.task.id.clone();
             tokio::spawn(async move {
                 let _ = db
-                    .finish_scheduled_run_async(&task_id, scheduled_at, state, None, error.as_deref())
+                    .finish_scheduled_run_async(
+                        &task_id,
+                        scheduled_at,
+                        state,
+                        None,
+                        error.as_deref(),
+                    )
                     .await;
             });
         }
@@ -490,17 +512,13 @@ impl MultiFinisher {
             .expect("task result hook poisoned")
             .clone()
         {
-            Self::emit_summary_notification(&hook, &self.task, summary);
+            self.emit_summary_notification(&hook, summary);
         }
     }
 
     /// 多输入任务只发一条聚合通知：以折叠后的状态/错误复用既有 result_hook
     /// 管线（模板、通道、幂等去重全部沿用）。
-    fn emit_summary_notification(
-        hook: &TaskResultHook,
-        task: &Task,
-        summary: &[TaskInputResult],
-    ) {
+    fn emit_summary_notification(&self, hook: &TaskResultHook, summary: &[TaskInputResult]) {
         let total = summary.len();
         let ok = summary.iter().filter(|row| row.state == "success").count();
         let failed = total - ok;
@@ -518,15 +536,14 @@ impl MultiFinisher {
                 .collect::<Vec<_>>()
                 .join("；")
         });
-        let event_id = format!(
-            "schedule:{}:summary:{}",
-            task.id,
-            Utc::now().timestamp_millis()
-        );
+        // The hook consumes this snapshot directly; it must not depend on the
+        // asynchronous database write or inherit the previous occurrence's rows.
+        let mut task = self.task.clone();
+        task.result_summary = Some(summary.to_vec());
         hook(
-            task.clone(),
+            task,
             TaskResult {
-                event_id,
+                event_id: self.event_id.clone(),
                 run_id: None,
                 state: if failed == 0 {
                     "success".into()
@@ -535,7 +552,9 @@ impl MultiFinisher {
                 },
                 error,
                 finished_at: Utc::now(),
-                elapsed_secs: 0,
+                // Includes waiting for other inputs' concurrency permits; do
+                // not sum overlapping per-input runtimes for a batch duration.
+                elapsed_secs: self.started.elapsed().as_secs(),
             },
         );
     }
@@ -1402,7 +1421,8 @@ impl TimerCore {
             }
             return;
         }
-        self.dispatch_multi(task, scheduled_at, runner, inputs).await;
+        self.dispatch_multi(task, scheduled_at, runner, inputs)
+            .await;
     }
 
     /// 多输入并发派发：计划触发点只 claim 一次（幂等记录复用原键）；每个
@@ -1863,9 +1883,10 @@ impl TimerCore {
                 match DeviceId::new(device) {
                     Ok(device_id) => app.device_id = device_id,
                     Err(error) => {
-                        first_error = Some(first_error.unwrap_or_else(|| {
-                            TimerRunnerError::Invalid(error.to_string())
-                        }));
+                        first_error = Some(
+                            first_error
+                                .unwrap_or_else(|| TimerRunnerError::Invalid(error.to_string())),
+                        );
                         finisher.record(&input_id, TimerOutcome::Failed("设备覆盖无效".into()), 0);
                         continue;
                     }
@@ -1879,9 +1900,9 @@ impl TimerCore {
             ) {
                 Ok(request) => request,
                 Err(error) => {
-                    first_error = Some(first_error.unwrap_or_else(|| {
-                        TimerRunnerError::Invalid(error.to_string())
-                    }));
+                    first_error = Some(
+                        first_error.unwrap_or_else(|| TimerRunnerError::Invalid(error.to_string())),
+                    );
                     finisher.record(&input_id, TimerOutcome::Failed(error.to_string()), 0);
                     continue;
                 }
@@ -1891,9 +1912,10 @@ impl TimerCore {
                 match crate::core::ExecutionPolicy::from_task_extensions(&task.extensions) {
                     Ok(policy) => policy,
                     Err(error) => {
-                        first_error = Some(first_error.unwrap_or_else(|| {
-                            TimerRunnerError::Invalid(error.to_string())
-                        }));
+                        first_error = Some(
+                            first_error
+                                .unwrap_or_else(|| TimerRunnerError::Invalid(error.to_string())),
+                        );
                         finisher.record(&input_id, TimerOutcome::Failed(error.to_string()), 0);
                         continue;
                     }
@@ -1965,8 +1987,10 @@ impl TimerCore {
         }
         match first_run {
             Some(run) => Ok(run),
-            None => Err(first_error
-                .unwrap_or_else(|| TimerRunnerError::Invalid("没有可运行的输入".into()))),
+            None => {
+                Err(first_error
+                    .unwrap_or_else(|| TimerRunnerError::Invalid("没有可运行的输入".into())))
+            }
         }
     }
 
@@ -2309,6 +2333,115 @@ mod tests {
             restored.run_request().unwrap().execution_policy,
             Some(policy)
         );
+    }
+
+    #[tokio::test]
+    async fn multi_summary_notifies_current_batch_once_with_elapsed_and_trigger_identity() {
+        let (db, dir) = test_db("multi-summary");
+        let mut task = test_task();
+        task.inputs = ["155", "188", "136", "173"]
+            .into_iter()
+            .map(|id| serde_json::json!({"id": id, "label": id}))
+            .collect();
+        let previous = ["155", "188", "136", "173"]
+            .into_iter()
+            .map(|id| TaskInputResult {
+                input_id: id.into(),
+                label: Some(id.into()),
+                state: if id == "188" { "failed" } else { "success" }.into(),
+                error: (id == "188").then(|| "previous occurrence error".into()),
+                finished_at: Utc::now(),
+                elapsed_secs: 999,
+            })
+            .collect::<Vec<_>>();
+        task.result_summary = Some(previous.clone());
+        db.upsert_timer_task_async(&task).await.unwrap();
+        assert!(db.claim_scheduled_run_async(&task.id, 42).await.unwrap());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let hook: TaskResultHook = Arc::new(move |task, result| {
+            captured.lock().unwrap().push((task, result));
+        });
+        let mut finisher = MultiFinisher::new(db.clone(), Some(hook), task.clone(), 4, Some(42));
+        Arc::get_mut(&mut finisher).unwrap().started =
+            std::time::Instant::now() - Duration::from_secs(125);
+        // Completion order differs from declaration order and input runtimes
+        // overlap; notification duration must describe the entire batch.
+        finisher.record("173", TimerOutcome::Success, 40);
+        finisher.record("136", TimerOutcome::Failed("challenge timeout".into()), 35);
+        finisher.record("155", TimerOutcome::Success, 45);
+        assert!(events.lock().unwrap().is_empty());
+        finisher.record("188", TimerOutcome::Failed("power OCR".into()), 50);
+        finisher.record("188", TimerOutcome::Failed("late duplicate".into()), 50);
+        {
+            let events = events.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            let (notified_task, result) = &events[0];
+            let summary = notified_task.result_summary.as_ref().unwrap();
+            assert_eq!(summary.len(), 4);
+            assert_eq!(
+                summary
+                    .iter()
+                    .map(|row| row.input_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["155", "188", "136", "173"]
+            );
+            assert_eq!(
+                summary.iter().filter(|row| row.state == "success").count(),
+                2
+            );
+            assert_eq!(summary[1].error.as_deref(), Some("power OCR"));
+            assert_eq!(summary[2].error.as_deref(), Some("challenge timeout"));
+            assert_eq!(result.state, "failed");
+            assert_eq!(
+                result.error.as_deref(),
+                Some("188：power OCR；136：challenge timeout")
+            );
+            assert_eq!(result.event_id, "schedule:task-1:summary:42");
+            assert!(result.run_id.is_none());
+            assert!((125..128).contains(&result.elapsed_secs));
+            assert_eq!(task.result_summary, Some(previous));
+        }
+        // Persistence may complete after the hook; its eventual content must
+        // agree with the exact snapshot already delivered to the observer.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let saved = db.get_timer_task_async(&task.id).await.unwrap().unwrap();
+                if saved.last_result.as_deref() == Some("部分成功 2/4")
+                    && db.scheduled_run_state(&task.id, 42) == "failed"
+                {
+                    assert_eq!(
+                        saved.result_summary,
+                        events.lock().unwrap()[0].0.result_summary
+                    );
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(finisher);
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn multi_summary_identity_is_stable_for_scheduled_replays_and_distinct_for_manual_runs() {
+        let (db, dir) = test_db("multi-event-id");
+        let task = test_task();
+        let scheduled = MultiFinisher::new(db.clone(), None, task.clone(), 4, Some(42));
+        let replay = MultiFinisher::new(db.clone(), None, task.clone(), 4, Some(42));
+        let next = MultiFinisher::new(db.clone(), None, task.clone(), 4, Some(43));
+        let manual = MultiFinisher::new(db.clone(), None, task.clone(), 4, None);
+        let another_manual = MultiFinisher::new(db.clone(), None, task, 4, None);
+        assert_eq!(scheduled.event_id, replay.event_id);
+        assert_ne!(scheduled.event_id, next.event_id);
+        assert_ne!(manual.event_id, another_manual.event_id);
+        assert_ne!(manual.event_id, scheduled.event_id);
+        drop((scheduled, replay, next, manual, another_manual));
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

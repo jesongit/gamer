@@ -12,6 +12,14 @@
 
 Cron 以服务端本地时区执行。浏览器关闭后任务仍由服务端调度；电脑休眠或服务停止时不会继续执行。
 
+修改时间应在任务页保存，或使用正常 API/MCP 保存入口；不要直接修改 SQLite 的 `schedule_json`，否则旧 `next_wakeup` 仍可能执行一次。仓库维护工具 `tools/gamer_change_cron.py` 使用已有 MCP 令牌，先按服务端时区预览，再以 `expected_updated_at` 做快照 CAS 保存，保留多输入、并发和通知配置；默认只读，追加 `--apply` 才保存，不会立即运行任务：
+
+```sh
+python tools/gamer_change_cron.py --url http://127.0.0.1:8443/api/mcp --token-file /private/gamer-mcp-token --task-id <任务ID> --expected-expression "17 4 6 * *" --expression "0 5 6 * *"
+```
+
+令牌需要 `task.read`、`task.write`，修改已启用任务还需要 `run.submit` 及所有输入目标的对象授权；保留正常外部执行权限策略。工具显式提交多输入字段，旧宿主不支持时会拒绝保存。遇到并发冲突应重读任务，写请求断线等结果不明时不要自动重试。
+
 ## 执行状态
 
 同一设备同时只允许一个活动运行，避免不同流程争抢输入。设备忙时请求可能被拒绝，先查看当前运行。

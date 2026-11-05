@@ -392,6 +392,130 @@ async fn task_snapshot_cas_rejects_a_target_changed_after_authorization_even_wit
 }
 
 #[tokio::test]
+async fn task_cron_change_discards_old_cursor_and_preserves_multi_input_configuration() {
+    use crate::timer_core::ScheduleExtension;
+    use chrono::TimeZone;
+    let f = fixture().await;
+    let p = principal(&f, &["task.write", "task.read"]);
+    let mut create = task();
+    create["inputs"] = json!([
+        {"id":"first","device_id":"fixture-device","label":"A"},
+        {"id":"second","device_id":"fixture-device","label":"B"}
+    ]);
+    create["concurrency"] = json!(2);
+    let saved = f
+        .service
+        .call_tool(p.clone(), "gamer.core.task_save", create)
+        .await
+        .unwrap();
+    assert!(!saved.is_error, "{saved:?}");
+    let saved = saved.structured_content.unwrap();
+    let id = saved["id"].as_str().unwrap();
+    let mut before = f.core.db.get_timer_task_async(id).await.unwrap().unwrap();
+    before.next_wakeup = Some(
+        chrono::Local
+            .with_ymd_and_hms(2026, 11, 6, 4, 17, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+    );
+    f.core.db.upsert_timer_task_async(&before).await.unwrap();
+    let mut update = task();
+    update["task_id"] = json!(id);
+    update["expected_updated_at"] = json!(before.updated_at);
+    update["schedule"]["config"]["expression"] = json!("0 5 6 * *");
+    update["operation_id"] = json!("change-cron");
+    let result = f
+        .service
+        .call_tool(p.clone(), "gamer.core.task_save", update.clone())
+        .await
+        .unwrap();
+    assert!(!result.is_error, "{result:?}");
+    let after = f.core.db.get_timer_task_async(id).await.unwrap().unwrap();
+    assert_eq!(after.inputs, before.inputs);
+    assert_eq!(after.concurrency, 2);
+    assert_eq!(after.extensions, before.extensions);
+    assert_eq!(after.enabled, before.enabled);
+    assert_eq!(
+        after.next_wakeup, None,
+        "合法保存必须丢弃旧 cron 的持久游标"
+    );
+    let now = chrono::Local
+        .with_ymd_and_hms(2026, 11, 5, 22, 0, 0)
+        .single()
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let expected = chrono::Local
+        .with_ymd_and_hms(2026, 11, 6, 5, 0, 0)
+        .single()
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert_eq!(
+        f.core
+            .scheduler
+            .schedules()
+            .next_after(&after.schedule, now)
+            .unwrap(),
+        Some(expected)
+    );
+
+    // A stale snapshot may not overwrite the schedule or multi-input settings.
+    update["operation_id"] = json!("stale-cron");
+    assert!(
+        f.service
+            .call_tool(p.clone(), "gamer.core.task_save", update.clone())
+            .await
+            .unwrap()
+            .is_error
+    );
+    assert_eq!(
+        f.core.db.get_timer_task_async(id).await.unwrap().unwrap(),
+        after
+    );
+    update["expected_updated_at"] = json!(after.updated_at);
+    update["operation_id"] = json!("clear-inputs");
+    update["inputs"] = json!([]);
+    update["concurrency"] = json!(1);
+    let cleared = f
+        .service
+        .call_tool(p, "gamer.core.task_save", update)
+        .await
+        .unwrap();
+    assert!(!cleared.is_error, "{cleared:?}");
+    let cleared = f.core.db.get_timer_task_async(id).await.unwrap().unwrap();
+    assert!(cleared.inputs.is_empty());
+    assert_eq!(cleared.concurrency, 1);
+    assert_eq!(f.accepted.0.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn task_save_rejects_invalid_or_unauthorized_multi_inputs_without_writing() {
+    let f = fixture().await;
+    let p = principal(&f, &["task.write", "task.read"]);
+    for (suffix, inputs, concurrency) in [
+        ("missing-id", json!([{"label":"missing id"}]), json!(2)),
+        (
+            "foreign-device",
+            json!([{"id":"foreign","device_id":"not-authorized"}]),
+            json!(2),
+        ),
+        ("too-many-workers", json!([]), json!(65)),
+    ] {
+        let mut args = task();
+        args["inputs"] = inputs;
+        args["concurrency"] = concurrency;
+        args["operation_id"] = json!(suffix);
+        let result = f
+            .service
+            .call_tool(p.clone(), "gamer.core.task_save", args)
+            .await;
+        assert!(result.is_err() || result.unwrap().is_error);
+        assert!(f.core.db.list_timer_tasks_async().await.unwrap().is_empty());
+    }
+    assert_eq!(f.accepted.0.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn concurrent_task_saves_with_one_expected_updated_at_have_one_winner() {
     let f = fixture().await;
     let p = principal(&f, &["task.write", "task.read"]);

@@ -48,6 +48,58 @@ async fn optional_task_configuration_survives_without_plugin_and_omitted_update(
     assert_eq!(json_body(resp).await["extensions"], extensions);
 }
 
+#[tokio::test]
+async fn task_cron_update_invalidates_old_wakeup_without_losing_multi_inputs() {
+    let t = build_app(
+        "task-cron-cursor",
+        test_credential("admin123"),
+        Default::default(),
+    );
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    let mut body = task_body("每月兑换", YAML_RUNNER, "example/monthly.yaml");
+    body["schedule"]["config"]["expression"] = serde_json::json!("17 4 6 * *");
+    body["inputs"] =
+        serde_json::json!([{"id":"one","device_id":"d1"},{"id":"two","device_id":"d2"}]);
+    body["concurrency"] = serde_json::json!(2);
+    let created = json_body(post_json(&t, &sid, "/api/tasks", body.clone()).await).await;
+    let id = created["id"].as_str().unwrap();
+    let db = crate::store::Store::open(&Config {
+        data_dir: t.dir.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    let mut previous = db.get_timer_task_async(id).await.unwrap().unwrap();
+    previous.next_wakeup = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+    db.upsert_timer_task_async(&previous).await.unwrap();
+    body["schedule"]["config"]["expression"] = serde_json::json!("0 5 6 * *");
+    body.as_object_mut().unwrap().remove("inputs");
+    body.as_object_mut().unwrap().remove("concurrency");
+    let response = send(
+        &t.app,
+        req(
+            "PUT",
+            &format!("/api/tasks/{id}"),
+            None,
+            &json_headers(sid.to_string()),
+            Some(body.to_string()),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved = json_body(response).await;
+    assert!(saved["next_wakeup"].is_null());
+    assert_eq!(saved["inputs"], created["inputs"]);
+    assert_eq!(saved["concurrency"], 2);
+    assert_eq!(saved["schedule"]["config"]["expression"], "0 5 6 * *");
+    assert!(db
+        .get_timer_task_async(id)
+        .await
+        .unwrap()
+        .unwrap()
+        .next_wakeup
+        .is_none());
+}
+
 /// CRUD 全链路 + enable/disable 生命周期：嵌套 runner/schedule 形状回读一致，
 /// enable/disable 走显式状态迁移（Active ↔ Suspended+"disabled"）。
 #[tokio::test]
@@ -610,7 +662,15 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
 
     // 6. 非法 payload 门禁（任务保存时 payload 不透明，运行时才校验）：
     //    必填参数缺失 → 400 + 结构化诊断消息。
-    let resp = put_package_text(&t, &sid, "com.example.game", "gamer-yaml", "automations/required.yaml", "params:\n  secret:\n    type: string\n    required: true\nrun:\n  - log: $secret\n").await;
+    let resp = put_package_text(
+        &t,
+        &sid,
+        "com.example.game",
+        "gamer-yaml",
+        "automations/required.yaml",
+        "params:\n  secret:\n    type: string\n    required: true\nrun:\n  - log: $secret\n",
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
     let resp = post_json(
         &t,
