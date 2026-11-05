@@ -81,9 +81,25 @@ functions:
         then:
           - tap: $max_btn
         else:
-          - fail:
-              message: 兑换弹窗未出现（最大值按钮找不到），停止兑换
-              code: MX_DIALOG_MISSING
+          # 卡片在但已兑完（0/5）或余烬不足时弹窗无最大值按钮：关掉弹窗跳过
+          - key: Escape
+          - sleep:
+              duration: 800ms
+          - tap_template:
+              template: mx_shop_close_20261105.png
+              threshold: 0.9
+              region:
+                - 0.94
+                - 0.0
+                - 0.06
+                - 0.1
+            optional: true
+          - sleep:
+              duration: 1s
+          - log:
+              message: 弹窗无最大值按钮（已兑完或余烬不足），跳过该票据
+              level: info
+          - return: false
       - sleep:
           duration: 400ms
       - tap_template:
@@ -107,9 +123,14 @@ functions:
                 - 0.15
                 - 0.9
         else:
-          - fail:
-              message: 确认后未出现获得物品提示，兑换可能未成功
-              code: MX_GAIN_PROMPT_MISSING
+          # 确认点了但无获得提示（极端情况下次数被并发用掉）：按 ESC 关掉可能的弹窗后跳过
+          - key: Escape
+          - sleep:
+              duration: 800ms
+          - log:
+              message: 确认后未出现获得物品提示，按跳过处理
+              level: warn
+          - return: false
       - sleep:
           duration: 600ms
 
