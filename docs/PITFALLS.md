@@ -717,3 +717,4 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - HSR「培养目标」面板按账号状态呈现不同布局，固定 region 的按钮模板会随推荐内容行数漂移；脚本对可能漂移的按钮应保留旧模板步骤并追加新模板/扩大区域的兜底分支，不要只调一次坐标。
 - Windows 下 `python -`（heredoc/stdin 传脚本）会进 pyrepl 死循环（WinError 123 readline 报错刷屏）；一次性数据迁移逻辑必须写成临时 `.py` 文件用 `python -X utf8 file.py` 执行，用完删除。多输入定时任务的轮询/派发注意：信号量许可须覆盖整个运行生命周期（完成回调释放），只在提交瞬间持许可不构成并发上限。
 - FnOS 线上部署 SSH 用户名是 **`Jeson`**（大写 J，公钥已装），22 端口；`root`/`posase`/小写均拒绝。生产数据卷 `gamer-production-data` 为 root-owned，宿主普通用户的 python3 读不了 `/vol1/docker/volumes/gamer-production-data/_data/gamer.db`——库级数据操作须 `docker cp` 脚本进容器后 `docker exec gamer python3 …` 在容器内执行（容器内置 python3）。
+- 模板 NCC 峰极尖锐（细笔画文字 1px 偏移可从 0.99 掉到 0.36），matcher 对 >16x16 模板曾用步长2粗分+±1精化——区域原点奇偶与峰位错开时永远 miss（每月兑换 100x34 文字模板线上实测）。现改为全模板步长1穷举（全屏路径已缩 540px、区域路径面积小，4x 采样可接受）；另注意离线验证模板得分时搜索步长必须为 1，步长2会复现同样的假 miss。

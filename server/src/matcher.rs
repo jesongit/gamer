@@ -585,9 +585,11 @@ fn match_template_with_source(
 
     // Tiny high-frequency targets can have nearly zero correlation one pixel
     // away. A stride-2 winner elsewhere then never refines the exact match.
-    // Exhaust the four pixel parities for <=16x16 source templates; preserve
-    // the existing coarse/refine path for larger targets.
-    let step = if tw <= 16 && th <= 16 { 1usize } else { 2usize };
+    // 线上实测（每月兑换 100x34 文字模板）峰位 (even,odd) 与区域原点奇偶完全错开时，
+    // 步长2粗分 + ±1 精化永远到不了真峰（精确位 0.99，±1px 全部 <0.4），大文字模板
+    // 同样病态；四奇偶穷举（步长1）对所有模板生效，全屏路径已缩到 ≤540px、区域路径
+    // 面积小，4x 采样成本可接受。
+    let step = 1usize;
     let xs: Vec<u32> = x_range.clone().step_by(step).collect();
     let ys: Vec<u32> = y_range.clone().step_by(step).collect();
 
@@ -2095,5 +2097,41 @@ mod tiny_template_parity_tests {
             "tiny NCC parity+boundary+negative (7 matches,64x48,9x9): {:?}",
             start.elapsed()
         );
+    }
+
+    /// 回归（2026-11-05 每月兑换线上 miss）：大文字模板的 NCC 峰极尖锐，
+    /// 峰位 (even,odd) 与区域原点奇偶完全错开时，步长2粗分 + ±1 精化到不了真峰。
+    /// 步长1穷举后，任意奇偶组合的峰位与区域原点都必须命中。
+    #[test]
+    fn large_text_template_matches_every_parity_against_region_origin() {
+        // 100x34 仿文字模板：平底 + 细笔画高频图案（近似白字金底卡片）
+        let template = RgbImage::from_fn(100, 34, |x, y| {
+            let stroke = if (x * 7 + y * 13) % 11 < 2 || (x + 2 * y) % 17 == 0 {
+                235u8
+            } else {
+                150u8.saturating_add(((x * 3 + y) % 9) as u8)
+            };
+            image::Rgb([stroke, stroke, stroke])
+        });
+        let png = encode(&template);
+        // 区域原点 (269,130)：与峰位 (374,363) 的奇偶完全错开（线上真实场景）
+        for (px, py) in [(374, 363), (375, 363), (374, 362), (375, 362)] {
+            let mut screen = RgbImage::from_fn(1920, 1080, |x, y| {
+                image::Rgb([((x * 5 + y * 11) % 89) as u8; 3])
+            });
+            image::imageops::replace(&mut screen, &template, px, py);
+            let matched = match_decoded_frame(
+                &DecodedFrame::from_rgb(screen),
+                &DecodedMatchRequest {
+                    template_png: png.clone(),
+                    threshold: Some(0.9),
+                    region: Some([269, 130, 1344, 540]),
+                    color: false,
+                },
+            )
+            .unwrap()
+            .unwrap_or_else(|| panic!("parity {px},{py} must match with stride-1 search"));
+            assert_eq!((matched.x, matched.y), (px as u32, py as u32));
+        }
     }
 }
