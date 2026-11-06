@@ -3,11 +3,15 @@ import vue from '@vitejs/plugin-vue'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { currentPublicAssetsPlugin } from './retired-public-assets.mjs'
+import { assertMatchingBuildVersion } from './build-version.mjs'
 
-// WEB-006 混包告警的前端侧版本源：构建期把 web/package.json version 注入为全局
-// __APP_VERSION__（CI 由 tools/check-version.ps1 保证它与 server/Cargo.toml 同源一致）。
-// 运行时 MainLayout 拿它与 /api/system/info 的 app.version 比对，不一致显示混包警告条。
+// WEB-006：构建和开发启动都先校验 web/package.json 与服务端权威版本，
+// 再注入真实前端构建版本；运行时继续检测部署资源与服务端是否混包。
 const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
+const appVersion = assertMatchingBuildVersion(
+  pkg.version,
+  readFileSync(new URL('../server/Cargo.toml', import.meta.url), 'utf8'),
+)
 
 export default defineConfig({
   plugins: [
@@ -33,7 +37,7 @@ export default defineConfig({
   ],
   resolve: { dedupe: ["vue", "vue-router"] },
   define: {
-    __APP_VERSION__: JSON.stringify(pkg.version)
+    __APP_VERSION__: JSON.stringify(appVersion)
   },
   build: {
     // 构建产物直接输出到后端静态托管目录（server 服务于 ./web-dist）

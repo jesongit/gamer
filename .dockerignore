@@ -29,6 +29,8 @@
 !plugins/gamer-yaml/interpreter/**
 !plugins/sdk/
 !plugins/sdk/**
+!plugins/ui-shared/
+!plugins/ui-shared/**
 !sdk/
 !sdk/**
 !updater/

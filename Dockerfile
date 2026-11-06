@@ -10,6 +10,8 @@ COPY sdk ./sdk
 COPY plugins ./plugins
 COPY tools/build-plugin-ui.mjs ./tools/build-plugin-ui.mjs
 COPY web ./web
+# The frontend build validates its metadata against the server version.
+COPY server/Cargo.toml ./server/Cargo.toml
 RUN pnpm --dir web install --frozen-lockfile \
     && node tools/build-plugin-ui.mjs --install-only \
     && node tools/build-plugin-ui.mjs \
