@@ -7,26 +7,27 @@ Simplified Chinese OCR. A separate browser or VNC container is not required.
 ## Release
 
 ```sh
-docker pull --platform linux/amd64 posase/gamer:v1.0.15
+docker pull --platform linux/amd64 posase/gamer:v1.0.17
 ```
 
-Docker release **v1.0.15** packages application **0.5.16**. Task save hotfix:
-the API save boundary now defaults a missing/empty `inputs[].id` to
-`device_id`, and the task form sends `id` explicitly, so saving a
-multi-input task no longer fails with
-`task inputs[0].id must not be empty`. Multi-input dispatch, bounded
-concurrency and single merged notifications (introduced in v1.0.14: up to 64
-inputs with per-input device override for YAML automation, concurrency default
-1 max 64, one aggregated notification per trigger with the
-`summary.total` / `summary.success` / `summary.failed` / `summary.lines`
-template variables) are unchanged. Database schema stays v8.
+Docker release **v1.0.17** packages application **0.5.18**. The frontend and
+server are rebuilt from the same source revision with matching versions, fixing
+the frontend 0.5.16 / server 0.5.17 warning. Frontend builds now reject mismatched
+version metadata, and the Docker context includes shared plugin UI modules.
+
+This release also includes the recent scheduler host fixes: aggregated
+notifications use the current batch's results and full batch duration, and MCP
+task saves preserve multi-input and concurrency settings. The image retains the
+existing multi-input task and template-matching fixes. Database schema stays v8.
+Installed plugin versions remain managed separately; this image does not
+automatically update plugins in an existing data volume.
 
 The `latest` image tag follows this stable release; versioned tags stay immutable.
 The published architecture is **linux/amd64**, for Intel/AMD x86_64 hosts.
-The previous `v1.0`, `v1.0.1`, `v1.0.2`, `v1.0.3`, `v1.0.4`, `v1.0.5`, `v1.0.6`, `v1.0.7`, `v1.0.8`, `v1.0.9`, `v1.0.10`, `v1.0.11`, `v1.0.12`, `v1.0.13` and `v1.0.14` tags remain unchanged. No ARM64 release is claimed.
+The previous `v1.0`, `v1.0.1`, `v1.0.2`, `v1.0.3`, `v1.0.4`, `v1.0.5`, `v1.0.6`, `v1.0.7`, `v1.0.8`, `v1.0.9`, `v1.0.10`, `v1.0.11`, `v1.0.12`, `v1.0.13`, `v1.0.14`, `v1.0.15` and `v1.0.16` tags remain unchanged. No ARM64 release is claimed.
 
-The v1.0.15 deployment bundle includes the unchanged Chromium seccomp file:
-https://github.com/jesongit/gamer/releases/tag/docker-v1.0.15
+The v1.0.17 deployment bundle includes the unchanged Chromium seccomp file:
+https://github.com/jesongit/gamer/releases/tag/docker-v1.0.17
 
 ## Fresh installation with docker run
 
@@ -37,7 +38,7 @@ Download and extract the deployment bundle from the release above. It includes
 docker volume create gamer-production-data
 docker run --rm -it --memory 512m --memory-swap 512m --entrypoint python3 \
   --mount type=volume,src=gamer-production-data,dst=/data \
-  posase/gamer:v1.0.14 /app/tools/gamer_docker.py init
+  posase/gamer:v1.0.17 /app/tools/gamer_docker.py init
 
 docker run -d --name gamer --init --restart unless-stopped \
   --stop-timeout 90 --shm-size 1g \
@@ -46,7 +47,7 @@ docker run -d --name gamer --init --restart unless-stopped \
   -e GAMER_PROFILE=prod -e GAMER_COOKIE_SECURE=false \
   --mount type=volume,src=gamer-production-data,dst=/data \
   --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 \
-  posase/gamer:v1.0.14
+  posase/gamer:v1.0.17
 ```
 
 Open `http://localhost:18443` using your configured password. There is no default
@@ -68,17 +69,17 @@ backup, retains the previous container, and inherits its exact volume and bind m
 Keep any additional custom ports or environment settings from your original command.
 
 ```bash
-image=posase/gamer:v1.0.14
+image=posase/gamer:v1.0.17
 docker pull "$image" &&
-docker run --rm --entrypoint cat "$image" /app/chromium-seccomp.json > gamer-seccomp-v114.json &&
+docker run --rm --entrypoint cat "$image" /app/chromium-seccomp.json > gamer-seccomp-v117.json &&
 docker stop -t 90 gamer &&
 (umask 077; docker run --rm --memory 512m --memory-swap 512m \
   --volumes-from gamer:ro --entrypoint python3 "$image" \
-  /app/tools/volume-transfer.py export --gzip > "gamer-before-v114-$(date +%s).tar.gz") &&
-docker rename gamer gamer-before-v114 &&
-docker update --restart=no gamer-before-v114 &&
+  /app/tools/volume-transfer.py export --gzip > "gamer-before-v117-$(date +%s).tar.gz") &&
+docker rename gamer gamer-before-v117 &&
+docker update --restart=no gamer-before-v117 &&
 docker run -d --name gamer --init --restart unless-stopped --stop-timeout 90 --shm-size 1g \
-  --volumes-from gamer-before-v114 --security-opt "seccomp=$PWD/gamer-seccomp-v114.json" \
+  --volumes-from gamer-before-v117 --security-opt "seccomp=$PWD/gamer-seccomp-v117.json" \
   -p 18443:8443 -e GAMER_PROFILE=prod -e GAMER_COOKIE_SECURE=false \
   --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 "$image"
 ```
@@ -128,10 +129,12 @@ provide an authenticated diagnostic ZIP from Tasks > View logs. Images may conta
 account information; review a package before sharing it.
 
 Update by replacing the image and keeping `/data`. Back up before upgrading; retain
-the previous image and matching pre-upgrade backup for rollback. This release has no
-database migration. Its isolated upgrade and cold-backup rollback checks use
-v1.0.5 with synthetic data; see the release receipt for the completed results. Data and credential keys must
-be backed up together. Tests used local synthetic pages, not real game accounts.
+the previous image and matching pre-upgrade backup for rollback. This release keeps schema v8 and adds no database migration. Its isolated
+checks verified matching frontend/server versions, HTTP assets, readiness,
+sandboxed Chromium and OCR language availability using a new synthetic volume.
+Full CI has outstanding Rust formatting and test dependency audit failures;
+see the release receipt for details. Data and credential keys must be backed up
+together. These checks did not run real game accounts.
 
 On shared small hosts, scheduled tasks can saturate all cores at night. A CPU cap
 set with `docker update --cpus 2 gamer` takes effect immediately and survives
